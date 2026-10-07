@@ -189,6 +189,40 @@ fn anything_uncertain_stays_ccitt() {
 }
 
 #[test]
+fn self_check_compares_fax_and_jbig2_by_pixels() {
+    let img = page(600, 400);
+    let id = |o: &Obj| Some(o.clone());
+    for black_is_1 in [false, true] {
+        let parms = if black_is_1 { "/BlackIs1 true" } else { "" };
+        let a = image_stream(&fax_pdf(&img, Scheme::G4, "/ColorSpace /DeviceGray", parms));
+        let as_jbig2 = |pixels: &Image| {
+            let mut b = a.clone();
+            b.dict.set(b"Filter", Obj::Name(b"JBIG2Decode".to_vec()));
+            b.dict.remove(b"DecodeParms");
+            b.data = jbig2::pdf_stream(pixels, black_is_1);
+            b
+        };
+        assert!(engine::fax::pdf::same_image(&a, &as_jbig2(&img), &id));
+        // One pixel flipped (the first pixel of row 200), or the other polarity: caught.
+        let mut flipped = Image::new(img.width);
+        for r in 0..img.rows() {
+            let mut px = vec![0u8; img.width];
+            ccitt::expand_row(img.row(r), &mut px);
+            if r == 200 {
+                px[0] ^= 1;
+            }
+            let mut ch = Vec::new();
+            row_changes(&px, &mut ch);
+            flipped.push_row(&ch);
+        }
+        assert!(!engine::fax::pdf::same_image(&a, &as_jbig2(&flipped), &id));
+        let mut wrong_polarity = as_jbig2(&img);
+        wrong_polarity.data = jbig2::pdf_stream(&img, !black_is_1);
+        assert!(!engine::fax::pdf::same_image(&a, &wrong_polarity, &id));
+    }
+}
+
+#[test]
 fn peyaji_restores_every_fax_layout_exactly() {
     let img = page(500, 300);
     for scheme in [Scheme::G4, Scheme::G31D, Scheme::G32D] {

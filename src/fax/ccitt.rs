@@ -3,8 +3,10 @@
 //! `parse` decodes a stream strictly and records every choice its encoder made: zero fill bits, EOL codes,
 //! the tag bits of 2-D Group 3, the codes after the last row (EOFB, RTC), the bits up to the next byte
 //! boundary and any bytes after them. `encode` writes the image back with those choices, following the
-//! coding procedure of the recommendations. When the two give back the original bytes exactly, the image and
-//! the recorded choices together are a lossless form of the stream; callers check that before relying on it.
+//! coding procedure of the recommendations. `parse` keeps a row only if writing it again gives the same
+//! bits, so `encode(parse(x))` is `x` for any bytes `x`: the image and the recorded choices together are a
+//! lossless form of the stream. Callers that store only the image still compare once more before relying
+//! on it.
 
 use super::tables::{tables, Code, Mode, EOL_BITS, EOL_LEN, HORIZONTAL, MAX_RUN_CODE, PASS, VERTICAL};
 

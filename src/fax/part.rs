@@ -14,7 +14,7 @@ use crate::cm::{Coder, Counter};
 /// Largest image the format takes (rows times columns).
 const MAX_PIXELS: u64 = 1 << 32;
 /// Most pixels the model may visit for one image (rows equal to the row above are nearly free): keeps the
-/// time to pack bounded for huge images. Only the encoder checks it.
+/// time to pack and to restore bounded for huge images (a restore that goes past it is refused).
 const MAX_WORK: u64 = 1 << 30;
 const MAX_ROWS: u64 = 1 << 20;
 const MAX_FILL: u64 = 1 << 16;
@@ -188,6 +188,7 @@ pub fn code<C: Coder>(c: &mut C, fc: &mut FaxCoder, src: Option<&Parsed>, max_le
     let mut enc = RowEncoder::new(w, scheme, rule);
     let mut st = GapState { pos: 0, prev_eol: false, first: true, prev_tag: false, since_1d: 0 };
     let mut row = Vec::new();
+    let mut work = 0u64;
     for r in 0..h {
         if r % CHECK_EVERY == 0 && (c.exhausted() || fc.bit(c, S_HEAD + 8, src.map(|_| 0)) != 0) {
             return None;
@@ -199,7 +200,13 @@ pub fn code<C: Coder>(c: &mut C, fc: &mut FaxCoder, src: Option<&Parsed>, max_le
         } else {
             fc.gap(c, lay.map(|l| &l.gaps[r]), &mut st, scheme, false)?
         };
-        fc.model.code_row(c, img.map(|i| i.row(r)), &mut row);
+        if !fc.model.code_row(c, img.map(|i| i.row(r)), &mut row) {
+            // Counted as `Image::work` counts (the encoder took only images within the bound).
+            work += w as u64;
+            if work > MAX_WORK {
+                return None;
+            }
+        }
         enc.row(&mut wr, &g, &row);
         if wr.bit_pos() / 8 > max_len {
             return None;

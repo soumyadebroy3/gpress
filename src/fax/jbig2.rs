@@ -321,8 +321,8 @@ pub fn encode_generic(img: &Image, invert: bool) -> Vec<u8> {
     let mut rows = [vec![0u8; w + 2 * M], vec![0u8; w + 2 * M], vec![0u8; w + 2 * M]];
     let mut ltp = 0u32;
     for y in 0..img.rows() {
-        // Same as the row above (above the first row: white, which is all 0 after any inversion... the
-        // decoder's row "above" the image is 0, so with inversion the first row must be compared to 0 too).
+        // Typical prediction: is the row the same as the row above? Above the first row the decoder sees 0
+        // pixels, so there the question is whether the row is all 0 after the inversion.
         let same = if y == 0 {
             row_is_zero(img.row(0), w, invert)
         } else {
