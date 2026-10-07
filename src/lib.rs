@@ -2,3 +2,4 @@
 //! data is written here.
 
 pub mod flate;
+pub mod pdf;
