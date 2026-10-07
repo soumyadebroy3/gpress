@@ -98,6 +98,8 @@ fn main() {
                     }
                 };
                 let t = Instant::now();
+                // A fresh pool (and memory of inputs) for each file.
+                let opt = Options { shared: opt.shared.as_ref().map(|_| flate::deflate::Shared::new(threads)), ..opt.clone() };
                 let z = flate::deflate_zlib(&data, &opt);
                 let ms = t.elapsed().as_secs_f64() * 1000.0;
                 let ok = flate::zlib::unwrap(&z, data.len() + 1).map(|u| u.data == data).unwrap_or(false);

@@ -22,9 +22,10 @@ pub struct Options {
     /// Largest decoded stream we re-encode.
     pub max_stream: usize,
     /// How hard to try, 0 to 100. At 100 every stream gets `flate` and the full predictor search. Below,
-    /// the streams that take the most room in the file get `flate` first, while the work stays within a
-    /// budget proportional to the file's size; the others get the quick settings, and image predictors are
-    /// chosen from a sample of rows. Decided from sizes only, never from time, so the output is repeatable.
+    /// the streams that take the most room in the file come first and get `flate`, or a cheaper step of 20,
+    /// while the work stays within a budget proportional to the file's size; the others get the quick
+    /// settings, and image predictors are chosen from a sample of rows (see `effort_plan`). Decided from sizes
+    /// only, never from time, so the output is repeatable.
     pub effort: u8,
     /// Threads to use (0: what the machine offers, at most 8). Never changes the output.
     pub threads: usize,

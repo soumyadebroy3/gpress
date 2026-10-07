@@ -468,7 +468,8 @@ impl<'m, C: Coder> Io<'m, C> {
 #[derive(Clone, Debug)]
 pub struct PackOptions {
     /// How hard to try, 0 to 100. Below `PLAIN_BELOW`, data that looks compressed already is coded plainly:
-    /// much faster, about 1% larger on such data.
+    /// on 3 MB of random bytes 17 times faster (0.8 s instead of 14 s) and no larger; up to about 1% larger
+    /// on compressed data the model still finds a little in.
     pub effort: u8,
     /// Threads for looking at the streams (0: what the machine offers, at most 8). Never changes the output.
     pub threads: usize,
