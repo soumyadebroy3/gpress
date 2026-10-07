@@ -89,12 +89,27 @@ def jpeg_bytes(s):
     return t.read_bytes(decode_level=pikepdf.StreamDecodeLevel.specialized)
 
 
-def jpeg_pixels(s, data):
-    """Decoded pixels by two decoders: qpdf (libjpeg, decode level all) and Pillow."""
+def dct_parms(s):
+    """The DCT stage's own parameters (ColorTransform changes the colours)."""
+    names = filter_names(s)
+    p = s.stream_dict.get('/DecodeParms')
+    if isinstance(p, pikepdf.Array):
+        p = p[len(names) - 1] if len(p) == len(names) else 'mismatch'
+    elif len(names) != 1:
+        p = None
+    return 'null' if p is None else p if isinstance(p, str) else p.unparse(resolved=True)
+
+
+def jpeg_pixels(data):
+    """Decoded pixels by two decoders: qpdf (libjpeg, decode level all; on a copy of the JPEG alone, as qpdf
+    decodes no DCT stream that has parameters) and Pillow."""
     from PIL import Image
     out = []
     try:
-        out.append(hashlib.sha256(s.read_bytes(decode_level=pikepdf.StreamDecodeLevel.all)).hexdigest())
+        scratch = pikepdf.new()
+        t = pikepdf.Stream(scratch, data)
+        t.Filter = pikepdf.Name.DCTDecode
+        out.append(hashlib.sha256(t.read_bytes(decode_level=pikepdf.StreamDecodeLevel.all)).hexdigest())
     except Exception as e:
         out.append('qpdf failed:' + type(e).__name__)
     try:
@@ -118,11 +133,11 @@ def streams_same(x, y):
         return False
     if ja is None and jb is None:
         return a == b
-    if ja is None or jb is None:
+    if ja is None or jb is None or dct_parms(x) != dct_parms(y):
         return False
     if ja == jb:
         return True
-    pa, pb = jpeg_pixels(x, ja), jpeg_pixels(y, jb)
+    pa, pb = jpeg_pixels(ja), jpeg_pixels(jb)
     return pa == pb and not any('failed' in p for p in pa)
 
 
