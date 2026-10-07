@@ -272,8 +272,9 @@ fn fax_work_is_bounded_by_the_data() {
     let d = pdf("/Width 131072 /Height 4096 /BitsPerComponent 1 /ColorSpace /DeviceGray /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 131072 >>", &data);
     assert_eq!(explain(&d), "kept: too much work for the size of the data");
 
-    // peyaji format: the file's fax streams may take 2^24 plus 512 per byte of the file together, in file
-    // order; the rest are coded plainly. Each of these images needs nearly 2^24, so only the first fits.
+    // peyaji format: the file's fax streams up to any point of it may take 2^24 plus 512 per byte of the file
+    // up to there, in file order; the rest are coded plainly. Each of these images needs nearly 2^24, so only
+    // the first fits.
     let mut objs = Vec::new();
     for i in 0..3u32 {
         let img = bomb(131072, 120, 10 + i);
@@ -281,14 +282,14 @@ fn fax_work_is_bounded_by_the_data() {
         objs.push(("/Width 131072 /Height 120 /BitsPerComponent 1 /ColorSpace /DeviceGray /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 131072 >>".to_string(), data));
     }
     let d = pdf_images(&objs);
-    let (budget, cost) = (engine::fax::part::file_budget(d.len()), engine::fax::part::cost(&bomb(131072, 120, 10)));
+    let (budget, cost) = (engine::fax::part::budget(d.len()), engine::fax::part::cost(&bomb(131072, 120, 10)));
     assert!(cost <= budget && budget < 2 * cost, "budget {budget}, cost {cost}");
     let (packed, stats) = pack(&d);
     assert_eq!(stats.fax, 1, "{stats:?}");
     assert_eq!(unpack(&packed).unwrap(), d);
-    // With room for all three (a larger file), all three are coded as images.
-    let per_byte = engine::fax::part::file_budget(1) - engine::fax::part::file_budget(0);
-    let pad = ((3 * cost - budget) / per_byte) as usize + 64;
+    // With room for all three (more of the file before them), all three are coded as images.
+    let per_byte = engine::fax::part::budget(1) - engine::fax::part::budget(0);
+    let pad = (3 * cost / per_byte) as usize;
     let mut big = d.clone();
     big.splice(9..9, std::iter::repeat_n(b'%', pad).chain([b'\n']));
     let big = fix_xref(&big);

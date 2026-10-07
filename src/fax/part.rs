@@ -17,11 +17,12 @@ const MAX_PIXELS: u64 = 1 << 32;
 /// Most work (`Image::work`) for one image: keeps the time to pack and to restore bounded for huge images (a
 /// restore that goes past it is refused).
 const MAX_WORK: u64 = 1 << 30;
-/// Most work for all fax streams of a file: FILE_WORK_BASE plus FILE_WORK_PER_BYTE per byte of the file. A
-/// few bytes of fax data can describe a huge image, and a file can hold many: this bounds the time to pack
-/// and to restore a file by its size (at most about 70 microseconds per byte to pack, half that to restore).
-/// Streams past it are coded plainly; a restore that goes past it is refused. The test files need at most
-/// 180 per byte, and one small file 1,200 (within the base).
+/// Most work for the fax streams of a file up to any point of it: FILE_WORK_BASE plus FILE_WORK_PER_BYTE per
+/// byte of the file up to there. A few bytes of fax data can describe a huge image, and a file can hold
+/// many: this bounds the time to pack a file, and to restore one, by its size (at most about 70 microseconds
+/// per byte to pack, half that to restore), whatever length a damaged file claims. Streams past it are coded
+/// plainly; a restore that goes past it is refused. The test files need at most 180 per byte, and one small
+/// file 1,200 (within the base).
 const FILE_WORK_BASE: u64 = 1 << 24;
 const FILE_WORK_PER_BYTE: u64 = 512;
 /// Work charged for each fax stream besides its rows (setting up the model, the stream's header).
@@ -67,12 +68,12 @@ pub fn prepare(raw: &[u8], scheme: Scheme, columns: usize, byte_align: bool) -> 
     Some(parsed)
 }
 
-/// The work all fax streams of a file of `file_len` bytes may take together (see FILE_WORK_PER_BYTE).
-pub fn file_budget(file_len: usize) -> u64 {
-    FILE_WORK_BASE.saturating_add(FILE_WORK_PER_BYTE.saturating_mul(file_len as u64))
+/// The work the fax streams of a file may take up to byte `pos` of it (see FILE_WORK_PER_BYTE).
+pub fn budget(pos: usize) -> u64 {
+    FILE_WORK_BASE.saturating_add(FILE_WORK_PER_BYTE.saturating_mul(pos as u64))
 }
 
-/// The work `code` charges to the file budget for an image: what a pack must keep within `file_budget`.
+/// The work of coding an image, as `code` counts it.
 pub fn cost(img: &Image) -> u64 {
     start_work(img.width) + img.work()
 }
@@ -81,12 +82,48 @@ fn start_work(width: usize) -> u64 {
     STREAM_WORK + width as u64 / 64
 }
 
-/// The models of a pack run (fax streams of one document share what they learn) and the work the file's fax
-/// streams may still take.
+/// The work of a file's fax streams so far, counted as `code` counts it while it codes them.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Work {
+    spent: u64,
+}
+
+impl Work {
+    /// Adds `n`; false if the work up to byte `pos` of the file is then past `budget(pos)`.
+    fn add(&mut self, n: u64, pos: usize) -> bool {
+        self.spent = self.spent.saturating_add(n);
+        self.spent <= budget(pos)
+    }
+
+    /// Would coding `p`, a stream starting at byte `at` of the file, stay within the budget at every row, as
+    /// `code` checks it? If so, its work is counted (a pack codes only the streams this lets in, so their
+    /// restore never fails these checks).
+    pub fn admit(&mut self, p: &Parsed, at: usize) -> bool {
+        let (img, lay) = (&p.image, &p.layout);
+        let mut t = *self;
+        if !t.add(start_work(img.width), at) {
+            return false;
+        }
+        let mut wr = Writer::new();
+        let mut enc = RowEncoder::new(img.width, lay.scheme, lay.rule);
+        for r in 0..img.rows() {
+            let same = if r == 0 { img.row(0).is_empty() } else { img.row(r) == img.row(r - 1) };
+            enc.row(&mut wr, &lay.gaps[r], img.row(r));
+            if !t.add(row_work(img.width, same), at + wr.bit_pos() / 8) {
+                return false;
+            }
+        }
+        *self = t;
+        true
+    }
+}
+
+/// The models of a pack run (fax streams of one document share what they learn) and the work of its fax
+/// streams so far.
 pub struct FaxCoder {
     model: Bilevel,
     small: Vec<Counter>,
-    left: u64,
+    work: Work,
 }
 
 // Counter slots of `small`.
@@ -107,22 +144,11 @@ const N_END: usize = 3;
 const N_TRAILING: usize = 4;
 
 impl FaxCoder {
-    /// `file_len`: the length of the whole file being packed (the decoder knows it too); it sets the work
-    /// budget, and small files get small hashed tables (quick to set up, and they have few contexts anyway).
+    /// `file_len`: the length of the whole file being packed (the decoder knows it too); small files get
+    /// small hashed tables (quick to set up, and they have few contexts anyway).
     pub fn new(file_len: usize) -> FaxCoder {
         let bits = (usize::BITS - file_len.leading_zeros()) + 4;
-        FaxCoder { model: Bilevel::new(bits), small: vec![Counter::new(); S_END], left: file_budget(file_len) }
-    }
-
-    /// Takes `n` from the work budget; false if it isn't there.
-    fn spend(&mut self, n: u64) -> bool {
-        match self.left.checked_sub(n) {
-            Some(l) => {
-                self.left = l;
-                true
-            }
-            None => false,
-        }
+        FaxCoder { model: Bilevel::new(bits), small: vec![Counter::new(); S_END], work: Work::default() }
     }
 
     fn bit<C: Coder>(&mut self, c: &mut C, slot: usize, bit: Option<u32>) -> u32 {
@@ -223,10 +249,10 @@ struct GapState {
     since_1d: usize,
 }
 
-/// Codes one fax stream: encoding when `src` is given (it must pass `fits`, and its `cost` must be within
-/// what is left of the file budget), restoring otherwise. Returns the stream's bytes, or None when the data
-/// can only come from a damaged file. The result is never longer than `max_len`.
-pub fn code<C: Coder>(c: &mut C, fc: &mut FaxCoder, src: Option<&Parsed>, max_len: usize) -> Option<Vec<u8>> {
+/// Codes one fax stream, which starts at byte `at` of the file: encoding when `src` is given (it must pass
+/// `fits`, and `Work::admit` must have let it in), restoring otherwise. Returns the stream's bytes, or None
+/// when the data can only come from a damaged file. The result is never longer than `max_len`.
+pub fn code<C: Coder>(c: &mut C, fc: &mut FaxCoder, src: Option<&Parsed>, at: usize, max_len: usize) -> Option<Vec<u8>> {
     let lay = src.map(|p| &p.layout);
     let img = src.map(|p| &p.image);
     // Header.
@@ -243,8 +269,8 @@ pub fn code<C: Coder>(c: &mut C, fc: &mut FaxCoder, src: Option<&Parsed>, max_le
         return None;
     }
     let (w, h) = (w as usize, h as usize);
-    // The work is counted as `cost` counts it (the encoder takes only images within the bounds).
-    if !fc.spend(start_work(w)) {
+    // The work is counted and checked as `Work::admit` does it.
+    if !fc.work.add(start_work(w), at) {
         return None;
     }
     fc.model.start(w);
@@ -265,11 +291,11 @@ pub fn code<C: Coder>(c: &mut C, fc: &mut FaxCoder, src: Option<&Parsed>, max_le
             fc.gap(c, lay.map(|l| &l.gaps[r]), &mut st, scheme, false)?
         };
         let rw = row_work(w, fc.model.code_row(c, img.map(|i| i.row(r)), &mut row));
+        enc.row(&mut wr, &g, &row);
         work += rw;
-        if work > MAX_WORK || !fc.spend(rw) {
+        if work > MAX_WORK || !fc.work.add(rw, at + wr.bit_pos() / 8) {
             return None;
         }
-        enc.row(&mut wr, &g, &row);
         if wr.bit_pos() / 8 > max_len {
             return None;
         }
@@ -365,7 +391,7 @@ mod tests {
         assert!(fits(&p));
         let mut fc = FaxCoder::new(bytes.len());
         let mut e = Encoder::new();
-        let back = code(&mut e, &mut fc, Some(&p), bytes.len()).unwrap();
+        let back = code(&mut e, &mut fc, Some(&p), 0, bytes.len()).unwrap();
         assert_eq!(back, bytes);
         e.finish()
     }
@@ -373,7 +399,7 @@ mod tests {
     fn unpack_one(data: &[u8], max: usize) -> Option<Vec<u8>> {
         let mut fc = FaxCoder::new(max);
         let mut d = Decoder::new(data);
-        code(&mut d, &mut fc, None, max)
+        code(&mut d, &mut fc, None, 0, max)
     }
 
     #[test]
@@ -437,8 +463,8 @@ mod tests {
     }
 
     #[test]
-    fn restore_refuses_work_past_the_file_budget() {
-        // 130 rows of 131072 pixels, none like the row above: about 2^24 of work from 280 bytes.
+    fn restore_refuses_work_past_the_budget() {
+        // 130 rows of 131072 pixels, none like the row above: more than 2^24 of work from 280 bytes.
         let mut img = Image::new(131072);
         for r in 0..130 {
             img.push_row(if r % 2 == 0 { &[10, 11][..] } else { &[] });
@@ -448,23 +474,24 @@ mod tests {
         let bytes = encode(&img, &lay);
         let p = parse(&bytes, Scheme::G4, 131072, false, Limits::default()).unwrap();
         let c = cost(&img);
-        assert!(fits(&p) && file_budget(bytes.len()) < c && c <= file_budget(1 << 20));
+        assert!(fits(&p) && budget(bytes.len()) < c);
+        // Far enough into a file the budget has room for it; at the start of one, or a little less far, not.
+        let per_byte = budget(1) - budget(0);
+        let far = ((c - budget(0)) / per_byte) as usize + 1;
+        let near = far - bytes.len() - 2;
+        assert!(Work::default().admit(&p, far));
+        assert!(!Work::default().admit(&p, near) && !Work::default().admit(&p, 0));
+        // The budget is shared: right after it, a second one doesn't fit.
+        let mut wk = Work::default();
+        assert!(wk.admit(&p, far) && !wk.admit(&p, far + bytes.len()));
+        // The restore makes the same checks, at the place in the file it has really restored up to (not a
+        // length the file claims).
         let mut e = Encoder::new();
-        assert_eq!(code(&mut e, &mut FaxCoder::new(1 << 20), Some(&p), bytes.len()).as_deref(), Some(&bytes[..]));
+        assert_eq!(code(&mut e, &mut FaxCoder::new(far), Some(&p), far, bytes.len()).as_deref(), Some(&bytes[..]));
         let packed = e.finish();
-        // With exactly the cost left the image comes back; with one less the restore is refused.
-        let restore = |left: u64| {
-            let mut fc = FaxCoder::new(1 << 20);
-            fc.left = left;
-            code(&mut Decoder::new(&packed), &mut fc, None, bytes.len())
-        };
-        assert_eq!(restore(c).as_deref(), Some(&bytes[..]));
-        assert_eq!(restore(c - 1), None);
+        let restore = |at: usize| code(&mut Decoder::new(&packed), &mut FaxCoder::new(far), None, at, bytes.len());
+        assert_eq!(restore(far).as_deref(), Some(&bytes[..]));
+        assert_eq!(restore(near), None);
         assert_eq!(restore(0), None);
-        // The budget is shared: after the image, as much again is not there.
-        let mut fc = FaxCoder::new(1 << 20);
-        fc.left = 2 * c - 1;
-        assert!(code(&mut Decoder::new(&packed), &mut fc, None, bytes.len()).is_some());
-        assert!(!fc.spend(c));
     }
 }

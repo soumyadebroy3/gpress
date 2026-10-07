@@ -525,7 +525,7 @@ fn plan(d: &[u8]) -> Vec<Plan> {
 pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
     let mut out = Vec::with_capacity(d.len() * 2);
     let mut extra = 0;
-    for p in fax_budget(plan(d), d.len()) {
+    for p in fax_budget(plan(d)) {
         match p {
             Plan::Syntax(a, b) | Plan::Raw(a, b) => out.extend_from_slice(&d[a..b]),
             Plan::Rebuilt { data, tail, lep, .. } => {
@@ -674,7 +674,7 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
     let mut fax_coder: Option<crate::fax::part::FaxCoder> = None;
     let mut io = Io { m: &mut model, c, damaged: false };
     let mut out: Vec<u8> = Vec::with_capacity(reserve(total_len));
-    let plans = d.map(|d| fax_budget(plan(d), total_len));
+    let plans = d.map(|d| fax_budget(plan(d)));
     let mut si = 0;
     loop {
         let cur = plans.as_ref().map(|p| p.get(si));
@@ -811,7 +811,7 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
                     _ => None,
                 };
                 let fc = fax_coder.get_or_insert_with(|| crate::fax::part::FaxCoder::new(total_len));
-                match crate::fax::part::code(&mut io.c, fc, src, left) {
+                match crate::fax::part::code(&mut io.c, fc, src, out.len(), left) {
                     Some(bytes) => out.extend_from_slice(&bytes),
                     None => {
                         io.damaged = true;
@@ -1034,15 +1034,14 @@ fn fax(d: &[u8], a: usize, b: usize, objects: &ObjIndex) -> Option<Plan> {
     Some(Plan::Fax { parsed: Box::new(parsed), a, b })
 }
 
-/// Keeps the fax streams of a file within the work budget the restore checks (`crate::fax::part::file_budget`
-/// of the file's length), in file order; streams past it are coded plainly.
-fn fax_budget(mut plans: Vec<Plan>, file_len: usize) -> Vec<Plan> {
-    let mut left = crate::fax::part::file_budget(file_len);
+/// Keeps the fax streams of a file within the work budget the restore checks (`crate::fax::part::Work`), in
+/// file order; streams past it are coded plainly.
+fn fax_budget(mut plans: Vec<Plan>) -> Vec<Plan> {
+    let mut work = crate::fax::part::Work::default();
     for p in plans.iter_mut() {
         if let Plan::Fax { parsed, a, b } = p {
-            match left.checked_sub(crate::fax::part::cost(&parsed.image)) {
-                Some(l) => left = l,
-                None => *p = Plan::Raw(*a, *b),
+            if !work.admit(parsed, *a) {
+                *p = Plan::Raw(*a, *b);
             }
         }
     }
