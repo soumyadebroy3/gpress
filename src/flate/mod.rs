@@ -10,6 +10,7 @@ pub mod matcher;
 pub mod parse;
 pub mod tables;
 pub mod zlib;
+pub mod zlibexact;
 
 pub use deflate::{deflate, deflate_zlib, Options};
 pub use inflate::{inflate, InflateError};
