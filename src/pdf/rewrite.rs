@@ -770,3 +770,88 @@ fn self_check(objs: &BTreeMap<u32, (u16, Obj)>, out: &[u8], trailer: &Dict) -> R
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod effort_tests {
+    use super::*;
+
+    fn flate_stream(decoded: &[u8], extra: &[(&[u8], Obj)]) -> Stream {
+        let mut d = Dict::default();
+        d.set(b"Filter", Obj::Name(b"FlateDecode".to_vec()));
+        for (k, v) in extra {
+            d.set(k, v.clone());
+        }
+        Stream { dict: d, data: flate::deflate_zlib(decoded, &flate::Options::quick()) }
+    }
+
+    #[test]
+    fn predictor_samples_are_whole_rows_inside_the_image() {
+        assert_eq!(predictor_sample(1000, 300, 100), None);
+        assert_eq!(predictor_sample(100, 300, 0), None, "small images are ranked whole");
+        for (nrows, row, effort) in [(3000usize, 1000usize, 0u8), (5000, 4000, 50), (7, 200_000, 10), (1_000_000, 3, 99)] {
+            let bands = predictor_sample(nrows, row, effort).unwrap();
+            let mut last_end = 0;
+            let mut rows = 0;
+            for &(a, b) in &bands {
+                assert!(a >= last_end && a < b && b <= nrows, "{bands:?}");
+                last_end = b;
+                rows += b - a;
+            }
+            // About the budget (at least one row per band).
+            assert!(rows * row <= predictor_budget(effort).max(8 * row), "{nrows} x {row}: {rows} rows");
+        }
+        assert!(predictor_budget(0) < predictor_budget(40) && predictor_budget(40) < predictor_budget(99));
+    }
+
+    #[test]
+    fn the_budget_goes_to_the_biggest_streams_first_and_grows_with_the_effort() {
+        // A very compressible big stream (decodes to 1000 times its size in the file) and small text.
+        let big = flate_stream(&vec![7u8; 2_000_000], &[]);
+        let text: Vec<u8> = (0..20_000u32).map(|i| b"BT 12 Tf (abc) Tj ET\n"[(i % 21) as usize]).collect();
+        let small = flate_stream(&text, &[]);
+        let streams: Vec<(u32, &Stream)> = vec![(1, &small), (2, &big)];
+        let unique = vec![0, 1];
+        let input_len = 50_000;
+        let plan = |e: u8| -> Vec<u8> { effort_plan(&streams, &unique, &Options::effort(e), input_len, None).iter().map(|o| o.effort).collect() };
+        assert_eq!(plan(100), vec![100, 100]);
+        assert_eq!(plan(0), vec![0, 0]);
+        // At 30 the budget (7.5 x 50 KB) is too small for the big one's 0.7 x 2 MB; the text fits.
+        assert_eq!(plan(30), vec![30, 0]);
+        // At 50 (30 x 50 KB) the big one, taken first, gets the cheaper 20 step; the text still fits.
+        assert_eq!(plan(50), vec![50, 20]);
+        // At 99 the budget (about 900 x 50 KB) takes both at full strength.
+        assert_eq!(plan(99), vec![99, 99]);
+        // Settings follow the effort given to each stream.
+        let o = effort_plan(&streams, &unique, &Options::effort(50), input_len, None);
+        assert!(o[1].flate.same_output(&flate::Options::effort(20)));
+        assert!(o[0].flate.same_output(&flate::Options::effort(50)));
+    }
+
+    #[test]
+    fn a_stream_too_big_for_its_step_gets_a_cheaper_one() {
+        // 1 MB decoded. At effort 60 the budget is about 60 times the file: the 60 step needs 2.1 MB of extra
+        // work, the 40 step 1.0 MB, the 20 step 0.7 MB.
+        let data: Vec<u8> = (0..1_000_000u32).map(|i| if i % 1000 < 3 { 0 } else { 255 }).collect();
+        let s = flate_stream(&data, &[]);
+        let streams: Vec<(u32, &Stream)> = vec![(1, &s)];
+        let step = |input_len: usize| effort_plan(&streams, &[0], &Options::effort(60), input_len, None)[0].effort;
+        assert_eq!(step(40_000), 60);
+        assert_eq!(step(20_000), 40);
+        assert_eq!(step(15_000), 20);
+        assert_eq!(step(5_000), 0);
+        let o = effort_plan(&streams, &[0], &Options::effort(60), 15_000, None);
+        assert!(o[0].flate.same_output(&flate::Options::effort(20)));
+    }
+
+    #[test]
+    fn identical_streams_are_found_by_value() {
+        let a = flate_stream(b"same bytes", &[]);
+        let b = flate_stream(b"same bytes", &[]);
+        let c = flate_stream(b"same bytes", &[(b"Length1", Obj::Int(3))]);
+        let d = flate_stream(b"other bytes", &[]);
+        let streams: Vec<(u32, &Stream)> = vec![(1, &a), (2, &c), (3, &b), (4, &d), (5, &a)];
+        let (same, unique) = identical_streams(&streams);
+        assert_eq!(same, vec![0, 1, 0, 3, 0]);
+        assert_eq!(unique, vec![0, 1, 3]);
+    }
+}

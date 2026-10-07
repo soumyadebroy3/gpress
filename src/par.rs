@@ -13,12 +13,14 @@ use std::sync::{Arc, Condvar, Mutex};
 #[derive(Debug)]
 pub struct Pool {
     free: AtomicUsize,
+    threads: usize,
 }
 
 impl Pool {
     /// A pool for `threads` threads in all (at least 1: the caller).
     pub fn new(threads: usize) -> Arc<Pool> {
-        Arc::new(Pool { free: AtomicUsize::new(threads.max(1) - 1) })
+        let threads = threads.max(1);
+        Arc::new(Pool { free: AtomicUsize::new(threads - 1), threads })
     }
 
     fn take(&self) -> bool {
@@ -51,8 +53,9 @@ impl Drop for Slot<'_> {
 pub fn map<R: Send>(pool: Option<&Pool>, n: usize, order: Option<&[usize]>, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
     debug_assert!(order.map_or(true, |o| o.len() == n));
     let at = |k: usize| order.map_or(k, |o| o[k]);
+    // One thread (as in a browser build): plain sequential work, no thread machinery at all.
     let pool = match pool {
-        Some(p) if n > 1 => p,
+        Some(p) if n > 1 && p.threads > 1 => p,
         _ => {
             let mut out: Vec<Option<R>> = (0..n).map(|_| None).collect();
             for k in 0..n {
