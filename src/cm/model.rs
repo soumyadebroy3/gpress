@@ -168,9 +168,11 @@ pub struct Model {
     mm_min: usize,
 }
 
-fn env_num(k: &str, d: usize) -> usize {
-    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
-}
+// Fixed settings of format version 3. They are part of the format: the decoder must use exactly the
+// same values as the encoder, so they are constants (never read from the environment).
+const STATE_LIMIT: u32 = 1023;
+const MATCH_MIN: usize = 5;
+const MIXER_SHIFT: i32 = 12;
 
 impl Model {
     pub fn new(table_bits: u32) -> Model {
@@ -214,10 +216,10 @@ impl Model {
             pr: 2048,
             tok: Tok::default(),
             obj_offsets: std::collections::HashMap::new(),
-            limit: env_num("PDFE_LIMIT", 1023) as u32,
-            mm_min: env_num("PDFE_MMMIN", 5),
+            limit: STATE_LIMIT,
+            mm_min: MATCH_MIN,
         };
-        m.mx.shift = env_num("PDFE_MXSHIFT", 12) as i32;
+        m.mx.shift = MIXER_SHIFT;
         let per_kind = 7;
         m.smaps = (0..NCTX * per_kind)
             .map(|_| (0..128).map(|st| Counter(((m.states.init_p[st] as u32) << 20) | 0)).collect())

@@ -241,18 +241,28 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
     let rest = &stages[k..];
     let mut best: Option<(Dict, Vec<u8>)> = None;
     let mut best_len = s.data.len();
-    // Our Flate in front of whatever image codec follows.
-    let z = flate::deflate_zlib(&data, &opt.flate);
-    let mut with_flate = vec![Stage { name: b"FlateDecode".to_vec(), parms: carried.clone() }];
-    with_flate.extend_from_slice(rest);
-    let mut d = s.dict.clone();
-    set_chain(&mut d, &with_flate);
-    if z.len() < best_len {
-        best_len = z.len();
-        best = Some((d, z));
+    // Some readers decide how to read JPEG 2000 and JBIG2 images from the first filter's name (pdf.js reads
+    // a JPEG 2000 image's colour and depth from the image data only when JPXDecode comes first). So for
+    // those the chain keeps its shape: a lone codec stays alone, a codec behind general filters stays behind
+    // one.
+    let shape_matters = rest.iter().any(|st| matches!(st.name.as_slice(), b"JPXDecode" | b"JBIG2Decode"));
+    // Our Flate in front of whatever image codec follows. Putting a filter in front of a codec that had
+    // none (a JPEG, say) is done only when it saves at least 1%.
+    let adds_layer = k == 0 && !rest.is_empty();
+    if !(adds_layer && shape_matters) {
+        let z = flate::deflate_zlib(&data, &opt.flate);
+        let mut with_flate = vec![Stage { name: b"FlateDecode".to_vec(), parms: carried.clone() }];
+        with_flate.extend_from_slice(rest);
+        let mut d = s.dict.clone();
+        set_chain(&mut d, &with_flate);
+        let limit = if adds_layer { best_len - best_len / 100 } else { best_len };
+        if z.len() < limit {
+            best_len = z.len();
+            best = Some((d, z));
+        }
     }
     // No general filter at all (e.g. a JPEG that Flate can't shrink), only without predictor bytes.
-    if carried.is_none() && k > 0 && data.len() < best_len {
+    if carried.is_none() && k > 0 && !shape_matters && data.len() < best_len {
         let mut d = s.dict.clone();
         set_chain(&mut d, rest);
         best_len = data.len();

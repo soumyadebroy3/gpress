@@ -11,9 +11,9 @@ tool, measured on public test PDFs against the best existing tools. Nothing here
 | Flate encoder | `src/flate/deflate.rs`, `matcher.rs`, `parse.rs`, `block.rs`, `huffman.rs` | Binary-tree match finder (smallest distance for every length), shortest-path parsing priced first by symbol statistics and then by the exact code lengths, farther matches with cheaper distance codes, block boundaries by dynamic programming plus merge/split polishing, optimised block headers. |
 | zlib rebuild | `src/flate/zlibexact.rs` | zlib's deflate re-created from its description, bit for bit, to rebuild streams zlib wrote. |
 | PDF reader | `src/pdf/parse.rs`, `xref.rs`, `filters.rs` | Strict parser: objects, xref tables and streams, object streams, LZW, ASCIIHex, ASCII85, RunLength, predictors. |
-| PDF writer | `src/pdf/rewrite.rs`, `images.rs` | Keeps every reachable object's value; re-encodes streams with our Flate; picks a better PNG predictor (or none) for images; packs objects into compressed object streams grouped by type; writes a compressed xref stream; reads its own output back and compares before returning it. |
+| PDF writer | `src/pdf/rewrite.rs`, `images.rs` | Keeps every reachable object's value; re-encodes streams with our Flate; picks a better PNG predictor (or none) for images; puts Flate in front of a JPEG only when that saves at least 1% (never in front of JPEG 2000 or JBIG2, whose filter chain keeps its shape for readers such as pdf.js); packs objects into compressed object streams grouped by type; writes a compressed xref stream; reads its own output back and compares before returning it. |
 | Safety gate | `src/pdf/rewrite.rs` (`gate`) | Encrypted, signed, certified, PDF/A, PDF/X, files with earlier revisions, files we can't read strictly, objects beyond /Size, objects present but not indexed: returned untouched. |
-| peyaji format | `src/pack/`, `src/cm/` | Any PDF, packed with our context-mixing model (bit-history states, mixers, SSE) with PDF-aware contexts: syntax, predicted object numbers and xref offsets, drawing instructions, image samples coded as residuals. Restored byte for byte; every pack is restored and checked (SHA-256) before it is returned. |
+| peyaji format | `src/pack/`, `src/cm/` | Any PDF, packed with our context-mixing model (bit-history states, mixers, SSE) with PDF-aware contexts: syntax, predicted object numbers and xref offsets, drawing instructions, image samples coded as residuals. Streams are recognised by their bytes (zlib, JPEG), not only by their dictionaries. Restored byte for byte; every pack is restored and checked (SHA-256) before it is returned. A damaged .pyj file is refused with an error: lengths are bounded, decoding stops when the data runs out, and the checksum is checked, so a wrong file is never returned. The model's settings are constants of the format version. |
 | SHA-256 | `src/pack/sha256.rs` | For the restore check. |
 
 ## Existing libraries (optional, `--features existing`)
@@ -42,6 +42,11 @@ target/release/pdfe unpack out.pyj back.pdf        # exact original
 - `pdf_bench.py`, `verify_pdf.py`: whole PDFs against qpdf; every output checked independently with qpdf
   --check, pikepdf (object graph followed by value, streams decoded) and PDFium (pixels and text of every
   page, up to 30 pages).
+- `verify_render.py`, `verify_pdfjs.mjs`: two more renderers on every output, Poppler and pdf.js (pixels and
+  text of every page, up to 30 pages; no new Poppler errors). pdf.js comes from npm (`pdfjs-dist`,
+  `@napi-rs/canvas`), installed outside this folder; the engine itself has no dependencies.
+- `check_the_checkers.py`: the checks must catch one small change (a character, a metadata value, the page
+  size, one bit of one pixel) and pass an unchanged copy.
 - `pack_bench.py`: the peyaji format against xz, Brotli, Zstandard and inflate+xz; every file restored and
   compared byte for byte.
 

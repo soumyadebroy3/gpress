@@ -63,6 +63,10 @@ impl Default for Tables {
 /// Codes one bit with probability `p1` (12-bit, of a 1) — the same interface for encoding and decoding.
 pub trait Coder {
     fn code(&mut self, bit: Option<u32>, p1: i32) -> u32;
+    /// A decoder that has read well past the end of its input is decoding a damaged file.
+    fn exhausted(&self) -> bool {
+        false
+    }
 }
 
 pub struct Encoder {
@@ -136,6 +140,9 @@ impl<'a> Decoder<'a> {
 }
 
 impl<'a> Coder for Decoder<'a> {
+    fn exhausted(&self) -> bool {
+        self.overrun()
+    }
     #[inline]
     fn code(&mut self, _bit: Option<u32>, p1: i32) -> u32 {
         let p = p1.clamp(1, 4095) as u64;

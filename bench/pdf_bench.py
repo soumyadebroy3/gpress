@@ -10,7 +10,7 @@ The corpus list is OUT/files.txt (one path per line). Run with python3 -I."""
 import json, os, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor
 
-ENGINE = '/tmp/pdfe-max'
+ENGINE = os.environ.get('PDFE', '/home/claude/pdf-engine/target/release/pdfe')
 VERIFY = '/home/claude/pdf-engine/bench/verify_pdf.py'
 
 def files(out):
