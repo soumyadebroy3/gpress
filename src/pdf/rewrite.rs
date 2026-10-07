@@ -7,6 +7,7 @@
 //! cross-reference stream. Before anything is returned, the output is read back and compared object by object.
 
 use super::filters::{chain, decode_stage, is_general, Stage};
+use super::images;
 use super::object::*;
 use super::xref::{self, Doc, Entry};
 use crate::flate;
@@ -119,6 +120,31 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>) -> Result<(), String> {
     if doc.trailing > 1024 {
         return Err("data after the end of the file".into());
     }
+    // Objects numbered at or beyond /Size: readers disagree on whether they exist.
+    if let Some(size) = doc.trailer.get(b"Size").and_then(|x| x.as_int()) {
+        let max_used = doc.entries.iter().filter(|(_, e)| !matches!(e, Entry::Free)).map(|(n, _)| *n as i64).max().unwrap_or(0);
+        if max_used >= size {
+            return Err("object numbers beyond /Size".into());
+        }
+    }
+    // A reference to an object missing from the cross-reference data is null — unless the object is
+    // physically in the file, where some readers find it anyway.
+    let mut dangling = Vec::new();
+    for (_, (_, o)) in objs.iter() {
+        let mut r = Vec::new();
+        match o {
+            // A stream's /Length is replaced by a direct number, so its target doesn't matter.
+            Obj::Stream(st) => st.dict.0.iter().filter(|(k, _)| k != b"Length").for_each(|(_, v)| v.refs(&mut r)),
+            _ => o.refs(&mut r),
+        }
+        dangling.extend(r.into_iter().filter(|(n, _)| !objs.contains_key(n)));
+    }
+    for (n, g) in dangling {
+        let pat = format!("{n} {g} obj");
+        if contains(doc.data, pat.as_bytes()) {
+            return Err("an object in the file is missing from its cross-reference data".into());
+        }
+    }
     let mut why: Option<String> = None;
     for (_, (_, o)) in objs.iter() {
         walk(o, &mut |x| {
@@ -177,7 +203,7 @@ fn set_chain(dict: &mut Dict, stages: &[Stage]) {
 }
 
 /// The best encoding of one stream: (new dict, new data), or None to keep it exactly as it is.
-fn reencode(s: &Stream, opt: &Options) -> Option<(Dict, Vec<u8>)> {
+fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) -> Option<(Dict, Vec<u8>)> {
     if s.dict.name(b"Type") == Some(b"Metadata") || s.dict.has(b"F") {
         return None; // XMP stays readable by other tools; external file streams are left alone
     }
@@ -228,9 +254,62 @@ fn reencode(s: &Stream, opt: &Options) -> Option<(Dict, Vec<u8>)> {
     if carried.is_none() && k > 0 && data.len() < best_len {
         let mut d = s.dict.clone();
         set_chain(&mut d, rest);
-        best = Some((d, data));
+        best_len = data.len();
+        best = Some((d, data.clone()));
+    }
+    // Images: try storing the samples with a different (or no) PNG predictor.
+    if rest.is_empty() && data.len() <= 48 << 20 {
+        if let Some((d, z)) = repredict(s, &data, carried.as_ref(), opt, resolve) {
+            if z.len() < best_len {
+                best = Some((d, z));
+            }
+        }
     }
     best
+}
+
+fn repredict(s: &Stream, data: &[u8], carried: Option<&Dict>, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) -> Option<(Dict, Vec<u8>)> {
+    let g = images::geometry(&s.dict, resolve)?;
+    let (row, bpp) = (g.row(), g.bpp());
+    // The samples, whatever predictor they are stored with now.
+    let px = match carried {
+        None => data.to_vec(),
+        Some(p) => {
+            let pred = p.get(b"Predictor").and_then(|x| x.as_int()).unwrap_or(1);
+            let pc = p.get(b"Colors").and_then(|x| x.as_int()).unwrap_or(1) as usize;
+            let pb = p.get(b"BitsPerComponent").and_then(|x| x.as_int()).unwrap_or(8) as usize;
+            let pcol = p.get(b"Columns").and_then(|x| x.as_int()).unwrap_or(1) as usize;
+            if (pc, pb, pcol) != (g.colors, g.bpc, g.columns) {
+                return None; // predictor geometry differs from the image's: leave it
+            }
+            if pred >= 10 {
+                images::png_unfilter(data, row, bpp)?
+            } else if pred == 2 && g.bpc == 8 {
+                images::tiff_unfilter(data, row, bpp)
+            } else {
+                return None;
+            }
+        }
+    };
+    if px.is_empty() || px.len() % row != 0 || px.len() < 1024 {
+        return None;
+    }
+    let quick = flate::Options::quick();
+    let mut cands: Vec<(Option<Dict>, Vec<u8>)> = vec![(None, px.clone())];
+    for how in [images::Choice::MinSum, images::Choice::Fixed(2), images::Choice::Fixed(1), images::Choice::Fixed(4)] {
+        let f = images::png_filter(&px, row, bpp, how);
+        let mut p = Dict::default();
+        p.set(b"Predictor", Obj::Int(15));
+        p.set(b"Colors", Obj::Int(g.colors as i64));
+        p.set(b"BitsPerComponent", Obj::Int(g.bpc as i64));
+        p.set(b"Columns", Obj::Int(g.columns as i64));
+        cands.push((Some(p), f));
+    }
+    let (parms, bytes) = cands.into_iter().min_by_key(|(_, b)| flate::deflate_zlib(b, &quick).len())?;
+    let z = flate::deflate_zlib(&bytes, &opt.flate);
+    let mut d = s.dict.clone();
+    set_chain(&mut d, &[Stage { name: b"FlateDecode".to_vec(), parms }]);
+    Some((d, z))
 }
 
 fn kind_key(o: &Obj) -> (u8, Vec<u8>, Vec<u8>) {
@@ -258,7 +337,13 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         match o {
             Obj::Stream(s) => {
                 stats.streams += 1;
-                let (mut dict, data) = match reencode(s, opt) {
+                let resolve = |o: &Obj| -> Option<Obj> {
+                    match o {
+                        Obj::Ref(n, _) => objs.get(n).map(|x| x.1.clone()),
+                        x => Some(x.clone()),
+                    }
+                };
+                let (mut dict, data) = match reencode(s, opt, &resolve) {
                     Some(x) => {
                         stats.streams_reencoded += 1;
                         x
@@ -374,9 +459,10 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     xd.set(b"Type", Obj::Name(b"XRef".to_vec()));
     xd.set(b"Size", Obj::Int(size as i64));
     xd.set(b"W", Obj::Array(vec![Obj::Int(1), Obj::Int(w1 as i64), Obj::Int(w2 as i64)]));
-    for key in [&b"Root"[..], b"Info", b"ID"] {
-        if let Some(v) = doc.trailer.get(key) {
-            xd.set(key, v.clone());
+    // Every trailer entry that isn't about the old cross-reference structure carries over.
+    for (k, v) in &doc.trailer.0 {
+        if !STRUCTURAL.contains(&k.as_slice()) {
+            xd.set(k, v.clone());
         }
     }
     xd.set(b"Filter", Obj::Name(b"FlateDecode".to_vec()));
@@ -402,6 +488,9 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     Ok((out, stats))
 }
 
+/// Trailer keys that describe the cross-reference structure itself (rewritten, not copied).
+const STRUCTURAL: [&[u8]; 9] = [b"Size", b"Prev", b"XRefStm", b"Index", b"W", b"Type", b"Filter", b"DecodeParms", b"Length"];
+
 fn bytes_for(v: u64) -> usize {
     let mut n = 1;
     while n < 8 && v >> (8 * n) != 0 {
@@ -410,7 +499,8 @@ fn bytes_for(v: u64) -> usize {
     n
 }
 
-/// Decoded content of a stream through its general filters (predictor bytes left in place).
+/// Decoded content of a stream through its general filters, predictors undone, plus the image-codec stages
+/// that remain (their bytes are compared as they are).
 fn content_of(s: &Stream) -> Option<(Vec<u8>, Vec<Stage>)> {
     let stages = chain(&s.dict)?;
     let mut data = s.data.clone();
@@ -418,6 +508,12 @@ fn content_of(s: &Stream) -> Option<(Vec<u8>, Vec<Stage>)> {
     for st in stages {
         if is_general(&st.name) && rest.is_empty() {
             data = decode_stage(&st, &data, 1 << 30).ok()?;
+            if st.name == b"FlateDecode" || st.name == b"LZWDecode" {
+                let pred = st.parms.as_ref().and_then(|p| p.get(b"Predictor")).and_then(|x| x.as_int()).unwrap_or(1);
+                if pred > 1 {
+                    data = super::filters::unpredict(&st, &data).ok()?;
+                }
+            }
         } else {
             rest.push(st);
         }
@@ -425,21 +521,6 @@ fn content_of(s: &Stream) -> Option<(Vec<u8>, Vec<Stage>)> {
     Some((data, rest))
 }
 
-fn predictor_parms(s: &Stream) -> Option<Dict> {
-    let stages = chain(&s.dict)?;
-    let k = stages.iter().take_while(|st| is_general(&st.name)).count();
-    if k == 0 {
-        return None;
-    }
-    stages[k - 1].parms.clone().and_then(|mut p| {
-        p.remove(b"EarlyChange");
-        if p.has(b"Predictor") {
-            Some(p)
-        } else {
-            None
-        }
-    })
-}
 
 fn same_except_encoding(a: &Dict, b: &Dict) -> bool {
     let strip = |d: &Dict| -> Vec<(Vec<u8>, Obj)> {
@@ -450,8 +531,8 @@ fn same_except_encoding(a: &Dict, b: &Dict) -> bool {
 
 fn self_check(objs: &BTreeMap<u32, (u16, Obj)>, out: &[u8], trailer: &Dict) -> Result<(), String> {
     let doc2 = xref::open(out).map_err(|e| format!("self-check: output unreadable: {e:?}"))?;
-    for key in [&b"Root"[..], b"Info", b"ID"] {
-        if trailer.get(key) != doc2.trailer.get(key) {
+    for (k, v) in &trailer.0 {
+        if !STRUCTURAL.contains(&k.as_slice()) && doc2.trailer.get(k) != Some(v) {
             return Err("self-check: trailer differs".into());
         }
     }
@@ -459,6 +540,10 @@ fn self_check(objs: &BTreeMap<u32, (u16, Obj)>, out: &[u8], trailer: &Dict) -> R
     let a: BTreeSet<u32> = objs.keys().copied().collect();
     let b: BTreeSet<u32> = objs2.keys().copied().collect();
     if a != b {
+        if std::env::var_os("PDFE_DEBUG").is_some() {
+            eprintln!("only in input: {:?}", a.difference(&b).take(10).collect::<Vec<_>>());
+            eprintln!("only in output: {:?}", b.difference(&a).take(10).collect::<Vec<_>>());
+        }
         return Err("self-check: different objects reachable".into());
     }
     for (n, (g, o)) in objs {
@@ -476,7 +561,7 @@ fn self_check(objs: &BTreeMap<u32, (u16, Obj)>, out: &[u8], trailer: &Dict) -> R
                 }
                 let c1 = content_of(s1).ok_or(format!("self-check: stream {n} undecodable"))?;
                 let c2 = content_of(s2).ok_or(format!("self-check: stream {n} undecodable in output"))?;
-                if c1 != c2 || predictor_parms(s1) != predictor_parms(s2) {
+                if c1 != c2 {
                     return Err(format!("self-check: content of stream {n} differs"));
                 }
             }

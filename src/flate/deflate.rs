@@ -11,7 +11,7 @@ use super::bits::BitWriter;
 use super::block::*;
 use super::lz::{Hist, Sym};
 use super::matcher::{find_matches, Matches};
-use super::parse::{greedy, optimal, Costs, ParseScratch};
+use super::parse::{greedy, optimal_nice, Costs, ParseScratch};
 use super::tables::*;
 
 #[derive(Clone, Debug)]
@@ -29,16 +29,20 @@ pub struct Options {
     pub alternatives: bool,
     /// Segments up to this size are also optimised from a second starting point.
     pub multi_start_limit: usize,
+    /// Matches at least this long are taken at once (259 = never).
+    pub nice: usize,
+    /// Merge/split polishing of block boundaries.
+    pub polish: bool,
 }
 
 impl Options {
     /// Our strongest setting.
     pub fn max() -> Options {
-        Options { iterations: 8, exact_rounds: 4, max_chain: 8192, segment: 1 << 20, split: true, alternatives: true, multi_start_limit: 1 << 18 }
+        Options { iterations: 8, exact_rounds: 4, max_chain: 8192, segment: 1 << 20, split: true, alternatives: true, multi_start_limit: 1 << 18, nice: 259, polish: true }
     }
     /// Fast but still optimal-parsed.
     pub fn quick() -> Options {
-        Options { iterations: 2, exact_rounds: 2, max_chain: 128, segment: 1 << 20, split: true, alternatives: false, multi_start_limit: 0 }
+        Options { iterations: 2, exact_rounds: 1, max_chain: 128, segment: 1 << 20, split: true, alternatives: false, multi_start_limit: 0, nice: 64, polish: false }
     }
 }
 
@@ -120,13 +124,13 @@ fn optimize_segment(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options)
     // 1. The whole segment, from neutral prices and (for smaller segments) also from a greedy parse's
     //    statistics; the better result goes on.
     let mut first = Vec::new();
-    optimal(data, a, b, m, &Costs::fixed(), false, &mut sc, &mut first);
+    optimal_nice(data, a, b, m, &Costs::fixed(), false, opt.nice, &mut sc, &mut first);
     let mut syms = refine(data, a, b, m, opt, first, &mut sc);
     if b - a <= opt.multi_start_limit {
         let mut g = Vec::new();
         greedy(data, a, b, m, &mut g);
         let mut second = Vec::new();
-        optimal(data, a, b, m, &Costs::entropy(&Hist::of(&g)), false, &mut sc, &mut second);
+        optimal_nice(data, a, b, m, &Costs::entropy(&Hist::of(&g)), false, opt.nice, &mut sc, &mut second);
         let other = refine(data, a, b, m, opt, second, &mut sc);
         if price(&Hist::of(&other), b - a) < price(&Hist::of(&syms), b - a) {
             syms = other;
@@ -144,7 +148,7 @@ fn optimize_segment(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options)
     }
     let t3 = t.elapsed();
     // 4. Polish: merge neighbours that are cheaper together, split blocks that are cheaper apart.
-    if opt.split {
+    if opt.split && opt.polish {
         polish(data, m, opt, &mut plans, &mut sc);
     }
     if dbg {
@@ -243,7 +247,7 @@ fn refine(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options, start: Ve
     let mut stuck = 0;
     for it in 0..opt.iterations {
         cur.clear();
-        optimal(data, a, b, m, &Costs::entropy(&stats), false, sc, &mut cur);
+        optimal_nice(data, a, b, m, &Costs::entropy(&stats), false, opt.nice, sc, &mut cur);
         let h = Hist::of(&cur);
         let bits = price(&h, b - a);
         if bits < best_bits {
@@ -296,7 +300,7 @@ fn exact(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options, start: Vec
                 // keep the variety small when alternatives are tried
             }
             cur.clear();
-            optimal(data, a, b, m, &Costs::lengths(&code.ll, &code.d, missing), alt, sc, &mut cur);
+            optimal_nice(data, a, b, m, &Costs::lengths(&code.ll, &code.d, missing), alt, opt.nice, sc, &mut cur);
             let bits = price(&Hist::of(&cur), b - a);
             if bits < best_bits {
                 best_bits = bits;
