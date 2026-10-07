@@ -9,13 +9,50 @@ use super::parse::{Fail, Jpeg, Scan};
 /// Token slot of a restart marker (Huffman slots are 0-3 for DC tables, 4-7 for AC tables).
 pub const RESTART: u8 = 8;
 
-/// One coded symbol with its extra bits, or a restart marker (slot RESTART, `sym` its number 0-7).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Tok {
-    pub slot: u8,
-    pub sym: u8,
-    pub nbits: u8,
-    pub bits: u16,
+/// Most tokens of one block: the DC token and at most 63 AC tokens (each moves on at least one coefficient,
+/// or ends the block).
+pub const BLOCK_TOKENS: usize = 64;
+
+/// Most blocks decoded in one call of [`Tokens::next`].
+pub const BATCH_BLOCKS: usize = 64;
+
+/// Room for the tokens of one call of [`Tokens::next`].
+pub type Buffer = [Tok; BATCH_BLOCKS * BLOCK_TOKENS];
+
+/// One coded symbol with its extra bits, or a restart marker (slot RESTART, symbol its number 0-7), in one
+/// word: slot (4 bits), symbol (8), number of extra bits (4), extra bits (16).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tok(u32);
+
+impl Tok {
+    #[inline]
+    pub fn new(slot: u8, sym: u8, nbits: u8, bits: u16) -> Tok {
+        Tok((slot as u32) << 28 | (sym as u32) << 20 | (nbits as u32) << 16 | bits as u32)
+    }
+    #[inline]
+    pub fn slot(self) -> u8 {
+        (self.0 >> 28) as u8
+    }
+    #[inline]
+    pub fn sym(self) -> u8 {
+        (self.0 >> 20) as u8
+    }
+    #[inline]
+    pub fn nbits(self) -> u8 {
+        (self.0 >> 16 & 15) as u8
+    }
+    #[inline]
+    pub fn bits(self) -> u16 {
+        self.0 as u16
+    }
+}
+
+/// True if one of the 8 bytes of `w` is 0xFF.
+#[inline]
+fn has_ff(w: u64) -> bool {
+    const LOW: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    (!w).wrapping_sub(LOW) & w & HIGH != 0
 }
 
 /// Reads entropy-coded bits: stuffed 0xFF 0x00 is a 0xFF data byte; reading stops at any other marker.
@@ -23,6 +60,7 @@ struct Bits<'a> {
     d: &'a [u8],
     pos: usize,
     end: usize,
+    /// The next `n` bits are the low bits of `acc`, most significant first.
     acc: u64,
     n: u32,
     at_marker: bool,
@@ -31,6 +69,19 @@ struct Bits<'a> {
 impl<'a> Bits<'a> {
     #[inline]
     fn refill(&mut self) {
+        // Eight bytes without a 0xFF need no checks: take as many as fit.
+        if !self.at_marker && self.n <= 56 && self.pos + 8 <= self.end {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&self.d[self.pos..self.pos + 8]);
+            let w = u64::from_be_bytes(b);
+            if !has_ff(w) {
+                let take = (64 - self.n) / 8; // 1 to 8 bytes
+                self.acc = if take == 8 { w } else { self.acc << (8 * take) | w >> (64 - 8 * take) };
+                self.n += 8 * take;
+                self.pos += take as usize;
+                return;
+            }
+        }
         while self.n <= 56 && !self.at_marker {
             if self.pos >= self.end {
                 self.at_marker = true;
@@ -115,18 +166,16 @@ impl<'a> Bits<'a> {
     }
 }
 
-/// The tokens of one scan, in order.
+/// The tokens of one scan, in order, some blocks (or a restart marker) at a time.
 pub struct Tokens<'a> {
     bits: Bits<'a>,
-    tables: [Option<&'a DecodeTable>; 8],
-    /// (DC slot, AC slot) of each block of an MCU.
-    blocks: Vec<(u8, u8)>,
+    /// (DC table, AC table, DC slot, AC slot) of each block of an MCU.
+    blocks: Vec<(&'a DecodeTable, &'a DecodeTable, u8, u8)>,
     mcus: u64,
     restart: u64,
     mcu: u64,
+    /// Next block of the current MCU.
     blk: usize,
-    /// Next coefficient of the current block: 0 is DC, 64 means the block is complete.
-    k: u32,
     rst: u8,
     done: bool,
 }
@@ -153,109 +202,163 @@ impl<'a> Tokens<'a> {
             let h = (f.height as u64).div_ceil(8 * f.vmax as u64);
             (b, w * h)
         };
-        let mut tables = [None; 8];
-        for (slot, t) in s.tables.iter().enumerate() {
-            if let Some(i) = t {
-                tables[slot] = Some(j.tables.get(*i).ok_or("bad table index")?);
-            }
+        // Every block takes at least 2 bits (a DC code and an end-of-block code, 1 bit each at the least): a
+        // frame claiming more blocks than the data can hold is refused before any work.
+        if mcus * blocks.len() as u64 > 4 * s.data.len() as u64 {
+            return Err("more blocks than the data can hold");
         }
-        for &(dc, ac) in &blocks {
-            if tables[dc as usize].is_none() || tables[ac as usize].is_none() {
-                return Err("scan uses an undefined Huffman table");
-            }
-        }
+        let table = |slot: u8| -> Result<&'a DecodeTable, Fail> {
+            let i = s.tables[slot as usize].ok_or("scan uses an undefined Huffman table")?;
+            j.tables.get(i).ok_or("bad table index")
+        };
+        let blocks = blocks.iter().map(|&(dc, ac)| Ok((table(dc)?, table(ac)?, dc, ac))).collect::<Result<Vec<_>, Fail>>()?;
         let bits = Bits { d: j.data, pos: s.data.start, end: s.data.end, acc: 0, n: 0, at_marker: false };
-        Ok(Tokens { bits, tables, blocks, mcus, restart: s.restart as u64, mcu: 0, blk: 0, k: 0, rst: 0, done: false })
+        Ok(Tokens { bits, blocks, mcus, restart: s.restart as u64, mcu: 0, blk: 0, rst: 0, done: false })
     }
 
-    /// The next token; None after the last one (when the data has been checked to end exactly there).
-    pub fn next(&mut self) -> Result<Option<Tok>, Fail> {
+    /// A buffer for [`Tokens::next`].
+    pub fn buffer() -> Box<Buffer> {
+        Box::new([Tok::default(); BATCH_BLOCKS * BLOCK_TOKENS])
+    }
+
+    /// The tokens of the next blocks (at most BATCH_BLOCKS, never past the end of a restart interval), or the
+    /// token of a restart marker, into the start of `out`: how many there are; 0 after the last token, when the
+    /// data has been checked to end exactly there. Two scans with the same frame and scan header come in the
+    /// same batches.
+    pub fn next(&mut self, out: &mut Buffer) -> Result<usize, Fail> {
         if self.done {
-            return Ok(None);
+            return Ok(0);
         }
-        if self.k >= 64 {
-            self.k = 0;
+        if self.blk == self.blocks.len() {
+            self.blk = 0;
+            self.mcu += 1;
+            if self.mcu == self.mcus {
+                self.done = true;
+                self.bits.end_of_interval()?;
+                // Some encoders end the last interval with a restart marker too (the next one in turn); it is
+                // kept, as a last token.
+                let m = self.rst;
+                if self.restart > 0 && self.bits.pos + 2 == self.bits.end && self.bits.restart_marker(m) {
+                    out[0] = Tok::new(RESTART, m, 0, 0);
+                    return Ok(1);
+                }
+                if self.bits.pos != self.bits.end {
+                    return Err("marker inside the scan's data");
+                }
+                return Ok(0);
+            }
+            if self.restart > 0 && self.mcu % self.restart == 0 {
+                let m = self.rst;
+                self.rst = (m + 1) & 7;
+                self.bits.end_of_interval()?;
+                if !self.bits.restart_marker(m) {
+                    return Err("restart marker missing or out of order");
+                }
+                out[0] = Tok::new(RESTART, m, 0, 0);
+                return Ok(1);
+            }
+        }
+        let (mut count, mut n) = (0, 0);
+        loop {
+            let (tdc, tac, dc, ac) = self.blocks[self.blk];
+            n = self.block(tdc, tac, dc, ac, out, n)?;
             self.blk += 1;
+            count += 1;
             if self.blk == self.blocks.len() {
+                // The end of the scan or of an interval is for the next call.
+                let next = self.mcu + 1;
+                if count >= BATCH_BLOCKS || next == self.mcus || (self.restart > 0 && next % self.restart == 0) {
+                    return Ok(n);
+                }
                 self.blk = 0;
-                self.mcu += 1;
-                if self.mcu == self.mcus {
-                    self.done = true;
-                    self.bits.end_of_interval()?;
-                    // Some encoders end the last interval with a restart marker too (the next one in turn);
-                    // it is kept, as a last token.
-                    let m = self.rst;
-                    if self.restart > 0 && self.bits.pos + 2 == self.bits.end && self.bits.restart_marker(m) {
-                        return Ok(Some(Tok { slot: RESTART, sym: m, nbits: 0, bits: 0 }));
-                    }
-                    if self.bits.pos != self.bits.end {
-                        return Err("marker inside the scan's data");
-                    }
-                    return Ok(None);
-                }
-                if self.restart > 0 && self.mcu % self.restart == 0 {
-                    let m = self.rst;
-                    self.rst = (m + 1) & 7;
-                    self.bits.end_of_interval()?;
-                    if !self.bits.restart_marker(m) {
-                        return Err("restart marker missing or out of order");
-                    }
-                    return Ok(Some(Tok { slot: RESTART, sym: m, nbits: 0, bits: 0 }));
-                }
+                self.mcu = next;
+            } else if count >= BATCH_BLOCKS {
+                return Ok(n);
             }
         }
-        let (dc, ac) = self.blocks[self.blk];
-        if self.k == 0 {
-            let t = self.tables[dc as usize].ok_or("no table")?;
-            let s = self.bits.symbol(t)?;
-            if s > 11 {
-                return Err("DC difference too large for 8-bit samples");
-            }
-            let bits = self.bits.get(s as u32)?;
-            self.k = 1;
-            return Ok(Some(Tok { slot: dc, sym: s, nbits: s, bits }));
+    }
+
+    /// One block into `out` from position `n`: the DC token, then AC tokens up to the end-of-block symbol or the
+    /// 64th coefficient. Returns the position after it (at most 64 more).
+    #[inline]
+    fn block(&mut self, tdc: &DecodeTable, tac: &DecodeTable, dc: u8, ac: u8, out: &mut Buffer, mut n: usize) -> Result<usize, Fail> {
+        let s = self.bits.symbol(tdc)?;
+        if s > 11 {
+            return Err("DC difference too large for 8-bit samples");
         }
-        let t = self.tables[ac as usize].ok_or("no table")?;
-        let rs = self.bits.symbol(t)?;
-        let (r, s) = ((rs >> 4) as u32, (rs & 15) as u32);
-        if s == 0 {
-            match r {
-                0 => self.k = 64, // end of block
-                15 => {
-                    // Sixteen zeros; ending the block exactly is fine, running past it is not.
-                    if self.k + 16 > 64 {
-                        return Err("zero run past the end of a block");
+        let bits = self.bits.get(s as u32)?;
+        out[n] = Tok::new(dc, s, s, bits);
+        n += 1;
+        // Next coefficient; each token moves it on by at least one, or ends the block.
+        let mut k = 1u32;
+        while k < 64 {
+            let rs = self.bits.symbol(tac)?;
+            let (r, s) = ((rs >> 4) as u32, (rs & 15) as u32);
+            if s == 0 {
+                match r {
+                    0 => {
+                        out[n] = Tok::new(ac, rs, 0, 0);
+                        return Ok(n + 1); // end of block
                     }
-                    self.k += 16;
+                    15 => {
+                        // Sixteen zeros; ending the block exactly is fine, running past it is not.
+                        if k + 16 > 64 {
+                            return Err("zero run past the end of a block");
+                        }
+                        k += 16;
+                        out[n] = Tok::new(ac, rs, 0, 0);
+                        n += 1;
+                        continue;
+                    }
+                    _ => return Err("unusual AC symbol"),
                 }
-                _ => return Err("unusual AC symbol"),
             }
-            return Ok(Some(Tok { slot: ac, sym: rs, nbits: 0, bits: 0 }));
+            if s > 10 {
+                return Err("AC coefficient too large for 8-bit samples");
+            }
+            if k + r > 63 {
+                return Err("coefficient past the end of a block");
+            }
+            let bits = self.bits.get(s)?;
+            out[n] = Tok::new(ac, rs, s as u8, bits);
+            n += 1;
+            k += r + 1;
         }
-        if s > 10 {
-            return Err("AC coefficient too large for 8-bit samples");
-        }
-        if self.k + r > 63 {
-            return Err("coefficient past the end of a block");
-        }
-        let bits = self.bits.get(s)?;
-        self.k += r + 1;
-        Ok(Some(Tok { slot: ac, sym: rs, nbits: s as u8, bits }))
+        Ok(n)
     }
 }
 
+/// Where the bytes of a [`BitWriter`] go.
+pub trait Sink {
+    fn byte(&mut self, b: u8);
+    fn marker(&mut self, m: u8);
+}
+
+/// Counts the 0xFF bytes written (each needs a stuffed 0x00), writing nothing.
+#[derive(Default)]
+pub struct CountFF(pub u64);
+
+impl Sink for CountFF {
+    #[inline]
+    fn byte(&mut self, b: u8) {
+        self.0 += (b == 0xFF) as u64;
+    }
+    fn marker(&mut self, _: u8) {}
+}
+
 /// Writes bits most significant first, with a 0x00 after every 0xFF byte.
-pub struct BitWriter<'a> {
-    pub out: &'a mut Vec<u8>,
+pub struct BitWriter<S: Sink> {
+    pub out: S,
     acc: u64,
     n: u32,
 }
 
-impl<'a> BitWriter<'a> {
-    pub fn new(out: &'a mut Vec<u8>) -> Self {
+impl<S: Sink> BitWriter<S> {
+    pub fn new(out: S) -> Self {
         BitWriter { out, acc: 0, n: 0 }
     }
 
+    /// `len` (at most 32) bits of `v`.
     #[inline]
     pub fn put(&mut self, v: u32, len: u32) {
         self.acc = self.acc << len | v as u64;
@@ -263,9 +366,9 @@ impl<'a> BitWriter<'a> {
         while self.n >= 8 {
             self.n -= 8;
             let b = (self.acc >> self.n) as u8;
-            self.out.push(b);
+            self.out.byte(b);
             if b == 0xFF {
-                self.out.push(0);
+                self.out.byte(0);
             }
         }
     }
@@ -277,5 +380,11 @@ impl<'a> BitWriter<'a> {
             self.put((1 << k) - 1, k);
         }
         self.acc = 0;
+    }
+
+    /// Restart marker `m`, after padding.
+    pub fn restart(&mut self, m: u8) {
+        self.pad();
+        self.out.marker(0xD0 + m);
     }
 }

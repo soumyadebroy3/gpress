@@ -269,6 +269,9 @@ fn other_kinds_are_left_alone() {
     assert_eq!(optimize(&patched(sof + 1, 0xC5)), Err(Refused("hierarchical")));
     assert_eq!(optimize(&patched(sof + 1, 0xC9)), Err(Refused("arithmetic coding")));
     assert_eq!(optimize(&patched(sof + 6, 0)), Err(Refused("number of lines given by a DNL marker")));
+    // Luma sampled 2x2, chroma 1x1 here; chroma 3x1 makes 2:3, which libjpeg can't scale ("fractional
+    // sampling not implemented yet").
+    assert_eq!(optimize(&patched(sof + 14, 0x31)), Err(Refused("fractional sampling")));
     // A scan that is not the whole of the coefficients.
     let sos = find(&a, &[0xFF, 0xDA]);
     let len = u16::from_be_bytes([a[sos + 2], a[sos + 3]]) as usize;
@@ -420,6 +423,29 @@ fn data_bound_to_the_bytes_leaves_the_file_as_it_is() {
     // Any APP11.
     let b = [&a[..2], &segment(0xEB, b"other"), &a[2..]].concat();
     assert!(optimize(&b).is_err());
+}
+
+#[test]
+fn more_blocks_than_the_data_can_hold_are_refused_at_once() {
+    // Every block takes at least 2 bits, so a frame of 65535 x 65535 pixels (67 million blocks) can't fit in 2 KB
+    // of coded data: refused before any decoding, not after reading to the end of the data.
+    let a = data("gray.jpg");
+    let sof = find(&a, &[0xFF, 0xC0]);
+    let mut b = a.clone();
+    b[sof + 5..sof + 9].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
+    let t = std::time::Instant::now();
+    assert_eq!(optimize(&b), Err(Refused("more blocks than the data can hold")));
+    assert!(t.elapsed().as_millis() < 100);
+    // At exactly the bound it is read: 1-bit codes for the one DC difference and the end of block, 4 blocks of
+    // 2 bits in one byte of coded data (the new file saves 4 bytes with one table segment instead of two).
+    let dht = |class: u8| segment(0xC4, &[&[class][..], &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], &[0]].concat());
+    let frame = segment(0xC0, &[8, 0, 16, 0, 16, 1, 1, 0x11, 0]);
+    let scan = segment(0xDA, &[1, 1, 0x00, 0, 63, 0]);
+    let jpeg = [&[0xFF, 0xD8][..], &segment(0xDB, &[&[0u8][..], &[1u8; 64]].concat()), &frame, &dht(0x00), &dht(0x10), &scan, &[0x00], &[0xFF, 0xD9]].concat();
+    assert_eq!(coefficients(&jpeg).map(|s| s[0].len()), Some(4));
+    let o = optimize(&jpeg).unwrap();
+    assert!(o.len() < jpeg.len() && equivalent(&jpeg, &o));
+    assert_eq!(coefficients(&o), coefficients(&jpeg));
 }
 
 #[test]
