@@ -1,0 +1,53 @@
+%PDF-1.7
+%âãÏÓ
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /Metadata 3 0 R /Lang (en-US) /StructTreeRoot 15 0 R /MarkInfo << /Marked true >> /ViewerPreferences << /DisplayDocTitle true >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [ 4 0 R 16 0 R ] /Count 2 >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [ 0 0 612 792 ] /CropBox [ 0 0 612 792 ] /Rotate 0 /Resources << /Font << /F1 5 0 R /F2 6 0 R /TT1 17 0 R >> /ExtGState << /GS1 7 0 R >> /XObject << /Im1 8 0 R /Fm1 18 0 R >> /ColorSpace << /CS0 19 0 R >> /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ] >> /Contents 9 0 R /Group << /Type /Group /S /Transparency /CS /DeviceRGB >> /Tabs /S /StructParents 0 /Annots [ 20 0 R ] >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /TrueType /BaseFont /ABCDEF+ArialMT /FirstChar 32 /LastChar 126 /Widths 10 0 R /FontDescriptor 11 0 R /Encoding /WinAnsiEncoding /ToUnicode 21 0 R >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /Type0 /BaseFont /ABCDEF+Calibri-Bold /Encoding /Identity-H /DescendantFonts [ 22 0 R ] /ToUnicode 23 0 R >>
+endobj
+7 0 obj
+<< /Type /ExtGState /BM /Normal /CA 1 /ca 1 /SA true /SM 0.02 >>
+endobj
+8 0 obj
+<< /Type /XObject /Subtype /Image /Width 640 /Height 480 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Interpolate true /SMask 24 0 R /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 3 /BitsPerComponent 8 /Columns 640 >> /Length 12345 >>
+endobj
+11 0 obj
+<< /Type /FontDescriptor /FontName /ABCDEF+ArialMT /Flags 32 /FontBBox [ -665 -325 2000 1006 ] /ItalicAngle 0 /Ascent 905 /Descent -212 /CapHeight 716 /StemV 80 /XHeight 519 /AvgWidth 441 /MaxWidth 2000 /FontFile2 12 0 R >>
+endobj
+20 0 obj
+<< /Type /Annot /Subtype /Link /Rect [ 72 700 300 714 ] /Border [ 0 0 0 ] /A << /Type /Action /S /URI /URI (https://example.com/) >> /F 4 /StructParent 1 >>
+endobj
+22 0 obj
+<< /Type /Font /Subtype /CIDFontType2 /BaseFont /ABCDEF+Calibri-Bold /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 25 0 R /W [ 3 [ 226 ] 17 [ 544 ] 28 [ 488 ] ] /CIDToGIDMap /Identity >>
+endobj
+26 0 obj
+<</Type/Page/Parent 2 0 R/Resources<</Font<</F1 5 0 R/F2 6 0 R>>/ProcSet[/PDF/Text]>>/MediaBox[0 0 595.276 841.89]/Contents 27 0 R>>
+endobj
+27 0 obj
+<</Length 1234/Filter/FlateDecode>>
+stream
+endstream
+endobj
+14 0 obj
+<< /Title (Report) /Author (Author) /Creator (Microsoft Word) /Producer (Microsoft Word) /CreationDate (D:20240101120000+05'30') /ModDate (D:20240101120000+05'30') >>
+endobj
+xref
+0 28
+0000000000 65535 f 
+0000000017 00000 n 
+0000000253 00000 n 
+trailer
+<< /Size 28 /Root 1 0 R /Info 14 0 R /ID [ <0123456789ABCDEF0123456789ABCDEF> <0123456789ABCDEF0123456789ABCDEF> ] >>
+startxref
+12345
+%%EOF

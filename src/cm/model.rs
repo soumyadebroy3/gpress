@@ -35,22 +35,63 @@ fn hb(h: u32, b: u8) -> u32 {
     (h ^ b as u32).wrapping_mul(0x0100_0193)
 }
 
+/// Bit-history states: (n0, n1, last bit) with counts up to 7; the opposite count is halved when it is
+/// large, so recent bits weigh more. 128 states; state 0 is "nothing seen".
+pub struct States {
+    next: [[u8; 2]; 128],
+    init_p: [i32; 128],
+}
+
+fn st_unpack(s: usize) -> (usize, usize, usize) {
+    (s >> 4 & 7, s >> 1 & 7, s & 1)
+}
+
+fn st_pack(n0: usize, n1: usize, last: usize) -> usize {
+    n0 << 4 | n1 << 1 | last
+}
+
+impl States {
+    pub fn new() -> States {
+        let mut next = [[0u8; 2]; 128];
+        let mut init_p = [2048i32; 128];
+        for s in 0..128 {
+            let (n0, n1, _) = st_unpack(s);
+            let up = |a: usize, b: usize| -> (usize, usize) {
+                // a: count of the bit seen (incremented), b: opposite count (discounted)
+                ((a + 1).min(7), if b > 2 { (b + 1) / 2 } else { b })
+            };
+            let (a1, b1) = up(n1, n0);
+            next[s][1] = st_pack(b1, a1, 1) as u8;
+            let (a0, b0) = up(n0, n1);
+            next[s][0] = st_pack(a0, b0, 0) as u8;
+            init_p[s] = (((n1 as i32 * 2 + 1) * 4096) / ((n0 + n1) as i32 * 2 + 2)).clamp(64, 4032);
+        }
+        States { next, init_p }
+    }
+}
+
+impl Default for States {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 struct Table {
-    t: Vec<[u32; 16]>,
+    t: Vec<[u8; 16]>,
     mask: usize,
 }
 
 impl Table {
     fn new(bits: u32) -> Table {
-        Table { t: vec![[0u32; 16]; 1 << bits], mask: (1 << bits) - 1 }
+        Table { t: vec![[0u8; 16]; 1 << bits], mask: (1 << bits) - 1 }
     }
     #[inline]
     fn find(&mut self, h: u32) -> usize {
         let i = (h as usize) & self.mask;
-        let chk = (h >> 16) | 1;
+        let chk = ((h >> 24) as u8) | 1;
         let b = &mut self.t[i];
         if b[0] != chk {
-            *b = [Counter::new().0; 16];
+            *b = [0u8; 16];
             b[0] = chk;
         }
         i
@@ -84,6 +125,10 @@ struct Tok {
 pub struct Model {
     tb: Tables,
     pub hist: Vec<u8>,
+    /// For images: the coded residual of each byte (actual minus prediction); 0 elsewhere.
+    rhist: Vec<u8>,
+    /// Prediction subtracted from the current byte before coding (images only).
+    pred: u8,
     kind: Kind,
     geom: Geom,
     seg_start: usize,
@@ -98,6 +143,8 @@ pub struct Model {
     hashes: [u32; NCTX],
     tables: Vec<Table>,
     slot: [usize; NCTX],
+    states: States,
+    smaps: Vec<Vec<Counter>>,
     // long matches
     mm_table: Vec<u32>,
     mm_ptr: usize,
@@ -117,9 +164,13 @@ pub struct Model {
     tok: Tok,
     /// Original offsets of objects seen ("N G obj"), for predicting cross-reference tables.
     obj_offsets: std::collections::HashMap<i64, (u64, i64)>,
+    limit: u32,
+    mm_min: usize,
 }
 
-const MM_MIN: usize = 7;
+fn env_num(k: &str, d: usize) -> usize {
+    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+}
 
 impl Model {
     pub fn new(table_bits: u32) -> Model {
@@ -130,6 +181,8 @@ impl Model {
         let mut m = Model {
             tb: Tables::new(),
             hist: Vec::new(),
+            rhist: Vec::new(),
+            pred: 0,
             kind: Kind::Meta,
             geom: Geom::default(),
             seg_start: 0,
@@ -143,6 +196,8 @@ impl Model {
             hashes: [0; NCTX],
             tables,
             slot: [0; NCTX],
+            states: States::new(),
+            smaps: Vec::new(),
             mm_table: vec![0; 1 << 20],
             mm_ptr: 0,
             mm_len: 0,
@@ -159,9 +214,24 @@ impl Model {
             pr: 2048,
             tok: Tok::default(),
             obj_offsets: std::collections::HashMap::new(),
+            limit: env_num("PDFE_LIMIT", 1023) as u32,
+            mm_min: env_num("PDFE_MMMIN", 5),
         };
+        m.mx.shift = env_num("PDFE_MXSHIFT", 12) as i32;
+        let per_kind = 7;
+        m.smaps = (0..NCTX * per_kind)
+            .map(|_| (0..128).map(|st| Counter(((m.states.init_p[st] as u32) << 20) | 0)).collect())
+            .collect();
         m.contexts();
         m
+    }
+
+    /// After priming: forget object positions learned from the priming text.
+    pub fn forget_document(&mut self) {
+        self.obj_offsets.clear();
+        self.tok = Tok::default();
+        self.exp.clear();
+        self.exp_i = 0;
     }
 
     /// Switches the kind of data that follows (at a byte boundary).
@@ -183,8 +253,9 @@ impl Model {
     }
 
     pub fn code_byte<C: Coder>(&mut self, c: &mut C, byte: Option<u8>) -> u8 {
+        let sym = byte.map(|b| b.wrapping_sub(self.pred));
         for k in (0..8).rev() {
-            let bit = byte.map(|b| ((b >> k) & 1) as u32);
+            let bit = sym.map(|b| ((b >> k) & 1) as u32);
             let p = self.predict();
             let got = c.code(bit, p);
             self.update(got);
@@ -194,15 +265,18 @@ impl Model {
 
     fn predict(&mut self) -> i32 {
         let node = self.nib as usize;
+        let kb = self.kind as usize * NCTX;
         for i in 0..NCTX {
-            let v = self.tables[i].t[self.slot[i]][node];
-            let st = self.tb.stretch(Counter(v).p12());
-            self.mx.add(st);
+            let state = self.tables[i].t[self.slot[i]][node] as usize;
+            let p = self.smaps[kb + i][state].p12();
+            self.mx.add(if state == 0 { 0 } else { self.tb.stretch(p) });
         }
         // Long match.
         let mut mm_state = 0;
+        let residual = self.pred_on();
         if self.mm_len > 0 && !self.mm_miss {
-            let pb = self.hist[self.mm_ptr];
+            // For residual-coded images the match predicts the residual the matched byte would give.
+            let pb = self.hist[self.mm_ptr].wrapping_sub(self.pred);
             let expect = ((pb as u32 | 256) >> (7 - self.bitpos)) & 1;
             let ctx = self.mm_len.min(63) * 2 + expect as usize;
             let p = self.mm_sm.p(ctx);
@@ -212,7 +286,7 @@ impl Model {
             self.mx.add(0);
         }
         // Expected text.
-        if self.exp_i < self.exp.len() && !self.exp_miss {
+        if self.exp_i < self.exp.len() && !self.exp_miss && !residual {
             let eb = self.exp[self.exp_i];
             let expect = ((eb as u32 | 256) >> (7 - self.bitpos)) & 1;
             let ctx = ((self.exp_hits.min(15) as usize * 2 + expect as usize) * 4) + (self.kind as usize % 4);
@@ -233,21 +307,23 @@ impl Model {
 
     fn update(&mut self, bit: u32) {
         let node = self.nib as usize;
+        let kb = self.kind as usize * NCTX;
         for i in 0..NCTX {
             let v = &mut self.tables[i].t[self.slot[i]][node];
-            let mut c = Counter(*v);
-            c.update(bit, 255);
-            *v = c.0;
+            let state = *v as usize;
+            self.smaps[kb + i][state].update(bit, self.limit);
+            *v = self.states.next[state][bit as usize];
         }
+        let residual = self.pred_on();
         if self.mm_len > 0 && !self.mm_miss {
             self.mm_sm.update(bit);
-            let pb = self.hist[self.mm_ptr];
+            let pb = self.hist[self.mm_ptr].wrapping_sub(self.pred);
             let expect = ((pb as u32 | 256) >> (7 - self.bitpos)) & 1;
             if expect != bit {
                 self.mm_miss = true;
             }
         }
-        if self.exp_i < self.exp.len() && !self.exp_miss {
+        if self.exp_i < self.exp.len() && !self.exp_miss && !residual {
             self.exp_sm.update(bit);
             let eb = self.exp[self.exp_i];
             let expect = ((eb as u32 | 256) >> (7 - self.bitpos)) & 1;
@@ -268,7 +344,9 @@ impl Model {
                 self.slot[i] = self.tables[i].find(h);
             }
         } else if self.bitpos == 8 {
-            let b = (self.c0 & 0xff) as u8;
+            let r = (self.c0 & 0xff) as u8;
+            let b = r.wrapping_add(self.pred);
+            self.rhist.push(if self.pred_on() { r } else { 0 });
             self.byte_done(b);
             self.c0 = 1;
             self.nib = 1;
@@ -297,9 +375,9 @@ impl Model {
             }
         }
         self.mm_miss = false;
-        if n >= MM_MIN {
+        if n >= self.mm_min {
             let mut h = 0u32;
-            for &x in &self.hist[n - MM_MIN..] {
+            for &x in &self.hist[n - self.mm_min..] {
                 h = hb(h, x);
             }
             let idx = (h >> 12) as usize;
@@ -310,7 +388,7 @@ impl Model {
                     while l < 64 && cand > l && self.hist[cand - 1 - l] == self.hist[n - 1 - l] {
                         l += 1;
                     }
-                    if l >= MM_MIN {
+                    if l >= self.mm_min {
                         self.mm_len = l;
                         self.mm_ptr = cand;
                     }
@@ -513,7 +591,14 @@ impl Model {
         }
     }
 
+    /// Whether the current byte is coded as a residual (images with known rows).
+    #[inline]
+    fn pred_on(&self) -> bool {
+        self.kind == Kind::Image && self.geom.stride > 0
+    }
+
     fn contexts(&mut self) {
+        self.pred = 0;
         let k = (self.kind as u32 + 1) << 28;
         let c4 = self.c4;
         let c1 = c4 & 0xff;
@@ -525,36 +610,67 @@ impl Model {
                 let pos = self.hist.len();
                 let s = self.geom.stride;
                 let bpp = self.geom.bpp.max(1);
-                let at = |back: usize| -> u32 {
-                    if pos >= back && pos - back >= self.seg_start {
-                        self.hist[pos - back] as u32
+                let lo = self.seg_start;
+                let at = |back: usize| -> i32 {
+                    if pos >= back && pos - back >= lo {
+                        self.hist[pos - back] as i32
                     } else {
                         0
                     }
                 };
-                let w = at(bpp);
-                let n = at(s);
-                let nw = at(s + bpp);
-                let ne = if s > bpp { at(s - bpp) } else { 0 };
-                let ww = at(2 * bpp);
-                let nn = at(2 * s);
-                let ch = (((pos - self.seg_start) % s) % bpp) as u32;
-                let med = {
-                    let (a, b, c) = (w as i32, n as i32, nw as i32);
-                    let p = a + b - c;
-                    p.clamp(a.min(b), a.max(b)) as u32
+                let rat = |back: usize| -> u32 {
+                    if pos >= back && pos - back >= lo {
+                        self.rhist[pos - back] as u32
+                    } else {
+                        0
+                    }
                 };
-                let grad = ((w as i32 + n as i32 - nw as i32).clamp(0, 255)) as u32;
-                hs[0] = k ^ h2(1, w | ch << 8);
-                hs[1] = k ^ h2(2, n | ch << 8);
-                hs[2] = k ^ h2(3, w | n << 8 | ch << 16);
-                hs[3] = k ^ h2(4, n | ne << 8 | ch << 16);
-                hs[4] = k ^ h2(5, w | nw << 8 | n << 16);
-                hs[5] = k ^ h2(6, med | ch << 8);
-                hs[6] = k ^ h2(7, ((w + n) >> 1) | ch << 8 | (ne >> 4) << 16);
-                hs[7] = k ^ h2(8, grad | (w >> 3) << 8 | (n >> 3) << 13 | ch << 18);
-                hs[8] = k ^ h2(9, w | ww << 8 | ch << 16);
-                hs[9] = k ^ h2(10, n | nn << 8 | ch << 16);
+                let col = (pos - lo) % s;
+                let first_row = pos - lo < s;
+                let w = if col >= bpp { at(bpp) } else if !first_row { at(s) } else { 0 };
+                let n = if !first_row { at(s) } else { w };
+                let nw = if !first_row && col >= bpp { at(s + bpp) } else { n };
+                let ne = if !first_row && col + bpp < s { at(s - bpp) } else { n };
+                // LOCO-I's median edge detector.
+                let pred = if nw >= w.max(n) {
+                    w.min(n)
+                } else if nw <= w.min(n) {
+                    w.max(n)
+                } else {
+                    w + n - nw
+                };
+                self.pred = pred as u8;
+                let q = |d: i32| -> u32 {
+                    let a = d.unsigned_abs();
+                    let m = match a {
+                        0 => 0,
+                        1 => 1,
+                        2 => 2,
+                        3..=4 => 3,
+                        5..=8 => 4,
+                        9..=16 => 5,
+                        17..=32 => 6,
+                        _ => 7,
+                    };
+                    if d < 0 { m + 8 } else { m }
+                };
+                let ch = (col % bpp) as u32;
+                let rw = if col >= bpp { rat(bpp) } else { 0 };
+                let rn = if !first_row { rat(s) } else { 0 };
+                let rnw = if !first_row && col >= bpp { rat(s + bpp) } else { 0 };
+                let rne = if !first_row && col + bpp < s { rat(s - bpp) } else { 0 };
+                let rp = if bpp > 1 && ch > 0 { rat(1) } else { 0 };
+                let (dh, dv, dd) = (q(w - nw), q(n - nw), q(ne - n));
+                hs[0] = k ^ h2(1, ch | dh << 4 | dv << 8);
+                hs[1] = k ^ h2(2, ch | dh << 4 | dv << 8 | dd << 12);
+                hs[2] = k ^ h2(3, ch | rw << 4);
+                hs[3] = k ^ h2(4, ch | rn << 4);
+                hs[4] = k ^ h2(5, ch | rw << 4 | rn << 12);
+                hs[5] = k ^ h2(6, ch | rp << 4 | (q(w - pred) << 12));
+                hs[6] = k ^ h2(7, ch | ((pred as u32) >> 2) << 4);
+                hs[7] = k ^ h2(8, ch | q(w - pred) << 4 | q(n - pred) << 8 | q(ne - pred) << 12);
+                hs[8] = k ^ h2(9, ch | rnw << 4 | rne << 12);
+                hs[9] = k ^ h2(10, ch | rp << 4 | rw << 12);
             }
             _ => {
                 hs[0] = k ^ h2(11, c1);

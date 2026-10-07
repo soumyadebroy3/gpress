@@ -1,0 +1,36 @@
+/Artifact BMC
+q
+0 0 612 792 re
+W n
+EMC
+/P <</MCID 0>> BDC
+BT
+/F1 12 Tf
+1 0 0 1 72 720 Tm
+0 g
+0 G
+[(H)3(ello)-250(W)30(orld)] TJ
+ET
+EMC
+q
+0.1 0 0 0.1 0 0 cm
+0 0 0 rg
+1 0 0 RG
+0.5 w
+720 7200 m
+5400 7200 l
+S
+1000 1000 2000 500 re
+f*
+Q
+BT
+/F2 10.98 Tf
+1 0 0 1 72 700.5 Tm
+(Text line) Tj
+0 -13.2 Td
+(Next line) Tj
+ET
+q
+200 0 0 150 72 400 cm
+/Im1 Do
+Q

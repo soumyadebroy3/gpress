@@ -168,6 +168,31 @@ fn main() {
             let out = engine::pack::unpack(&data).unwrap_or_else(|e| die(&e));
             std::fs::write(o, &out).unwrap_or_else(|e| die(&format!("{o}: {e}")));
         }
+        Some("cm-test") => {
+            // pdfe cm-test FILE KIND [STRIDE BPP]: size of FILE coded by the model as KIND.
+            use engine::cm::model::{Geom, Kind, Model};
+            let i = pos.get(1).unwrap_or_else(|| die("need FILE"));
+            let data = std::fs::read(i).unwrap_or_else(|e| die(&format!("{i}: {e}")));
+            let kind = match pos.get(2).map(|s| s.as_str()) {
+                Some("image") => Kind::Image,
+                Some("content") => Kind::Content,
+                Some("syntax") => Kind::Syntax,
+                Some("font") => Kind::Font,
+                Some("raw") => Kind::Raw,
+                _ => Kind::Data,
+            };
+            let stride: usize = pos.get(3).and_then(|x| x.parse().ok()).unwrap_or(0);
+            let bpp: usize = pos.get(4).and_then(|x| x.parse().ok()).unwrap_or(1);
+            let t = Instant::now();
+            let mut m = Model::new(18);
+            m.set_kind(kind, Geom { stride, bpp }, 0);
+            let mut e = engine::cm::Encoder::new();
+            for &b in &data {
+                m.code_byte(&mut e, Some(b));
+            }
+            let z = e.finish();
+            println!("{} -> {} bytes ({:.3} bits/byte) in {:.2}s", data.len(), z.len(), 8.0 * z.len() as f64 / data.len() as f64, t.elapsed().as_secs_f64());
+        }
         Some("pack-batch") => {
             let stdin = std::io::stdin();
             let mut out = std::io::stdout().lock();

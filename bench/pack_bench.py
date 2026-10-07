@@ -34,8 +34,13 @@ def run(out):
         rows.append(f'{f}\t{n}\t{z}\t{secs}\t{"exact" if ok else "MISMATCH"}\t{p[4] if len(p) > 4 else ""}\n')
     open(os.path.join(out, 'pack.tsv'), 'w').write(''.join(rows))
     print(f'pack: {time.time() - t:.0f} s')
+    if not os.path.exists(os.path.join(out, 'base.tsv')):
+        baselines(out)
+
+def baselines(out):
+    files = [l.strip() for l in open(os.path.join(out, 'files.txt')) if l.strip()]
     base = []
-    zc = zstandard.ZstdCompressor(level=19, write_content_size=False, compression_params=zstandard.ZstdCompressionParameters.from_level(19, window_log=27, enable_ldm=True))
+    zc = zstandard.ZstdCompressor(compression_params=zstandard.ZstdCompressionParameters.from_level(19, window_log=27, enable_ldm=True))
     for f in files:
         d = open(f, 'rb').read()
         xz = len(lzma.compress(d, preset=9 | lzma.PRESET_EXTREME))
@@ -76,4 +81,4 @@ def report(out):
     print(f"  ours smallest on {wins} of {T['n']} files")
 
 if __name__ == '__main__':
-    {'run': run, 'report': report}[sys.argv[2]](sys.argv[1])
+    {'run': run, 'base': baselines, 'report': report}[sys.argv[2]](sys.argv[1])
