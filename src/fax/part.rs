@@ -127,16 +127,29 @@ impl FaxCoder {
         };
         let ctx = (st.pos & 7) * 4 + eol as usize * 2 + end as usize;
         let fill = self.fill(c, ctx, g.map(|g| g.fill))?;
-        let tag = scheme == Scheme::G32D && {
-            let tctx = if end { 62 + st.prev_tag as usize } else { st.since_1d.min(30) * 2 + st.prev_tag as usize };
-            self.bit(c, S_TAG + tctx, g.map(|g| g.tag as u32)) == 1
+        let tag = if scheme != Scheme::G32D {
+            false
+        } else if end {
+            let t = self.bit(c, S_TAG + 62 + st.prev_tag as usize, g.map(|g| g.tag as u32)) == 1;
+            st.prev_tag = t;
+            t
+        } else {
+            self.tag(c, g, st)
         };
         st.prev_eol = eol;
         st.first = false;
-        st.prev_tag = tag;
-        st.since_1d = if tag { 0 } else { st.since_1d + 1 };
         st.pos += fill as usize + if eol { 12 } else { 0 } + (scheme == Scheme::G32D) as usize;
         Some(Gap { fill, eol, tag })
+    }
+
+    /// The tag bit of a 2-D Group 3 row (1: coded one-dimensionally), in the context of how many rows ago
+    /// the last one-dimensional row was (encoders write one every K rows).
+    fn tag<C: Coder>(&mut self, c: &mut C, g: Option<&Gap>, st: &mut GapState) -> bool {
+        let tctx = st.since_1d.min(30) * 2 + st.prev_tag as usize;
+        let t = self.bit(c, S_TAG + tctx, g.map(|g| g.tag as u32)) == 1;
+        st.prev_tag = t;
+        st.since_1d = if t { 0 } else { st.since_1d + 1 };
+        t
     }
 }
 
@@ -161,6 +174,8 @@ pub fn code<C: Coder>(c: &mut C, fc: &mut FaxCoder, src: Option<&Parsed>, max_le
     let scheme = Scheme::from_id((s0 | s1 << 1) as u8)?;
     let r = fc.bit(c, S_HEAD + 4, lay.map(|l| l.rule.id() as u32));
     let rule = Rule::from_id(r as u8)?;
+    // No row has an EOL or fill bits (the usual Group 4 stream): then only tag bits are coded per row.
+    let plain = fc.bit(c, S_HEAD + 5, lay.map(|l| l.gaps.iter().all(|g| !g.eol && g.fill == 0) as u32)) == 1;
     let w = fc.num(c, N_COLUMNS, img.map(|i| i.width as u64), 18)?;
     let h = fc.num(c, N_ROWS, img.map(|i| i.rows() as u64), 21)?;
     if w == 0 || w > MAX_COLUMNS as u64 || h > MAX_ROWS || w * h > MAX_PIXELS {
@@ -177,7 +192,12 @@ pub fn code<C: Coder>(c: &mut C, fc: &mut FaxCoder, src: Option<&Parsed>, max_le
             return None;
         }
         st.pos = wr.bit_pos();
-        let g = fc.gap(c, lay.map(|l| &l.gaps[r]), &mut st, scheme, false)?;
+        let g = if plain {
+            let tag = scheme == Scheme::G32D && fc.tag(c, lay.map(|l| &l.gaps[r]), &mut st);
+            Gap { fill: 0, eol: false, tag }
+        } else {
+            fc.gap(c, lay.map(|l| &l.gaps[r]), &mut st, scheme, false)?
+        };
         fc.model.code_row(c, img.map(|i| i.row(r)), &mut row);
         enc.row(&mut wr, &g, &row);
         if wr.bit_pos() / 8 > max_len {

@@ -959,6 +959,9 @@ fn zlib_header(raw: &[u8]) -> bool {
     raw.len() >= 8 && raw[0] & 0x0f == 8 && raw[0] >> 4 <= 7 && ((raw[0] as u16) << 8 | raw[1] as u16) % 31 == 0 && raw[1] & 0x20 == 0
 }
 
+/// Smallest CCITT stream coded as an image (measured on the test files: below this, plain coding wins).
+const MIN_FAX: usize = 64;
+
 /// A stream whose only filter is CCITTFaxDecode, when our CCITT decoder understands most of it: the image
 /// and the encoder's choices, checked to give the very same bytes back.
 fn fax(d: &[u8], a: usize, b: usize) -> Option<Plan> {
@@ -970,6 +973,10 @@ fn fax(d: &[u8], a: usize, b: usize) -> Option<Plan> {
     }
     let fp = FaxParams::from(stages[0].parms.as_ref())?;
     let raw = &d[a..b];
+    // A tiny stream costs less coded as it is than the image model needs to get going.
+    if raw.len() < MIN_FAX {
+        return None;
+    }
     let parsed = ccitt::parse(raw, ccitt::Scheme::from_k(fp.k), fp.columns, fp.byte_align, ccitt::Limits::default())?;
     if parsed.image.rows() == 0 || parsed.layout.trailing.len() * 4 > raw.len() || !part::fits(&parsed) {
         return None;
