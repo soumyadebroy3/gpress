@@ -13,6 +13,8 @@ use super::lz::{Hist, Sym};
 use super::matcher::{find_matches, Matches};
 use super::parse::{greedy, optimal_nice, Costs, ParseScratch};
 use super::tables::*;
+use crate::par::{self, Memo, Pool};
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -33,18 +35,71 @@ pub struct Options {
     pub nice: usize,
     /// Merge/split polishing of block boundaries.
     pub polish: bool,
+    /// Threads and earlier results shared by the encodes of one job. Never changes the output.
+    pub shared: Option<Arc<Shared>>,
 }
 
 impl Options {
     /// Our strongest setting.
     pub fn max() -> Options {
-        Options { iterations: 8, exact_rounds: 4, max_chain: 8192, segment: 1 << 20, split: true, alternatives: true, multi_start_limit: 1 << 18, nice: 259, polish: true }
+        Options { iterations: 8, exact_rounds: 4, max_chain: 8192, segment: 1 << 20, split: true, alternatives: true, multi_start_limit: 1 << 18, nice: 259, polish: true, shared: None }
     }
     /// Fast but still optimal-parsed.
     pub fn quick() -> Options {
-        Options { iterations: 2, exact_rounds: 1, max_chain: 128, segment: 1 << 20, split: true, alternatives: false, multi_start_limit: 0, nice: 64, polish: false }
+        Options { iterations: 2, exact_rounds: 1, max_chain: 128, segment: 1 << 20, split: true, alternatives: false, multi_start_limit: 0, nice: 64, polish: false, shared: None }
+    }
+
+    /// Settings for an effort from 0 (`quick`) to 100 (`max`).
+    pub fn effort(effort: u8) -> Options {
+        let o = |iterations, exact_rounds, max_chain, alternatives, multi_start_limit, nice, polish| Options {
+            iterations,
+            exact_rounds,
+            max_chain,
+            segment: 1 << 20,
+            split: true,
+            alternatives,
+            multi_start_limit,
+            nice,
+            polish,
+            shared: None,
+        };
+        match effort {
+            0..=9 => Options::quick(),
+            10..=29 => o(3, 1, 512, false, 0, 128, false),
+            30..=49 => o(4, 2, 1024, false, 0, 259, false),
+            50..=69 => o(5, 2, 2048, true, 0, 259, true),
+            70..=89 => o(6, 3, 4096, true, 1 << 16, 259, true),
+            _ => Options::max(),
+        }
+    }
+
+    /// The settings that decide the output (everything but `shared`).
+    fn fingerprint(&self) -> [usize; 9] {
+        [self.iterations, self.exact_rounds, self.max_chain, self.segment, self.split as usize, self.alternatives as usize, self.multi_start_limit, self.nice, self.polish as usize]
     }
 }
+
+/// What the encodes of one job share: a pool of threads, and the output for inputs already encoded with the
+/// same settings (identical streams are encoded once). Neither changes any output.
+pub struct Shared {
+    pub pool: Arc<Pool>,
+    memo: Memo<(u64, usize, [usize; 9]), Arc<Vec<u8>>>,
+}
+
+impl Shared {
+    pub fn new(threads: usize) -> Arc<Shared> {
+        Arc::new(Shared { pool: Pool::new(threads), memo: Memo::new() })
+    }
+}
+
+impl std::fmt::Debug for Shared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Shared({:?})", self.pool)
+    }
+}
+
+/// Segments optimised together before their blocks are written (bounds the memory held by finished plans).
+const SEGMENTS_AT_ONCE: usize = 8;
 
 /// Raw Deflate data for `data`.
 pub fn deflate(data: &[u8], opt: &Options) -> Vec<u8> {
@@ -53,37 +108,47 @@ pub fn deflate(data: &[u8], opt: &Options) -> Vec<u8> {
         write_fixed(&mut w, &[], true);
         return w.finish();
     }
-    let mut a = 0;
-    while a < data.len() {
-        let b = (a + opt.segment).min(data.len());
-        let t0 = std::time::Instant::now();
-        let m = find_matches(data, a, b, opt.max_chain, opt.alternatives);
-        let t1 = t0.elapsed();
-        let plans = optimize_segment(data, a, b, &m, opt);
-        if std::env::var_os("PDFE_DEBUG").is_some() {
-            eprintln!(
-                "segment {}..{}: matches {:?} ({} steps), optimise {:?}, {} blocks",
-                a,
-                b,
-                t1,
-                m.steps.len(),
-                t0.elapsed() - t1,
-                plans.len()
-            );
+    let seg = opt.segment.max(1);
+    let bounds: Vec<(usize, usize)> = (0..data.len()).step_by(seg).map(|a| (a, (a + seg).min(data.len()))).collect();
+    let dbg = std::env::var_os("PDFE_DEBUG").is_some();
+    let pool = opt.shared.as_ref().map(|s| &*s.pool);
+    // Segments are optimised independently (in parallel when threads are free) and written in order, so the
+    // output is the same whatever the number of threads.
+    for group in bounds.chunks(SEGMENTS_AT_ONCE) {
+        let plans = par::map(pool, group.len(), None, |k| {
+            let (a, b) = group[k];
+            let t0 = std::time::Instant::now();
+            let m = find_matches(data, a, b, opt.max_chain, opt.alternatives);
+            let t1 = t0.elapsed();
+            let plans = optimize_segment(data, a, b, &m, opt);
+            if dbg {
+                eprintln!("segment {}..{}: matches {:?} ({} steps), optimise {:?}, {} blocks", a, b, t1, m.steps.len(), t0.elapsed() - t1, plans.len());
+            }
+            plans
+        });
+        for (&(_, b), plans) in group.iter().zip(&plans) {
+            let n = plans.len();
+            for (k, p) in plans.iter().enumerate() {
+                let last = b == data.len() && k + 1 == n;
+                write_best(&mut w, data, p, last);
+            }
         }
-        let n = plans.len();
-        for (k, p) in plans.iter().enumerate() {
-            let last = b == data.len() && k + 1 == n;
-            write_best(&mut w, data, p, last);
-        }
-        a = b;
     }
     w.finish()
 }
 
-/// Zlib-wrapped data, as PDF's FlateDecode expects.
+/// Zlib-wrapped data, as PDF's FlateDecode expects. With `shared`, an input already encoded with the same
+/// settings is not encoded again: the earlier output is reused after checking that it decodes to this input.
 pub fn deflate_zlib(data: &[u8], opt: &Options) -> Vec<u8> {
-    super::zlib::wrap(&deflate(data, opt), data)
+    let encode = || super::zlib::wrap(&deflate(data, opt), data);
+    match &opt.shared {
+        None => encode(),
+        Some(sh) => {
+            let key = (par::hash64(data), data.len(), opt.fingerprint());
+            let fits = |z: &Arc<Vec<u8>>| super::zlib::unwrap(z, data.len() + 1).map_or(false, |u| u.data == data && u.trailing == 0);
+            sh.memo.get(key, fits, || Arc::new(encode())).to_vec()
+        }
+    }
 }
 
 struct Plan {

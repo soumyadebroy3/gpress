@@ -316,7 +316,8 @@ fn greedy_tokens(seq: &[u8], use16: bool, use17: bool, use18: bool) -> Vec<(u8, 
     t
 }
 
-/// Cheapest tokens for a length sequence given the cost of each code-length symbol.
+/// Cheapest tokens for a length sequence given the cost of each code-length symbol: a shortest path over
+/// positions, where among equal costs the earliest step found is kept.
 fn dp_tokens(seq: &[u8], cost: &[u64; 19]) -> Vec<(u8, u8)> {
     let n = seq.len();
     let mut best = vec![u64::MAX; n + 1];
@@ -331,8 +332,31 @@ fn dp_tokens(seq: &[u8], cost: &[u64; 19]) -> Vec<(u8, u8)> {
     for i in (1..n).rev() {
         vrun[i] = if seq[i] == seq[i - 1] { if i + 1 < n && seq[i + 1] == seq[i] { vrun[i + 1] + 1 } else { 1 } } else { 0 };
     }
+    // Symbol 18 (11 to 138 zeros, one price) reaches position t only from t - 138 ..= t - 11, so it is
+    // settled before any other symbol can reach t (they come from t - 10 or later). Its best start is the
+    // cheapest one in that window (the earliest of equal ones), kept in a queue of starts with rising cost.
+    let mut win: std::collections::VecDeque<(usize, u64)> = std::collections::VecDeque::new();
     for i in 0..n {
         let b = best[i];
+        if b != u64::MAX && zrun[i] >= 11 {
+            let c = b + cost[18] + 7;
+            while win.back().map_or(false, |&(_, x)| x > c) {
+                win.pop_back();
+            }
+            win.push_back((i, c));
+        }
+        let t = i + 11;
+        if t <= n {
+            // Starts too far back, or in a run of zeros that ends before t, can't reach t (nor anything later).
+            while win.front().map_or(false, |&(j, _)| j + 138 < t || j + zrun[j] < t) {
+                win.pop_front();
+            }
+            if let Some(&(j, c)) = win.front() {
+                debug_assert!(best[t] == u64::MAX);
+                best[t] = c;
+                from[t] = (18, (t - j - 11) as u8, (t - j) as u16);
+            }
+        }
         if b == u64::MAX {
             continue;
         }
@@ -357,15 +381,6 @@ fn dp_tokens(seq: &[u8], cost: &[u64; 19]) -> Vec<(u8, u8)> {
                 if c < best[i + k] {
                     best[i + k] = c;
                     from[i + k] = (17, (k - 3) as u8, k as u16);
-                }
-            }
-            if zrun[i] >= 11 {
-                let c = b + cost[18] + 7;
-                for k in 11..=zrun[i].min(138) {
-                    if c < best[i + k] {
-                        best[i + k] = c;
-                        from[i + k] = (18, (k - 11) as u8, k as u16);
-                    }
                 }
             }
         }
@@ -420,21 +435,32 @@ pub fn quick_header(ll: &[u8], d: &[u8]) -> Header {
 fn header_search(ll: &[u8], d: &[u8], flag_sets: &[u8], rounds: usize) -> Header {
     let (hlit, hdist, seq) = sequence(ll, d);
     let mut best: Option<Header> = None;
+    // Token lists already tried, with what followed them. The searches from different starting points often
+    // meet; a list seen before can't improve on the best (its size was compared already), and its next
+    // list is known, so it is not worked out again. The result is the same as without this.
+    let mut seen: Vec<(Vec<(u8, u8)>, Vec<(u8, u8)>)> = Vec::new();
     for &flags in flag_sets {
         let mut tokens = greedy_tokens(&seq, flags & 1 != 0, flags & 2 != 0, flags & 4 != 0);
         for _round in 0..rounds {
-            let cl = cl_lengths(&tokens);
-            let (hclen, bits) = header_bits(&cl, &tokens);
-            let improved = best.as_ref().map_or(true, |b| bits < b.bits);
-            if improved {
-                best = Some(Header { hlit, hdist, hclen, cl, tokens: tokens.clone(), bits });
-            }
-            // Re-tokenise for these code-length codes; unused symbols are priced at 7 bits plus a little.
-            let mut cost = [0u64; 19];
-            for s in 0..19 {
-                cost[s] = if cl[s] != 0 { cl[s] as u64 } else { 8 };
-            }
-            let nt = dp_tokens(&seq, &cost);
+            let nt = match seen.iter().find(|(t, _)| *t == tokens) {
+                Some((_, next)) => next.clone(),
+                None => {
+                    let cl = cl_lengths(&tokens);
+                    let (hclen, bits) = header_bits(&cl, &tokens);
+                    let improved = best.as_ref().map_or(true, |b| bits < b.bits);
+                    if improved {
+                        best = Some(Header { hlit, hdist, hclen, cl, tokens: tokens.clone(), bits });
+                    }
+                    // Re-tokenise for these code-length codes; unused symbols are priced at 7 bits plus a little.
+                    let mut cost = [0u64; 19];
+                    for s in 0..19 {
+                        cost[s] = if cl[s] != 0 { cl[s] as u64 } else { 8 };
+                    }
+                    let nt = dp_tokens(&seq, &cost);
+                    seen.push((tokens.clone(), nt.clone()));
+                    nt
+                }
+            };
             if nt == tokens {
                 break;
             }
@@ -535,6 +561,148 @@ pub fn write_stored(w: &mut BitWriter, bytes: &[u8], last: bool) {
         w.put(!(c.len() as u32) & 0xffff, 16);
         for &b in c {
             w.put(b as u32, 8);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The token search as it was first written (every symbol-18 step relaxed one by one).
+    fn dp_tokens_reference(seq: &[u8], cost: &[u64; 19]) -> Vec<(u8, u8)> {
+        let n = seq.len();
+        let mut best = vec![u64::MAX; n + 1];
+        let mut from: Vec<(u8, u8, u16)> = vec![(0, 0, 0); n + 1];
+        best[0] = 0;
+        let mut zrun = vec![0usize; n + 1];
+        let mut vrun = vec![0usize; n + 1];
+        for i in (0..n).rev() {
+            zrun[i] = if seq[i] == 0 { zrun[i + 1] + 1 } else { 0 };
+        }
+        for i in (1..n).rev() {
+            vrun[i] = if seq[i] == seq[i - 1] { if i + 1 < n && seq[i + 1] == seq[i] { vrun[i + 1] + 1 } else { 1 } } else { 0 };
+        }
+        for i in 0..n {
+            let b = best[i];
+            if b == u64::MAX {
+                continue;
+            }
+            let v = seq[i];
+            let c = b + cost[v as usize];
+            if c < best[i + 1] {
+                best[i + 1] = c;
+                from[i + 1] = (v, 0, 1);
+            }
+            if i >= 1 && vrun[i] >= 3 {
+                let c = b + cost[16] + 2;
+                for k in 3..=vrun[i].min(6) {
+                    if c < best[i + k] {
+                        best[i + k] = c;
+                        from[i + k] = (16, (k - 3) as u8, k as u16);
+                    }
+                }
+            }
+            if zrun[i] >= 3 {
+                let c = b + cost[17] + 3;
+                for k in 3..=zrun[i].min(10) {
+                    if c < best[i + k] {
+                        best[i + k] = c;
+                        from[i + k] = (17, (k - 3) as u8, k as u16);
+                    }
+                }
+                if zrun[i] >= 11 {
+                    let c = b + cost[18] + 7;
+                    for k in 11..=zrun[i].min(138) {
+                        if c < best[i + k] {
+                            best[i + k] = c;
+                            from[i + k] = (18, (k - 11) as u8, k as u16);
+                        }
+                    }
+                }
+            }
+        }
+        let mut t = Vec::new();
+        let mut i = n;
+        while i > 0 {
+            let (s, e, r) = from[i];
+            t.push((s, e));
+            i -= r as usize;
+        }
+        t.reverse();
+        t
+    }
+
+    fn rng(s: &mut u64) -> u64 {
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
+        *s
+    }
+
+    #[test]
+    fn token_search_matches_the_reference() {
+        let mut s = 0x5eed_1234u64;
+        for round in 0..3000 {
+            // Code-length sequences with runs of zeros (some longer than 138) and of equal values.
+            let n = 1 + (rng(&mut s) % 320) as usize;
+            let mut seq = Vec::with_capacity(n);
+            while seq.len() < n {
+                let kind = rng(&mut s) % 4;
+                let len = match kind {
+                    0 => 1 + (rng(&mut s) % if round % 3 == 0 { 300 } else { 40 }) as usize,
+                    1 => 1 + (rng(&mut s) % 12) as usize,
+                    _ => 1,
+                };
+                let v = if kind == 0 { 0 } else { (rng(&mut s) % 16) as u8 };
+                for _ in 0..len.min(n - seq.len()) {
+                    seq.push(v);
+                }
+            }
+            // Costs with many ties (small range) or spread out.
+            let mut cost = [0u64; 19];
+            for c in cost.iter_mut() {
+                *c = if round % 2 == 0 { 1 + rng(&mut s) % 3 } else { 1 + rng(&mut s) % 9 };
+            }
+            assert_eq!(dp_tokens(&seq, &cost), dp_tokens_reference(&seq, &cost), "round {round}: {seq:?} {cost:?}");
+        }
+    }
+
+    #[test]
+    fn header_search_is_unchanged_by_the_memory_of_tried_tokens() {
+        // Every header the search returns must describe the lengths it was given.
+        let mut s = 77u64;
+        for _ in 0..200 {
+            let mut h = Hist::empty();
+            for i in 0..LITLEN_SYMS {
+                if rng(&mut s) % 3 == 0 {
+                    h.ll[i] = (rng(&mut s) % 1000) as u32;
+                }
+            }
+            for i in 0..DIST_SYMS {
+                if rng(&mut s) % 2 == 0 {
+                    h.d[i] = (rng(&mut s) % 300) as u32;
+                }
+            }
+            for code in [best_dynamic(&h), good_dynamic(&h)] {
+                // Expand the tokens back into lengths.
+                let mut lens: Vec<u8> = Vec::new();
+                for &(sym, e) in &code.header.tokens {
+                    match sym {
+                        16 => {
+                            let last = *lens.last().unwrap();
+                            lens.extend(std::iter::repeat(last).take(3 + e as usize));
+                        }
+                        17 => lens.extend(std::iter::repeat(0).take(3 + e as usize)),
+                        18 => lens.extend(std::iter::repeat(0).take(11 + e as usize)),
+                        v => lens.push(v),
+                    }
+                }
+                let (hl, hd) = (code.header.hlit, code.header.hdist);
+                assert_eq!(lens.len(), hl + hd);
+                assert_eq!(&lens[..hl], &code.ll[..hl]);
+                assert_eq!(&lens[hl..], &code.d[..hd]);
+            }
         }
     }
 }

@@ -61,7 +61,7 @@ fn entropy_bits(counts: &[u32]) -> Vec<f32> {
 #[derive(Default)]
 pub struct ParseScratch {
     cost: Vec<f32>,
-    choice: Vec<(u16, u16)>,
+    choice: Vec<u32>,
 }
 
 /// Cheapest parse of `data[a..b]` (positions inside the range covered by `m`). Matches are cut at `b`.
@@ -74,11 +74,30 @@ pub fn optimal(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt: boo
 /// As `optimal`, but a match of at least `nice` bytes is taken as soon as it is found (the positions it
 /// covers are not tried as starting points): much faster on repetitive data, slightly less thorough.
 pub fn optimal_nice(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt: bool, nice: usize, sc: &mut ParseScratch, out: &mut Vec<Sym>) {
+    // The same code built for AVX2 where the processor has it (wider vectors, the same arithmetic).
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            // Safe: the processor supports AVX2.
+            return unsafe { parse_avx2(data, a, b, m, c, alt, nice, sc, out) };
+        }
+    }
+    parse(data, a, b, m, c, alt, nice, sc, out)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn parse_avx2(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt: bool, nice: usize, sc: &mut ParseScratch, out: &mut Vec<Sym>) {
+    parse(data, a, b, m, c, alt, nice, sc, out)
+}
+
+#[inline(always)]
+fn parse(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt: bool, nice: usize, sc: &mut ParseScratch, out: &mut Vec<Sym>) {
     let n = b - a;
     sc.cost.clear();
     sc.cost.resize(n + 1, f32::INFINITY);
     sc.choice.clear();
-    sc.choice.resize(n + 1, (0, 0));
+    sc.choice.resize(n + 1, 0);
     let cost = &mut sc.cost;
     let choice = &mut sc.choice;
     cost[0] = 0.0;
@@ -89,6 +108,10 @@ pub fn optimal_nice(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt
             continue;
         }
         let c0 = cost[k];
+        // An unreachable position offers nothing, and must not skip positions that are reachable (with `nice`).
+        if c0 == f32::INFINITY {
+            continue;
+        }
         let i = a + k;
         // Deep inside a long run of one byte (more than 2 x 258 left, and 258 back still inside it), the only
         // sensible step is a 258-byte match at distance 1; skip the full pricing there.
@@ -96,59 +119,47 @@ pub fn optimal_nice(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt
             let v = c0 + run_cost;
             if v < cost[k + MAX_MATCH] {
                 cost[k + MAX_MATCH] = v;
-                choice[k + MAX_MATCH] = (MAX_MATCH as u16, 1);
+                choice[k + MAX_MATCH] = pack(MAX_MATCH, 1);
             }
             continue;
         }
         let lc = c0 + c.lit[data[i] as usize];
         if lc < cost[k + 1] {
             cost[k + 1] = lc;
-            choice[k + 1] = (1, 0);
+            choice[k + 1] = pack(1, 0);
         }
         let maxl = (b - i).min(MAX_MATCH);
         if maxl < MIN_MATCH {
             continue;
         }
-        let steps = m.at(i);
-        if steps.is_empty() {
+        // Steps longer than every closer one (the rest only matter with `alt`).
+        let chain = m.chain_at(i);
+        if chain.is_empty() {
             continue;
         }
         if nice <= MAX_MATCH {
-            let longest = steps.iter().map(|s| s.0 as usize).max().unwrap_or(0).min(maxl);
+            let longest = (chain[chain.len() - 1].0 as usize).min(maxl);
             if longest >= nice {
                 // The smallest distance reaching that length.
-                let d = steps.iter().find(|s| s.0 as usize >= longest).map(|s| s.1).unwrap();
+                let d = chain.iter().find(|s| s.0 as usize >= longest).map(|s| s.1).unwrap();
                 let v = c0 + c.dist[dist_code(d as usize)] + c.len[longest];
                 if v < cost[k + longest] {
                     cost[k + longest] = v;
-                    choice[k + longest] = (longest as u16, d);
+                    choice[k + longest] = pack(longest, d);
                 }
                 skip_to = k + longest;
                 continue;
             }
         }
+        let (cost_k, choice_k) = (&mut cost[k..], &mut choice[k..]);
         if !alt {
             // The smallest-distance chain: steps whose length beats every earlier (closer) one.
             let mut lo = MIN_MATCH;
-            for &(ml, d) in steps {
-                if (ml as usize) < lo {
-                    continue;
-                }
+            for &(ml, d) in chain {
+                debug_assert!(ml as usize >= lo);
                 let hi = (ml as usize).min(maxl);
-                let dc = c0 + c.dist[dist_code(d as usize)];
                 debug_assert!(k + hi <= n && hi <= MAX_MATCH);
-                unsafe {
-                    let cp = cost.as_mut_ptr().add(k);
-                    let chp = choice.as_mut_ptr().add(k);
-                    let lp = c.len.as_ptr();
-                    for l in lo..=hi {
-                        let v = dc + *lp.add(l);
-                        if v < *cp.add(l) {
-                            *cp.add(l) = v;
-                            *chp.add(l) = (l as u16, d);
-                        }
-                    }
-                }
+                relax_range(cost_k, choice_k, &c.len, lo, hi, c0 + c.dist[dist_code(d as usize)], d);
                 lo = hi + 1;
                 if lo > maxl {
                     break;
@@ -159,7 +170,7 @@ pub fn optimal_nice(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt
         // Candidates sorted by length, longest first, each with its distance price.
         let mut cand = [(0u16, 0f32, 0u16); 32];
         let mut cnt = 0;
-        for &(ml, d) in steps.iter().take(32) {
+        for &(ml, d) in m.at(i).iter().take(32) {
             let e = (ml, c.dist[dist_code(d as usize)], d);
             let mut j = cnt;
             while j > 0 && cand[j - 1].0 < ml {
@@ -171,35 +182,28 @@ pub fn optimal_nice(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt
         }
         let top = (cand[0].0 as usize).min(maxl);
         debug_assert!(k + top <= n && top <= MAX_MATCH);
+        // Lengths from the longest down; each uses the cheapest distance among the candidates long enough,
+        // which only changes where another candidate joins.
         let (mut j, mut bc, mut bd) = (0usize, f32::INFINITY, 0u16);
-        // Lengths from the longest down; the cheapest distance among candidates long enough.
-        unsafe {
-            let cp = cost.as_mut_ptr().add(k);
-            let chp = choice.as_mut_ptr().add(k);
-            let lp = c.len.as_ptr();
-            let mut l = top;
-            while l >= MIN_MATCH {
-                while j < cnt && cand[j].0 as usize >= l {
-                    if cand[j].1 < bc {
-                        bc = cand[j].1;
-                        bd = cand[j].2;
-                    }
-                    j += 1;
+        let mut l = top;
+        while l >= MIN_MATCH {
+            while j < cnt && cand[j].0 as usize >= l {
+                if cand[j].1 < bc {
+                    bc = cand[j].1;
+                    bd = cand[j].2;
                 }
-                let v = c0 + bc + *lp.add(l);
-                if v < *cp.add(l) {
-                    *cp.add(l) = v;
-                    *chp.add(l) = (l as u16, bd);
-                }
-                l -= 1;
+                j += 1;
             }
+            let lo = if j < cnt { cand[j].0 as usize + 1 } else { MIN_MATCH };
+            relax_range(cost_k, choice_k, &c.len, lo, l, c0 + bc, bd);
+            l = lo - 1;
         }
     }
     // Walk back from the end.
     let first = out.len();
     let mut k = n;
     while k > 0 {
-        let (l, d) = choice[k];
+        let (l, d) = (choice[k] & 0xffff, choice[k] >> 16);
         if d == 0 {
             out.push(Sym::lit(data[a + k - 1]));
             k -= 1;
@@ -211,6 +215,27 @@ pub fn optimal_nice(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt
     out[first..].reverse();
 }
 
+/// A match choice: length in the low 16 bits, distance in the high 16 bits (0 for a literal).
+#[inline]
+fn pack(l: usize, d: u16) -> u32 {
+    l as u32 | (d as u32) << 16
+}
+
+/// `cost[l] = base + len[l]` and `choice[l] = (l, d)` for every `l` in `lo..=hi` where that is lower than
+/// `cost[l]`. Written without branches so the compiler can use vector instructions; the result is exactly
+/// that of the plain loop (the same additions and comparisons, in any order since each `l` is separate).
+#[inline(always)]
+fn relax_range(cost: &mut [f32], choice: &mut [u32], len: &[f32], lo: usize, hi: usize, base: f32, d: u16) {
+    let tag = (d as u32) << 16;
+    let (cost, choice, len) = (&mut cost[lo..=hi], &mut choice[lo..=hi], &len[lo..=hi]);
+    for (i, ((c, ch), &x)) in cost.iter_mut().zip(choice.iter_mut()).zip(len).enumerate() {
+        let v = base + x;
+        let better = v < *c;
+        *c = if better { v } else { *c };
+        *ch = if better { (lo + i) as u32 | tag } else { *ch };
+    }
+}
+
 /// Greedy parse: the longest match wherever there is one (closest distance), otherwise a literal.
 pub fn greedy(data: &[u8], a: usize, b: usize, m: &Matches, out: &mut Vec<Sym>) {
     let mut i = a;
@@ -218,7 +243,7 @@ pub fn greedy(data: &[u8], a: usize, b: usize, m: &Matches, out: &mut Vec<Sym>) 
         let maxl = (b - i).min(MAX_MATCH);
         let mut best: Option<(usize, usize)> = None;
         if maxl >= MIN_MATCH {
-            for &(ml, d) in m.at(i) {
+            for &(ml, d) in m.chain_at(i) {
                 let l = (ml as usize).min(maxl);
                 if l >= MIN_MATCH && best.map_or(true, |(bl, _)| l > bl) {
                     best = Some((l, d as usize));
