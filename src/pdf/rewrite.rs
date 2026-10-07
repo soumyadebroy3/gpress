@@ -262,19 +262,24 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
     let shape_matters = rest.iter().any(|st| matches!(st.name.as_slice(), b"JPXDecode" | b"JBIG2Decode"));
     // Our Flate in front of whatever image codec follows. Putting a filter in front of a codec that had
     // none (a JPEG, say) is done only when it saves at least 1% (over the optimised JPEG, when there is one).
-    // A JPEG goes into Flate in its optimised form: Flate on the original instead was smaller for 3 of the
-    // 284 test JPEGs (1.8 KB in all) and would cost as much time again.
+    // A JPEG goes into Flate in its optimised form. Only when Flate shrinks that by a tenth or more (very
+    // regular data) does the original get a turn too: its own byte patterns can suit Flate better then (2 of
+    // the 284 test JPEGs, 1.8 KB), and trying it for every JPEG would double the Flate time.
     let adds_layer = k == 0 && !rest.is_empty();
     if !(adds_layer && shape_matters) {
-        let z = flate::deflate_zlib(jpeg.as_ref().unwrap_or(&data), &opt.flate);
+        let bare_len = best_len;
         let mut with_flate = vec![Stage { name: b"FlateDecode".to_vec(), parms: carried.clone() }];
         with_flate.extend_from_slice(rest);
         let mut d = s.dict.clone();
         set_chain(&mut d, &with_flate);
-        let limit = if adds_layer { best_len - best_len / 100 } else { best_len };
-        if z.len() < limit {
-            best_len = z.len();
-            best = Some((d, z));
+        let z = flate::deflate_zlib(jpeg.as_ref().unwrap_or(&data), &opt.flate);
+        let again = jpeg.as_ref().map_or(false, |j| z.len() * 10 <= j.len() * 9);
+        for z in std::iter::once(z).chain(again.then(|| flate::deflate_zlib(&data, &opt.flate))) {
+            let limit = if adds_layer { best_len.min(bare_len - bare_len / 100) } else { best_len };
+            if z.len() < limit {
+                best_len = z.len();
+                best = Some((d.clone(), z));
+            }
         }
     }
     // No general filter at all (e.g. a JPEG that Flate can't shrink), only without predictor bytes.

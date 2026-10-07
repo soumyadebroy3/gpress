@@ -413,6 +413,22 @@ fn pdf_images_get_optimised_tables() {
 }
 
 #[test]
+fn pdf_jpeg_behind_flate_is_the_optimised_one() {
+    // A long comment Flate shrinks well: the image goes behind Flate, and the JPEG inside has the new tables.
+    let a = data("base420.jpg");
+    let mut com = vec![0xFF, 0xFE, 0x30, 0x02];
+    com.extend(b"PDF engine test. ".iter().cycle().take(0x3000));
+    let jpeg = [&a[..2], &com[..], &a[2..]].concat();
+    let r = rewrite::optimize(&pdf_with_image(&jpeg, "/DCTDecode", 75, 53, "DeviceRGB"), &quick());
+    assert!(matches!(r.outcome, Outcome::Smaller(_)));
+    let doc = engine::pdf::xref::open(&r.data).unwrap();
+    let Obj::Stream(s) = doc.load(4).unwrap().1 else { panic!() };
+    assert_eq!(s.dict.get(b"Filter"), Some(&Obj::Array(vec![Obj::Name(b"FlateDecode".to_vec()), Obj::Name(b"DCTDecode".to_vec())])));
+    let (_, inner) = image_of(&r.data);
+    assert_eq!(inner, optimize(&jpeg).unwrap());
+}
+
+#[test]
 fn pdf_images_we_cannot_optimise_stay_as_they_are() {
     let base = data("base420.jpg");
     let sof = find(&base, &[0xFF, 0xC0]);
