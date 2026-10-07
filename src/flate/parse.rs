@@ -68,6 +68,12 @@ pub struct ParseScratch {
 /// With `alt`, every length may use any candidate distance long enough (the cheapest); without it, each
 /// length uses the smallest distance that reaches it.
 pub fn optimal(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt: bool, sc: &mut ParseScratch, out: &mut Vec<Sym>) {
+    optimal_nice(data, a, b, m, c, alt, MAX_MATCH + 1, sc, out)
+}
+
+/// As `optimal`, but a match of at least `nice` bytes is taken as soon as it is found (the positions it
+/// covers are not tried as starting points): much faster on repetitive data, slightly less thorough.
+pub fn optimal_nice(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt: bool, nice: usize, sc: &mut ParseScratch, out: &mut Vec<Sym>) {
     let n = b - a;
     sc.cost.clear();
     sc.cost.resize(n + 1, f32::INFINITY);
@@ -77,7 +83,11 @@ pub fn optimal(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt: boo
     let choice = &mut sc.choice;
     cost[0] = 0.0;
     let run_cost = c.len[MAX_MATCH] + c.dist[0];
+    let mut skip_to = 0usize;
     for k in 0..n {
+        if k < skip_to {
+            continue;
+        }
         let c0 = cost[k];
         let i = a + k;
         // Deep inside a long run of one byte (more than 2 x 258 left, and 258 back still inside it), the only
@@ -102,6 +112,20 @@ pub fn optimal(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt: boo
         let steps = m.at(i);
         if steps.is_empty() {
             continue;
+        }
+        if nice <= MAX_MATCH {
+            let longest = steps.iter().map(|s| s.0 as usize).max().unwrap_or(0).min(maxl);
+            if longest >= nice {
+                // The smallest distance reaching that length.
+                let d = steps.iter().find(|s| s.0 as usize >= longest).map(|s| s.1).unwrap();
+                let v = c0 + c.dist[dist_code(d as usize)] + c.len[longest];
+                if v < cost[k + longest] {
+                    cost[k + longest] = v;
+                    choice[k + longest] = (longest as u16, d);
+                }
+                skip_to = k + longest;
+                continue;
+            }
         }
         if !alt {
             // The smallest-distance chain: steps whose length beats every earlier (closer) one.

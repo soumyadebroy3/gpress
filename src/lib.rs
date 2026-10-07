@@ -3,3 +3,5 @@
 
 pub mod flate;
 pub mod pdf;
+pub mod cm;
+pub mod pack;
