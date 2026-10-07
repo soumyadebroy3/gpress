@@ -1,0 +1,4 @@
+//! Our PDF compression engine. No third-party compression code: everything that encodes or decodes
+//! data is written here.
+
+pub mod flate;
