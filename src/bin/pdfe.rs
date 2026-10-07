@@ -16,8 +16,41 @@ fn die(msg: &str) -> ! {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |f: &str| args.iter().any(|a| a == f);
-    let pos: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
-    let opt = if flag("--quick") { Options::quick() } else { Options::max() };
+    let mut pos: Vec<&String> = Vec::new();
+    let mut skip_next = false;
+    for a in &args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if a.starts_with("--") {
+            skip_next = matches!(a.as_str(), "--iter" | "--exact" | "--chain");
+            continue;
+        }
+        pos.push(a);
+    }
+    let mut opt = if flag("--quick") { Options::quick() } else { Options::max() };
+    let num = |name: &str| -> Option<usize> {
+        args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok())
+    };
+    if let Some(v) = num("--iter") {
+        opt.iterations = v;
+    }
+    if let Some(v) = num("--exact") {
+        opt.exact_rounds = v;
+    }
+    if let Some(v) = num("--chain") {
+        opt.max_chain = v;
+    }
+    if flag("--nosplit") {
+        opt.split = false;
+    }
+    if flag("--noalt") {
+        opt.alternatives = false;
+    }
+    if flag("--nomulti") {
+        opt.multi_start_limit = 0;
+    }
     match pos.first().map(|s| s.as_str()) {
         Some("deflate") => {
             let (i, o) = (pos.get(1).unwrap_or_else(|| die("need IN")), pos.get(2).unwrap_or_else(|| die("need OUT")));

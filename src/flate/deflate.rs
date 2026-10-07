@@ -11,7 +11,7 @@ use super::bits::BitWriter;
 use super::block::*;
 use super::lz::{Hist, Sym};
 use super::matcher::{find_matches, Matches};
-use super::parse::{optimal, Costs, ParseScratch};
+use super::parse::{greedy, optimal, Costs, ParseScratch};
 use super::tables::*;
 
 #[derive(Clone, Debug)]
@@ -25,16 +25,20 @@ pub struct Options {
     /// Bytes optimised together; blocks never cross segments.
     pub segment: usize,
     pub split: bool,
+    /// Also offer farther matches whose distance codes may be cheaper.
+    pub alternatives: bool,
+    /// Segments up to this size are also optimised from a second starting point.
+    pub multi_start_limit: usize,
 }
 
 impl Options {
     /// Our strongest setting.
     pub fn max() -> Options {
-        Options { iterations: 15, exact_rounds: 8, max_chain: 8192, segment: 1 << 20, split: true }
+        Options { iterations: 8, exact_rounds: 4, max_chain: 8192, segment: 1 << 20, split: true, alternatives: true, multi_start_limit: 1 << 18 }
     }
     /// Fast but still optimal-parsed.
     pub fn quick() -> Options {
-        Options { iterations: 2, exact_rounds: 2, max_chain: 128, segment: 1 << 20, split: true }
+        Options { iterations: 2, exact_rounds: 2, max_chain: 128, segment: 1 << 20, split: true, alternatives: false, multi_start_limit: 0 }
     }
 }
 
@@ -48,8 +52,21 @@ pub fn deflate(data: &[u8], opt: &Options) -> Vec<u8> {
     let mut a = 0;
     while a < data.len() {
         let b = (a + opt.segment).min(data.len());
-        let m = find_matches(data, a, b, opt.max_chain);
+        let t0 = std::time::Instant::now();
+        let m = find_matches(data, a, b, opt.max_chain, opt.alternatives);
+        let t1 = t0.elapsed();
         let plans = optimize_segment(data, a, b, &m, opt);
+        if std::env::var_os("PDFE_DEBUG").is_some() {
+            eprintln!(
+                "segment {}..{}: matches {:?} ({} steps), optimise {:?}, {} blocks",
+                a,
+                b,
+                t1,
+                m.steps.len(),
+                t0.elapsed() - t1,
+                plans.len()
+            );
+        }
         let n = plans.len();
         for (k, p) in plans.iter().enumerate() {
             let last = b == data.len() && k + 1 == n;
@@ -71,9 +88,14 @@ struct Plan {
     syms: Vec<Sym>,
 }
 
-/// Exact size of a block in its best form (dynamic or fixed), excluding stored, plus the 3-bit block header.
-fn coded_bits(h: &Hist) -> u64 {
-    3 + best_dynamic(h).bits.min(fixed_bits(h))
+/// Block size for comparing parses: a close search for small blocks (where the header matters most), a
+/// quick estimate for large ones.
+fn price(h: &Hist, nbytes: usize) -> u64 {
+    if nbytes < 65536 {
+        3 + good_dynamic(h).bits.min(fixed_bits(h))
+    } else {
+        3 + estimate_dynamic_bits(h).min(fixed_bits(h))
+    }
 }
 
 fn write_best(w: &mut BitWriter, data: &[u8], p: &Plan, last: bool) {
@@ -92,39 +114,128 @@ fn write_best(w: &mut BitWriter, data: &[u8], p: &Plan, last: bool) {
 }
 
 fn optimize_segment(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options) -> Vec<Plan> {
+    let dbg = std::env::var_os("PDFE_DEBUG").is_some();
+    let t = std::time::Instant::now();
     let mut sc = ParseScratch::default();
-    // 1. The whole segment, from neutral prices.
+    // 1. The whole segment, from neutral prices and (for smaller segments) also from a greedy parse's
+    //    statistics; the better result goes on.
     let mut first = Vec::new();
-    optimal(data, a, b, m, &Costs::fixed(), &mut sc, &mut first);
-    let syms = refine(data, a, b, m, opt, first, &mut sc);
+    optimal(data, a, b, m, &Costs::fixed(), false, &mut sc, &mut first);
+    let mut syms = refine(data, a, b, m, opt, first, &mut sc);
+    if b - a <= opt.multi_start_limit {
+        let mut g = Vec::new();
+        greedy(data, a, b, m, &mut g);
+        let mut second = Vec::new();
+        optimal(data, a, b, m, &Costs::entropy(&Hist::of(&g)), false, &mut sc, &mut second);
+        let other = refine(data, a, b, m, opt, second, &mut sc);
+        if price(&Hist::of(&other), b - a) < price(&Hist::of(&syms), b - a) {
+            syms = other;
+        }
+    }
+    let t1 = t.elapsed();
     // 2. Split into blocks.
     let mut plans = if opt.split { split(data, a, b, syms) } else { vec![Plan { a, b, syms }] };
+    let t2 = t.elapsed();
     // 3. Each block under its own codes.
     for p in plans.iter_mut() {
         let s = std::mem::take(&mut p.syms);
         let s = refine(data, p.a, p.b, m, opt, s, &mut sc);
         p.syms = exact(data, p.a, p.b, m, opt, s, &mut sc);
     }
-    // 4. Once more: the re-parsed blocks may prefer other boundaries.
-    if opt.split && plans.len() > 1 {
-        let all: Vec<Sym> = plans.iter().flat_map(|p| p.syms.iter().copied()).collect();
-        let before: u64 = plans.iter().map(|p| coded_bits(&Hist::of(&p.syms))).sum();
-        let mut again = split(data, a, b, all);
-        for p in again.iter_mut() {
-            let s = std::mem::take(&mut p.syms);
-            p.syms = exact(data, p.a, p.b, m, opt, s, &mut sc);
-        }
-        let after: u64 = again.iter().map(|p| coded_bits(&Hist::of(&p.syms))).sum();
-        if after < before {
-            plans = again;
-        }
+    let t3 = t.elapsed();
+    // 4. Polish: merge neighbours that are cheaper together, split blocks that are cheaper apart.
+    if opt.split {
+        polish(data, m, opt, &mut plans, &mut sc);
+    }
+    if dbg {
+        eprintln!("  global {:?}, split {:?}, blocks {:?}, polish {:?}", t1, t2 - t1, t3 - t2, t.elapsed() - t3);
     }
     plans
 }
 
+fn plan_price(p: &Plan) -> u64 {
+    price(&Hist::of(&p.syms), p.b - p.a)
+}
+
+fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &mut ParseScratch) {
+    for _pass in 0..2 {
+        let mut changed = false;
+        // Merges.
+        let mut k = 0;
+        while k + 1 < plans.len() {
+            let (pa, pb) = (&plans[k], &plans[k + 1]);
+            let apart = plan_price(pa) + plan_price(pb);
+            let mut joined: Vec<Sym> = Vec::with_capacity(pa.syms.len() + pb.syms.len());
+            joined.extend_from_slice(&pa.syms);
+            joined.extend_from_slice(&pb.syms);
+            let (a, b) = (pa.a, pb.b);
+            let together = price(&Hist::of(&joined), b - a);
+            // Merging lets one parse span both, so re-parse before judging when it is close.
+            if together <= apart + (apart / 50).min(400) {
+                let better = exact(data, a, b, m, opt, joined, sc);
+                if price(&Hist::of(&better), b - a) < apart {
+                    plans[k] = Plan { a, b, syms: better };
+                    plans.remove(k + 1);
+                    changed = true;
+                    continue;
+                }
+            }
+            k += 1;
+        }
+        // Splits: try the best single cut of each block.
+        let mut k = 0;
+        while k < plans.len() {
+            let p = &plans[k];
+            let n = p.syms.len();
+            if n < 64 {
+                k += 1;
+                continue;
+            }
+            let whole = plan_price(p);
+            let total = Hist::of(&p.syms);
+            let step = (n / 64).max(4);
+            let mut left = Hist::of(&[]);
+            let mut best = (u64::MAX, 0usize);
+            let mut c = 0;
+            while c + step < n {
+                for s in &p.syms[c..c + step] {
+                    left.add(s);
+                }
+                c += step;
+                let right = Hist::diff(&total, &left);
+                let v = estimate_dynamic_bits(&left).min(fixed_bits(&left)) + estimate_dynamic_bits(&right).min(fixed_bits(&right));
+                if v < best.0 {
+                    best = (v, c);
+                }
+            }
+            if best.1 == 0 || best.0 + 6 >= whole {
+                k += 1;
+                continue;
+            }
+            let cut = best.1;
+            let mid = p.a + p.syms[..cut].iter().map(|x| x.span()).sum::<usize>();
+            let (a, b) = (p.a, p.b);
+            let l = exact(data, a, mid, m, opt, p.syms[..cut].to_vec(), sc);
+            let r = exact(data, mid, b, m, opt, p.syms[cut..].to_vec(), sc);
+            let split_price = price(&Hist::of(&l), mid - a) + price(&Hist::of(&r), b - mid);
+            if split_price < whole {
+                plans[k] = Plan { a, b: mid, syms: l };
+                plans.insert(k + 1, Plan { a: mid, b, syms: r });
+                changed = true;
+                k += 2;
+            } else {
+                k += 1;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
 /// Entropy-priced rounds: price symbols by how often the current parse uses them, re-parse, repeat.
 fn refine(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options, start: Vec<Sym>, sc: &mut ParseScratch) -> Vec<Sym> {
-    let mut best_bits = coded_bits(&Hist::of(&start));
+    let mut best_bits = price(&Hist::of(&start), b - a);
     let mut best = start;
     let mut stats = Hist::of(&best);
     let mut last_bits = best_bits;
@@ -132,9 +243,9 @@ fn refine(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options, start: Ve
     let mut stuck = 0;
     for it in 0..opt.iterations {
         cur.clear();
-        optimal(data, a, b, m, &Costs::entropy(&stats), sc, &mut cur);
+        optimal(data, a, b, m, &Costs::entropy(&stats), false, sc, &mut cur);
         let h = Hist::of(&cur);
-        let bits = coded_bits(&h);
+        let bits = price(&h, b - a);
         if bits < best_bits {
             best_bits = bits;
             best.clone_from(&cur);
@@ -172,7 +283,7 @@ fn blend(new: &Hist, old: &Hist, salt: u64) -> Hist {
 
 /// Exact-priced rounds: price symbols by the code lengths the block would really use.
 fn exact(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options, start: Vec<Sym>, sc: &mut ParseScratch) -> Vec<Sym> {
-    let mut best_bits = coded_bits(&Hist::of(&start));
+    let mut best_bits = price(&Hist::of(&start), b - a);
     let mut best = start;
     let mut cur = Vec::with_capacity(best.len());
     for _ in 0..opt.exact_rounds {
@@ -180,10 +291,13 @@ fn exact(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options, start: Vec
         let code = best_dynamic(&h);
         let maxlen = *code.ll.iter().max().unwrap_or(&15) as f32;
         let mut improved = false;
-        for missing in [maxlen + 1.0, maxlen + 4.0] {
+        for (missing, alt) in [(maxlen + 1.0, false), (maxlen + 4.0, false), (maxlen + 1.0, opt.alternatives)] {
+            if alt == false && missing > maxlen + 1.0 && opt.alternatives {
+                // keep the variety small when alternatives are tried
+            }
             cur.clear();
-            optimal(data, a, b, m, &Costs::lengths(&code.ll, &code.d, missing), sc, &mut cur);
-            let bits = coded_bits(&Hist::of(&cur));
+            optimal(data, a, b, m, &Costs::lengths(&code.ll, &code.d, missing), alt, sc, &mut cur);
+            let bits = price(&Hist::of(&cur), b - a);
             if bits < best_bits {
                 best_bits = bits;
                 best.clone_from(&cur);
@@ -203,7 +317,7 @@ fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>) -> Vec<Plan> {
     if n < 64 {
         return vec![Plan { a, b, syms }];
     }
-    let g = (n / 384).max(32);
+    let g = (n / 160).max(32);
     let mut cand: Vec<usize> = (0..n).step_by(g).collect();
     if *cand.last().unwrap() != n {
         cand.push(n);
@@ -224,7 +338,7 @@ fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>) -> Vec<Plan> {
         pos.push(bytes);
         pref.push(h.clone());
     }
-    let span_limit = 160usize;
+    let span_limit = 96usize;
     let est = |i: usize, j: usize| -> u64 {
         let hh = Hist::diff(&pref[j], &pref[i]);
         let nbytes = pos[j] - pos[i];
@@ -253,25 +367,30 @@ fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>) -> Vec<Plan> {
         cuts.push(j);
     }
     cuts.reverse();
-    // Fine-tune each inner boundary in symbol steps around its candidate.
+    // Fine-tune each inner boundary in symbol steps around its candidate (histograms kept incrementally).
     let mut idx: Vec<usize> = cuts.iter().map(|&c| cand[c]).collect();
-    let hist_of = |s: usize, e: usize| Hist::of(&syms[s..e]);
     for t in 1..idx.len() - 1 {
         let (l, r) = (idx[t - 1], idx[t + 1]);
-        let mut bestc = idx[t];
-        let mut bestv = coded_bits(&hist_of(l, bestc)) + coded_bits(&hist_of(bestc, r));
+        let total = Hist::of(&syms[l..r]);
+        let lo = idx[t].saturating_sub(g).max(l + 1);
+        let hi = (idx[t] + g).min(r - 1);
         let step = (g / 8).max(1);
-        let mut c = idx[t].saturating_sub(g).max(l + 1);
-        while c < (idx[t] + g).min(r) {
-            let v = estimate_pair(&syms, l, c, r);
+        let mut left = Hist::of(&syms[l..lo]);
+        let mut c = lo;
+        let mut bestc = idx[t];
+        let mut bestv = u64::MAX;
+        while c <= hi {
+            let right = Hist::diff(&total, &left);
+            let v = estimate_dynamic_bits(&left).min(fixed_bits(&left)) + estimate_dynamic_bits(&right).min(fixed_bits(&right));
             if v < bestv {
-                let exactv = coded_bits(&hist_of(l, c)) + coded_bits(&hist_of(c, r));
-                if exactv < bestv {
-                    bestv = exactv;
-                    bestc = c;
-                }
+                bestv = v;
+                bestc = c;
             }
-            c += step;
+            let next = (c + step).min(hi + 1);
+            for s in &syms[c..next.min(r)] {
+                left.add(s);
+            }
+            c = next;
         }
         idx[t] = bestc;
     }
@@ -287,10 +406,4 @@ fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>) -> Vec<Plan> {
     debug_assert_eq!(byte, b);
     let _ = data;
     plans
-}
-
-fn estimate_pair(syms: &[Sym], l: usize, c: usize, r: usize) -> u64 {
-    let h1 = Hist::of(&syms[l..c]);
-    let h2 = Hist::of(&syms[c..r]);
-    estimate_dynamic_bits(&h1).min(fixed_bits(&h1)) + estimate_dynamic_bits(&h2).min(fixed_bits(&h2))
 }

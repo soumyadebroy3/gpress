@@ -79,6 +79,95 @@ pub fn limited_lengths_into(freqs: &[u32], max_bits: u32, lens: &mut [u8]) {
     }
 }
 
+/// Huffman code lengths without a length limit, computed in place (Moffat and Katajainen's method), with no
+/// heap allocation. Returns the longest length; callers fall back to `limited_lengths` when it exceeds
+/// their limit. `lens` receives one length per symbol (0 for unused symbols).
+pub fn fast_lengths(freqs: &[u32], lens: &mut [u8]) -> u8 {
+    const MAXN: usize = 320;
+    let mut w = [0u64; MAXN];
+    let mut sym = [0u16; MAXN];
+    let mut n = 0;
+    for (i, &f) in freqs.iter().enumerate() {
+        lens[i] = 0;
+        if f > 0 {
+            w[n] = ((f as u64) << 16) | i as u64; // ties broken by symbol, like `limited_lengths`
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return 0;
+    }
+    if n <= 2 {
+        for k in 0..n {
+            lens[(w[k] & 0xffff) as usize] = 1;
+        }
+        return 1;
+    }
+    w[..n].sort_unstable();
+    for k in 0..n {
+        sym[k] = (w[k] & 0xffff) as u16;
+        w[k] >>= 16;
+    }
+    let a = &mut w[..n];
+    // Pass 1: internal node weights, left to right.
+    a[0] += a[1];
+    let (mut root, mut leaf) = (0usize, 2usize);
+    for next in 1..n - 1 {
+        if leaf >= n || a[root] < a[leaf] {
+            a[next] = a[root];
+            a[root] = next as u64;
+            root += 1;
+        } else {
+            a[next] = a[leaf];
+            leaf += 1;
+        }
+        if leaf >= n || (root < next && a[root] < a[leaf]) {
+            a[next] += a[root];
+            a[root] = next as u64;
+            root += 1;
+        } else {
+            a[next] += a[leaf];
+            leaf += 1;
+        }
+    }
+    // Pass 2: internal node depths, right to left.
+    a[n - 2] = 0;
+    for next in (0..n - 2).rev() {
+        a[next] = a[a[next] as usize] + 1;
+    }
+    // Pass 3: leaf depths.
+    let (mut avbl, mut used, mut depth) = (1i64, 0i64, 0u64);
+    let (mut root, mut next) = (n as isize - 2, n as isize - 1);
+    while avbl > 0 {
+        while root >= 0 && a[root as usize] == depth {
+            used += 1;
+            root -= 1;
+        }
+        while avbl > used {
+            a[next as usize] = depth;
+            next -= 1;
+            avbl -= 1;
+        }
+        avbl = 2 * used;
+        depth += 1;
+        used = 0;
+    }
+    let mut max = 0u8;
+    for k in 0..n {
+        let l = a[k].min(255) as u8;
+        lens[sym[k] as usize] = l;
+        max = max.max(l);
+    }
+    max
+}
+
+/// Optimal lengths limited to `max_bits`: the fast method when it fits, package-merge otherwise.
+pub fn lengths_into(freqs: &[u32], max_bits: u32, lens: &mut [u8]) {
+    if fast_lengths(freqs, lens) as u32 > max_bits {
+        limited_lengths_into(freqs, max_bits, lens);
+    }
+}
+
 /// Canonical codes (RFC 1951 3.2.2), returned bit-reversed so they can be written least-significant-bit first.
 pub fn canonical_codes(lens: &[u8]) -> Vec<u16> {
     let mut bl_count = [0u16; 16];
@@ -199,6 +288,32 @@ mod tests {
             }
         }
         assert_eq!(cost(&fr, &lens), best);
+    }
+
+    #[test]
+    fn fast_lengths_are_optimal() {
+        let mut s = 0xfeed_beefu64;
+        for round in 0..500 {
+            let n = 1 + (rng(&mut s) % 300) as usize;
+            let freqs: Vec<u32> = (0..n)
+                .map(|_| if rng(&mut s) % 3 == 0 { 0 } else { (rng(&mut s) % (1 + round * 20)) as u32 + 1 })
+                .collect();
+            let mut a = vec![0u8; n];
+            let max = fast_lengths(&freqs, &mut a);
+            let used = freqs.iter().filter(|&&f| f > 0).count();
+            if used >= 2 {
+                assert_eq!(kraft_wide(&a), 1u64 << 40, "complete");
+                assert_eq!(cost(&freqs, &a), huffman_cost(&freqs), "optimal");
+            }
+            if max <= 15 {
+                let b = limited_lengths(&freqs, 15);
+                assert_eq!(cost(&freqs, &a), cost(&freqs, &b));
+            }
+        }
+    }
+
+    fn kraft_wide(lens: &[u8]) -> u64 {
+        lens.iter().filter(|&&l| l > 0).map(|&l| 1u64 << (40 - l as u32)).sum()
     }
 
     #[test]

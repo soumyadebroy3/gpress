@@ -1,7 +1,7 @@
 //! Block costs and block writing: dynamic Huffman blocks with an optimised header, fixed blocks, stored blocks.
 
 use super::bits::BitWriter;
-use super::huffman::{canonical_codes, limited_lengths};
+use super::huffman::{canonical_codes, lengths_into, limited_lengths};
 use super::lz::{d_extra, ll_extra, Hist, Sym};
 use super::tables::*;
 
@@ -115,9 +115,17 @@ fn smooth(counts: &[u32], tolerance: f64) -> Vec<u32> {
 
 /// The cheapest dynamic code we can find for a histogram, with its exact size.
 pub fn best_dynamic(h: &Hist) -> DynCode {
+    dynamic_search(h, &[(None, 15), (Some(0.25), 15), (Some(0.5), 15), (None, 12), (None, 10), (Some(1.0), 15)], true)
+}
+
+/// A cheaper search for comparing parses: fewer code variants and header strategies.
+pub fn good_dynamic(h: &Hist) -> DynCode {
+    dynamic_search(h, &[(None, 15), (Some(0.25), 15)], false)
+}
+
+fn dynamic_search(h: &Hist, variants: &[(Option<f64>, u32)], thorough: bool) -> DynCode {
     let mut best: Option<DynCode> = None;
-    let variants: [(Option<f64>, u32); 6] = [(None, 15), (Some(0.25), 15), (Some(0.5), 15), (None, 12), (None, 10), (Some(1.0), 15)];
-    for (tol, maxb) in variants {
+    for &(tol, maxb) in variants {
         let llc = match tol {
             None => h.ll.to_vec(),
             Some(t) => smooth(&h.ll, t),
@@ -141,7 +149,7 @@ pub fn best_dynamic(h: &Hist) -> DynCode {
                 continue;
             }
         }
-        let header = best_header(&ll, &d);
+        let header = if thorough { best_header(&ll, &d) } else { quick_header(&ll, &d) };
         let bits = header.bits + data;
         if best.as_ref().map_or(true, |b| bits < b.bits) {
             best = Some(DynCode { ll, d, header, bits });
@@ -150,13 +158,95 @@ pub fn best_dynamic(h: &Hist) -> DynCode {
     best.unwrap()
 }
 
-/// Quick size estimate for block splitting: the plain optimal code with a cheap header estimate.
+/// Very fast estimate for choosing block boundaries: Shannon cost of the symbols, their extra bits, and a
+/// header charge per used symbol.
+pub fn entropy_estimate_bits(h: &Hist) -> u64 {
+    fn part(c: &[u32], extra: fn(usize) -> u32) -> f64 {
+        let total: u64 = c.iter().map(|&x| x as u64).sum();
+        if total == 0 {
+            return 0.0;
+        }
+        let lt = (total as f64).log2();
+        let mut bits = 0.0;
+        let mut used = 0;
+        for (s, &x) in c.iter().enumerate() {
+            if x > 0 {
+                let xf = x as f64;
+                bits += xf * (lt - xf.log2()) + xf * extra(s) as f64;
+                used += 1;
+            }
+        }
+        bits + 4.5 * used as f64
+    }
+    (part(&h.ll, ll_extra) + part(&h.d, d_extra) + 40.0) as u64
+}
+
+/// Quick size estimate: the plain optimal code with a cheap header estimate, without heap allocation.
 pub fn estimate_dynamic_bits(h: &Hist) -> u64 {
-    let mut ll = limited_lengths(&h.ll, 15);
-    let mut d = limited_lengths(&h.d, 15);
+    let mut ll = [0u8; LITLEN_SYMS];
+    let mut d = [0u8; DIST_SYMS];
+    lengths_into(&h.ll, 15, &mut ll);
+    lengths_into(&h.d, 15, &mut d);
     patch_litlen(&mut ll);
     patch_distances(&mut d);
-    data_bits(h, &ll, &d) + greedy_header_bits(&ll, &d)
+    data_bits(h, &ll, &d) + fast_header_bits(&ll, &d)
+}
+
+/// Header size with greedy run-length tokens, computed without allocation.
+fn fast_header_bits(ll: &[u8], d: &[u8]) -> u64 {
+    let hlit = (ll.iter().rposition(|&l| l != 0).map_or(0, |p| p + 1)).max(257);
+    let hdist = (d.iter().rposition(|&l| l != 0).map_or(0, |p| p + 1)).max(1);
+    let mut seq = [0u8; LITLEN_SYMS + DIST_SYMS];
+    seq[..hlit].copy_from_slice(&ll[..hlit]);
+    seq[hlit..hlit + hdist].copy_from_slice(&d[..hdist]);
+    let seq = &seq[..hlit + hdist];
+    let mut f = [0u32; 19];
+    let mut extra = 0u64;
+    let mut i = 0;
+    while i < seq.len() {
+        let v = seq[i];
+        let mut run = 1;
+        while i + run < seq.len() && seq[i + run] == v {
+            run += 1;
+        }
+        let mut r = run;
+        if v == 0 {
+            while r >= 11 {
+                let k = r.min(138);
+                f[18] += 1;
+                extra += 7;
+                r -= k;
+            }
+            if r >= 3 {
+                f[17] += 1;
+                extra += 3;
+                r = 0;
+            }
+            f[0] += r as u32;
+        } else {
+            f[v as usize] += 1;
+            r -= 1;
+            while r >= 3 {
+                let k = r.min(6);
+                f[16] += 1;
+                extra += 2;
+                r -= k;
+            }
+            f[v as usize] += r as u32;
+        }
+        i += run;
+    }
+    let mut cl = [0u8; 19];
+    lengths_into(&f, 7, &mut cl);
+    if cl.iter().filter(|&&x| x != 0).count() == 1 {
+        cl[16] = 1;
+    }
+    let hclen = (CL_ORDER.iter().rposition(|&s| cl[s] != 0).map_or(0, |p| p + 1)).max(4);
+    let mut bits = 14 + 3 * hclen as u64 + extra;
+    for s in 0..19 {
+        bits += f[s] as u64 * cl[s] as u64;
+    }
+    bits
 }
 
 fn sequence(ll: &[u8], d: &[u8]) -> (usize, usize, Vec<u8>) {
@@ -316,20 +406,23 @@ fn header_bits(cl: &[u8; 19], tokens: &[(u8, u8)]) -> (usize, u64) {
     (hclen, bits)
 }
 
-fn greedy_header_bits(ll: &[u8], d: &[u8]) -> u64 {
-    let (_, _, seq) = sequence(ll, d);
-    let t = greedy_tokens(&seq, true, true, true);
-    let cl = cl_lengths(&t);
-    header_bits(&cl, &t).1
-}
 
 /// The cheapest header we can find for these code lengths.
 pub fn best_header(ll: &[u8], d: &[u8]) -> Header {
+    header_search(ll, d, &[0, 1, 2, 3, 4, 5, 6, 7], 4)
+}
+
+/// Fewer strategies, for comparing parses.
+pub fn quick_header(ll: &[u8], d: &[u8]) -> Header {
+    header_search(ll, d, &[7, 6], 2)
+}
+
+fn header_search(ll: &[u8], d: &[u8], flag_sets: &[u8], rounds: usize) -> Header {
     let (hlit, hdist, seq) = sequence(ll, d);
     let mut best: Option<Header> = None;
-    for flags in 0..8u8 {
+    for &flags in flag_sets {
         let mut tokens = greedy_tokens(&seq, flags & 1 != 0, flags & 2 != 0, flags & 4 != 0);
-        for _round in 0..4 {
+        for _round in 0..rounds {
             let cl = cl_lengths(&tokens);
             let (hclen, bits) = header_bits(&cl, &tokens);
             let improved = best.as_ref().map_or(true, |b| bits < b.bits);

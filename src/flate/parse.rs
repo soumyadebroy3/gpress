@@ -65,7 +65,9 @@ pub struct ParseScratch {
 }
 
 /// Cheapest parse of `data[a..b]` (positions inside the range covered by `m`). Matches are cut at `b`.
-pub fn optimal(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, sc: &mut ParseScratch, out: &mut Vec<Sym>) {
+/// With `alt`, every length may use any candidate distance long enough (the cheapest); without it, each
+/// length uses the smallest distance that reaches it.
+pub fn optimal(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt: bool, sc: &mut ParseScratch, out: &mut Vec<Sym>) {
     let n = b - a;
     sc.cost.clear();
     sc.cost.resize(n + 1, f32::INFINITY);
@@ -74,9 +76,20 @@ pub fn optimal(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, sc: &mut
     let cost = &mut sc.cost;
     let choice = &mut sc.choice;
     cost[0] = 0.0;
+    let run_cost = c.len[MAX_MATCH] + c.dist[0];
     for k in 0..n {
         let c0 = cost[k];
         let i = a + k;
+        // Deep inside a long run of one byte (more than 2 x 258 left, and 258 back still inside it), the only
+        // sensible step is a 258-byte match at distance 1; skip the full pricing there.
+        if k > MAX_MATCH && i + MAX_MATCH <= b && m.same_at(i) > 2 * MAX_MATCH && m.same_at(i - MAX_MATCH) > MAX_MATCH {
+            let v = c0 + run_cost;
+            if v < cost[k + MAX_MATCH] {
+                cost[k + MAX_MATCH] = v;
+                choice[k + MAX_MATCH] = (MAX_MATCH as u16, 1);
+            }
+            continue;
+        }
         let lc = c0 + c.lit[data[i] as usize];
         if lc < cost[k + 1] {
             cost[k + 1] = lc;
@@ -86,23 +99,75 @@ pub fn optimal(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, sc: &mut
         if maxl < MIN_MATCH {
             continue;
         }
-        let mut lo = MIN_MATCH;
-        for &(ml, d) in m.at(i) {
-            let hi = (ml as usize).min(maxl);
-            if hi < lo {
-                break;
-            }
-            let dc = c0 + c.dist[dist_code(d as usize)];
-            for l in lo..=hi {
-                let v = dc + c.len[l];
-                if v < cost[k + l] {
-                    cost[k + l] = v;
-                    choice[k + l] = (l as u16, d);
+        let steps = m.at(i);
+        if steps.is_empty() {
+            continue;
+        }
+        if !alt {
+            // The smallest-distance chain: steps whose length beats every earlier (closer) one.
+            let mut lo = MIN_MATCH;
+            for &(ml, d) in steps {
+                if (ml as usize) < lo {
+                    continue;
+                }
+                let hi = (ml as usize).min(maxl);
+                let dc = c0 + c.dist[dist_code(d as usize)];
+                debug_assert!(k + hi <= n && hi <= MAX_MATCH);
+                unsafe {
+                    let cp = cost.as_mut_ptr().add(k);
+                    let chp = choice.as_mut_ptr().add(k);
+                    let lp = c.len.as_ptr();
+                    for l in lo..=hi {
+                        let v = dc + *lp.add(l);
+                        if v < *cp.add(l) {
+                            *cp.add(l) = v;
+                            *chp.add(l) = (l as u16, d);
+                        }
+                    }
+                }
+                lo = hi + 1;
+                if lo > maxl {
+                    break;
                 }
             }
-            lo = hi + 1;
-            if lo > maxl {
-                break;
+            continue;
+        }
+        // Candidates sorted by length, longest first, each with its distance price.
+        let mut cand = [(0u16, 0f32, 0u16); 32];
+        let mut cnt = 0;
+        for &(ml, d) in steps.iter().take(32) {
+            let e = (ml, c.dist[dist_code(d as usize)], d);
+            let mut j = cnt;
+            while j > 0 && cand[j - 1].0 < ml {
+                cand[j] = cand[j - 1];
+                j -= 1;
+            }
+            cand[j] = e;
+            cnt += 1;
+        }
+        let top = (cand[0].0 as usize).min(maxl);
+        debug_assert!(k + top <= n && top <= MAX_MATCH);
+        let (mut j, mut bc, mut bd) = (0usize, f32::INFINITY, 0u16);
+        // Lengths from the longest down; the cheapest distance among candidates long enough.
+        unsafe {
+            let cp = cost.as_mut_ptr().add(k);
+            let chp = choice.as_mut_ptr().add(k);
+            let lp = c.len.as_ptr();
+            let mut l = top;
+            while l >= MIN_MATCH {
+                while j < cnt && cand[j].0 as usize >= l {
+                    if cand[j].1 < bc {
+                        bc = cand[j].1;
+                        bd = cand[j].2;
+                    }
+                    j += 1;
+                }
+                let v = c0 + bc + *lp.add(l);
+                if v < *cp.add(l) {
+                    *cp.add(l) = v;
+                    *chp.add(l) = (l as u16, bd);
+                }
+                l -= 1;
             }
         }
     }
@@ -120,4 +185,31 @@ pub fn optimal(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, sc: &mut
         }
     }
     out[first..].reverse();
+}
+
+/// Greedy parse: the longest match wherever there is one (closest distance), otherwise a literal.
+pub fn greedy(data: &[u8], a: usize, b: usize, m: &Matches, out: &mut Vec<Sym>) {
+    let mut i = a;
+    while i < b {
+        let maxl = (b - i).min(MAX_MATCH);
+        let mut best: Option<(usize, usize)> = None;
+        if maxl >= MIN_MATCH {
+            for &(ml, d) in m.at(i) {
+                let l = (ml as usize).min(maxl);
+                if l >= MIN_MATCH && best.map_or(true, |(bl, _)| l > bl) {
+                    best = Some((l, d as usize));
+                }
+            }
+        }
+        match best {
+            Some((l, d)) => {
+                out.push(Sym::mat(l, d));
+                i += l;
+            }
+            None => {
+                out.push(Sym::lit(data[i]));
+                i += 1;
+            }
+        }
+    }
 }
