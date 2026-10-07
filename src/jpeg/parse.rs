@@ -239,6 +239,11 @@ fn read_frame(b: &[u8]) -> Result<Frame, Fail> {
     }
     let hmax = comps.iter().map(|c| c.h as u32).max().unwrap_or(1);
     let vmax = comps.iter().map(|c| c.v as u32).max().unwrap_or(1);
+    // libjpeg scales components up by whole factors only ("fractional sampling not implemented"); readers
+    // differ on the others, so they are left as they are.
+    if comps.iter().any(|c| hmax % c.h as u32 != 0 || vmax % c.v as u32 != 0) {
+        return Err("fractional sampling");
+    }
     Ok(Frame { width, height, comps, hmax, vmax })
 }
 
