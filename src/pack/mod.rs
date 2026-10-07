@@ -85,6 +85,7 @@ fn header(version: u8, input: &[u8]) -> Vec<u8> {
     out
 }
 
+mod sealed;
 mod sha256;
 pub use sha256::sha256;
 
@@ -106,6 +107,10 @@ pub struct PackStats {
     /// Bytes coded plainly (already compressed) and bytes coded by one long-repeat decision.
     pub flat_bytes: usize,
     pub bypassed: u64,
+    /// Encrypted streams stored decrypted (and encrypted again exactly on restore), and their bytes as stored
+    /// in the file (encrypted).
+    pub decrypted: usize,
+    pub decrypted_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -467,6 +472,9 @@ const T_RAW: u8 = 1;
 const T_REBUILT: u8 = 2;
 const T_PREFLATED: u8 = 3;
 const T_LEPTON: u8 = 4;
+/// Encrypted files (see `sealed`): the file key, and an encrypted stream's settings before its payload.
+const T_CRYPT_KEY: u8 = 20;
+const T_CRYPT: u8 = 21;
 const T_END: u8 = 255;
 
 fn table_bits(n: usize) -> u32 {
@@ -488,6 +496,12 @@ enum Plan {
     Preflated { header: [u8; 2], corrections: Vec<u8>, data: Vec<u8>, adler_ok: bool, rest: Vec<u8>, lep: Option<Vec<u8>> },
     /// A JPEG recompressed with an existing library (Lepton), restored bit for bit.
     Lepton { data: Vec<u8> },
+    /// An encrypted stream's decrypted bytes that nothing rebuilds (coded like a raw stream).
+    Plain(Vec<u8>),
+    /// The file key of an encrypted file, before its first encrypted stream.
+    CryptKey(Vec<u8>),
+    /// An encrypted stream's settings; the next part is its decrypted payload.
+    Crypt(sealed::Sealed),
 }
 
 fn plan(d: &[u8]) -> Vec<Plan> {
@@ -519,9 +533,13 @@ fn plan(d: &[u8]) -> Vec<Plan> {
 pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
     let mut out = Vec::with_capacity(d.len() * 2);
     let mut extra = 0;
-    for p in plan(d) {
+    for p in sealed::crypt_plans(d, plan(d)) {
         match p {
             Plan::Syntax(a, b) | Plan::Raw(a, b) => out.extend_from_slice(&d[a..b]),
+            Plan::Plain(v) => out.extend_from_slice(&v),
+            // The key once; per stream its settings and initialization vector.
+            Plan::CryptKey(k) => extra += 1 + k.len(),
+            Plan::Crypt(_) => extra += 18,
             Plan::Rebuilt { data, tail, lep, .. } => {
                 match lep {
                     Some(l) => extra += l.len(),
@@ -656,22 +674,37 @@ fn recreate(_data: &[u8], _corrections: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// One pass of the format: encoding `d` (Some) or rebuilding it (None). The same code runs both ways so the
-/// model sees exactly the same sequence of events.
-fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats) -> (Vec<u8>, C) {
+/// model sees exactly the same sequence of events. `decrypt`: the encoder stores the encrypted streams of a
+/// file the empty password opens decrypted (see `sealed`).
+fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats, decrypt: bool) -> (Vec<u8>, C) {
+    let plans = d.map(|d| if decrypt { sealed::crypt_plans(d, plan(d)) } else { plan(d) });
+    run_plans(c, d, plans, total_len, stats)
+}
+
+fn run_plans<C: Coder>(c: C, d: Option<&[u8]>, plans: Option<Vec<Plan>>, total_len: usize, stats: &mut PackStats) -> (Vec<u8>, C) {
     let mut model = primed(table_bits(total_len));
     let mut io = Io { m: &mut model, c, damaged: false };
     let mut out: Vec<u8> = Vec::with_capacity(reserve(total_len));
-    let plans = d.map(plan);
+    // Encrypted files: the file key, and the settings of the stream whose decrypted payload comes next with
+    // where that payload starts in `out`.
+    let mut crypt_key: Option<Vec<u8>> = None;
+    let mut sealing: Option<(sealed::Sealed, usize)> = None;
+    // Every part restores something, except an empty stream and the crypt parts before a payload, so a
+    // damaged or hostile file can't keep the decoder busy without progress: at most two such parts in a row.
+    let mut idle = 0;
+    let mut prev: Option<u8> = None;
     let mut si = 0;
     loop {
         let cur = plans.as_ref().map(|p| p.get(si));
         let tag_in = cur.map(|p| match p {
             None => T_END,
             Some(Plan::Syntax(..)) => T_SYNTAX,
-            Some(Plan::Raw(..)) => T_RAW,
+            Some(Plan::Raw(..)) | Some(Plan::Plain(..)) => T_RAW,
             Some(Plan::Rebuilt { .. }) => T_REBUILT,
             Some(Plan::Preflated { .. }) => T_PREFLATED,
             Some(Plan::Lepton { .. }) => T_LEPTON,
+            Some(Plan::CryptKey(..)) => T_CRYPT_KEY,
+            Some(Plan::Crypt(..)) => T_CRYPT,
         });
         if io.damaged || out.len() > total_len || io.c.exhausted() {
             io.damaged = true;
@@ -680,11 +713,25 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
         let left = total_len - out.len();
         io.m.set_kind(Kind::Meta, Geom::default(), out.len() as u64);
         let tag = io.byte(tag_in);
+        // An encrypted stream's settings come right after the syntax before the stream (the file key, once,
+        // right before the first settings) and are followed by its payload.
+        let in_order = match tag {
+            T_CRYPT_KEY => crypt_key.is_none() && prev == Some(T_SYNTAX),
+            T_CRYPT => matches!(prev, Some(T_SYNTAX) | Some(T_CRYPT_KEY)),
+            T_RAW | T_REBUILT | T_PREFLATED | T_LEPTON => prev != Some(T_CRYPT_KEY),
+            _ => sealing.is_none() && prev != Some(T_CRYPT_KEY),
+        };
+        if !in_order {
+            io.damaged = true;
+            break;
+        }
+        let before = out.len();
         match tag {
             T_END => break,
             T_SYNTAX | T_RAW => {
                 let src: Option<&[u8]> = match cur.flatten() {
                     Some(Plan::Syntax(a, b)) | Some(Plan::Raw(a, b)) => Some(&d.unwrap()[*a..*b]),
+                    Some(Plan::Plain(v)) => Some(v.as_slice()),
                     _ => None,
                 };
                 let n = io.length(src.map(|x| x.len() as u64), left);
@@ -791,11 +838,61 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
                 stats.streams += 1;
                 stats.leptons += 1;
             }
+            T_CRYPT_KEY => {
+                let key_in = match cur.flatten() {
+                    Some(Plan::CryptKey(k)) => Some(k.as_slice()),
+                    _ => None,
+                };
+                match sealed::code_key(&mut io, key_in) {
+                    Some(k) => crypt_key = Some(k),
+                    None => {
+                        io.damaged = true;
+                        break;
+                    }
+                }
+            }
+            T_CRYPT => {
+                let s_in = match cur.flatten() {
+                    Some(Plan::Crypt(s)) => Some(s),
+                    _ => None,
+                };
+                match sealed::code_settings(&mut io, s_in, &out, crypt_key.as_deref()) {
+                    Some(s) => sealing = Some((s, out.len())),
+                    None => {
+                        io.damaged = true;
+                        break;
+                    }
+                }
+            }
             _ => {
                 io.damaged = true;
                 break;
             }
         }
+        // The payload of an encrypted stream is now in `out`, decrypted: encrypt it again. An empty payload is
+        // never stored this way.
+        if tag != T_CRYPT {
+            if let Some((s, mark)) = sealing.take() {
+                let plain = out.split_off(mark);
+                match crypt_key.as_deref().filter(|_| !plain.is_empty()).and_then(|k| sealed::seal_payload(&s, k, &plain)) {
+                    Some(z) => {
+                        stats.decrypted += 1;
+                        stats.decrypted_bytes += z.len();
+                        out.extend_from_slice(&z);
+                    }
+                    None => {
+                        io.damaged = true;
+                        break;
+                    }
+                }
+            }
+        }
+        idle = if out.len() == before { idle + 1 } else { 0 };
+        if idle > 2 {
+            io.damaged = true;
+            break;
+        }
+        prev = Some(tag);
         si += 1;
     }
     if io.damaged {
@@ -942,8 +1039,22 @@ fn rebuild_params(_d: &[u8], _start: usize, raw: &[u8]) -> Option<(zlibexact::Pa
 }
 
 pub fn pack(input: &[u8]) -> (Vec<u8>, PackStats) {
+    let (out, stats) = pack_pass(input, true);
+    // Storing encrypted streams decrypted costs the file key and each stream's settings. The encrypted bytes
+    // can't be compressed, so a pack well below their size can only win; otherwise the pack without
+    // decryption is made too, and the smaller kept (both are restored and checked).
+    if stats.decrypted > 0 && out.len() as u64 * 50 > stats.decrypted_bytes as u64 * 49 {
+        let (plain, plain_stats) = pack_pass(input, false);
+        if plain.len() <= out.len() {
+            return (plain, plain_stats);
+        }
+    }
+    (out, stats)
+}
+
+fn pack_pass(input: &[u8], decrypt: bool) -> (Vec<u8>, PackStats) {
     let mut stats = PackStats::default();
-    let (copy, enc) = run(Encoder::new(), Some(input), input.len(), &mut stats);
+    let (copy, enc) = run(Encoder::new(), Some(input), input.len(), &mut stats, decrypt);
     debug_assert_eq!(copy, input);
     let mut out = header(VERSION, input);
     out.extend_from_slice(&enc.finish());
@@ -1000,7 +1111,7 @@ pub fn unpack(a: &[u8]) -> Result<Vec<u8>, String> {
     let out = match ver {
         VERSION => {
             let mut stats = PackStats::default();
-            let (out, _) = run(Decoder::new(body), None, len, &mut stats);
+            let (out, _) = run(Decoder::new(body), None, len, &mut stats, true);
             if stats.damaged {
                 return Err("damaged peyaji file".into());
             }

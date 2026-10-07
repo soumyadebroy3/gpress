@@ -6,6 +6,7 @@
 //! into compressed object streams grouped by type, and the cross-reference table becomes a compressed
 //! cross-reference stream. Before anything is returned, the output is read back and compared object by object.
 
+use super::crypt::{Crypt, Method};
 use super::filters::{chain, decode_stage, is_general, Stage};
 use super::images;
 use super::object::*;
@@ -36,6 +37,8 @@ pub struct Stats {
     pub streams_kept: usize,
     pub objstms: usize,
     pub dropped_unreachable: usize,
+    /// How the file is encrypted (kept exactly as it was), e.g. "R4/AESV2"; empty when it isn't.
+    pub encryption: String,
 }
 
 #[derive(Debug)]
@@ -111,8 +114,10 @@ fn walk<'o>(o: &'o Obj, f: &mut dyn FnMut(&'o Obj)) {
 
 /// Reasons to leave a file exactly as it is.
 fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>) -> Result<(), String> {
-    if doc.trailer.has(b"Encrypt") {
-        return Err("encrypted".into());
+    match &doc.crypt {
+        Some(Err(why)) => return Err(format!("encrypted: {why}")),
+        Some(Ok(c)) => encrypted_gate(c, objs)?,
+        None => {}
     }
     if doc.has_revisions {
         return Err("keeps earlier revisions (incremental updates)".into());
@@ -122,8 +127,10 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>) -> Result<(), String> {
     }
     // Objects numbered at or beyond /Size: readers disagree on whether they exist.
     if let Some(size) = doc.trailer.get(b"Size").and_then(|x| x.as_int()) {
-        // Only objects the document uses count (an xref stream numbered at /Size is harmless).
-        let max_used = objs.keys().copied().max().unwrap_or(0) as i64;
+        // Only objects the document uses count (an xref stream numbered at /Size is harmless), and the
+        // encryption dictionary's.
+        let enc = crypt_objects(doc.crypt.as_ref().and_then(|c| c.as_ref().ok()));
+        let max_used = objs.keys().copied().chain(enc.iter().map(|o| o.0)).max().unwrap_or(0) as i64;
         if max_used >= size {
             return Err("object numbers beyond /Size".into());
         }
@@ -174,6 +181,22 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>) -> Result<(), String> {
         Some(w) => Err(w),
         None => Ok(()),
     }
+}
+
+/// Encrypted files we rewrite: the encryption dictionary and the objects it refers to stay apart from the
+/// document (they are written as they are, unencrypted). Trailer strings need nothing: readers read the trailer
+/// before decrypting anything, and it is copied as it is into the cross-reference stream, which is never
+/// encrypted.
+fn encrypted_gate(c: &Crypt, objs: &BTreeMap<u32, (u16, Obj)>) -> Result<(), String> {
+    if objs.keys().any(|&n| c.is_own(n)) {
+        return Err("encrypted: the encryption dictionary is also part of the document".into());
+    }
+    Ok(())
+}
+
+/// Object numbers of the encryption dictionary and the objects it refers to.
+fn crypt_objects(c: Option<&Crypt>) -> Vec<(u32, u16)> {
+    c.map_or(Vec::new(), |c| c.obj.into_iter().chain(c.parts.iter().map(|p| (p.0, p.1))).collect())
 }
 
 fn contains(h: &[u8], n: &[u8]) -> bool {
@@ -279,6 +302,26 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
     best
 }
 
+/// An encrypted XMP metadata stream (no tool reads it from the file without decrypting it): our Flate when
+/// that is smaller. Only general filters without parameters are undone; anything else stays as it is.
+fn reencode_xmp(s: &Stream, opt: &Options) -> Option<(Dict, Vec<u8>)> {
+    let stages = chain(&s.dict)?;
+    if s.dict.has(b"F") || stages.iter().any(|st| !is_general(&st.name) || st.parms.is_some()) {
+        return None;
+    }
+    let mut data = s.data.clone();
+    for st in &stages {
+        data = decode_stage(st, &data, opt.max_stream).ok()?;
+    }
+    let z = flate::deflate_zlib(&data, &opt.flate);
+    if z.len() >= s.data.len() {
+        return None;
+    }
+    let mut d = s.dict.clone();
+    set_chain(&mut d, &[Stage { name: b"FlateDecode".to_vec(), parms: None }]);
+    Some((d, z))
+}
+
 fn repredict(s: &Stream, data: &[u8], carried: Option<&Dict>, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) -> Option<(Dict, Vec<u8>)> {
     let g = images::geometry(&s.dict, resolve)?;
     let (row, bpp) = (g.row(), g.bpp());
@@ -337,9 +380,16 @@ fn kind_key(o: &Obj) -> (u8, Vec<u8>, Vec<u8>) {
 
 fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     let doc = xref::open(input).map_err(|e| format!("unreadable: {e:?}"))?;
+    // An encrypted file the empty password doesn't open stays as it is. One it opens is read decrypted and
+    // written with the same encryption: same dictionary, /ID, file key and permissions.
+    if let Some(Err(why)) = &doc.crypt {
+        return Err(format!("encrypted: {why}"));
+    }
+    let crypt = doc.crypt.as_ref().and_then(|c| c.as_ref().ok());
     let objs = load_reachable(&doc)?;
     gate(&doc, &objs)?;
     let mut stats = Stats { objects: objs.len(), dropped_unreachable: doc.entries.values().filter(|e| !matches!(e, Entry::Free)).count().saturating_sub(objs.len()), ..Default::default() };
+    stats.encryption = crypt.map(|c| c.describe()).unwrap_or_default();
 
     // Streams: re-encode; every stream gets a direct /Length.
     let mut direct: BTreeMap<u32, (u16, Vec<u8>)> = BTreeMap::new(); // serialised indirect objects
@@ -354,7 +404,10 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
                         x => Some(x.clone()),
                     }
                 };
-                let (mut dict, data) = match reencode(s, opt, &resolve) {
+                // XMP stays as it is for tools that read it straight from the file, unless it is encrypted.
+                let xmp = s.dict.name(b"Type") == Some(b"Metadata") && crypt.map_or(false, |c| c.stream_method(n, &s.dict).map_or(false, |m| m != Method::Identity));
+                let best = if xmp { reencode_xmp(s, opt) } else { reencode(s, opt, &resolve) };
+                let (dict, data) = match best {
                     Some(x) => {
                         stats.streams_reencoded += 1;
                         x
@@ -363,6 +416,11 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
                         stats.streams_kept += 1;
                         (s.dict.clone(), s.data.clone())
                     }
+                };
+                // Encrypted again with this object's key.
+                let (mut dict, data) = match crypt {
+                    Some(c) => c.seal_stream(n, *g, &dict, &data).map_err(|e| format!("object {n}: {e}"))?,
+                    None => (dict, data),
                 };
                 dict.set(b"Length", Obj::Int(data.len() as i64));
                 let mut body = Vec::with_capacity(data.len() + 64);
@@ -373,7 +431,11 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
                 direct.insert(n, (*g, body));
             }
             _ if *g != 0 => {
-                direct.insert(n, (*g, to_bytes(o)));
+                let body = match crypt {
+                    Some(c) => to_bytes(&c.seal_object(n, *g, o).map_err(|e| format!("object {n}: {e}"))?),
+                    None => to_bytes(o),
+                };
+                direct.insert(n, (*g, body));
             }
             _ => packable.push((n, o)),
         }
@@ -382,6 +444,8 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     // Object streams, grouped by kind so similar objects sit together.
     packable.sort_by(|a, b| kind_key(a.1).cmp(&kind_key(b.1)).then(a.0.cmp(&b.0)));
     let max_num = objs.keys().copied().max().unwrap_or(0).max(doc.trailer.get(b"Size").and_then(|x| x.as_int()).unwrap_or(0) as u32);
+    // The encryption dictionary's objects keep their numbers.
+    let max_num = crypt_objects(crypt).iter().fold(max_num, |m, o| m.max(o.0));
     let mut next_num = max_num + 1;
     let mut in_stm: HashMap<u32, (u32, u32)> = HashMap::new();
     for chunk in packable.chunks(opt.objstm_size.max(1)) {
@@ -406,6 +470,11 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         d.set(b"N", Obj::Int(chunk.len() as i64));
         d.set(b"First", Obj::Int(first as i64));
         d.set(b"Filter", Obj::Name(b"FlateDecode".to_vec()));
+        // Encrypted as a stream; the objects inside are not encrypted on their own.
+        let (mut d, z) = match crypt {
+            Some(c) => c.seal_stream(sn, 0, &d, &z).map_err(|e| format!("object stream: {e}"))?,
+            None => (d, z),
+        };
         d.set(b"Length", Obj::Int(z.len() as i64));
         let mut out = Vec::new();
         Writer { out: &mut out }.dict(&d);
@@ -414,6 +483,15 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         out.extend_from_slice(b"\nendstream");
         direct.insert(sn, (0, out));
         stats.objstms += 1;
+    }
+    // The encryption dictionary and its objects as they were: never encrypted, never in an object stream.
+    if let Some(c) = crypt {
+        if let Some((n, g)) = c.obj {
+            direct.insert(n, (g, to_bytes(&Obj::Dict(c.dict.clone()))));
+        }
+        for (n, g, o) in &c.parts {
+            direct.insert(*n, (*g, to_bytes(o)));
+        }
     }
 
     // The file.
@@ -495,7 +573,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     out.extend_from_slice(format!("startxref\n{xref_off}\n%%EOF\n").as_bytes());
 
     // Read our own output back and compare everything reachable.
-    self_check(&objs, &out, &doc.trailer)?;
+    self_check(&objs, &out, &doc.trailer, crypt)?;
     Ok((out, stats))
 }
 
@@ -540,8 +618,18 @@ fn same_except_encoding(a: &Dict, b: &Dict) -> bool {
     strip(a) == strip(b)
 }
 
-fn self_check(objs: &BTreeMap<u32, (u16, Obj)>, out: &[u8], trailer: &Dict) -> Result<(), String> {
+fn self_check(objs: &BTreeMap<u32, (u16, Obj)>, out: &[u8], trailer: &Dict, crypt: Option<&Crypt>) -> Result<(), String> {
     let doc2 = xref::open(out).map_err(|e| format!("self-check: output unreadable: {e:?}"))?;
+    // It opens the same way: the same encryption dictionary and object, file key and methods. Objects are then
+    // compared decrypted.
+    let same_crypt = match (crypt, &doc2.crypt) {
+        (None, None) => true,
+        (Some(a), Some(Ok(b))) => a == b,
+        _ => false,
+    };
+    if !same_crypt {
+        return Err("self-check: encryption differs".into());
+    }
     for (k, v) in &trailer.0 {
         if !STRUCTURAL.contains(&k.as_slice()) && doc2.trailer.get(k) != Some(v) {
             return Err("self-check: trailer differs".into());
