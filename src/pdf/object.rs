@@ -72,6 +72,12 @@ impl Obj {
             _ => None,
         }
     }
+    pub fn as_array(&self) -> Option<&Vec<Obj>> {
+        match self {
+            Obj::Array(a) => Some(a),
+            _ => None,
+        }
+    }
     pub fn as_name(&self) -> Option<&[u8]> {
         match self {
             Obj::Name(n) => Some(n),

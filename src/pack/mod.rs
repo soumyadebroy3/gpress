@@ -14,7 +14,7 @@ use crate::pdf::object::{Dict, Obj};
 use crate::pdf::parse::Lexer;
 
 pub const MAGIC: &[u8; 4] = b"\x89PYJ";
-const VERSION: u8 = 3;
+const VERSION: u8 = 4;
 const HASH_LEN: usize = 16;
 
 /// A typical PDF fragment both sides feed to the model first, so small files don't pay for a cold start.
@@ -30,6 +30,8 @@ impl Coder for Null {
 
 fn primed(bits: u32) -> Model {
     let mut m = Model::new(bits);
+    // The priming text runs twice to train the full model, so the long-repeat shortcut stays off here.
+    m.bypass_on = false;
     let mut n = Null;
     for _ in 0..2 {
         m.set_kind(Kind::Syntax, Geom::default(), 0);
@@ -42,7 +44,27 @@ fn primed(bits: u32) -> Model {
         }
     }
     m.forget_document();
+    m.bypass_on = true;
     m
+}
+
+/// Data that is already compressed (high byte entropy) may be coded plainly: much faster, but about 1%
+/// larger than the full model even on such data (measured), so only when speed is asked for. Only the encoder
+/// decides; the decision is stored in the file.
+fn looks_compressed(x: &[u8], allowed: bool) -> bool {
+    if !allowed || x.len() < 1024 {
+        return false;
+    }
+    let mut h = [0u64; 256];
+    for &b in x {
+        h[b as usize] += 1;
+    }
+    let n = x.len() as f64;
+    let bits: f64 = h.iter().filter(|&&c| c > 0).map(|&c| {
+        let p = c as f64 / n;
+        -p * p.log2()
+    }).sum();
+    bits >= 7.9
 }
 
 fn header(version: u8, input: &[u8]) -> Vec<u8> {
@@ -81,6 +103,9 @@ pub struct PackStats {
     pub stored: bool,
     /// Restore only: the file is damaged (it can't be restored; nothing wrong is ever returned).
     pub damaged: bool,
+    /// Bytes coded plainly (already compressed) and bytes coded by one long-repeat decision.
+    pub flat_bytes: usize,
+    pub bypassed: u64,
 }
 
 #[derive(Debug)]
@@ -185,6 +210,9 @@ fn dict_before(d: &[u8], k: usize) -> Option<Dict> {
 struct Info {
     kind: Kind,
     geom: Geom,
+    /// Image without a predictor: (width, height, bits per component, components guessed from the colour
+    /// space), so the row length can be confirmed from the data length.
+    img: Option<(usize, usize, usize, usize)>,
     /// PNG predictor rows: (bytes per row without the filter byte, bytes per pixel).
     png: Option<(usize, usize)>,
     /// TIFF predictor 2 on 8-bit samples: (bytes per row, bytes per pixel).
@@ -196,7 +224,7 @@ fn int(d: &Dict, k: &[u8]) -> Option<i64> {
 }
 
 fn info(dict: Option<&Dict>, decoded_sample: Option<&[u8]>) -> Info {
-    let mut inf = Info { kind: Kind::Raw, geom: Geom::default(), png: None, tiff: None };
+    let mut inf = Info { kind: Kind::Raw, geom: Geom::default(), img: None, png: None, tiff: None };
     let d = match dict {
         Some(d) => d,
         None => return inf,
@@ -211,22 +239,38 @@ fn info(dict: Option<&Dict>, decoded_sample: Option<&[u8]>) -> Info {
     };
     let subtype = d.name(b"Subtype").map(|x| x.to_vec());
     let typ = d.name(b"Type").map(|x| x.to_vec());
+    // Behind Flate there may be another codec (a JPEG, say): then the decoded data is that codec's bytes, not
+    // samples or text.
+    if matches!(d.get(b"Filter"), Some(Obj::Array(a)) if a.len() > 1) {
+        return inf;
+    }
     if subtype.as_deref() == Some(b"Image") {
-        let w = int(d, b"Width").unwrap_or(0).max(0) as usize;
-        let bpc = int(d, b"BitsPerComponent").unwrap_or(8).max(1) as usize;
-        let comps = match d.get(b"ColorSpace") {
-            Some(Obj::Name(n)) if n == b"DeviceRGB" || n == b"CalRGB" => 3,
-            Some(Obj::Name(n)) if n == b"DeviceCMYK" => 4,
-            Some(Obj::Name(n)) if n == b"DeviceGray" || n == b"CalGray" => 1,
-            Some(Obj::Array(a)) if a.first().and_then(|x| x.as_name()) == Some(b"Indexed") => 1,
-            Some(Obj::Array(a)) if a.first().and_then(|x| x.as_name()) == Some(b"ICCBased") => 3,
-            _ if d.get(b"ImageMask") == Some(&Obj::Bool(true)) => 1,
-            _ => 1,
+        let w = int(d, b"Width").unwrap_or(0).clamp(0, 1 << 24) as usize;
+        let h = int(d, b"Height").unwrap_or(0).clamp(0, 1 << 24) as usize;
+        let mask = d.get(b"ImageMask") == Some(&Obj::Bool(true));
+        let bpc = if mask { 1 } else { int(d, b"BitsPerComponent").unwrap_or(8).clamp(1, 16) as usize };
+        let first = |a: &Vec<Obj>| a.first().and_then(|x| x.as_name()).map(|x| x.to_vec());
+        let (comps, indexed) = match d.get(b"ColorSpace") {
+            Some(Obj::Name(n)) if n == b"DeviceRGB" || n == b"CalRGB" || n == b"RGB" => (3, false),
+            Some(Obj::Name(n)) if n == b"DeviceCMYK" || n == b"CMYK" => (4, false),
+            Some(Obj::Name(n)) if n == b"DeviceGray" || n == b"CalGray" || n == b"G" => (1, false),
+            Some(Obj::Array(a)) => match first(a).as_deref() {
+                Some(b"Indexed") | Some(b"I") => (1, true),
+                Some(b"DeviceN") => (a.get(1).and_then(|x| x.as_array()).map_or(1, |v| v.len().max(1)), false),
+                Some(b"Separation") | Some(b"CalGray") => (1, false),
+                Some(b"CalRGB") | Some(b"Lab") => (3, false),
+                // The real count is in the ICC stream (/N); the data length confirms it below.
+                _ => (3, false),
+            },
+            _ => (1, false),
         };
         let row = (w * comps * bpc + 7) / 8;
         let bpp = ((comps * bpc) / 8).max(1);
         inf.kind = Kind::Image;
-        inf.geom = Geom { stride: row, bpp };
+        // Palette indices and packed pixels are symbols: modelled exactly, not as differences.
+        let exact = indexed || bpc < 8;
+        inf.geom = Geom { stride: row, bpp, exact };
+        inf.img = Some((w, h, bpc, comps));
         if let Some(p) = &parms {
             let pred = int(p, b"Predictor").unwrap_or(1);
             if pred >= 10 {
@@ -236,19 +280,22 @@ fn info(dict: Option<&Dict>, decoded_sample: Option<&[u8]>) -> Info {
                 let prow = (cols * colors * pbpc + 7) / 8;
                 let pbpp = ((colors * pbpc + 7) / 8).max(1);
                 inf.png = Some((prow, pbpp));
-                inf.geom = Geom { stride: prow, bpp: pbpp };
+                inf.geom = Geom { stride: prow, bpp: pbpp, exact: exact || pbpc < 8 };
+                inf.img = None;
             } else if pred == 2 {
                 let cols = int(p, b"Columns").unwrap_or(1).max(1) as usize;
                 let colors = int(p, b"Colors").unwrap_or(1).max(1) as usize;
                 let pbpc = int(p, b"BitsPerComponent").unwrap_or(8).max(1) as usize;
                 if pbpc == 8 {
                     inf.tiff = Some((cols * colors, colors));
-                    inf.geom = Geom { stride: cols * colors, bpp: colors };
+                    inf.geom = Geom { stride: cols * colors, bpp: colors, exact: false };
                 } else {
-                    inf.geom = Geom { stride: 0, bpp: 1 };
+                    inf.geom = Geom { stride: 0, bpp: 1, exact: false };
                 }
+                inf.img = None;
             } else if pred > 1 {
-                inf.geom = Geom { stride: 0, bpp: 1 };
+                inf.geom = Geom { stride: 0, bpp: 1, exact: false };
+                inf.img = None;
             }
         }
         return inf;
@@ -412,6 +459,9 @@ impl<'m, C: Coder> Io<'m, C> {
     }
 }
 
+/// Plain coding for compressed-looking streams: off at the current (maximum) effort.
+const PLAIN_WHEN_COMPRESSED: bool = false;
+
 const T_SYNTAX: u8 = 0;
 const T_RAW: u8 = 1;
 const T_REBUILT: u8 = 2;
@@ -432,9 +482,10 @@ fn table_bits(n: usize) -> u32 {
 enum Plan {
     Syntax(usize, usize),
     Raw(usize, usize),
-    Rebuilt { params: zlibexact::Params, data: Vec<u8>, tail: Vec<u8> },
+    /// `lep`: the decoded data is a JPEG, recompressed with Lepton (when that beats the Flate bytes).
+    Rebuilt { params: zlibexact::Params, data: Vec<u8>, tail: Vec<u8>, lep: Option<Vec<u8>> },
     /// Rebuilt with the corrections an existing library (preflate) records for non-zlib encoders.
-    Preflated { header: [u8; 2], corrections: Vec<u8>, data: Vec<u8>, adler_ok: bool, rest: Vec<u8> },
+    Preflated { header: [u8; 2], corrections: Vec<u8>, data: Vec<u8>, adler_ok: bool, rest: Vec<u8>, lep: Option<Vec<u8>> },
     /// A JPEG recompressed with an existing library (Lepton), restored bit for bit.
     Lepton { data: Vec<u8> },
 }
@@ -445,7 +496,10 @@ fn plan(d: &[u8]) -> Vec<Plan> {
         .map(|s| match s {
             Seg::Syntax(a, b) => Plan::Syntax(a, b),
             Seg::Stream(a, b) => match rebuild_params(d, a, &d[a..b]) {
-                Some((params, data, tail)) => Plan::Rebuilt { params, data, tail },
+                Some((params, data, tail)) => {
+                    let lep = nested_lepton(&data, b - a);
+                    Plan::Rebuilt { params, data, tail, lep }
+                }
                 None => match preflated(d, a, &d[a..b]) {
                     Some(p) => p,
                     None => match lepton(d, a, &d[a..b]) {
@@ -468,13 +522,19 @@ pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
     for p in plan(d) {
         match p {
             Plan::Syntax(a, b) | Plan::Raw(a, b) => out.extend_from_slice(&d[a..b]),
-            Plan::Rebuilt { data, tail, .. } => {
-                out.extend_from_slice(&data);
+            Plan::Rebuilt { data, tail, lep, .. } => {
+                match lep {
+                    Some(l) => extra += l.len(),
+                    None => out.extend_from_slice(&data),
+                }
                 out.extend_from_slice(&tail);
                 extra += 2;
             }
-            Plan::Preflated { corrections, data, rest, .. } => {
-                out.extend_from_slice(&data);
+            Plan::Preflated { corrections, data, rest, lep, .. } => {
+                match lep {
+                    Some(l) => extra += l.len(),
+                    None => out.extend_from_slice(&data),
+                }
                 out.extend_from_slice(&rest);
                 extra += corrections.len();
             }
@@ -512,7 +572,8 @@ fn preflated(_d: &[u8], _start: usize, raw: &[u8]) -> Option<Plan> {
     let after = &raw[used..];
     let adler_ok = after.len() >= 4 && after[..4] == zlib::adler32(&data).to_be_bytes();
     let rest = if adler_ok { after[4..].to_vec() } else { after.to_vec() };
-    Some(Plan::Preflated { header: [cmf, flg], corrections: res.corrections, data, adler_ok, rest })
+    let lep = nested_lepton(&data, raw.len());
+    Some(Plan::Preflated { header: [cmf, flg], corrections: res.corrections, data, adler_ok, rest, lep })
 }
 
 #[cfg(not(feature = "existing"))]
@@ -529,35 +590,33 @@ fn lepton_features() -> lepton_jpeg::EnabledFeatures {
 
 #[cfg(feature = "existing")]
 fn lepton(_d: &[u8], _start: usize, raw: &[u8]) -> Option<Plan> {
-    // A JPEG by its bytes (start of image, then a marker); Lepton's result is checked by restoring it.
+    lepton_bytes(raw).map(|data| Plan::Lepton { data })
+}
+
+/// Decoded Flate data that is a JPEG: Lepton, when its output is at least 10% smaller than the Flate bytes
+/// (a JPEG that Flate shrinks a lot is better left to our model).
+fn nested_lepton(data: &[u8], flate_len: usize) -> Option<Vec<u8>> {
+    lepton_bytes(data).filter(|l| l.len() * 10 < flate_len * 9)
+}
+
+/// A JPEG by its bytes (start of image, then a marker) recompressed with Lepton; kept only if smaller and
+/// restored exactly.
+#[cfg(feature = "existing")]
+fn lepton_bytes(raw: &[u8]) -> Option<Vec<u8>> {
     if raw.len() < 1024 || !raw.starts_with(&[0xFF, 0xD8, 0xFF]) {
         return None;
     }
     let pool = lepton_jpeg::SingleThreadPool {};
     let mut out = std::io::Cursor::new(Vec::new());
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        match lepton_jpeg::encode_lepton(&mut std::io::Cursor::new(raw), &mut out, &lepton_features(), &pool) {
-            Ok(m) => Some(m),
-            Err(e) => {
-                if std::env::var_os("PDFE_DEBUG").is_some() {
-                    eprintln!("lepton: {e:?}");
-                }
-                None
-            }
-        }
+        lepton_jpeg::encode_lepton(&mut std::io::Cursor::new(raw), &mut out, &lepton_features(), &pool).ok()
     }));
-    if std::env::var_os("PDFE_DEBUG").is_some() && r.is_err() {
-        eprintln!("lepton panicked");
-    }
     r.ok()??;
     let data = out.into_inner();
-    if data.len() >= raw.len() {
+    if data.len() >= raw.len() || unlepton(&data)? != raw {
         return None;
     }
-    if unlepton(&data)? != raw {
-        return None;
-    }
-    Some(Plan::Lepton { data })
+    Some(data)
 }
 
 #[cfg(feature = "existing")]
@@ -573,6 +632,11 @@ fn unlepton(data: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(not(feature = "existing"))]
 fn lepton(_d: &[u8], _start: usize, _raw: &[u8]) -> Option<Plan> {
+    None
+}
+
+#[cfg(not(feature = "existing"))]
+fn lepton_bytes(_raw: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
@@ -624,20 +688,27 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
                     _ => None,
                 };
                 let n = io.length(src.map(|x| x.len() as u64), left);
+                let mut flat = false;
                 if tag == T_SYNTAX {
                     io.m.set_kind(Kind::Syntax, Geom::default(), out.len() as u64);
                     stats.syntax_bytes += n;
                 } else {
+                    flat = io.byte(src.map(|x| looks_compressed(x, PLAIN_WHEN_COMPRESSED) as u8)) == 1;
                     io.m.set_kind(Kind::Raw, Geom::default(), out.len() as u64);
                     stats.streams += 1;
                     stats.raw_stream_bytes += n;
+                    if flat {
+                        stats.flat_bytes += n;
+                    }
                 }
+                io.m.set_flat(flat);
                 io.bytes(src, n, &mut out);
+                io.m.set_flat(false);
             }
             T_REBUILT => {
-                let (p_in, data_in, tail_in) = match cur.flatten() {
-                    Some(Plan::Rebuilt { params, data, tail }) => (Some(*params), Some(data.as_slice()), Some(tail.as_slice())),
-                    _ => (None, None, None),
+                let (p_in, data_in, tail_in, lep_in) = match cur.flatten() {
+                    Some(Plan::Rebuilt { params, data, tail, lep }) => (Some(*params), Some(data.as_slice()), Some(tail.as_slice()), Some(lep.as_deref())),
+                    _ => (None, None, None, None),
                 };
                 let level = io.byte(p_in.map(|p| p.level));
                 let wb = io.byte(p_in.map(|p| p.window_bits));
@@ -651,7 +722,7 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
                 let tail_n = io.length(tail_in.map(|t| t.len() as u64), left);
                 let mut tail = Vec::with_capacity(reserve(tail_n));
                 io.bytes(tail_in, tail_n, &mut tail);
-                let decoded = payload(&mut io, data_in, &out, stats);
+                let decoded = payload(&mut io, data_in, lep_in, &out, stats);
                 if io.damaged {
                     break;
                 }
@@ -664,7 +735,7 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
             }
             T_PREFLATED => {
                 let cur_p = match cur.flatten() {
-                    Some(Plan::Preflated { header, corrections, data, adler_ok, rest }) => Some((*header, corrections.as_slice(), data.as_slice(), *adler_ok, rest.as_slice())),
+                    Some(Plan::Preflated { header, corrections, data, adler_ok, rest, lep }) => Some((*header, corrections.as_slice(), data.as_slice(), *adler_ok, rest.as_slice(), lep.as_deref())),
                     _ => None,
                 };
                 let h0 = io.byte(cur_p.map(|p| p.0[0]));
@@ -678,7 +749,7 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
                 let rlen = io.length(cur_p.map(|p| p.4.len() as u64), left);
                 let mut rest = Vec::with_capacity(reserve(rlen));
                 io.bytes(cur_p.map(|p| p.4), rlen, &mut rest);
-                let decoded = payload(&mut io, cur_p.map(|p| p.2), &out, stats);
+                let decoded = payload(&mut io, cur_p.map(|p| p.2), cur_p.map(|p| p.5), &out, stats);
                 if io.damaged {
                     break;
                 }
@@ -705,9 +776,8 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
                     _ => None,
                 };
                 let n = io.length(src.map(|x| x.len() as u64), MAX_PART);
-                io.m.set_kind(Kind::Raw, Geom::default(), 0);
                 let mut lep = Vec::with_capacity(reserve(n));
-                io.bytes(src, n, &mut lep);
+                lepton_part(&mut io, src, n, &mut lep, stats);
                 if io.damaged {
                     break;
                 }
@@ -731,14 +801,44 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
     if io.damaged {
         stats.damaged = true;
     }
+    stats.bypassed = io.m.bypassed;
     let Io { c, .. } = io;
     (out, c)
 }
 
+/// Lepton's output: usually entropy-coded already, so coded plainly (repeats are still found); our model
+/// when it isn't (an odd JPEG). The encoder decides; the decision is stored.
+fn lepton_part<C: Coder>(io: &mut Io<C>, src: Option<&[u8]>, n: usize, lep: &mut Vec<u8>, stats: &mut PackStats) {
+    let flat = io.byte(src.map(|x| looks_compressed(x, true) as u8)) == 1;
+    io.m.set_kind(Kind::Raw, Geom::default(), 0);
+    io.m.set_flat(flat);
+    io.bytes(src, n, lep);
+    io.m.set_flat(false);
+    if flat {
+        stats.flat_bytes += n;
+    }
+}
+
 /// Codes a decoded stream payload (shared by the rebuilt kinds): its length, then the data with the model
 /// set for what it is; image rows lose their PNG predictor bytes on the way.
-fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, out: &[u8], stats: &mut PackStats) -> Vec<u8> {
+fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, lep_in: Option<Option<&[u8]>>, out: &[u8], stats: &mut PackStats) -> Vec<u8> {
     let dlen = io.length(data_in.map(|x| x.len() as u64), MAX_PART);
+    // A JPEG behind Flate (as normal-PDF output writes them): Lepton for the JPEG inside.
+    if io.byte(lep_in.map(|l| l.is_some() as u8)) == 1 {
+        let src = lep_in.flatten();
+        let n = io.length(src.map(|x| x.len() as u64), MAX_PART);
+        let mut lep = Vec::with_capacity(reserve(n));
+        lepton_part(io, src, n, &mut lep, stats);
+        stats.leptons += 1;
+        stats.decoded_bytes += dlen;
+        return match (io.damaged, unlepton(&lep)) {
+            (false, Some(j)) if j.len() == dlen => j,
+            _ => {
+                io.damaged = true;
+                Vec::new()
+            }
+        };
+    }
     let dict = dict_before(out, out.len().saturating_sub(1));
     let looks = io.byte(data_in.map(|x| looks_like_content(x) as u8));
     let mut inf = info(dict.as_ref(), Some(if looks == 1 { b"q" as &[u8] } else { b"\x00" as &[u8] }));
@@ -756,7 +856,7 @@ fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, out: &[u8], stats: 
             io.m.set_kind(Kind::Data, Geom::default(), 0);
             let mut types = Vec::with_capacity(reserve(rows));
             io.bytes(types_in, rows, &mut types);
-            io.m.set_kind(Kind::Image, Geom { stride: row, bpp }, 0);
+            io.m.set_kind(Kind::Image, Geom { stride: row, bpp, exact: inf.geom.exact }, 0);
             let mut px = Vec::with_capacity(reserve(rows * row));
             io.bytes(px_in, rows * row, &mut px);
             if io.damaged {
@@ -780,7 +880,7 @@ fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, out: &[u8], stats: 
                 }
                 v
             });
-            io.m.set_kind(Kind::Image, Geom { stride: row, bpp }, 0);
+            io.m.set_kind(Kind::Image, Geom { stride: row, bpp, exact: false }, 0);
             let mut px = Vec::with_capacity(reserve(dlen));
             io.bytes(px_in.as_deref(), dlen, &mut px);
             for r in px.chunks_mut(row) {
@@ -795,10 +895,29 @@ fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, out: &[u8], stats: 
     }
     if !used_png {
         if inf.png.is_some() {
-            inf.geom = Geom { stride: inf.geom.stride + 1, bpp: 1 };
+            inf.geom = Geom { stride: inf.geom.stride + 1, bpp: 1, exact: true };
         }
+        if let Some((w, h, bpc, comps)) = inf.img {
+            // The colour space can't always tell the number of components (an ICC profile's /N lives in another
+            // object); the data length can. Both sides see the same length and dictionary.
+            for c in [comps, 1, 3, 4, 2, 5, 6, 7, 8] {
+                let row = (w * c * bpc + 7) / 8;
+                if row > 0 && h > 0 && row.checked_mul(h) == Some(dlen) {
+                    inf.geom.stride = row;
+                    inf.geom.bpp = ((c * bpc) / 8).max(1);
+                    break;
+                }
+            }
+        }
+        // Decoded data can itself be compressed (a JPEG behind Flate, say).
+        let flat = io.byte(data_in.map(|x| (inf.png.is_none() && looks_compressed(x, PLAIN_WHEN_COMPRESSED)) as u8)) == 1;
         io.m.set_kind(inf.kind, inf.geom, 0);
+        io.m.set_flat(flat);
         io.bytes(data_in, dlen, &mut decoded);
+        io.m.set_flat(false);
+        if flat {
+            stats.flat_bytes += dlen;
+        }
     }
     stats.decoded_bytes += dlen;
     decoded
