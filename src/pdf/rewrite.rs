@@ -353,6 +353,12 @@ fn repredict(s: &Stream, data: &[u8], carried: Option<&Dict>, opt: &Options, res
     Some((d, z))
 }
 
+/// Bytes of an image the predictor candidates are ranked on below effort 100: 64 KiB at effort 0, twice as
+/// much every 20 points.
+fn predictor_budget(effort: u8) -> usize {
+    (64usize << 10) << (effort.min(99) as usize / 20)
+}
+
 /// Rows for ranking the predictor candidates of an image below effort 100: bands of whole rows spread over
 /// the image (neighbouring rows keep what predictors and matches see), at most a budget of bytes that grows
 /// with the effort. None: rank on the whole image (effort 100, or a small image).
@@ -360,8 +366,7 @@ fn predictor_sample(nrows: usize, row: usize, effort: u8) -> Option<Vec<(usize, 
     if effort >= 100 || row == 0 {
         return None;
     }
-    // 64 KiB at effort 0, twice as much every 20 points.
-    let budget = (64usize << 10) << (effort as usize / 20);
+    let budget = predictor_budget(effort);
     if nrows.saturating_mul(row) <= budget {
         return None;
     }
@@ -426,7 +431,7 @@ fn effort_plan(streams: &[(u32, &Stream)], unique: &[usize], opt: &Options, inpu
         return vec![opt.clone(); unique.len()];
     }
     let quick = Options { flate: flate::Options { shared: opt.flate.shared.clone(), ..flate::Options::effort(0) }, effort: 0, ..opt.clone() };
-    if opt.effort == 0 {
+    if opt.flate.same_output(&quick.flate) && predictor_budget(opt.effort) == predictor_budget(0) {
         return vec![quick; unique.len()];
     }
     let sizes = par::map(pool, unique.len(), None, |u| decoded_len(streams[unique[u]].1, opt.max_stream));

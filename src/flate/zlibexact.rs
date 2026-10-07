@@ -98,6 +98,10 @@ struct State<'a> {
     block_start: usize,
     /// End (absolute) of the input read into the window so far.
     read_upto: usize,
+    /// When rebuilding known bytes: they, how many were compared so far, and whether a difference was seen.
+    target: Option<&'a [u8]>,
+    checked: usize,
+    differs: bool,
 }
 
 impl<'a> State<'a> {
@@ -205,11 +209,30 @@ impl<'a> State<'a> {
         flush_block(&mut self.out, t, block, stored_len, last, storable);
         self.block_start = self.strstart;
         t.reset();
+        // Compare the whole bytes written so far with the target: the first difference ends the attempt.
+        if let Some(target) = self.target {
+            let done = &self.out.out;
+            if done.len() > target.len() || done[self.checked..] != target[self.checked..done.len()] {
+                self.differs = true;
+            }
+            self.checked = done.len();
+        }
     }
 }
 
 /// Compresses `d` exactly as zlib would with these parameters (raw Deflate data, no zlib wrapper).
 pub fn deflate_like_zlib(d: &[u8], p: Params) -> Vec<u8> {
+    run_zlib(d, p, None).expect("no target to differ from")
+}
+
+/// Whether `d` compressed with these parameters gives exactly `target` (raw Deflate data). Stops at the
+/// first block that differs, so a wrong guess costs little.
+pub fn rebuilds(d: &[u8], p: Params, target: &[u8]) -> bool {
+    run_zlib(d, p, Some(target)).map_or(false, |z| z == target)
+}
+
+/// The compressed data, or None as soon as it is known to differ from `target`.
+fn run_zlib(d: &[u8], p: Params, target: Option<&[u8]>) -> Option<Vec<u8>> {
     let w_size = 1usize << p.window_bits;
     let hash_bits = p.mem_level as u32 + 7;
     let mut s = State {
@@ -232,6 +255,9 @@ pub fn deflate_like_zlib(d: &[u8], p: Params) -> Vec<u8> {
         out: BitWriter::with_capacity(d.len() / 2 + 64),
         block_start: 0,
         read_upto: 0,
+        target,
+        checked: 0,
+        differs: false,
     };
     let _ = s.hash_bits;
     let mut t = Tally::new((1usize << (p.mem_level + 6)) - 1);
@@ -240,8 +266,11 @@ pub fn deflate_like_zlib(d: &[u8], p: Params) -> Vec<u8> {
     } else {
         run_slow(&mut s, &mut t);
     }
+    if s.differs {
+        return None;
+    }
     s.flush(&mut t, true);
-    s.out.finish()
+    Some(s.out.finish())
 }
 
 fn run_fast(s: &mut State, t: &mut Tally) {
@@ -289,6 +318,9 @@ fn run_fast(s: &mut State, t: &mut Tally) {
         }
         if bflush {
             s.flush(t, false);
+            if s.differs {
+                return;
+            }
         }
     }
 }
@@ -337,11 +369,17 @@ fn run_slow(s: &mut State, t: &mut Tally) {
             s.strstart += 1;
             if bflush {
                 s.flush(t, false);
+                if s.differs {
+                    return;
+                }
             }
         } else if match_available {
             let bflush = t.lit(s.d[s.strstart - 1]);
             if bflush {
                 s.flush(t, false);
+                if s.differs {
+                    return;
+                }
             }
             s.strstart += 1;
             s.lookahead -= 1;
@@ -696,8 +734,7 @@ pub fn find_params(data: &[u8], raw: &[u8]) -> Option<Params> {
                     continue;
                 }
                 let p = Params { level, window_bits: wb, mem_level: mem, filtered };
-                let z = deflate_like_zlib(data, p);
-                if z == body {
+                if rebuilds(data, p, body) {
                     return Some(p);
                 }
             }
@@ -747,5 +784,43 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 40, "checked {checked}");
+    }
+
+    #[test]
+    fn early_stop_agrees_with_full_encoding() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+        let mut data = std::fs::read(dir.join("mixed.raw")).unwrap();
+        // Long enough for several blocks at the smaller memory levels.
+        let text = std::fs::read(dir.join("text.raw")).unwrap();
+        for k in 0..60 {
+            data.extend_from_slice(&text);
+            data.extend(std::iter::repeat((k * 7) as u8).take(k * 13));
+        }
+        let mut tried = 0;
+        for level in [1u8, 4, 6, 9] {
+            for mem in [1u8, 8] {
+                let target = deflate_like_zlib(&data, Params { level, window_bits: 15, mem_level: mem, filtered: false });
+                for l2 in [1u8, 4, 6, 9] {
+                    for m2 in [1u8, 8] {
+                        let p = Params { level: l2, window_bits: 15, mem_level: m2, filtered: false };
+                        assert_eq!(rebuilds(&data, p, &target), deflate_like_zlib(&data, p) == target, "{level}/{mem} vs {p:?}");
+                        tried += 1;
+                    }
+                }
+                // A damaged target is never rebuilt, wherever the damage is.
+                let p = Params { level, window_bits: 15, mem_level: mem, filtered: false };
+                assert!(rebuilds(&data, p, &target));
+                for pos in [0, target.len() / 3, target.len() - 1] {
+                    let mut bad = target.clone();
+                    bad[pos] ^= 0x10;
+                    assert!(!rebuilds(&data, p, &bad));
+                }
+                assert!(!rebuilds(&data, p, &target[..target.len() - 1]));
+                let mut longer = target.clone();
+                longer.push(0);
+                assert!(!rebuilds(&data, p, &longer));
+            }
+        }
+        assert_eq!(tried, 64);
     }
 }
