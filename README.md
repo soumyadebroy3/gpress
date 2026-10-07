@@ -21,6 +21,7 @@ tool, measured on public test PDFs against the best existing tools. Nothing here
 The engine keeps whichever result is smaller after the checks, so existing libraries can only help:
 
 - [preflate-rs](https://crates.io/crates/preflate-rs) (Apache-2.0, Microsoft): rebuilds Flate streams made by encoders other than zlib (Adobe, cairo, Quartz) in the peyaji format.
+- [lepton_jpeg](https://crates.io/crates/lepton_jpeg) (Apache-2.0, Microsoft): recompresses JPEG streams in the peyaji format and restores them bit for bit.
 
 Apache-2.0 requires shipping its licence and notices with the product.
 

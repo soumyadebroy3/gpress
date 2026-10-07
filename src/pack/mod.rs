@@ -76,6 +76,7 @@ pub struct PackStats {
     pub decoded_bytes: usize,
     pub unpredicted_images: usize,
     pub preflated: usize,
+    pub leptons: usize,
     pub fallback: bool,
     pub stored: bool,
 }
@@ -396,6 +397,7 @@ const T_SYNTAX: u8 = 0;
 const T_RAW: u8 = 1;
 const T_REBUILT: u8 = 2;
 const T_PREFLATED: u8 = 3;
+const T_LEPTON: u8 = 4;
 const T_END: u8 = 255;
 
 fn table_bits(n: usize) -> u32 {
@@ -413,6 +415,8 @@ enum Plan {
     Rebuilt { params: zlibexact::Params, data: Vec<u8>, tail: Vec<u8> },
     /// Rebuilt with the corrections an existing library (preflate) records for non-zlib encoders.
     Preflated { header: [u8; 2], corrections: Vec<u8>, data: Vec<u8>, adler_ok: bool, rest: Vec<u8> },
+    /// A JPEG recompressed with an existing library (Lepton), restored bit for bit.
+    Lepton { data: Vec<u8> },
 }
 
 fn plan(d: &[u8]) -> Vec<Plan> {
@@ -424,7 +428,10 @@ fn plan(d: &[u8]) -> Vec<Plan> {
                 Some((params, data, tail)) => Plan::Rebuilt { params, data, tail },
                 None => match preflated(d, a, &d[a..b]) {
                     Some(p) => p,
-                    None => Plan::Raw(a, b),
+                    None => match lepton(d, a, &d[a..b]) {
+                        Some(p) => p,
+                        None => Plan::Raw(a, b),
+                    },
                 },
             },
         })
@@ -465,6 +472,79 @@ fn preflated(_d: &[u8], _start: usize, _raw: &[u8]) -> Option<Plan> {
 }
 
 #[cfg(feature = "existing")]
+fn lepton_features() -> lepton_jpeg::EnabledFeatures {
+    let mut f = lepton_jpeg::EnabledFeatures::compat_lepton_vector_write();
+    f.max_processor_threads = 1;
+    f
+}
+
+#[cfg(feature = "existing")]
+fn lepton(d: &[u8], start: usize, raw: &[u8]) -> Option<Plan> {
+    let dict = dict_before(d, start.saturating_sub(1));
+    if std::env::var_os("PDFE_DEBUG").is_some() {
+        eprintln!("lepton dict: {:?}", dict.as_ref().map(|x| x.get(b"Filter").cloned()));
+    }
+    let dict = dict?;
+    let dct = match dict.get(b"Filter") {
+        Some(Obj::Name(n)) => n == b"DCTDecode" || n == b"DCT",
+        Some(Obj::Array(a)) if a.len() == 1 => matches!(&a[0], Obj::Name(n) if n == b"DCTDecode" || n == b"DCT"),
+        _ => false,
+    };
+    if std::env::var_os("PDFE_DEBUG").is_some() {
+        eprintln!("lepton candidate: dct={dct} len={}", raw.len());
+    }
+    if !dct || raw.len() < 1024 {
+        return None;
+    }
+    let pool = lepton_jpeg::SingleThreadPool {};
+    let mut out = std::io::Cursor::new(Vec::new());
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match lepton_jpeg::encode_lepton(&mut std::io::Cursor::new(raw), &mut out, &lepton_features(), &pool) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                if std::env::var_os("PDFE_DEBUG").is_some() {
+                    eprintln!("lepton: {e:?}");
+                }
+                None
+            }
+        }
+    }));
+    if std::env::var_os("PDFE_DEBUG").is_some() && r.is_err() {
+        eprintln!("lepton panicked");
+    }
+    r.ok()??;
+    let data = out.into_inner();
+    if data.len() >= raw.len() {
+        return None;
+    }
+    if unlepton(&data)? != raw {
+        return None;
+    }
+    Some(Plan::Lepton { data })
+}
+
+#[cfg(feature = "existing")]
+fn unlepton(data: &[u8]) -> Option<Vec<u8>> {
+    let pool = lepton_jpeg::SingleThreadPool {};
+    let mut out = Vec::new();
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        lepton_jpeg::decode_lepton(&mut std::io::Cursor::new(data), &mut out, &lepton_features(), &pool).ok()
+    }));
+    r.ok()??;
+    Some(out)
+}
+
+#[cfg(not(feature = "existing"))]
+fn lepton(_d: &[u8], _start: usize, _raw: &[u8]) -> Option<Plan> {
+    None
+}
+
+#[cfg(not(feature = "existing"))]
+fn unlepton(_data: &[u8]) -> Option<Vec<u8>> {
+    None
+}
+
+#[cfg(feature = "existing")]
 fn recreate(data: &[u8], corrections: &[u8]) -> Option<Vec<u8>> {
     preflate_rs::recreate_whole_deflate_stream(data, corrections).ok()
 }
@@ -490,6 +570,7 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
             Some(Plan::Raw(..)) => T_RAW,
             Some(Plan::Rebuilt { .. }) => T_REBUILT,
             Some(Plan::Preflated { .. }) => T_PREFLATED,
+            Some(Plan::Lepton { .. }) => T_LEPTON,
         });
         io.m.set_kind(Kind::Meta, Geom::default(), out.len() as u64);
         let tag = io.byte(tag_in);
@@ -559,6 +640,19 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
                 out.extend_from_slice(&rest);
                 stats.streams += 1;
                 stats.preflated += 1;
+            }
+            T_LEPTON => {
+                let src = match cur.flatten() {
+                    Some(Plan::Lepton { data }) => Some(data.as_slice()),
+                    _ => None,
+                };
+                let n = io.varint(src.map(|x| x.len() as u64)) as usize;
+                io.m.set_kind(Kind::Raw, Geom::default(), 0);
+                let mut lep = Vec::with_capacity(n);
+                io.bytes(src, n, &mut lep);
+                out.extend_from_slice(&unlepton(&lep).unwrap_or_default());
+                stats.streams += 1;
+                stats.leptons += 1;
             }
             _ => break,
         }
