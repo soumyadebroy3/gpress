@@ -281,6 +281,23 @@ mod tests {
         out
     }
 
+    #[test]
+    fn decryption_is_kept_only_when_it_pays() {
+        // One tiny AES stream: the key and its initialization vector cost more than decrypting it saves, so the
+        // pack without decryption is kept.
+        let tiny = include_bytes!("../../tests/data/enc/aes_tiny_stream.pdf");
+        let (with, with_stats) = pack_pass(tiny, true);
+        let (packed, stats) = pack(tiny);
+        assert_eq!((with_stats.decrypted, stats.decrypted), (1, 0));
+        assert!(packed.len() < with.len(), "{} {}", packed.len(), with.len());
+        assert_eq!(unpack(&packed).unwrap(), tiny);
+        // Larger encrypted streams: decrypted, and at least a quarter smaller than without.
+        let r4 = include_bytes!("../../tests/data/enc/r4_aes_128.pdf");
+        let (packed, stats) = pack(r4);
+        let (plain, _) = pack_pass(r4, false);
+        assert!(stats.decrypted == 3 && packed.len() * 4 < plain.len() * 3, "{} {}", packed.len(), plain.len());
+    }
+
     fn rc4_settings() -> Plan {
         Plan::Crypt(Sealed { method: Method::Rc4, num: 1, gen: 0, iv: [0; 16] })
     }

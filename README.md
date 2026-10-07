@@ -41,14 +41,17 @@ named by both /StmF and /StrF, and /EncryptMetadata false. The key comes from th
   alone, the pack without decryption is made too and the smaller kept. Unencrypted files encode exactly as
   before (format version 4). The decoder refuses crypt parts out of place (a second key, settings not right
   after the syntax before a stream, an empty payload) and more than two parts in a row that restore nothing.
-- Left untouched (normal PDF) and packed as before (peyaji): files that need a password, other security
-  handlers, signed files, streams with their own /Crypt filter, and anything readers may take differently:
-  a /CF entry named /Identity (qpdf and pdf.js use it, PDFium and Poppler don't), /CFM /None or no /CFM (qpdf
-  decrypts as AES, PDFium as RC4), /StmF and /StrF missing or naming different filters, a /V 4 or 5 key length
-  given nowhere (Poppler takes 40 bits), a /V 4 key that isn't 128 bits, /V 2 without /Length, /R 2 with more
-  than 40 bits, /O or /U of unusual length, a /P outside 32 bits, and literal strings with a raw carriage
-  return (decrypted differently by readers that keep it and readers that read a line feed). Everything else the
-  gate refuses (PDF/A, earlier revisions, ...) still applies.
+- Left untouched (normal PDF): files that need a password, other security handlers, signed files, streams
+  with their own /Crypt filter, and anything readers may take differently: a /CF entry named /Identity (qpdf
+  and pdf.js use it, PDFium and Poppler don't), /CFM /None or no /CFM (qpdf decrypts as AES, PDFium as RC4),
+  /StmF and /StrF missing or naming different filters, a /V 4 or 5 key length given nowhere (Poppler takes 40
+  bits), a /V 4 key that isn't 128 bits, /V 2 without /Length, /R 2 with more than 40 bits, /O or /U of unusual
+  length, a /P outside 32 bits, and literal strings with a raw carriage return (decrypted differently by
+  readers that keep it and readers that read a line feed). Everything else the gate refuses (PDF/A, earlier
+  revisions, ...) still applies.
+- peyaji format: files whose handler isn't opened as above are packed exactly as before. In the others, a
+  stream with its own /Crypt filter, or one that doesn't encrypt back to its stored bytes, is kept as stored;
+  strings are never changed, so signatures and raw carriage returns don't matter there.
 
 ## Existing libraries (optional, `--features existing`)
 

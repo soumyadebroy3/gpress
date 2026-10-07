@@ -162,9 +162,9 @@ def objkey(fk, num, gen, aes=False):
 CONTENT = b'BT /F1 24 Tf 72 700 Td (Hello encrypted world) Tj ET\n' * 8
 
 
-def hand_made(name, enc_body, r, n, p, seal_stream, seal_string, title=None):
+def hand_made(name, enc_body, r, n, p, seal_stream, seal_string, title=None, content=CONTENT):
     """A one-page file: content stream 4, info 6 (its /Title literal or hex), encryption dictionary 7."""
-    c4 = seal_stream(4, CONTENT)
+    c4 = seal_stream(4, content)
     if title is None:
         title = b'<' + seal_string(6, b'A title').hex().encode() + b'>'
     objs = {
@@ -221,6 +221,9 @@ def make_hand_made():
     head_nolen = head.replace(b' /Length 128', b'')
     hand_made('v4_aes_no_length', b'<< ' + head_nolen + b' /CF << /StdCF << /CFM /AESV2 /AuthEvent /DocOpen >> >>'
               b' /StmF /StdCF /StrF /StdCF >>', 4, 16, -1028, aes, aes)
+    # One tiny AES stream: decrypting it can't pay for the key and its initialization vector in a pack.
+    hand_made('aes_tiny_stream', b'<< ' + head + b' /CF << /StdCF << /CFM /AESV2 /AuthEvent /DocOpen /Length 16 >> >>'
+              b' /StmF /StdCF /StrF /StdCF >>', 4, 16, -1028, aes, aes, content=b'0 g\n')
     signed()
 
 
