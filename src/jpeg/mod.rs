@@ -9,8 +9,11 @@
 //!
 //! Only baseline and extended sequential Huffman JPEG with 8-bit samples is handled. Progressive, arithmetic-
 //! coded, lossless, hierarchical and 12-bit JPEGs, and anything unusual or damaged, are refused (the caller keeps
-//! the original). Before a new file is returned it is read back and compared with the original: the same bytes
-//! outside the tables and the coded data, the same symbols in every scan.
+//! the original). So are files whose layout readers could take differently once the tables move (fill bytes
+//! before a marker, segments whose contents don't fill them exactly), and files with data bound to their exact
+//! bytes (multi-picture offsets, APP11 boxes such as content credentials). Before a new file is returned it is
+//! read back and compared with the original: the same bytes outside the tables and the coded data, the same
+//! symbols in every scan.
 
 mod huffman;
 mod parse;
@@ -38,13 +41,15 @@ pub fn optimize(d: &[u8]) -> Result<Vec<u8>, Refused> {
     if d.len() > MAX_LEN {
         return Err(Refused("too large"));
     }
-    let j = parse(d).map_err(Refused)?;
     let mut out = Vec::with_capacity(d.len());
-    for p in &j.pieces {
-        match p {
-            Piece::Keep(r) => out.extend_from_slice(&d[r.clone()]),
-            Piece::Tables => {}
-            Piece::Scan(i) => encode_scan(&j, &j.scans[*i], &mut out).map_err(Refused)?,
+    {
+        let j = parse(d).map_err(Refused)?;
+        for p in &j.pieces {
+            match p {
+                Piece::Keep(r) => out.extend_from_slice(&d[r.clone()]),
+                Piece::Tables => {}
+                Piece::Scan(i) => encode_scan(&j, &j.scans[*i], &mut out).map_err(Refused)?,
+            }
         }
     }
     if out.len() >= d.len() {
@@ -169,18 +174,14 @@ pub fn info(d: &[u8]) -> Result<String, Refused> {
 /// the same order) and the same symbols in every scan. Both must be JPEGs we can read.
 pub fn equivalent(a: &[u8], b: &[u8]) -> bool {
     let (Ok(ja), Ok(jb)) = (parse(a), parse(b)) else { return false };
-    let kept = |j: &Jpeg| -> Vec<std::ops::Range<usize>> {
-        j.pieces
-            .iter()
-            .filter_map(|p| match p {
-                Piece::Keep(r) => Some(r.clone()),
-                Piece::Scan(i) => Some(j.scans[*i].header.clone()),
-                Piece::Tables => None,
-            })
-            .collect()
-    };
-    let (ka, kb) = (kept(&ja), kept(&jb));
-    if ka.len() != kb.len() || ka.iter().zip(&kb).any(|(x, y)| a[x.clone()] != b[y.clone()]) {
+    fn kept<'j>(j: &'j Jpeg) -> impl Iterator<Item = &'j [u8]> + 'j {
+        j.pieces.iter().filter_map(move |p| match p {
+            Piece::Keep(r) => Some(&j.data[r.clone()]),
+            Piece::Scan(i) => Some(&j.data[j.scans[*i].header.clone()]),
+            Piece::Tables => None,
+        })
+    }
+    if !kept(&ja).eq(kept(&jb)) {
         return false;
     }
     same_symbols(&ja, &jb)

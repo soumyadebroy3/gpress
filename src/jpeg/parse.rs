@@ -11,6 +11,8 @@ pub struct Component {
     pub id: u8,
     pub h: u8,
     pub v: u8,
+    /// Quantisation table number.
+    pub tq: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -56,6 +58,10 @@ pub struct Jpeg<'a> {
 /// Most Huffman table definitions in one file (a sequential file needs at most 8 per scan, 4 scans).
 const MAX_TABLES: usize = 64;
 
+/// Most segments in one file. Real files have a few dozen (an ICC profile takes at most 255); the limit keeps
+/// the memory for a file made of millions of tiny segments small.
+const MAX_SEGMENTS: usize = 4096;
+
 /// Reads a baseline or extended sequential Huffman JPEG with 8-bit samples. Anything else, and anything
 /// unusual, is refused with the reason.
 pub fn parse(d: &[u8]) -> Result<Jpeg<'_>, Fail> {
@@ -67,6 +73,8 @@ pub fn parse(d: &[u8]) -> Result<Jpeg<'_>, Fail> {
     let mut scans: Vec<Scan> = Vec::new();
     let mut tables: Vec<DecodeTable> = Vec::new();
     let mut slots: [Option<usize>; 8] = [None; 8];
+    // Quantisation tables defined so far, and those a scan has used.
+    let (mut qdefined, mut qused) = ([false; 4], [false; 4]);
     let mut restart = 0u32;
     let mut pos = 2;
     loop {
@@ -77,12 +85,17 @@ pub fn parse(d: &[u8]) -> Result<Jpeg<'_>, Fail> {
         if d[pos] != 0xFF {
             return Err("bytes between segments");
         }
-        // Fill bytes (0xFF) may come before any marker; they stay with it (and go with a table segment).
-        while pos < d.len() && d[pos] == 0xFF {
-            pos += 1;
+        pos += 1;
+        // Fill bytes (more 0xFF before a marker) are allowed, but readers differ on them next to segments
+        // that move: pdf.js takes 0xFFFF right after an application segment for a wrong length and searches
+        // that segment for a marker. So files with them are left as they are.
+        match d.get(pos) {
+            None => return Err("no end-of-image marker"),
+            Some(0xFF) => return Err("fill bytes before a marker"),
+            Some(_) => {}
         }
-        if pos >= d.len() {
-            return Err("no end-of-image marker");
+        if pieces.len() >= MAX_SEGMENTS {
+            return Err("too many segments");
         }
         let m = d[pos];
         pos += 1;
@@ -132,13 +145,22 @@ pub fn parse(d: &[u8]) -> Result<Jpeg<'_>, Fail> {
                 restart = u16::from_be_bytes([body[0], body[1]]) as u32;
                 pieces.push(Piece::Keep(start..end));
             }
+            0xDB => {
+                read_quant_tables(body, &mut qdefined, &qused)?;
+                pieces.push(Piece::Keep(start..end));
+            }
             0xDA => {
                 let f = frame.as_ref().ok_or("scan before the frame header")?;
                 let comps = read_scan_header(body, f)?;
                 let mut t = [None; 8];
-                for &(_, td, ta) in &comps {
+                for &(ci, td, ta) in &comps {
                     t[td as usize] = Some(slots[td as usize].ok_or("scan uses an undefined Huffman table")?);
                     t[4 + ta as usize] = Some(slots[4 + ta as usize].ok_or("scan uses an undefined Huffman table")?);
+                    let tq = f.comps[ci].tq as usize;
+                    if !qdefined[tq] {
+                        return Err("scan uses an undefined quantisation table");
+                    }
+                    qused[tq] = true;
                 }
                 // The entropy-coded data runs to the first marker that is neither a stuffed 0xFF byte nor
                 // a restart marker.
@@ -169,7 +191,10 @@ pub fn parse(d: &[u8]) -> Result<Jpeg<'_>, Fail> {
                 // Multi-picture data points at images after this one by offsets, which would move.
                 return Err("multi-picture data");
             }
-            _ => pieces.push(Piece::Keep(start..end)), // DQT, APPn, COM
+            // JUMBF boxes (content credentials, JPEG XT and others) can hold a hash of the file's bytes, which
+            // would no longer match.
+            0xEB => return Err("APP11 data (JUMBF, such as content credentials)"),
+            _ => pieces.push(Piece::Keep(start..end)), // APPn, COM
         }
     }
     let frame = frame.ok_or("no frame header")?;
@@ -210,7 +235,7 @@ fn read_frame(b: &[u8]) -> Result<Frame, Fail> {
         if comps.iter().any(|x| x.id == id) {
             return Err("two components with one id");
         }
-        comps.push(Component { id, h, v });
+        comps.push(Component { id, h, v, tq });
     }
     let hmax = comps.iter().map(|c| c.h as u32).max().unwrap_or(1);
     let vmax = comps.iter().map(|c| c.v as u32).max().unwrap_or(1);
@@ -243,6 +268,31 @@ fn read_scan_header(b: &[u8], f: &Frame) -> Result<Vec<(usize, u8, u8)>, Fail> {
         return Err("too many blocks in an MCU");
     }
     Ok(comps)
+}
+
+/// A DQT segment, checked as libjpeg checks it and more strictly: 8- or 16-bit tables numbered 0 to 3 that fill
+/// the segment exactly (pdf.js reads the tables, not the length, so the two must agree). A table a scan has
+/// already used is not defined again (libjpeg keeps the first, pdf.js the last).
+fn read_quant_tables(mut b: &[u8], defined: &mut [bool; 4], used: &[bool; 4]) -> Result<(), Fail> {
+    if b.is_empty() {
+        return Err("empty quantisation table segment");
+    }
+    while let Some(&pt) = b.first() {
+        let (pq, tq) = ((pt >> 4) as usize, (pt & 15) as usize);
+        if pq > 1 || tq > 3 {
+            return Err("bad quantisation table precision or number");
+        }
+        let n = 1 + 64 * (1 + pq);
+        if b.len() < n {
+            return Err("bad quantisation table segment");
+        }
+        if used[tq] {
+            return Err("quantisation table defined again after a scan used it");
+        }
+        defined[tq] = true;
+        b = &b[n..];
+    }
+    Ok(())
 }
 
 fn read_tables(mut b: &[u8], tables: &mut Vec<DecodeTable>, slots: &mut [Option<usize>; 8]) -> Result<(), Fail> {
