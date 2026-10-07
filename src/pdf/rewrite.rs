@@ -263,8 +263,9 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
     // Our Flate in front of whatever image codec follows. Putting a filter in front of a codec that had
     // none (a JPEG, say) is done only when it saves at least 1% (over the optimised JPEG, when there is one).
     // A JPEG goes into Flate in its optimised form. Only when Flate shrinks that by a tenth or more (very
-    // regular data) does the original get a turn too: its own byte patterns can suit Flate better then (2 of
-    // the 284 test JPEGs, 1.8 KB), and trying it for every JPEG would double the Flate time.
+    // regular data) and the original is at least a tenth larger (poor tables) does the original get a turn
+    // too: its own byte patterns can suit Flate better then (2 of the 284 test JPEGs, 1.8 KB). Trying it for
+    // every JPEG would double the Flate time.
     let adds_layer = k == 0 && !rest.is_empty();
     if !(adds_layer && shape_matters) {
         let bare_len = best_len;
@@ -273,7 +274,7 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
         let mut d = s.dict.clone();
         set_chain(&mut d, &with_flate);
         let z = flate::deflate_zlib(jpeg.as_ref().unwrap_or(&data), &opt.flate);
-        let again = jpeg.as_ref().map_or(false, |j| z.len() * 10 <= j.len() * 9);
+        let again = jpeg.as_ref().map_or(false, |j| z.len() * 10 <= j.len() * 9 && j.len() * 10 <= data.len() * 9);
         for z in std::iter::once(z).chain(again.then(|| flate::deflate_zlib(&data, &opt.flate))) {
             let limit = if adds_layer { best_len.min(bare_len - bare_len / 100) } else { best_len };
             if z.len() < limit {

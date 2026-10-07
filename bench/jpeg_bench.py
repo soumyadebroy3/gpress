@@ -11,13 +11,12 @@ write.
   jpeg_bench.py OUT check           every JPEG we changed, against its original: pixels decoded by libjpeg-turbo
                                     (djpeg, DJPEG=path) and by Pillow, and coefficients (jpegtran -copy all with
                                     the standard tables must give the same bytes) -> OUT/check.tsv
-  jpeg_bench.py OUT report
+  jpeg_bench.py OUT report          totals, and ours against the tools by kind of JPEG (PDFE for jpeg-info)
 Run with python3 -I (the files are untrusted)."""
-import hashlib, io, os, subprocess, sys, time
+import hashlib, io, os, re, subprocess, sys, time
 
 import pikepdf
 
-TOOLS = os.environ.get('JPEG_TOOLS', '')
 PDFE = os.environ.get('PDFE', '/home/claude/pdf-engine/target/release/pdfe')
 JPEGTRAN = os.environ.get('JPEGTRAN', 'jpegtran')
 DJPEG = os.environ.get('DJPEG', 'djpeg')
@@ -166,6 +165,16 @@ def check(out):
     print(f'checked {len(rows)} optimised JPEGs: {len(rows) - bad} the same, {bad} different')
 
 
+def kind(path, why):
+    """Optimised with or without restart markers (jpegtran drops them, we keep them), or why left as it is."""
+    if why != 'optimized':
+        return 'left as it is: ' + why.replace('refused: ', '')
+    info = subprocess.run([PDFE, 'jpeg-info', path], capture_output=True, text=True).stdout
+    if any(int(r) > 0 for r in re.findall(r'\| scan \[[^\]]*\] restart (\d+)', info)):
+        return 'optimised, with restart markers'
+    return 'optimised, no restart markers'
+
+
 def report(out):
     tools_rows = {}
     if os.path.exists(os.path.join(out, 'tools.tsv')):
@@ -173,10 +182,9 @@ def report(out):
             h, size, opt, prog, moz, *_ = l.rstrip('\n').split('\t')
             tools_rows[h] = (int(size), int(opt), int(prog), int(moz))
     n = tin = tout = 0
-    refused = {}
     secs = 0.0
-    sums = [0, 0, 0, 0]
-    larger = []
+    kinds = {}
+    larger = {}
     for l in open(os.path.join(out, 'ours.tsv')):
         p = l.rstrip('\n').split('\t')
         if len(p) < 5:
@@ -187,25 +195,23 @@ def report(out):
         n += 1
         tin += a
         tout += b
-        if p[4] != 'optimized':
-            refused[p[4]] = refused.get(p[4], 0) + 1
-        if h in tools_rows:
-            size, opt, prog, moz = tools_rows[h]
-            opt_or_orig = opt if 0 < opt < size else size
-            sums[0] += b
-            sums[1] += opt_or_orig
-            sums[2] += prog if 0 < prog < size else size
-            sums[3] += moz if 0 < moz < size else size
-            if b > opt_or_orig:
-                larger.append((b - opt_or_orig, h, b, opt_or_orig, p[4]))
+        k = kind(p[0], p[4])
+        row = kinds.setdefault(k, [0] * 6)
+        size, opt, prog, moz = tools_rows.get(h, (a, -1, -1, -1))
+        best = lambda x: x if 0 < x < size else size  # a tool that can't make it smaller leaves it as it is
+        for i, v in enumerate((1, a, b, best(opt), best(prog), best(moz))):
+            row[i] += v
+        if b > best(opt):
+            larger.setdefault(k, []).append(b - best(opt))
     print(f'{n} distinct JPEGs: {tin} -> {tout} bytes ({100 * (1 - tout / max(tin, 1)):.2f}% smaller), {secs:.1f} s')
-    print('refused:', refused)
-    if tools_rows:
-        print(f'ours {sums[0]}, jpegtran -optimize {sums[1]}, jpegtran -optimize -progressive {sums[2]}, mozjpeg {sums[3]} '
-              '(each: the original when the tool could not make it smaller)')
-        print(f'{len(larger)} JPEGs where ours is larger than jpegtran -optimize:')
-        for d, h, b, o, why in sorted(larger, reverse=True)[:30]:
-            print(f'   {h} ours {b} jpegtran {o} (+{d}) {why}')
+    print('kind\tJPEGs\toriginal\tours\tjpegtran -optimize\tjpegtran -optimize -progressive\tmozjpeg (progressive)')
+    total = [0] * 6
+    for k, row in sorted(kinds.items()):
+        print(k, *row, sep='\t')
+        total = [x + y for x, y in zip(total, row)]
+    print('all', *total, sep='\t')
+    for k, v in sorted(larger.items()):
+        print(f'ours larger than jpegtran -optimize: {k}: {len(v)} JPEGs, {sum(v)} bytes')
 
 
 if __name__ == '__main__':
