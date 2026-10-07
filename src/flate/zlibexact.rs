@@ -1,6 +1,6 @@
 //! A bit-exact re-creation of zlib's deflate algorithm (levels 1-9, any window size, memory level and
 //! strategy except RLE/HUFFMAN_ONLY), written from the algorithm's description. It exists to rebuild the
-//! original compressed bytes of PDF streams that zlib wrote, so the peyaji format can store such streams
+//! original compressed bytes of PDF streams that zlib wrote, so the gpress archive can store such streams
 //! decoded (where they compress far better) and still give back the original file byte for byte.
 
 use super::bits::BitWriter;
@@ -169,7 +169,11 @@ impl<'a> State<'a> {
         let mut scan_end = self.byte(scan + best);
         loop {
             let m = cur;
-            if !(self.byte(m + best) != scan_end || self.byte(m + best - 1) != scan_end1 || self.byte(m) != self.byte(scan) || self.byte(m + 1) != self.byte(scan + 1)) {
+            if !(self.byte(m + best) != scan_end
+                || self.byte(m + best - 1) != scan_end1
+                || self.byte(m) != self.byte(scan)
+                || self.byte(m + 1) != self.byte(scan + 1))
+            {
                 // Bytes 0, 1 match; byte 2 matches by the hash; compare from 3 up to 258.
                 let mut len = 3;
                 while len < MAX_MATCH && self.byte(scan + len) == self.byte(m + len) {
@@ -220,7 +224,7 @@ pub fn deflate_like_zlib(d: &[u8], p: Params) -> Vec<u8> {
         max_dist: w_size - MIN_LOOKAHEAD,
         hash_bits,
         hash_mask: (1 << hash_bits) - 1,
-        hash_shift: (hash_bits + MIN_MATCH as u32 - 1) / MIN_MATCH as u32,
+        hash_shift: hash_bits.div_ceil(MIN_MATCH as u32),
         head: vec![NIL; 1 << hash_bits],
         prev: vec![NIL; w_size],
         ins_h: 0,
@@ -313,7 +317,9 @@ fn run_slow(s: &mut State, t: &mut Tally) {
         match_length = MIN_MATCH - 1;
         if hash_head != NIL && s.prev_length < s.cfg.lazy && s.strstart - hash_head <= s.max_dist {
             match_length = s.longest_match(hash_head);
-            if match_length <= 5 && (s.p.filtered || (match_length == MIN_MATCH && s.strstart - s.match_start > TOO_FAR)) {
+            if match_length <= 5
+                && (s.p.filtered || (match_length == MIN_MATCH && s.strstart - s.match_start > TOO_FAR))
+            {
                 match_length = MIN_MATCH - 1;
             }
         }
@@ -368,7 +374,14 @@ struct Tree {
 
 /// zlib's Huffman construction (heap with depth tie-break, then the overflow fix). Returns (tree, opt bits,
 /// static bits) where the bit counts include extra bits.
-fn build_tree(freqs: &[u32], extra: &dyn Fn(usize) -> u32, static_len: Option<&dyn Fn(usize) -> u32>, max_length: u16, opt: &mut u64, stat: &mut u64) -> Tree {
+fn build_tree(
+    freqs: &[u32],
+    extra: &dyn Fn(usize) -> u32,
+    static_len: Option<&dyn Fn(usize) -> u32>,
+    max_length: u16,
+    opt: &mut u64,
+    stat: &mut u64,
+) -> Tree {
     let elems = freqs.len();
     let nodes = 2 * elems + 1;
     let mut freq = vec![0u32; nodes];
@@ -405,7 +418,9 @@ fn build_tree(freqs: &[u32], extra: &dyn Fn(usize) -> u32, static_len: Option<&d
             *stat = stat.wrapping_sub(sl(node) as u64);
         }
     }
-    let smaller = |freq: &Vec<u32>, depth: &Vec<u8>, n: usize, m: usize| freq[n] < freq[m] || (freq[n] == freq[m] && depth[n] <= depth[m]);
+    let smaller = |freq: &Vec<u32>, depth: &Vec<u8>, n: usize, m: usize| {
+        freq[n] < freq[m] || (freq[n] == freq[m] && depth[n] <= depth[m])
+    };
     let down = |heap: &mut Vec<usize>, heap_len: usize, freq: &Vec<u32>, depth: &Vec<u8>, mut k: usize| {
         let v = heap[k];
         let mut j = k << 1;
@@ -540,7 +555,7 @@ fn scan_tree(len: &[u16], max_code: isize, mut emit: impl FnMut(u16, u16)) {
     let (mut max_count, mut min_count) = if nextlen == 0 { (138, 3) } else { (7, 4) };
     for n in 0..=max_code as usize {
         let curlen = nextlen;
-        nextlen = if n + 1 <= max_code as usize { len[n + 1] as i32 } else { 0xffff };
+        nextlen = if n < max_code as usize { len[n + 1] as i32 } else { 0xffff };
         count += 1;
         if count < max_count && curlen == nextlen {
             continue;
@@ -709,7 +724,15 @@ pub fn find_params(data: &[u8], raw: &[u8]) -> Option<Params> {
 /// The full zlib stream for these parameters (header, data, Adler-32).
 pub fn zlib_stream(data: &[u8], p: Params) -> Vec<u8> {
     let cmf = ((p.window_bits - 8) << 4) | 8;
-    let flevel = if p.level < 2 { 0 } else if p.level < 6 { 1 } else if p.level == 6 { 2 } else { 3 };
+    let flevel = if p.level < 2 {
+        0
+    } else if p.level < 6 {
+        1
+    } else if p.level == 6 {
+        2
+    } else {
+        3
+    };
     let mut hdr = ((cmf as u16) << 8) | ((flevel as u16) << 6);
     hdr += 31 - (hdr % 31);
     let mut out = vec![(hdr >> 8) as u8, hdr as u8];
@@ -741,7 +764,12 @@ mod tests {
             }
             let zb = std::fs::read(dir.join(z)).unwrap();
             let data = std::fs::read(dir.join(raw)).unwrap();
-            let p = Params { level, window_bits: wbits, mem_level: if level == 9 { 9 } else { 8 }, filtered: strat == "filt" };
+            let p = Params {
+                level,
+                window_bits: wbits,
+                mem_level: if level == 9 { 9 } else { 8 },
+                filtered: strat == "filt",
+            };
             let ours = zlib_stream(&data, p);
             assert!(ours == zb, "{z}: {} vs {} bytes", ours.len(), zb.len());
             checked += 1;

@@ -121,8 +121,8 @@ pub fn unpredict(st: &Stage, data: &[u8]) -> Result<Vec<u8>, FilterError> {
         return Err(FilterError::Bad("predictor parameters"));
     }
     let bits_per_pixel = (colors * bpc) as usize;
-    let row = (bits_per_pixel * cols as usize + 7) / 8;
-    let bpp = (bits_per_pixel + 7) / 8;
+    let row = (bits_per_pixel * cols as usize).div_ceil(8);
+    let bpp = bits_per_pixel.div_ceil(8);
     if pred == 2 {
         if bpc != 8 {
             return Err(FilterError::Unsupported);
@@ -159,7 +159,13 @@ pub fn unpredict(st: &Stage, data: &[u8]) -> Result<Vec<u8>, FilterError> {
                 4 => {
                     let p = a as i16 + b as i16 - c as i16;
                     let (pa, pb, pc) = ((p - a as i16).abs(), (p - b as i16).abs(), (p - c as i16).abs());
-                    let pr = if pa <= pb && pa <= pc { a } else if pb <= pc { b } else { c };
+                    let pr = if pa <= pb && pa <= pc {
+                        a
+                    } else if pb <= pc {
+                        b
+                    } else {
+                        c
+                    };
                     cur[i].wrapping_add(pr)
                 }
                 _ => return Err(FilterError::Bad("unknown PNG filter type")),
@@ -374,7 +380,7 @@ pub fn run_length_decode(data: &[u8], limit: usize) -> Result<Vec<u8>, FilterErr
         } else {
             let b = *data.get(i).ok_or(FilterError::Bad("RunLength repeat past the end"))?;
             i += 1;
-            out.extend(std::iter::repeat(b).take(257 - l));
+            out.extend(std::iter::repeat_n(b, 257 - l));
         }
         if out.len() > limit {
             return Err(FilterError::TooLarge);

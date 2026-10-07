@@ -1,0 +1,17 @@
+[package]
+name = "gpress-wasm"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "UNLICENSED"
+description = "gpress for the browser and Node: a plain WebAssembly module (no bindgen) with a TypeScript wrapper in js/."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+gpress = { path = "../..", default-features = false }
+
+[features]
+default = []
+existing = ["gpress/existing"]

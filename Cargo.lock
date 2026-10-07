@@ -118,14 +118,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 
 [[package]]
-name = "engine"
-version = "0.1.0"
-dependencies = [
- "lepton_jpeg",
- "preflate-rs",
-]
-
-[[package]]
 name = "flate2"
 version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -161,6 +153,28 @@ name = "glam"
 version = "0.34.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc148d4ddd3930c52f9e5ae79b89805c6f07e9ff417e7b083e0348cea60a5aba"
+
+[[package]]
+name = "gpress"
+version = "0.1.0"
+dependencies = [
+ "lepton_jpeg",
+ "preflate-rs",
+]
+
+[[package]]
+name = "gpress-c"
+version = "0.1.0"
+dependencies = [
+ "gpress",
+]
+
+[[package]]
+name = "gpress-wasm"
+version = "0.1.0"
+dependencies = [
+ "gpress",
+]
 
 [[package]]
 name = "lepton_jpeg"

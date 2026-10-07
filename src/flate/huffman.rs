@@ -195,7 +195,7 @@ pub fn canonical_codes(lens: &[u8]) -> Vec<u16> {
 
 #[inline]
 pub fn reverse_bits(code: u16, len: u32) -> u16 {
-    (code.reverse_bits() >> (16 - len)) as u16
+    code.reverse_bits() >> (16 - len)
 }
 
 /// Kraft sum scaled by 2^15: equals 32768 for a complete code.
@@ -241,7 +241,7 @@ mod tests {
         for round in 0..300 {
             let n = 2 + (rng(&mut s) % 300) as usize;
             let freqs: Vec<u32> = (0..n)
-                .map(|_| if rng(&mut s) % 4 == 0 { 0 } else { (rng(&mut s) % (1 + round * 50)) as u32 + 1 })
+                .map(|_| if rng(&mut s).is_multiple_of(4) { 0 } else { (rng(&mut s) % (1 + round * 50)) as u32 + 1 })
                 .collect();
             let used = freqs.iter().filter(|&&f| f > 0).count();
             if used < 2 {
@@ -296,7 +296,7 @@ mod tests {
         for round in 0..500 {
             let n = 1 + (rng(&mut s) % 300) as usize;
             let freqs: Vec<u32> = (0..n)
-                .map(|_| if rng(&mut s) % 3 == 0 { 0 } else { (rng(&mut s) % (1 + round * 20)) as u32 + 1 })
+                .map(|_| if rng(&mut s).is_multiple_of(3) { 0 } else { (rng(&mut s) % (1 + round * 20)) as u32 + 1 })
                 .collect();
             let mut a = vec![0u8; n];
             let max = fast_lengths(&freqs, &mut a);
