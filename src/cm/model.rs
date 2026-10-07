@@ -20,6 +20,9 @@ pub struct Geom {
     pub stride: usize,
     /// Bytes per pixel (at least 1).
     pub bpp: usize,
+    /// Samples are symbols, not intensities (palette indices, or several pixels packed in a byte): modelled
+    /// by their exact neighbours instead of as differences from a prediction.
+    pub exact: bool,
 }
 
 const NCTX: usize = 10;
@@ -166,13 +169,28 @@ pub struct Model {
     obj_offsets: std::collections::HashMap<i64, (u64, i64)>,
     limit: u32,
     mm_min: usize,
+    // Long repeats: one almost-certain decision ("same byte as the match") instead of eight.
+    rep: Vec<Counter>,
+    rep_last: u32,
+    /// Hash contexts are stale after bytes that skipped the full model; recomputed before the next full one.
+    ctx_dirty: bool,
+    /// Off while priming (the priming text is run twice to train the full model).
+    pub bypass_on: bool,
+    /// Plain coding for data that is already compressed: 8 even-odds bits per byte, history kept.
+    flat: bool,
+    /// Bytes coded by one long-repeat decision (for statistics).
+    pub bypassed: u64,
 }
 
-// Fixed settings of format version 3. They are part of the format: the decoder must use exactly the
-// same values as the encoder, so they are constants (never read from the environment).
+// Fixed settings of the format. They are part of it: the decoder must use exactly the same values as the
+// encoder, so they are constants (never read from the environment).
 const STATE_LIMIT: u32 = 1023;
 const MATCH_MIN: usize = 5;
 const MIXER_SHIFT: i32 = 12;
+/// A match at least this long codes the next byte with one decision (measured: 32, 64, 128 and 256; 128 is
+/// the smallest on a random sample and on huge repetitive images).
+const LONG_MIN: usize = 128;
+const REP_LIMIT: u32 = 1023;
 
 impl Model {
     pub fn new(table_bits: u32) -> Model {
@@ -218,6 +236,12 @@ impl Model {
             obj_offsets: std::collections::HashMap::new(),
             limit: STATE_LIMIT,
             mm_min: MATCH_MIN,
+            rep: vec![Counter::new(); 7 * 16 * 2 * 2],
+            rep_last: 1,
+            ctx_dirty: false,
+            bypass_on: true,
+            flat: false,
+            bypassed: 0,
         };
         m.mx.shift = MIXER_SHIFT;
         let per_kind = 7;
@@ -254,7 +278,43 @@ impl Model {
         self.contexts();
     }
 
+    /// Plain coding for the part that follows (already-compressed data), or back to the full model.
+    pub fn set_flat(&mut self, flat: bool) {
+        self.flat = flat;
+    }
+
     pub fn code_byte<C: Coder>(&mut self, c: &mut C, byte: Option<u8>) -> u8 {
+        // A long repeat: one almost-certain decision for the whole byte.
+        if self.bypass_on && self.mm_len >= LONG_MIN && !self.mm_miss {
+            let pb = self.hist[self.mm_ptr];
+            let n = self.hist.len();
+            let run = (n > 0 && self.hist[n - 1] == pb) as usize;
+            let lb = ((usize::BITS - self.mm_len.leading_zeros()) as usize).min(15);
+            let cx = ((self.kind as usize * 16 + lb) * 2 + self.rep_last as usize) * 2 + run;
+            let p = self.rep[cx].p16();
+            let hit = c.code16(byte.map(|b| (b == pb) as u32), p);
+            self.rep[cx].update(hit, REP_LIMIT);
+            self.rep_last = hit;
+            if hit == 1 {
+                self.bypassed += 1;
+                self.skip_byte(pb);
+                return pb;
+            }
+            // Not the matched byte: the match model has nothing to say about this one.
+            self.mm_miss = true;
+        }
+        if self.flat {
+            let mut v = 0u32;
+            for k in (0..8).rev() {
+                v = v << 1 | c.code16(byte.map(|b| ((b >> k) & 1) as u32), 32768);
+            }
+            let b = v as u8;
+            self.skip_byte(b);
+            return b;
+        }
+        if self.ctx_dirty {
+            self.contexts();
+        }
         let sym = byte.map(|b| b.wrapping_sub(self.pred));
         for k in (0..8).rev() {
             let bit = sym.map(|b| ((b >> k) & 1) as u32);
@@ -415,6 +475,71 @@ impl Model {
             Kind::Content => self.content_byte(b),
             _ => {}
         }
+    }
+
+    /// A byte known without the full model (a long repeat, or plain coding): history, matches and the
+    /// syntax trackers follow it; the hash contexts are refreshed only when the full model is needed again.
+    fn skip_byte(&mut self, b: u8) {
+        let image = self.pred_on();
+        self.rhist.push(if image { b.wrapping_sub(self.pred) } else { 0 });
+        self.byte_done(b);
+        self.pred = if image { self.image_neighbours().4 as u8 } else { 0 };
+        self.ctx_dirty = true;
+    }
+
+    /// For images with known rows: the left, upper, upper-left and upper-right samples of the next byte,
+    /// and LOCO-I's median edge prediction from them.
+    fn image_neighbours(&self) -> (i32, i32, i32, i32, i32) {
+        let pos = self.hist.len();
+        let s = self.geom.stride;
+        let bpp = self.geom.bpp.max(1);
+        let lo = self.seg_start;
+        let at = |back: usize| -> i32 {
+            if pos >= back && pos - back >= lo {
+                self.hist[pos - back] as i32
+            } else {
+                0
+            }
+        };
+        let col = (pos - lo) % s;
+        let first_row = pos - lo < s;
+        let w = if col >= bpp { at(bpp) } else if !first_row { at(s) } else { 0 };
+        let n = if !first_row { at(s) } else { w };
+        let nw = if !first_row && col >= bpp { at(s + bpp) } else { n };
+        let ne = if !first_row && col + bpp < s { at(s - bpp) } else { n };
+        let pred = if nw >= w.max(n) {
+            w.min(n)
+        } else if nw <= w.min(n) {
+            w.max(n)
+        } else {
+            w + n - nw
+        };
+        (w, n, nw, ne, pred)
+    }
+
+    /// For symbol images: the channel and the exact left, upper, upper-left, upper-right, second-left and
+    /// second-upper bytes of the next byte (0 outside the image).
+    fn exact_neighbours(&self) -> [u32; 7] {
+        let pos = self.hist.len();
+        let s = self.geom.stride;
+        let bpp = self.geom.bpp.max(1);
+        let lo = self.seg_start;
+        let at = |back: usize| -> u32 {
+            if pos >= back && pos - back >= lo {
+                self.hist[pos - back] as u32
+            } else {
+                0
+            }
+        };
+        let col = (pos - lo) % s;
+        let up = pos - lo >= s;
+        let w = if col >= bpp { at(bpp) } else { 0 };
+        let ww = if col >= 2 * bpp { at(2 * bpp) } else { 0 };
+        let n = if up { at(s) } else { 0 };
+        let nw = if up && col >= bpp { at(s + bpp) } else { 0 };
+        let ne = if up && col + bpp < s { at(s - bpp) } else { 0 };
+        let nn = if pos - lo >= 2 * s { at(2 * s) } else { 0 };
+        [(col % bpp) as u32, w, n, nw, ne, ww, nn]
     }
 
     fn token_end(&mut self) -> Option<Vec<u8>> {
@@ -596,30 +721,40 @@ impl Model {
     /// Whether the current byte is coded as a residual (images with known rows).
     #[inline]
     fn pred_on(&self) -> bool {
-        self.kind == Kind::Image && self.geom.stride > 0
+        self.kind == Kind::Image && self.geom.stride > 0 && !self.geom.exact
     }
 
     fn contexts(&mut self) {
+        self.ctx_dirty = false;
         self.pred = 0;
         let k = (self.kind as u32 + 1) << 28;
         let c4 = self.c4;
         let c1 = c4 & 0xff;
         let tokh = self.tok.tok.iter().fold(0u32, |h, &x| hb(h, x));
         let tl = self.tok.tok.len() as u32;
+        let nb = if self.kind == Kind::Image && self.geom.stride > 0 { self.image_neighbours() } else { (0, 0, 0, 0, 0) };
+        let ex = if self.kind == Kind::Image && self.geom.stride > 0 && self.geom.exact { self.exact_neighbours() } else { [0; 7] };
         let hs = &mut self.hashes;
         match self.kind {
+            Kind::Image if self.geom.stride > 0 && self.geom.exact => {
+                let [ch, w, n, nw, ne, ww, nn] = ex;
+                let wn = ch | w << 8 | n << 16;
+                hs[0] = k ^ h2(31, ch | w << 8);
+                hs[1] = k ^ h2(32, ch | n << 8);
+                hs[2] = k ^ h2(33, wn);
+                hs[3] = k ^ h2(34, h2(wn, nw));
+                hs[4] = k ^ h2(35, ch | n << 8 | ne << 16);
+                hs[5] = k ^ h2(36, h2(wn, ne));
+                hs[6] = k ^ h2(37, ch | w << 8 | ww << 16);
+                hs[7] = k ^ h2(38, ch | n << 8 | nn << 16);
+                hs[8] = k ^ h2(39, h2(wn, nw | ne << 8));
+                hs[9] = k ^ h2(40, h2(c4 & 0xffff, n));
+            }
             Kind::Image if self.geom.stride > 0 => {
                 let pos = self.hist.len();
                 let s = self.geom.stride;
                 let bpp = self.geom.bpp.max(1);
                 let lo = self.seg_start;
-                let at = |back: usize| -> i32 {
-                    if pos >= back && pos - back >= lo {
-                        self.hist[pos - back] as i32
-                    } else {
-                        0
-                    }
-                };
                 let rat = |back: usize| -> u32 {
                     if pos >= back && pos - back >= lo {
                         self.rhist[pos - back] as u32
@@ -629,18 +764,7 @@ impl Model {
                 };
                 let col = (pos - lo) % s;
                 let first_row = pos - lo < s;
-                let w = if col >= bpp { at(bpp) } else if !first_row { at(s) } else { 0 };
-                let n = if !first_row { at(s) } else { w };
-                let nw = if !first_row && col >= bpp { at(s + bpp) } else { n };
-                let ne = if !first_row && col + bpp < s { at(s - bpp) } else { n };
-                // LOCO-I's median edge detector.
-                let pred = if nw >= w.max(n) {
-                    w.min(n)
-                } else if nw <= w.min(n) {
-                    w.max(n)
-                } else {
-                    w + n - nw
-                };
+                let (w, n, nw, ne, pred) = nb;
                 self.pred = pred as u8;
                 let q = |d: i32| -> u32 {
                     let a = d.unsigned_abs();

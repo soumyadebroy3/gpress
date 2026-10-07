@@ -63,6 +63,10 @@ impl Default for Tables {
 /// Codes one bit with probability `p1` (12-bit, of a 1) — the same interface for encoding and decoding.
 pub trait Coder {
     fn code(&mut self, bit: Option<u32>, p1: i32) -> u32;
+    /// The same with a 16-bit probability, for decisions that are almost certain (long repeats).
+    fn code16(&mut self, bit: Option<u32>, p16: u32) -> u32 {
+        self.code(bit, (p16 >> 4) as i32)
+    }
     /// A decoder that has read well past the end of its input is decoding a damaged file.
     fn exhausted(&self) -> bool {
         false
@@ -92,7 +96,31 @@ impl Default for Encoder {
     }
 }
 
+impl Encoder {
+    #[inline]
+    fn code_at(&mut self, bit: u32, xmid: u32) -> u32 {
+        if bit == 1 {
+            self.x2 = xmid;
+        } else {
+            self.x1 = xmid + 1;
+        }
+        while (self.x1 ^ self.x2) & 0xff00_0000 == 0 {
+            self.out.push((self.x2 >> 24) as u8);
+            self.x1 <<= 8;
+            self.x2 = (self.x2 << 8) | 255;
+        }
+        bit
+    }
+}
+
 impl Coder for Encoder {
+    #[inline]
+    fn code16(&mut self, bit: Option<u32>, p16: u32) -> u32 {
+        let bit = bit.expect("encoder needs the bit");
+        let p = p16.clamp(1, 65535) as u64;
+        let xmid = self.x1 + (((self.x2 - self.x1) as u64 * p) >> 16) as u32;
+        self.code_at(bit, xmid)
+    }
     #[inline]
     fn code(&mut self, bit: Option<u32>, p1: i32) -> u32 {
         let bit = bit.expect("encoder needs the bit");
@@ -139,9 +167,33 @@ impl<'a> Decoder<'a> {
     }
 }
 
+impl<'a> Decoder<'a> {
+    #[inline]
+    fn code_at(&mut self, xmid: u32) -> u32 {
+        let bit = if self.x <= xmid { 1 } else { 0 };
+        if bit == 1 {
+            self.x2 = xmid;
+        } else {
+            self.x1 = xmid + 1;
+        }
+        while (self.x1 ^ self.x2) & 0xff00_0000 == 0 {
+            self.x1 <<= 8;
+            self.x2 = (self.x2 << 8) | 255;
+            self.x = (self.x << 8) | self.next() as u32;
+        }
+        bit
+    }
+}
+
 impl<'a> Coder for Decoder<'a> {
     fn exhausted(&self) -> bool {
         self.overrun()
+    }
+    #[inline]
+    fn code16(&mut self, _bit: Option<u32>, p16: u32) -> u32 {
+        let p = p16.clamp(1, 65535) as u64;
+        let xmid = self.x1 + (((self.x2 - self.x1) as u64 * p) >> 16) as u32;
+        self.code_at(xmid)
     }
     #[inline]
     fn code(&mut self, _bit: Option<u32>, p1: i32) -> u32 {
@@ -185,6 +237,10 @@ impl Counter {
     #[inline]
     pub fn p12(self) -> i32 {
         (self.0 >> 20) as i32
+    }
+    #[inline]
+    pub fn p16(self) -> u32 {
+        (self.0 >> 16).clamp(1, 65535)
     }
     #[inline]
     pub fn update(&mut self, bit: u32, limit: u32) {
@@ -341,6 +397,38 @@ mod tests {
         let mut d = Decoder::new(&out);
         for (b, p) in bits.iter().zip(&probs) {
             assert_eq!(d.code(None, *p), *b);
+        }
+    }
+
+    #[test]
+    fn coder_round_trip_with_16_bit_probabilities() {
+        let mut s = 987654321u64;
+        let mut items = Vec::new();
+        for i in 0..300_000 {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            if i % 3 == 0 {
+                let p = (s % 4095) as i32 + 1;
+                items.push((false, p as u32, ((s >> 20) % 4096 < p as u64) as u32));
+            } else {
+                let p = 65535 - (s % 64) as u32;
+                items.push((true, p, ((s >> 24) % 65536 < p as u64) as u32));
+            }
+        }
+        let mut e = Encoder::new();
+        for &(wide, p, b) in &items {
+            if wide {
+                e.code16(Some(b), p);
+            } else {
+                e.code(Some(b), p as i32);
+            }
+        }
+        let out = e.finish();
+        let mut d = Decoder::new(&out);
+        for &(wide, p, b) in &items {
+            let got = if wide { d.code16(None, p) } else { d.code(None, p as i32) };
+            assert_eq!(got, b);
         }
     }
 

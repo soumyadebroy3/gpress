@@ -192,9 +192,10 @@ fn main() {
             };
             let stride: usize = pos.get(3).and_then(|x| x.parse().ok()).unwrap_or(0);
             let bpp: usize = pos.get(4).and_then(|x| x.parse().ok()).unwrap_or(1);
+            let exact = pos.get(5).map(|s| s.as_str()) == Some("exact");
             let t = Instant::now();
             let mut m = Model::new(18);
-            m.set_kind(kind, Geom { stride, bpp }, 0);
+            m.set_kind(kind, Geom { stride, bpp, exact }, 0);
             let mut e = engine::cm::Encoder::new();
             for &b in &data {
                 m.code_byte(&mut e, Some(b));
