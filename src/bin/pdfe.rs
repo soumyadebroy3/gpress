@@ -223,8 +223,92 @@ fn main() {
                 out.flush().unwrap();
             }
         }
-        _ => die("usage: pdfe deflate|inflate|batch|optimize|pdf-batch|repro|pack|unpack|pack-batch ..."),
+        Some("fax-decode") => {
+            // pdfe fax-decode RAW K COLUMNS ALIGN(0|1) OUT.pbm: our CCITT decoder on raw fax data (for checking
+            // it against other decoders); prints rows, why it stopped, and whether the bytes come back exactly.
+            use engine::fax::ccitt;
+            let raw = std::fs::read(pos.get(1).unwrap_or_else(|| die("need RAW"))).unwrap_or_else(|e| die(&e.to_string()));
+            let k: i64 = pos.get(2).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need K"));
+            let cols: usize = pos.get(3).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need COLUMNS"));
+            let align = pos.get(4).map(|s| s.as_str()) == Some("1");
+            let o = pos.get(5).unwrap_or_else(|| die("need OUT"));
+            let p = ccitt::parse(&raw, ccitt::Scheme::from_k(k), cols, align, ccitt::Limits::default()).unwrap_or_else(|| die("bad parameters"));
+            let exact = ccitt::encode(&p.image, &p.layout) == raw;
+            std::fs::write(o, pbm(&p.image)).unwrap_or_else(|e| die(&e.to_string()));
+            println!("rows={} stop={:?} rule={:?} end_codes={} trailing={} exact={exact} why={:?}", p.image.rows(), p.stop, p.layout.rule, p.layout.end.len(), p.layout.trailing.len(), p.why);
+        }
+        Some("fax-encode") => {
+            // pdfe fax-encode IN.pbm K EOL(0|1) OUT.raw: our CCITT encoder (EOFB for K < 0, RTC otherwise).
+            use engine::fax::ccitt;
+            let data = std::fs::read(pos.get(1).unwrap_or_else(|| die("need IN.pbm"))).unwrap_or_else(|e| die(&e.to_string()));
+            let k: i64 = pos.get(2).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need K"));
+            let eol = pos.get(3).map(|s| s.as_str()) == Some("1");
+            let o = pos.get(4).unwrap_or_else(|| die("need OUT"));
+            let img = read_pbm(&data).unwrap_or_else(|| die("not a binary PBM"));
+            let scheme = ccitt::Scheme::from_k(k);
+            let gaps = (0..img.rows()).map(|r| ccitt::Gap { fill: 0, eol, tag: k > 0 && r as i64 % k == 0 }).collect();
+            let n_end = if k < 0 { 2 } else { 6 };
+            let end = vec![ccitt::Gap { fill: 0, eol: true, tag: k > 0 }; n_end];
+            let lay = ccitt::Layout { scheme, rule: ccitt::Rule::Standard, gaps, end, pad: 0, trailing: Vec::new() };
+            std::fs::write(o, ccitt::encode(&img, &lay)).unwrap_or_else(|e| die(&e.to_string()));
+        }
+        _ => die("usage: pdfe deflate|inflate|batch|optimize|pdf-batch|repro|pack|unpack|pack-batch|fax-decode|fax-encode ..."),
     }
+}
+
+/// A binary PBM (1 is black) of a bilevel image.
+fn pbm(img: &engine::fax::ccitt::Image) -> Vec<u8> {
+    let w = img.width;
+    let mut out = format!("P4\n{} {}\n", w, img.rows()).into_bytes();
+    let mut px = vec![0u8; w];
+    for r in 0..img.rows() {
+        engine::fax::ccitt::expand_row(img.row(r), &mut px);
+        for chunk in px.chunks(8) {
+            let mut b = 0u8;
+            for (i, &p) in chunk.iter().enumerate() {
+                b |= p << (7 - i);
+            }
+            out.push(b);
+        }
+    }
+    out
+}
+
+fn read_pbm(d: &[u8]) -> Option<engine::fax::ccitt::Image> {
+    // "P4", width, height, one whitespace byte, then packed rows (no comments).
+    let mut fields = Vec::new();
+    let mut i = 0;
+    while fields.len() < 3 {
+        while i < d.len() && d[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let s = i;
+        while i < d.len() && !d[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        fields.push(std::str::from_utf8(&d[s..i]).ok()?.to_string());
+    }
+    if fields[0] != "P4" {
+        return None;
+    }
+    let w: usize = fields[1].parse().ok()?;
+    let h: usize = fields[2].parse().ok()?;
+    let body = d.get(i + 1..)?;
+    let stride = (w + 7) / 8;
+    if body.len() < stride * h || w == 0 {
+        return None;
+    }
+    let mut img = engine::fax::ccitt::Image::new(w);
+    let mut px = vec![0u8; w];
+    let mut ch = Vec::new();
+    for r in 0..h {
+        for x in 0..w {
+            px[x] = (body[r * stride + x / 8] >> (7 - x % 8)) & 1;
+        }
+        engine::fax::ccitt::row_changes(&px, &mut ch);
+        img.push_row(&ch);
+    }
+    Some(img)
 }
 
 fn pdf_options(f: &Options) -> engine::pdf::rewrite::Options {
