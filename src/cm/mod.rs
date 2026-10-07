@@ -318,7 +318,9 @@ impl Mixer {
     pub fn mix(&mut self, sel: usize) -> i32 {
         let n = self.n;
         // Inputs not given count as 0.
-        self.x[self.nx.min(n)..n].fill(0);
+        if self.nx < n {
+            self.x[self.nx..n].fill(0);
+        }
         self.nx = n;
         self.sel = sel * n;
         let w = &self.w[self.sel..self.sel + n];

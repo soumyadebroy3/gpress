@@ -77,3 +77,18 @@ fn refuses_damaged_files() {
         }
     }
 }
+
+/// A PDF packed by the first build of format version 4 (`tests/data/format-v4.*`: syntax, a content stream, an
+/// image, long repeats and noise). It must still restore, and packing it again must give the same bytes: the
+/// model is part of the format, so a faster model has to compute exactly the same thing.
+#[test]
+fn format_v4_files_still_restore_and_pack_the_same() {
+    let pdf = include_bytes!("data/format-v4.pdf");
+    let pyj = include_bytes!("data/format-v4.pyj");
+    assert_eq!(unpack(pyj).unwrap(), pdf);
+    assert!(pack(pdf).0 == pyj);
+    // One bit changed is refused, not restored wrongly.
+    let mut bad = pyj.to_vec();
+    bad[pyj.len() / 2] ^= 8;
+    assert!(unpack(&bad).is_err());
+}

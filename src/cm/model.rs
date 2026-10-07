@@ -140,6 +140,9 @@ pub struct Model {
     kind: Kind,
     geom: Geom,
     seg_start: usize,
+    /// Column of the next byte in an image row: (hist.len() - seg_start) % geom.stride, kept up to date byte
+    /// by byte (a division per byte is slow).
+    col: usize,
     /// Original-file offset of the current syntax segment's first byte.
     seg_orig: u64,
     c0: u32,
@@ -149,10 +152,11 @@ pub struct Model {
     c8: u32,
     word: u32,
     hashes: [u32; NCTX],
-    tables: Vec<Table>,
+    tables: [Table; NCTX],
     slot: [usize; NCTX],
     states: States,
-    smaps: Vec<Vec<Counter>>,
+    /// One map per kind and context, from bit-history state (always below 128) to probability.
+    smaps: Vec<[Counter; 128]>,
     // long matches
     mm_table: Vec<u32>,
     mm_ptr: usize,
@@ -199,10 +203,7 @@ const REP_LIMIT: u32 = 1023;
 
 impl Model {
     pub fn new(table_bits: u32) -> Model {
-        let mut tables = Vec::with_capacity(NCTX);
-        for _ in 0..NCTX {
-            tables.push(Table::new(table_bits));
-        }
+        let tables = std::array::from_fn(|_| Table::new(table_bits));
         let mut m = Model {
             tb: Tables::new(),
             hist: Vec::new(),
@@ -211,6 +212,7 @@ impl Model {
             kind: Kind::Meta,
             geom: Geom::default(),
             seg_start: 0,
+            col: 0,
             seg_orig: 0,
             c0: 1,
             nib: 1,
@@ -250,9 +252,7 @@ impl Model {
         };
         m.mx.shift = MIXER_SHIFT;
         let per_kind = 7;
-        m.smaps = (0..NCTX * per_kind)
-            .map(|_| (0..128).map(|st| Counter(((m.states.init_p[st] as u32) << 20) | 0)).collect())
-            .collect();
+        m.smaps = vec![std::array::from_fn(|st| Counter(((m.states.init_p[st] as u32) << 20) | 0)); NCTX * per_kind];
         m.contexts();
         m
     }
@@ -270,6 +270,7 @@ impl Model {
         self.kind = kind;
         self.geom = geom;
         self.seg_start = self.hist.len();
+        self.col = 0;
         self.seg_orig = orig_offset;
         self.exp.clear();
         let keep_obj = (self.tok.last_obj, self.tok.xref_state, self.tok.xref_next, self.tok.xref_left);
@@ -335,7 +336,8 @@ impl Model {
         let kb = self.kind as usize * NCTX;
         let mut st = [0i32; NCTX];
         for i in 0..NCTX {
-            let state = self.tables[i].t[self.slot[i]][node] as usize;
+            // Nodes are 1..15 and states below 128: the masks change nothing but spare the bounds checks.
+            let state = self.tables[i].t[self.slot[i]][node & 15] as usize & 127;
             let p = self.smaps[kb + i][state].p12();
             st[i] = if state == 0 { 0 } else { self.tb.stretch(p) };
         }
@@ -378,10 +380,10 @@ impl Model {
         let node = self.nib as usize;
         let kb = self.kind as usize * NCTX;
         for i in 0..NCTX {
-            let v = &mut self.tables[i].t[self.slot[i]][node];
-            let state = *v as usize;
+            let v = &mut self.tables[i].t[self.slot[i]][node & 15];
+            let state = *v as usize & 127;
             self.smaps[kb + i][state].update(bit, self.limit);
-            *v = self.states.next[state][bit as usize];
+            *v = self.states.next[state][bit as usize & 1];
         }
         let residual = self.pred_on();
         if self.mm_len > 0 && !self.mm_miss {
@@ -426,6 +428,12 @@ impl Model {
 
     fn byte_done(&mut self, b: u8) {
         self.hist.push(b);
+        if self.geom.stride > 0 {
+            self.col += 1;
+            if self.col == self.geom.stride {
+                self.col = 0;
+            }
+        }
         self.c8 = (self.c8 << 8) | (self.c4 >> 24);
         self.c4 = (self.c4 << 8) | b as u32;
         if b.is_ascii_alphanumeric() {
@@ -508,7 +516,8 @@ impl Model {
                 0
             }
         };
-        let col = (pos - lo) % s;
+        let col = self.col;
+        debug_assert_eq!(col, (pos - lo) % s);
         let first_row = pos - lo < s;
         let w = if col >= bpp { at(bpp) } else if !first_row { at(s) } else { 0 };
         let n = if !first_row { at(s) } else { w };
@@ -538,7 +547,8 @@ impl Model {
                 0
             }
         };
-        let col = (pos - lo) % s;
+        let col = self.col;
+        debug_assert_eq!(col, (pos - lo) % s);
         let up = pos - lo >= s;
         let w = if col >= bpp { at(bpp) } else { 0 };
         let ww = if col >= 2 * bpp { at(2 * bpp) } else { 0 };
@@ -776,7 +786,8 @@ impl Model {
                         0
                     }
                 };
-                let col = (pos - lo) % s;
+                let col = self.col;
+                debug_assert_eq!(col, (pos - lo) % s);
                 let first_row = pos - lo < s;
                 let (w, n, nw, ne, pred) = nb;
                 self.pred = pred as u8;
@@ -859,6 +870,31 @@ mod tests {
         fn code(&mut self, bit: Option<u32>, _p: i32) -> u32 {
             bit.unwrap_or(0)
         }
+    }
+
+    #[test]
+    fn the_image_column_follows_the_bytes() {
+        // Rows of noise and long repeats (coded by the one-decision shortcut), with switches of kind and row
+        // length in between.
+        let mut s = 77u64;
+        let mut m = Model::new(12);
+        let mut n = Null;
+        for (stride, bpp, exact) in [(7usize, 1usize, false), (300, 3, false), (64, 1, true), (1, 1, false), (5, 2, false)] {
+            m.set_kind(Kind::Syntax, Geom::default(), 0);
+            for &b in b"1 0 obj\n" {
+                m.code_byte(&mut n, Some(b));
+            }
+            m.set_kind(Kind::Image, Geom { stride, bpp, exact }, 0);
+            for k in 0..6000usize {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                let b = if k % 2000 < 1200 { (k % 3) as u8 } else { s as u8 };
+                m.code_byte(&mut n, Some(b));
+                assert_eq!(m.col, (m.hist.len() - m.seg_start) % stride, "row length {stride}, byte {k}");
+            }
+        }
+        assert!(m.bypassed > 0);
     }
 
     #[test]

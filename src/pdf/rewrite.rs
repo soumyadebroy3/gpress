@@ -322,11 +322,21 @@ fn repredict(s: &Stream, data: &[u8], carried: Option<&Dict>, opt: &Options, res
     if px.is_empty() || px.len() % row != 0 || px.len() < 1024 {
         return None;
     }
-    // The candidates are ranked by their size with the quick settings (below effort 100, on rows sampled
-    // across the image), and only the best one gets the full encode. The first of equal sizes wins.
+    // The candidates are ranked by their size with the quick settings plus the size of their stream
+    // dictionary (the predictor parameters take room too), and only the best one gets the full encode. Below
+    // effort 100 the data is a sample of rows across the image, so the dictionary counts in proportion. The
+    // first of equal sizes wins.
     let quick = flate::Options { shared: opt.flate.shared.clone(), ..flate::Options::quick() };
-    let rows = predictor_sample(px.len() / row, row, opt.effort);
-    let mut best: Option<(usize, Option<Dict>, Vec<u8>)> = None;
+    let nrows = px.len() / row;
+    let rows = predictor_sample(nrows, row, opt.effort);
+    let sampled = rows.as_ref().map_or(nrows, |r| r.iter().map(|&(a, b)| b - a).sum());
+    let dict_with = |parms: &Option<Dict>| {
+        let mut d = s.dict.clone();
+        set_chain(&mut d, &[Stage { name: b"FlateDecode".to_vec(), parms: parms.clone() }]);
+        d
+    };
+    let dict_len = |parms: &Option<Dict>| to_bytes(&Obj::Dict(dict_with(parms))).len();
+    let mut best: Option<(u64, Option<Dict>, Vec<u8>)> = None;
     for how in [None, Some(images::Choice::MinSum), Some(images::Choice::Fixed(2)), Some(images::Choice::Fixed(1)), Some(images::Choice::Fixed(4))] {
         let (parms, bytes, stride) = match how {
             None => (None, px.clone(), row),
@@ -339,19 +349,24 @@ fn repredict(s: &Stream, data: &[u8], carried: Option<&Dict>, opt: &Options, res
                 (Some(p), images::png_filter(&px, row, bpp, how), row + 1)
             }
         };
-        let score = match &rows {
+        let data_len = match &rows {
             None => flate::deflate_zlib(&bytes, &quick).len(),
             Some(r) => flate::deflate_zlib(&r.iter().flat_map(|&(a, b)| &bytes[a * stride..b * stride]).copied().collect::<Vec<u8>>(), &quick).len(),
         };
+        // (data for all rows + dictionary) x sampled rows, in whole numbers.
+        let score = data_len as u64 * nrows as u64 + dict_len(&parms) as u64 * sampled as u64;
         if best.as_ref().map_or(true, |b| score < b.0) {
             best = Some((score, parms, bytes));
         }
     }
     let (_, parms, bytes) = best?;
     let z = flate::deflate_zlib(&bytes, &opt.flate);
-    let mut d = s.dict.clone();
-    set_chain(&mut d, &[Stage { name: b"FlateDecode".to_vec(), parms }]);
-    Some((d, z))
+    // Without a predictor before, the plain samples are what reencode() has already encoded (remembered, so
+    // this costs nothing): a predictor that saves fewer bytes than its parameters take is not kept.
+    if parms.is_some() && carried.is_none() && z.len() + dict_len(&parms) >= flate::deflate_zlib(&px, &opt.flate).len() + dict_len(&None) {
+        return None;
+    }
+    Some((dict_with(&parms), z))
 }
 
 /// Bytes of an image the predictor candidates are ranked on below effort 100: 64 KiB at effort 0, twice as
@@ -842,6 +857,40 @@ mod effort_tests {
         assert_eq!(step(5_000), 0);
         let o = effort_plan(&streams, &[0], &Options::effort(60), 15_000, None);
         assert!(o[0].flate.same_output(&flate::Options::effort(20)));
+    }
+
+    #[test]
+    fn a_predictor_is_kept_only_when_it_saves_more_than_its_parameters() {
+        let resolve = |o: &Obj| Some(o.clone());
+        let image = |w: usize, h: usize, cs: &[u8], px: Vec<u8>| {
+            let mut d = Dict::default();
+            d.set(b"Subtype", Obj::Name(b"Image".to_vec()));
+            d.set(b"Width", Obj::Int(w as i64));
+            d.set(b"Height", Obj::Int(h as i64));
+            d.set(b"BitsPerComponent", Obj::Int(8));
+            d.set(b"ColorSpace", Obj::Name(cs.to_vec()));
+            Stream { dict: d, data: px }
+        };
+        let total = |d: &Dict, z: &[u8]| to_bytes(&Obj::Dict(d.clone())).len() + z.len();
+        let cases = [
+            // Blank images: a predictor saves a byte or two of data, and its parameters take about 70.
+            (image(322, 333, b"DeviceGray", vec![0; 322 * 333]), false),
+            (image(200, 700, b"DeviceGray", vec![255; 200 * 700]), false),
+            (image(100, 100, b"DeviceRGB", vec![77; 100 * 100 * 3]), false),
+            // A smooth image: the predictor saves far more than that.
+            (image(256, 256, b"DeviceGray", (0..256 * 256).map(|i| ((i % 256) * 3 + (i / 256) * 5) as u8).collect()), true),
+        ];
+        for effort in [100u8, 0] {
+            let opt = Options::effort(effort);
+            for (k, (s, predicted)) in cases.iter().enumerate() {
+                let (d, z) = reencode(s, &opt, &resolve).expect("Flate makes it smaller");
+                let mut plain = s.dict.clone();
+                set_chain(&mut plain, &[Stage { name: b"FlateDecode".to_vec(), parms: None }]);
+                let plain_total = total(&plain, &flate::deflate_zlib(&s.data, &opt.flate));
+                assert!(total(&d, &z) <= plain_total, "image {k}, effort {effort}: {} > {plain_total}", total(&d, &z));
+                assert_eq!(d.has(b"DecodeParms"), *predicted, "image {k}, effort {effort}");
+            }
+        }
     }
 
     #[test]
