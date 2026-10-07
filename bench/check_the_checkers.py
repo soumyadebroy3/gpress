@@ -111,10 +111,10 @@ def make(text_pdf, rle_pdf, jpeg_pdf, work):
     cases = []
     def save(p, name):
         # pikepdf gives a saved file a new second /ID; put the original one back (same length, in place), so
-        # the only difference left is the one each case makes.
+        # the only difference left is the one each case makes (and it must not edit the XMP metadata).
         orig_id = [bytes(x) for x in p.trailer.ID] if '/ID' in p.trailer else None
         path = os.path.join(work, name)
-        p.save(path, compress_streams=False, stream_decode_level=pikepdf.StreamDecodeLevel.none)
+        p.save(path, compress_streams=False, stream_decode_level=pikepdf.StreamDecodeLevel.none, fix_metadata_version=False)
         if orig_id:
             with pikepdf.open(path) as q:
                 new_id = bytes(q.trailer.ID[1])
