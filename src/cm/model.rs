@@ -12,7 +12,12 @@ pub enum Kind {
     Font = 4,
     Data = 5,
     Raw = 6,
+    /// The private part of an opened Type 1 font: PostScript text with charstrings (binary strings).
+    Charstring = 7,
 }
+
+/// Number of kinds: per-kind tables are this many times larger.
+const KINDS: usize = 8;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Geom {
@@ -125,6 +130,97 @@ struct Tok {
 
 }
 
+/// Inside an opened Type 1 private part: the text, and the charstrings in it ("length RD " and that many
+/// bytes) whose tokens are followed, so the model knows what the next byte is.
+#[derive(Default, Clone)]
+struct Cs {
+    /// Text: the token being read and the two before it.
+    tok: Vec<u8>,
+    prev: [Vec<u8>; 2],
+    len_iv: i64,
+    /// Charstring bytes left (0: in the text), and read so far.
+    left: usize,
+    pos: usize,
+    /// What the next charstring byte is (CS_*), and the first byte of a longer number.
+    phase: u8,
+    lead: u8,
+    acc: i32,
+    /// Numbers since the last command, the last two numbers and commands, the name (or Subrs index) before
+    /// the charstring.
+    depth: u32,
+    n1: i32,
+    n2: i32,
+    c1: u32,
+    c2: u32,
+    name: u32,
+    /// The numbers given to the pending command so far, and to the last command.
+    ops: [i32; 8],
+    last: [i32; 8],
+    nlast: u32,
+}
+
+const CS_TOKEN: u8 = 0;
+const CS_POS2: u8 = 1;
+const CS_NEG2: u8 = 2;
+const CS_ESC: u8 = 3;
+const CS_RANDOM: u8 = 4;
+/// CS_INT..CS_INT + 3: the four bytes of a 32-bit number.
+const CS_INT: u8 = 5;
+
+impl Cs {
+    fn new() -> Cs {
+        Cs { len_iv: 4, ..Default::default() }
+    }
+    fn number(&mut self, v: i32) {
+        self.n2 = self.n1;
+        self.n1 = v;
+        if self.depth < 8 {
+            self.ops[self.depth as usize] = v;
+        }
+        self.depth += 1;
+        self.phase = CS_TOKEN;
+    }
+    fn command(&mut self, c: u32) {
+        self.c2 = self.c1;
+        self.c1 = c;
+        self.last = self.ops;
+        self.nlast = self.depth;
+        self.depth = 0;
+        self.phase = CS_TOKEN;
+    }
+}
+
+/// A decimal integer token (optional sign, at most 9 digits).
+fn int_token(t: &[u8]) -> Option<i64> {
+    let (neg, d) = match t.first() {
+        Some(b'-') => (true, &t[1..]),
+        Some(b'+') => (false, &t[1..]),
+        _ => (false, t),
+    };
+    if d.is_empty() || d.len() > 9 || !d.iter().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let v = d.iter().fold(0i64, |v, &c| v * 10 + (c - b'0') as i64);
+    Some(if neg { -v } else { v })
+}
+
+/// Kind of charstring command: curve, line, move, hint, other (and none).
+fn cmd_class(c: u32) -> usize {
+    match c {
+        8 | 30 | 31 => 1,
+        5 | 6 | 7 => 2,
+        21 | 22 | 4 => 3,
+        1 | 3 | 33 | 34 => 4,
+        0 => 0,
+        _ => 5,
+    }
+}
+
+/// Sign and size class of a charstring number.
+fn num_class(v: i32) -> u32 {
+    (32 - v.unsigned_abs().leading_zeros()).min(15) | ((v < 0) as u32) << 4
+}
+
 pub struct Model {
     tb: Tables,
     pub hist: Vec<u8>,
@@ -165,6 +261,7 @@ pub struct Model {
     a2: Apm,
     pr: i32,
     tok: Tok,
+    cs: Cs,
     /// Original offsets of objects seen ("N G obj"), for predicting cross-reference tables.
     obj_offsets: std::collections::HashMap<i64, (u64, i64)>,
     limit: u32,
@@ -191,6 +288,9 @@ const MIXER_SHIFT: i32 = 12;
 /// the smallest on a random sample and on huge repetitive images).
 const LONG_MIN: usize = 128;
 const REP_LIMIT: u32 = 1023;
+/// Mixer weight sets for charstring bytes: at a token start 7 operand counts x 6 kinds of last command, plus 3
+/// other places (end of a number, escaped command, other), each x 8 bits x 3 match states.
+const CS_SEL: usize = 45 * 8 * 3;
 
 impl Model {
     pub fn new(table_bits: u32) -> Model {
@@ -228,15 +328,16 @@ impl Model {
             exp_hits: 0,
             exp_sm: StateMap::new(16 * 2 * 4, 1023),
             exp_miss: false,
-            mx: Mixer::new(NIN, 7 * 8 * 3, 6),
-            a1: Apm::new(256 * 7, 7),
+            mx: Mixer::new(NIN, KINDS * 8 * 3 + CS_SEL, 6),
+            a1: Apm::new(256 * KINDS, 7),
             a2: Apm::new(65536, 7),
             pr: 2048,
             tok: Tok::default(),
+            cs: Cs::new(),
             obj_offsets: std::collections::HashMap::new(),
             limit: STATE_LIMIT,
             mm_min: MATCH_MIN,
-            rep: vec![Counter::new(); 7 * 16 * 2 * 2],
+            rep: vec![Counter::new(); KINDS * 16 * 2 * 2],
             rep_last: 1,
             ctx_dirty: false,
             bypass_on: true,
@@ -244,8 +345,7 @@ impl Model {
             bypassed: 0,
         };
         m.mx.shift = MIXER_SHIFT;
-        let per_kind = 7;
-        m.smaps = (0..NCTX * per_kind)
+        m.smaps = (0..NCTX * KINDS)
             .map(|_| (0..128).map(|st| Counter(((m.states.init_p[st] as u32) << 20) | 0)).collect())
             .collect();
         m.contexts();
@@ -267,6 +367,7 @@ impl Model {
         self.seg_start = self.hist.len();
         self.seg_orig = orig_offset;
         self.exp.clear();
+        self.cs = Cs::new();
         let keep_obj = (self.tok.last_obj, self.tok.xref_state, self.tok.xref_next, self.tok.xref_left);
         self.tok = Tok::default();
         self.tok.last_obj = keep_obj.0;
@@ -358,7 +459,17 @@ impl Model {
             self.mx.add(0);
         }
         self.mx.add(256);
-        let sel = (self.kind as usize * 8 + self.bitpos as usize) * 3 + mm_state;
+        let sel = if self.kind == Kind::Charstring && self.cs.left > 0 {
+            let at = match self.cs.phase {
+                CS_TOKEN => (self.cs.depth as usize).min(6) * 6 + cmd_class(self.cs.c1),
+                CS_POS2 | CS_NEG2 => 42,
+                CS_ESC => 43,
+                _ => 44,
+            };
+            KINDS * 8 * 3 + (at * 8 + self.bitpos as usize) * 3 + mm_state
+        } else {
+            (self.kind as usize * 8 + self.bitpos as usize) * 3 + mm_state
+        };
         let pm = self.mx.mix(sel);
         let c1 = (self.c4 & 0xff) as usize;
         let p1 = self.a1.p(pm, self.c0 as usize + 256 * self.kind as usize, &self.tb);
@@ -473,7 +584,78 @@ impl Model {
         match self.kind {
             Kind::Syntax => self.syntax_byte(b),
             Kind::Content => self.content_byte(b),
+            Kind::Charstring => self.charstring_byte(b),
             _ => {}
+        }
+    }
+
+    /// Follows the text of a Type 1 private part to its charstrings, and the tokens inside them.
+    fn charstring_byte(&mut self, b: u8) {
+        let cs = &mut self.cs;
+        if cs.left > 0 {
+            cs.left -= 1;
+            cs.pos += 1;
+            match cs.phase {
+                CS_RANDOM => {
+                    if cs.pos as i64 >= cs.len_iv {
+                        cs.phase = CS_TOKEN;
+                    }
+                }
+                CS_TOKEN => match b {
+                    12 => cs.phase = CS_ESC,
+                    0..=31 => cs.command(b as u32),
+                    32..=246 => cs.number(b as i32 - 139),
+                    247..=254 => {
+                        cs.phase = if b < 251 { CS_POS2 } else { CS_NEG2 };
+                        cs.lead = b;
+                    }
+                    _ => {
+                        cs.phase = CS_INT;
+                        cs.acc = 0;
+                    }
+                },
+                CS_POS2 => cs.number((cs.lead as i32 - 247) * 256 + b as i32 + 108),
+                CS_NEG2 => cs.number(-(cs.lead as i32 - 251) * 256 - b as i32 - 108),
+                CS_ESC => cs.command(32 + b as u32),
+                _ => {
+                    cs.acc = cs.acc << 8 | b as i32;
+                    cs.phase += 1;
+                    if cs.phase == CS_INT + 4 {
+                        let v = cs.acc;
+                        cs.number(v);
+                    }
+                }
+            }
+            return;
+        }
+        let is_ws = matches!(b, 0 | 9 | 10 | 12 | 13 | 32);
+        if !is_ws && !matches!(b, b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%') {
+            // Only short tokens matter (RD, -|, /lenIV, numbers).
+            if cs.tok.len() < 32 {
+                cs.tok.push(b);
+            }
+            return;
+        }
+        if !cs.tok.is_empty() {
+            let t = std::mem::take(&mut cs.tok);
+            // "length RD " (or -|): the charstring starts after this one white-space byte.
+            if (t == b"RD" || t == b"-|") && is_ws {
+                if let Some(n) = int_token(&cs.prev[1]).filter(|&n| n > 0) {
+                    let name = cs.prev[0].iter().fold(0x811C_9DC5, |h, &x| hb(h, x));
+                    *cs = Cs { len_iv: cs.len_iv, left: n as usize, name, ..Cs::new() };
+                    cs.phase = if cs.len_iv > 0 { CS_RANDOM } else { CS_TOKEN };
+                    return;
+                }
+            }
+            if cs.prev[1] == b"/lenIV" {
+                if let Some(v) = int_token(&t) {
+                    cs.len_iv = v;
+                }
+            }
+            cs.prev[0] = std::mem::replace(&mut cs.prev[1], t);
+        }
+        if b == b'/' {
+            cs.tok.push(b);
         }
     }
 
@@ -749,6 +931,27 @@ impl Model {
                 hs[7] = k ^ h2(38, ch | n << 8 | nn << 16);
                 hs[8] = k ^ h2(39, h2(wn, nw | ne << 8));
                 hs[9] = k ^ h2(40, h2(c4 & 0xffff, n));
+            }
+            Kind::Charstring if self.cs.left > 0 => {
+                // A charstring byte: what it is (token start, end of a number, escaped command, random), the
+                // numbers since the last command, the last commands, the size of the last numbers, the number
+                // at the same place in the last command, and the glyph's name.
+                let cs = &self.cs;
+                let ph = cs.phase as u32;
+                let depth = cs.depth.min(15);
+                let lead = if cs.phase == CS_POS2 || cs.phase == CS_NEG2 { cs.lead as u32 } else { 0 };
+                let st = ph | depth << 4 | cs.c1 << 8;
+                let same = if cs.depth < cs.nlast.min(8) { cs.last[cs.depth as usize].clamp(-4000, 4000) as u32 & 0xffff } else { 0x10000 };
+                hs[0] = k ^ h2(41, st);
+                hs[1] = k ^ h2(42, h2(st, cs.c2));
+                hs[2] = k ^ h2(43, ph);
+                hs[3] = k ^ h2(44, h2(st | lead << 24, num_class(cs.n1)));
+                hs[4] = k ^ h2(45, ph | lead << 8 | depth << 16);
+                hs[5] = k ^ h2(46, h2(cs.name, st | lead << 24));
+                hs[6] = k ^ h2(47, ph | c1 << 8 | depth << 16);
+                hs[7] = k ^ h2(48, h2(st | lead << 24, num_class(cs.n1) | num_class(cs.n2) << 8));
+                hs[8] = k ^ h2(49, h2(st | lead << 24, same));
+                hs[9] = k ^ h2(50, h2(c4, ph));
             }
             Kind::Image if self.geom.stride > 0 => {
                 let pos = self.hist.len();
