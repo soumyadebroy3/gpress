@@ -1,12 +1,13 @@
 //! A context-mixing model for bilevel images (1 bit per pixel), used by the peyaji format for fax images.
 //!
-//! Each pixel is predicted from pixels already coded around it, in the current row and the three rows
+//! Each pixel is predicted from pixels already coded around it, in the current row and up to four rows
 //! above: JBIG2's template 0 (16 pixels), a small template, a large 28-pixel template (hashed), a wide
-//! template, and a context of the current run and the nearest edges in the row above. The predictions are
-//! mixed by a trained mixer and refined by an adaptive probability map, with 16-bit precision so that white
-//! areas cost almost nothing. A row equal to the row above costs one decision (typical prediction), and a
-//! pixel whose whole 28-pixel neighbourhood is white is coded with one small counter instead of the full
-//! model (most pixels of a page; much faster).
+//! template, the current run with the nearest edge in the row above, vertical runs (how many rows each
+//! column has kept its colour), and a deep template over four rows (hashed). Two mixers (one chosen by
+//! nearby pixels, one by the run and the edge) combine the predictions and two adaptive probability maps
+//! refine them, with 16-bit precision so that white areas cost almost nothing. A row equal to the row above
+//! costs one decision (typical prediction), and a pixel whose whole 28-pixel neighbourhood is white is coded
+//! with one small counter instead of the full model (most pixels of a page; much faster).
 //!
 //! Everything is integer arithmetic, so encoder and decoder agree on every platform. The settings are
 //! constants of the format.
@@ -79,6 +80,8 @@ const TABLE_BITS: [u32; N] = [16, 12, 0, 16, 13, 13, 0];
 const M: usize = 16;
 /// Learning rate of the mixer (a shift; larger is slower).
 const MIX_SHIFT: i32 = 15;
+/// Mixer weights stay within +-256.0 (far beyond useful values), so no sum can overflow, whatever the data.
+const W_MAX: i32 = 1 << 24;
 /// Rate of the adaptive probability map (a shift).
 const APM_SHIFT: i32 = 6;
 const LIMIT: u32 = 1023;
@@ -149,8 +152,9 @@ impl Bilevel {
     }
 
     /// Codes one row: encoding when `row` (its changing elements) is given, decoding otherwise. Returns the
-    /// row's changing elements in `out`.
-    pub fn code_row<C: Coder>(&mut self, c: &mut C, row: Option<&[u32]>, out: &mut Vec<u32>) {
+    /// row's changing elements in `out`, and whether the row is the same as the row above (white above the
+    /// first), which costs one decision.
+    pub fn code_row<C: Coder>(&mut self, c: &mut C, row: Option<&[u32]>, out: &mut Vec<u32>) -> bool {
         let w = self.width;
         self.rows.rotate_right(1);
         // Typical prediction: the same row as the one above.
@@ -167,7 +171,7 @@ impl Bilevel {
             }
             out.clear();
             out.extend_from_slice(&self.prev);
-            return;
+            return true;
         }
         if let Some(r) = row {
             expand_row(r, &mut self.rows[0][M..M + w]);
@@ -275,8 +279,8 @@ impl Bilevel {
                 let err = ((bit as i64) << 16) - p1 as i64;
                 let err2 = ((bit as i64) << 16) - p2 as i64;
                 for i in 0..INPUTS {
-                    wts[i] += ((st[i] as i64 * err) >> MIX_SHIFT) as i32;
-                    wts2[i] += ((st[i] as i64 * err2) >> MIX_SHIFT) as i32;
+                    wts[i] = (wts[i] + ((st[i] as i64 * err) >> MIX_SHIFT) as i32).clamp(-W_MAX, W_MAX);
+                    wts2[i] = (wts2[i] + ((st[i] as i64 * err2) >> MIX_SHIFT) as i32).clamp(-W_MAX, W_MAX);
                 }
                 let near = if fr >= 32 { (lo + 1).min(32) } else { lo };
                 let target: i32 = if bit == 1 { 65535 } else { 0 };
@@ -304,6 +308,7 @@ impl Bilevel {
         }
         self.prev.clear();
         self.prev.extend_from_slice(out);
+        false
     }
 }
 
