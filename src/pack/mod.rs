@@ -5,6 +5,9 @@
 //! predictor bytes so the pixels themselves can be modelled. Everything is then coded by the
 //! context-mixing model, which knows what kind of data each part is.
 //!
+//! Type 1 fonts lose their two layers of encryption first (`type1`), so the model sees their text and their
+//! charstrings.
+//!
 //! Layout: magic (8) | version (1) | original length (8, LE) | SHA-256 of the original (32) | coded data.
 
 use crate::cm::model::{Geom, Kind, Model};
@@ -14,7 +17,7 @@ use crate::pdf::object::{Dict, Obj};
 use crate::pdf::parse::Lexer;
 
 pub const MAGIC: &[u8; 4] = b"\x89PYJ";
-const VERSION: u8 = 4;
+const VERSION: u8 = 5;
 const HASH_LEN: usize = 16;
 
 /// A typical PDF fragment both sides feed to the model first, so small files don't pay for a cold start.
@@ -87,6 +90,7 @@ fn header(version: u8, input: &[u8]) -> Vec<u8> {
 
 mod sha256;
 pub use sha256::sha256;
+pub mod type1;
 
 #[derive(Debug, Default, Clone)]
 pub struct PackStats {
@@ -97,6 +101,8 @@ pub struct PackStats {
     pub raw_stream_bytes: usize,
     pub decoded_bytes: usize,
     pub unpredicted_images: usize,
+    /// Type 1 fonts coded with their encryption removed.
+    pub type1: usize,
     pub preflated: usize,
     pub leptons: usize,
     pub fallback: bool,
@@ -512,20 +518,28 @@ fn plan(d: &[u8]) -> Vec<Plan> {
         .collect()
 }
 
-/// For measuring only: the file with every stream we can rebuild replaced by its decoded bytes and the JPEGs
-/// Lepton takes left out, plus the size of what a restore needs on top (rebuild settings, preflate
-/// corrections, Lepton data). A general compressor on the first, plus the second, is the fair "decompress
-/// first, then compress" baseline for the peyaji format: the same preparation, without our model.
+/// For measuring only: the file with every stream we can rebuild replaced by its decoded bytes (Type 1 fonts
+/// opened) and the JPEGs Lepton takes left out, plus the size of what a restore needs on top (rebuild
+/// settings, preflate corrections, Lepton data). A general compressor on the first, plus the second, is the
+/// fair "decompress first, then compress" baseline for the peyaji format: the same preparation, without our
+/// model.
 pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
+    // Type 1 font programs are opened, as in a pack.
+    fn put(out: &mut Vec<u8>, data: &[u8]) -> usize {
+        let (x, extra) = type1::expanded(out, data);
+        out.extend_from_slice(&x);
+        extra
+    }
     let mut out = Vec::with_capacity(d.len() * 2);
     let mut extra = 0;
     for p in plan(d) {
         match p {
-            Plan::Syntax(a, b) | Plan::Raw(a, b) => out.extend_from_slice(&d[a..b]),
+            Plan::Syntax(a, b) => out.extend_from_slice(&d[a..b]),
+            Plan::Raw(a, b) => extra += put(&mut out, &d[a..b]),
             Plan::Rebuilt { data, tail, lep, .. } => {
                 match lep {
                     Some(l) => extra += l.len(),
-                    None => out.extend_from_slice(&data),
+                    None => extra += put(&mut out, &data),
                 }
                 out.extend_from_slice(&tail);
                 extra += 2;
@@ -533,7 +547,7 @@ pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
             Plan::Preflated { corrections, data, rest, lep, .. } => {
                 match lep {
                     Some(l) => extra += l.len(),
-                    None => out.extend_from_slice(&data),
+                    None => extra += put(&mut out, &data),
                 }
                 out.extend_from_slice(&rest);
                 extra += corrections.len();
@@ -702,7 +716,12 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
                     }
                 }
                 io.m.set_flat(flat);
-                io.bytes(src, n, &mut out);
+                // A Type 1 font stored without a filter.
+                let font = if tag == T_RAW && !flat { type1::raw_font_dict(&out) } else { None };
+                match font {
+                    Some(dict) => type1::code(&mut io, src, n, Some(&dict), Kind::Raw, &mut out, stats),
+                    None => io.bytes(src, n, &mut out),
+                }
                 io.m.set_flat(false);
             }
             T_REBUILT => {
@@ -913,7 +932,11 @@ fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, lep_in: Option<Opti
         let flat = io.byte(data_in.map(|x| (inf.png.is_none() && looks_compressed(x, PLAIN_WHEN_COMPRESSED)) as u8)) == 1;
         io.m.set_kind(inf.kind, inf.geom, 0);
         io.m.set_flat(flat);
-        io.bytes(data_in, dlen, &mut decoded);
+        if !flat && type1::is_type1(dict.as_ref()) {
+            type1::code(io, data_in, dlen, dict.as_ref(), inf.kind, &mut decoded, stats);
+        } else {
+            io.bytes(data_in, dlen, &mut decoded);
+        }
         io.m.set_flat(false);
         if flat {
             stats.flat_bytes += dlen;
