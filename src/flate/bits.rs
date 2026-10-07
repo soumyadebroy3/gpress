@@ -139,7 +139,7 @@ impl<'a> BitReader<'a> {
 
     /// For stored blocks: after `align`, reads raw bytes.
     pub fn take_bytes(&mut self, len: usize) -> Result<&'a [u8], EndOfInput> {
-        debug_assert!(self.n % 8 == 0);
+        debug_assert!(self.n.is_multiple_of(8));
         let start = self.byte_pos();
         let end = start.checked_add(len).ok_or(EndOfInput)?;
         if end > self.data.len() {

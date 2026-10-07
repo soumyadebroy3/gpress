@@ -151,7 +151,7 @@ fn dynamic_search(h: &Hist, variants: &[(Option<f64>, u32)], thorough: bool) -> 
         }
         let header = if thorough { best_header(&ll, &d) } else { quick_header(&ll, &d) };
         let bits = header.bits + data;
-        if best.as_ref().map_or(true, |b| bits < b.bits) {
+        if best.as_ref().is_none_or(|b| bits < b.bits) {
             best = Some(DynCode { ll, d, header, bits });
         }
     }
@@ -329,7 +329,15 @@ fn dp_tokens(seq: &[u8], cost: &[u64; 19]) -> Vec<(u8, u8)> {
         zrun[i] = if seq[i] == 0 { zrun[i + 1] + 1 } else { 0 };
     }
     for i in (1..n).rev() {
-        vrun[i] = if seq[i] == seq[i - 1] { if i + 1 < n && seq[i + 1] == seq[i] { vrun[i + 1] + 1 } else { 1 } } else { 0 };
+        vrun[i] = if seq[i] == seq[i - 1] {
+            if i + 1 < n && seq[i + 1] == seq[i] {
+                vrun[i + 1] + 1
+            } else {
+                1
+            }
+        } else {
+            0
+        };
     }
     for i in 0..n {
         let b = best[i];
@@ -406,7 +414,6 @@ fn header_bits(cl: &[u8; 19], tokens: &[(u8, u8)]) -> (usize, u64) {
     (hclen, bits)
 }
 
-
 /// The cheapest header we can find for these code lengths.
 pub fn best_header(ll: &[u8], d: &[u8]) -> Header {
     header_search(ll, d, &[0, 1, 2, 3, 4, 5, 6, 7], 4)
@@ -425,7 +432,7 @@ fn header_search(ll: &[u8], d: &[u8], flag_sets: &[u8], rounds: usize) -> Header
         for _round in 0..rounds {
             let cl = cl_lengths(&tokens);
             let (hclen, bits) = header_bits(&cl, &tokens);
-            let improved = best.as_ref().map_or(true, |b| bits < b.bits);
+            let improved = best.as_ref().is_none_or(|b| bits < b.bits);
             if improved {
                 best = Some(Header { hlit, hdist, hclen, cl, tokens: tokens.clone(), bits });
             }
@@ -452,7 +459,7 @@ pub fn stored_bits(len: usize, bitpos: u64) -> u64 {
     loop {
         let k = left.min(65535);
         pos += 3;
-        pos = (pos + 7) / 8 * 8;
+        pos = pos.div_ceil(8) * 8;
         pos += 32 + 8 * k as u64;
         left -= k;
         if left == 0 {

@@ -50,7 +50,20 @@ mod tests {
 
     #[test]
     fn round_trips_with_our_decoder() {
-        for opt in [Options::quick(), Options { iterations: 4, exact_rounds: 3, max_chain: 512, segment: 50_000, split: true, alternatives: true, multi_start_limit: 1 << 18, nice: 259, polish: true }] {
+        for opt in [
+            Options::quick(),
+            Options {
+                iterations: 4,
+                exact_rounds: 3,
+                max_chain: 512,
+                segment: 50_000,
+                split: true,
+                alternatives: true,
+                multi_start_limit: 1 << 18,
+                nice: 259,
+                polish: true,
+            },
+        ] {
             for d in samples() {
                 let z = deflate(&d, &opt);
                 let back = inflate(&z, 1 << 30).expect("decodes");

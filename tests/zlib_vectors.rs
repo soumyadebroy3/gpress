@@ -1,6 +1,6 @@
 //! Our decoder against streams made by CPython's zlib (every level and strategy, two window sizes).
 
-use engine::flate::zlib;
+use gpress::flate::zlib;
 use std::path::Path;
 
 #[test]

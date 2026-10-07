@@ -1,0 +1,18 @@
+[package]
+name = "gpress-c"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "UNLICENSED"
+description = "C API for gpress (shared and static library plus include/gpress.h)."
+
+[lib]
+name = "gpress_c"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+gpress = { path = "../..", default-features = false }
+
+[features]
+default = []
+existing = ["gpress/existing"]

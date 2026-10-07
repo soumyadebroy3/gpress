@@ -1,13 +1,15 @@
-//! The peyaji format: exact restore, and damaged files refused (never a wrong result, never a crash).
+//! The gpress archive: exact restore, and damaged files refused (never a wrong result, never a crash).
 
-use engine::flate::zlibexact::{zlib_stream, Params};
-use engine::pack::{pack, unpack};
+use gpress::flate::zlibexact::{zlib_stream, Params};
+use gpress::pack::{pack, unpack};
 
 /// A small PDF whose one content stream names its filter by reference (`/Filter 3 0 R`).
 fn pdf_with_indirect_filter() -> Vec<u8> {
     let mut content = Vec::new();
     for i in 0..200 {
-        content.extend_from_slice(format!("BT /F1 12 Tf 72 {} Td (Line {i} of the test page) Tj ET\n", 700 - i * 3).as_bytes());
+        content.extend_from_slice(
+            format!("BT /F1 12 Tf 72 {} Td (Line {i} of the test page) Tj ET\n", 700 - i * 3).as_bytes(),
+        );
     }
     let z = zlib_stream(&content, Params { level: 6, window_bits: 15, mem_level: 8, filtered: false });
     let mut d = Vec::new();
@@ -71,9 +73,8 @@ fn refuses_damaged_files() {
     huge[5..10].copy_from_slice(&[0xff, 0xff, 0xff, 0xff, 0x7f]);
     cases.push(huge);
     for (k, c) in cases.iter().enumerate() {
-        match unpack(c) {
-            Ok(out) => assert_eq!(out, pdf, "case {k}: a damaged file restored to something else"),
-            Err(_) => {}
+        if let Ok(out) = unpack(c) {
+            assert_eq!(out, pdf, "case {k}: a damaged file restored to something else")
         }
     }
 }

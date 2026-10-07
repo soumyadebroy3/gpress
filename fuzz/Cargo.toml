@@ -1,0 +1,30 @@
+[package]
+name = "gpress-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+gpress = { path = ".." }
+
+[[bin]]
+name = "expand"
+path = "fuzz_targets/expand.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "inflate"
+path = "fuzz_targets/inflate.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "pdf_optimize"
+path = "fuzz_targets/pdf_optimize.rs"
+test = false
+doc = false

@@ -33,8 +33,11 @@ pub struct Doc<'a> {
     pub has_revisions: bool,
     /// Bytes after the last %%EOF.
     pub trailing: usize,
-    objstm_cache: RefCell<HashMap<u32, (Vec<u8>, Vec<(u32, usize)>, usize)>>,
+    objstm_cache: RefCell<HashMap<u32, ObjStm>>,
 }
+
+/// A decoded object stream: its bytes, (object number, offset) pairs, and where the objects start.
+type ObjStm = (Vec<u8>, Vec<(u32, usize)>, usize);
 
 fn find_last(d: &[u8], pat: &[u8], window: usize) -> Option<usize> {
     let start = d.len().saturating_sub(window);
@@ -140,7 +143,7 @@ fn read_section(d: &[u8], off: usize) -> Result<(Vec<(u32, Entry)>, Dict), LoadE
     if s.dict.name(b"Type") != Some(b"XRef") {
         return Err(LoadError::BadXref("stream is not /Type /XRef"));
     }
-    let raw = decode_fully(&s.dict, &s.data, 1 << 28).map_err(|_| LoadError::BadXref("xref stream undecodable"))?;
+    let raw = decode_fully(&s.dict, &s.data, 1 << 28).ok_or(LoadError::BadXref("xref stream undecodable"))?;
     let w: Vec<usize> = match s.dict.get(b"W") {
         Some(Obj::Array(a)) if a.len() == 3 => {
             let mut v = Vec::new();
@@ -246,16 +249,16 @@ fn read_table(d: &[u8], mut pos: usize) -> Result<(Vec<(u32, Entry)>, Dict), Loa
 }
 
 /// Decodes all filters of a stream (general filters only), predictors included.
-pub fn decode_fully(dict: &Dict, data: &[u8], limit: usize) -> Result<Vec<u8>, ()> {
-    let stages = chain(dict).ok_or(())?;
+pub fn decode_fully(dict: &Dict, data: &[u8], limit: usize) -> Option<Vec<u8>> {
+    let stages = chain(dict)?;
     let mut cur = data.to_vec();
     for st in &stages {
-        cur = decode_stage(st, &cur, limit).map_err(|_| ())?;
+        cur = decode_stage(st, &cur, limit).ok()?;
         if st.name == b"FlateDecode" || st.name == b"LZWDecode" {
-            cur = unpredict(st, &cur).map_err(|_| ())?;
+            cur = unpredict(st, &cur).ok()?;
         }
     }
-    Ok(cur)
+    Some(cur)
 }
 
 impl<'a> Doc<'a> {
@@ -284,7 +287,8 @@ impl<'a> Doc<'a> {
                 if off >= self.data.len() {
                     return Err(LoadError::BadObject(n, "offset past the end"));
                 }
-                let (pn, pg, o, _) = parse_indirect(self.data, off, &resolver).map_err(|e| LoadError::BadObject(n, e.msg))?;
+                let (pn, pg, o, _) =
+                    parse_indirect(self.data, off, &resolver).map_err(|e| LoadError::BadObject(n, e.msg))?;
                 if pn != n || pg != gen {
                     return Err(LoadError::BadObject(n, "object number at offset differs"));
                 }
@@ -297,16 +301,22 @@ impl<'a> Doc<'a> {
                         Obj::Stream(s) => s,
                         _ => return Err(LoadError::BadObject(sn, "object stream is not a stream")),
                     };
-                    let raw = decode_fully(&s.dict, &s.data, 1 << 28).map_err(|_| LoadError::BadObject(sn, "object stream undecodable"))?;
-                    let count = s.dict.get(b"N").and_then(|x| x.as_int()).ok_or(LoadError::BadObject(sn, "no /N"))? as usize;
-                    let first = s.dict.get(b"First").and_then(|x| x.as_int()).ok_or(LoadError::BadObject(sn, "no /First"))? as usize;
+                    let raw = decode_fully(&s.dict, &s.data, 1 << 28)
+                        .ok_or(LoadError::BadObject(sn, "object stream undecodable"))?;
+                    let count =
+                        s.dict.get(b"N").and_then(|x| x.as_int()).ok_or(LoadError::BadObject(sn, "no /N"))? as usize;
+                    let first =
+                        s.dict.get(b"First").and_then(|x| x.as_int()).ok_or(LoadError::BadObject(sn, "no /First"))?
+                            as usize;
                     let mut lx = Lexer::new(&raw, 0);
                     let mut heads = Vec::with_capacity(count);
                     for _ in 0..count {
                         lx.skip_ws();
-                        let a = parse_uint(lx.regular_token()).ok_or(LoadError::BadObject(sn, "bad object stream header"))?;
+                        let a = parse_uint(lx.regular_token())
+                            .ok_or(LoadError::BadObject(sn, "bad object stream header"))?;
                         lx.skip_ws();
-                        let b = parse_uint(lx.regular_token()).ok_or(LoadError::BadObject(sn, "bad object stream header"))?;
+                        let b = parse_uint(lx.regular_token())
+                            .ok_or(LoadError::BadObject(sn, "bad object stream header"))?;
                         heads.push((a as u32, b));
                     }
                     self.objstm_cache.borrow_mut().insert(sn, (raw, heads, first));

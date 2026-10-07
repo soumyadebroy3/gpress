@@ -61,7 +61,7 @@ impl States {
             let (n0, n1, _) = st_unpack(s);
             let up = |a: usize, b: usize| -> (usize, usize) {
                 // a: count of the bit seen (incremented), b: opposite count (discounted)
-                ((a + 1).min(7), if b > 2 { (b + 1) / 2 } else { b })
+                ((a + 1).min(7), if b > 2 { b.div_ceil(2) } else { b })
             };
             let (a1, b1) = up(n1, n0);
             next[s][1] = st_pack(b1, a1, 1) as u8;
@@ -122,7 +122,6 @@ struct Tok {
     xref_state: u8, // 0 none, 1 after "xref", 2 in entries
     xref_next: i64,
     xref_left: i64,
-
 }
 
 pub struct Model {
@@ -246,7 +245,7 @@ impl Model {
         m.mx.shift = MIXER_SHIFT;
         let per_kind = 7;
         m.smaps = (0..NCTX * per_kind)
-            .map(|_| (0..128).map(|st| Counter(((m.states.init_p[st] as u32) << 20) | 0)).collect())
+            .map(|_| (0..128).map(|st| Counter((m.states.init_p[st] as u32) << 20)).collect())
             .collect();
         m.contexts();
         m
@@ -503,7 +502,13 @@ impl Model {
         };
         let col = (pos - lo) % s;
         let first_row = pos - lo < s;
-        let w = if col >= bpp { at(bpp) } else if !first_row { at(s) } else { 0 };
+        let w = if col >= bpp {
+            at(bpp)
+        } else if !first_row {
+            at(s)
+        } else {
+            0
+        };
         let n = if !first_row { at(s) } else { w };
         let nw = if !first_row && col >= bpp { at(s + bpp) } else { n };
         let ne = if !first_row && col + bpp < s { at(s - bpp) } else { n };
@@ -732,8 +737,13 @@ impl Model {
         let c1 = c4 & 0xff;
         let tokh = self.tok.tok.iter().fold(0u32, |h, &x| hb(h, x));
         let tl = self.tok.tok.len() as u32;
-        let nb = if self.kind == Kind::Image && self.geom.stride > 0 { self.image_neighbours() } else { (0, 0, 0, 0, 0) };
-        let ex = if self.kind == Kind::Image && self.geom.stride > 0 && self.geom.exact { self.exact_neighbours() } else { [0; 7] };
+        let nb =
+            if self.kind == Kind::Image && self.geom.stride > 0 { self.image_neighbours() } else { (0, 0, 0, 0, 0) };
+        let ex = if self.kind == Kind::Image && self.geom.stride > 0 && self.geom.exact {
+            self.exact_neighbours()
+        } else {
+            [0; 7]
+        };
         let hs = &mut self.hashes;
         match self.kind {
             Kind::Image if self.geom.stride > 0 && self.geom.exact => {
@@ -778,7 +788,11 @@ impl Model {
                         17..=32 => 6,
                         _ => 7,
                     };
-                    if d < 0 { m + 8 } else { m }
+                    if d < 0 {
+                        m + 8
+                    } else {
+                        m
+                    }
                 };
                 let ch = (col % bpp) as u32;
                 let rw = if col >= bpp { rat(bpp) } else { 0 };
@@ -814,7 +828,11 @@ impl Model {
                     }
                     Kind::Content => {
                         let idx = self.tok.operands.len() as u32;
-                        let col = self.tok.prev_operands.get(idx as usize).map_or(0, |v| v.iter().fold(7u32, |h, &x| hb(h, x)));
+                        let col = self
+                            .tok
+                            .prev_operands
+                            .get(idx as usize)
+                            .map_or(0, |v| v.iter().fold(7u32, |h, &x| hb(h, x)));
                         hs[6] = k ^ h2(21, h2(self.tok.prev_op, idx << 16 | tokh & 0xffff) ^ tl);
                         hs[7] = k ^ h2(22, h2(col, tl << 8 | c1));
                         hs[8] = k ^ h2(23, h2(self.tok.prev_op ^ self.tok.prev_op2.rotate_left(7), idx << 8 | c1));

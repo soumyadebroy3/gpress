@@ -1,16 +1,18 @@
 [package]
-name = "engine"
+name = "gpress"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Our own PDF compression engine: Flate encoder and decoder, PDF reader and writer, and the peyaji format."
+license = "UNLICENSED"
+description = "Lossless PDF compression: smaller PDFs that any reader opens, and the gpress archive that restores byte for byte."
+repository = "https://github.com/soumyadebroy3/gpress"
 
 [lib]
 path = "src/lib.rs"
 
 [[bin]]
-name = "pdfe"
-path = "src/bin/pdfe.rs"
+name = "gpress"
+path = "src/bin/gpress.rs"
 
 # Our own code has no dependencies. The "existing" feature adds the best existing libraries as extra
 # candidates (the engine keeps whichever result is smaller after the checks).
@@ -20,6 +22,9 @@ lepton_jpeg = { version = "0.5", optional = true }
 
 [features]
 existing = ["dep:preflate-rs", "dep:lepton_jpeg"]
+
+[workspace]
+members = [".", "crates/gpress-c", "crates/gpress-wasm"]
 
 [profile.release]
 opt-level = 3

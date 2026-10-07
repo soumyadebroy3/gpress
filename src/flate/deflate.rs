@@ -38,11 +38,31 @@ pub struct Options {
 impl Options {
     /// Our strongest setting.
     pub fn max() -> Options {
-        Options { iterations: 8, exact_rounds: 4, max_chain: 8192, segment: 1 << 20, split: true, alternatives: true, multi_start_limit: 1 << 18, nice: 259, polish: true }
+        Options {
+            iterations: 8,
+            exact_rounds: 4,
+            max_chain: 8192,
+            segment: 1 << 20,
+            split: true,
+            alternatives: true,
+            multi_start_limit: 1 << 18,
+            nice: 259,
+            polish: true,
+        }
     }
     /// Fast but still optimal-parsed.
     pub fn quick() -> Options {
-        Options { iterations: 2, exact_rounds: 1, max_chain: 128, segment: 1 << 20, split: true, alternatives: false, multi_start_limit: 0, nice: 64, polish: false }
+        Options {
+            iterations: 2,
+            exact_rounds: 1,
+            max_chain: 128,
+            segment: 1 << 20,
+            split: true,
+            alternatives: false,
+            multi_start_limit: 0,
+            nice: 64,
+            polish: false,
+        }
     }
 }
 
@@ -207,7 +227,8 @@ fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &m
                 }
                 c += step;
                 let right = Hist::diff(&total, &left);
-                let v = estimate_dynamic_bits(&left).min(fixed_bits(&left)) + estimate_dynamic_bits(&right).min(fixed_bits(&right));
+                let v = estimate_dynamic_bits(&left).min(fixed_bits(&left))
+                    + estimate_dynamic_bits(&right).min(fixed_bits(&right));
                 if v < best.0 {
                     best = (v, c);
                 }
@@ -238,7 +259,15 @@ fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &m
 }
 
 /// Entropy-priced rounds: price symbols by how often the current parse uses them, re-parse, repeat.
-fn refine(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options, start: Vec<Sym>, sc: &mut ParseScratch) -> Vec<Sym> {
+fn refine(
+    data: &[u8],
+    a: usize,
+    b: usize,
+    m: &Matches,
+    opt: &Options,
+    start: Vec<Sym>,
+    sc: &mut ParseScratch,
+) -> Vec<Sym> {
     let mut best_bits = price(&Hist::of(&start), b - a);
     let mut best = start;
     let mut stats = Hist::of(&best);
@@ -286,7 +315,15 @@ fn blend(new: &Hist, old: &Hist, salt: u64) -> Hist {
 }
 
 /// Exact-priced rounds: price symbols by the code lengths the block would really use.
-fn exact(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options, start: Vec<Sym>, sc: &mut ParseScratch) -> Vec<Sym> {
+fn exact(
+    data: &[u8],
+    a: usize,
+    b: usize,
+    m: &Matches,
+    opt: &Options,
+    start: Vec<Sym>,
+    sc: &mut ParseScratch,
+) -> Vec<Sym> {
     let mut best_bits = price(&Hist::of(&start), b - a);
     let mut best = start;
     let mut cur = Vec::with_capacity(best.len());
@@ -296,7 +333,7 @@ fn exact(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options, start: Vec
         let maxlen = *code.ll.iter().max().unwrap_or(&15) as f32;
         let mut improved = false;
         for (missing, alt) in [(maxlen + 1.0, false), (maxlen + 4.0, false), (maxlen + 1.0, opt.alternatives)] {
-            if alt == false && missing > maxlen + 1.0 && opt.alternatives {
+            if !alt && missing > maxlen + 1.0 && opt.alternatives {
                 // keep the variety small when alternatives are tried
             }
             cur.clear();
@@ -385,7 +422,8 @@ fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>) -> Vec<Plan> {
         let mut bestv = u64::MAX;
         while c <= hi {
             let right = Hist::diff(&total, &left);
-            let v = estimate_dynamic_bits(&left).min(fixed_bits(&left)) + estimate_dynamic_bits(&right).min(fixed_bits(&right));
+            let v = estimate_dynamic_bits(&left).min(fixed_bits(&left))
+                + estimate_dynamic_bits(&right).min(fixed_bits(&right));
             if v < bestv {
                 bestv = v;
                 bestc = c;

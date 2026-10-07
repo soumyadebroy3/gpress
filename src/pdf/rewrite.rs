@@ -131,7 +131,7 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>) -> Result<(), String> {
     // A reference to an object missing from the cross-reference data is null — unless the object is
     // physically in the file, where some readers find it anyway.
     let mut dangling = Vec::new();
-    for (_, (_, o)) in objs.iter() {
+    for (_, o) in objs.values() {
         let mut r = Vec::new();
         match o {
             // A stream's /Length is replaced by a direct number, so its target doesn't matter.
@@ -147,7 +147,7 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>) -> Result<(), String> {
         }
     }
     let mut why: Option<String> = None;
-    for (_, (_, o)) in objs.iter() {
+    for (_, o) in objs.values() {
         walk(o, &mut |x| {
             if let Some(d) = x.as_dict() {
                 if d.name(b"Type") == Some(b"Sig") || d.has(b"ByteRange") {
@@ -213,12 +213,15 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
     if stages[k..].iter().any(|st| is_general(&st.name)) {
         return None;
     }
-    if stages[k..].iter().any(|st| !matches!(st.name.as_slice(), b"DCTDecode" | b"JPXDecode" | b"JBIG2Decode" | b"CCITTFaxDecode")) {
+    if stages[k..]
+        .iter()
+        .any(|st| !matches!(st.name.as_slice(), b"DCTDecode" | b"JPXDecode" | b"JBIG2Decode" | b"CCITTFaxDecode"))
+    {
         return None; // unknown or Crypt filters
     }
     // Predictor parameters may only sit on the last general stage (they stay with the data).
     for st in &stages[..k.saturating_sub(1)] {
-        if st.parms.as_ref().map_or(false, |p| p.has(b"Predictor")) {
+        if st.parms.as_ref().is_some_and(|p| p.has(b"Predictor")) {
             return None;
         }
     }
@@ -279,7 +282,13 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
     best
 }
 
-fn repredict(s: &Stream, data: &[u8], carried: Option<&Dict>, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) -> Option<(Dict, Vec<u8>)> {
+fn repredict(
+    s: &Stream,
+    data: &[u8],
+    carried: Option<&Dict>,
+    opt: &Options,
+    resolve: &dyn Fn(&Obj) -> Option<Obj>,
+) -> Option<(Dict, Vec<u8>)> {
     let g = images::geometry(&s.dict, resolve)?;
     let (row, bpp) = (g.row(), g.bpp());
     // The samples, whatever predictor they are stored with now.
@@ -339,7 +348,16 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     let doc = xref::open(input).map_err(|e| format!("unreadable: {e:?}"))?;
     let objs = load_reachable(&doc)?;
     gate(&doc, &objs)?;
-    let mut stats = Stats { objects: objs.len(), dropped_unreachable: doc.entries.values().filter(|e| !matches!(e, Entry::Free)).count().saturating_sub(objs.len()), ..Default::default() };
+    let mut stats = Stats {
+        objects: objs.len(),
+        dropped_unreachable: doc
+            .entries
+            .values()
+            .filter(|e| !matches!(e, Entry::Free))
+            .count()
+            .saturating_sub(objs.len()),
+        ..Default::default()
+    };
 
     // Streams: re-encode; every stream gets a direct /Length.
     let mut direct: BTreeMap<u32, (u16, Vec<u8>)> = BTreeMap::new(); // serialised indirect objects
@@ -381,7 +399,12 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
 
     // Object streams, grouped by kind so similar objects sit together.
     packable.sort_by(|a, b| kind_key(a.1).cmp(&kind_key(b.1)).then(a.0.cmp(&b.0)));
-    let max_num = objs.keys().copied().max().unwrap_or(0).max(doc.trailer.get(b"Size").and_then(|x| x.as_int()).unwrap_or(0) as u32);
+    let max_num = objs
+        .keys()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .max(doc.trailer.get(b"Size").and_then(|x| x.as_int()).unwrap_or(0) as u32);
     let mut next_num = max_num + 1;
     let mut in_stm: HashMap<u32, (u32, u32)> = HashMap::new();
     for chunk in packable.chunks(opt.objstm_size.max(1)) {
@@ -435,7 +458,13 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     let xref_off = out.len();
     offsets.insert(xn, (xref_off, 0));
     let max_off = offsets.values().map(|v| v.0).max().unwrap_or(0).max(xref_off);
-    let max_f3 = in_stm.values().map(|v| v.1 as usize).max().unwrap_or(0).max(offsets.values().map(|v| v.1 as usize).max().unwrap_or(0)).max(65535);
+    let max_f3 = in_stm
+        .values()
+        .map(|v| v.1 as usize)
+        .max()
+        .unwrap_or(0)
+        .max(offsets.values().map(|v| v.1 as usize).max().unwrap_or(0))
+        .max(65535);
     let max_f2 = max_off.max(next_num as usize);
     let w1 = bytes_for(max_f2 as u64);
     let w2 = bytes_for(max_f3 as u64);
@@ -500,7 +529,8 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
 }
 
 /// Trailer keys that describe the cross-reference structure itself (rewritten, not copied).
-const STRUCTURAL: [&[u8]; 9] = [b"Size", b"Prev", b"XRefStm", b"Index", b"W", b"Type", b"Filter", b"DecodeParms", b"Length"];
+const STRUCTURAL: [&[u8]; 9] =
+    [b"Size", b"Prev", b"XRefStm", b"Index", b"W", b"Type", b"Filter", b"DecodeParms", b"Length"];
 
 fn bytes_for(v: u64) -> usize {
     let mut n = 1;
@@ -531,7 +561,6 @@ fn content_of(s: &Stream) -> Option<(Vec<u8>, Vec<Stage>)> {
     }
     Some((data, rest))
 }
-
 
 fn same_except_encoding(a: &Dict, b: &Dict) -> bool {
     let strip = |d: &Dict| -> Vec<(Vec<u8>, Obj)> {
@@ -567,7 +596,10 @@ fn self_check(objs: &BTreeMap<u32, (u16, Obj)>, out: &[u8], trailer: &Dict) -> R
                 if !same_except_encoding(&s1.dict, &s2.dict) {
                     return Err(format!("self-check: dictionary of stream {n} differs"));
                 }
-                if s1.data == s2.data && s1.dict.get(b"Filter") == s2.dict.get(b"Filter") && s1.dict.get(b"DecodeParms") == s2.dict.get(b"DecodeParms") {
+                if s1.data == s2.data
+                    && s1.dict.get(b"Filter") == s2.dict.get(b"Filter")
+                    && s1.dict.get(b"DecodeParms") == s2.dict.get(b"DecodeParms")
+                {
                     continue;
                 }
                 let c1 = content_of(s1).ok_or(format!("self-check: stream {n} undecodable"))?;

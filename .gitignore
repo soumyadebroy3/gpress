@@ -1,2 +1,7 @@
 /target
 __pycache__/
+/crates/gpress-wasm/js/node_modules/
+/crates/gpress-wasm/js/dist/
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts

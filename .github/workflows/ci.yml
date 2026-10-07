@@ -1,0 +1,65 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --release --workspace
+      - run: cargo test --release --workspace --features existing
+      - name: C example against the shared library
+        run: |
+          cargo build --release -p gpress-c
+          gcc -O2 -Wall -Wextra -Icrates/gpress-c/include crates/gpress-c/examples/roundtrip.c -Ltarget/release -lgpress_c -lpthread -ldl -lm -o roundtrip
+          printf '%%PDF-1.4\n%%%%EOF\n' > t.pdf
+          LD_LIBRARY_PATH=target/release ./roundtrip t.pdf
+
+  wasm:
+    name: WebAssembly package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: cargo build --release -p gpress-wasm --target wasm32-unknown-unknown
+      - working-directory: crates/gpress-wasm/js
+        run: |
+          npm ci
+          mkdir -p dist && cp ../../../target/wasm32-unknown-unknown/release/gpress_wasm.wasm dist/gpress.wasm
+          npm run build:js
+          npm test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpress-wasm
+          path: crates/gpress-wasm/js/dist/
+
+  fuzz:
+    name: Fuzz the decoders (short run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      - run: |
+          for t in expand inflate pdf_optimize; do
+            cargo fuzz run $t -- -max_total_time=120 -rss_limit_mb=2048
+          done

@@ -1,4 +1,4 @@
-//! The peyaji format: any PDF, packed with our own PDF-aware model, restored byte for byte.
+//! The gpress archive: any PDF, packed with our own PDF-aware model, restored byte for byte.
 //!
 //! The file is cut into PDF syntax and stream payloads. Flate payloads that zlib made are stored decoded
 //! (with the few parameters needed to rebuild the exact compressed bytes); image rows lose their PNG
@@ -13,8 +13,9 @@ use crate::flate::{zlib, zlibexact};
 use crate::pdf::object::{Dict, Obj};
 use crate::pdf::parse::Lexer;
 
-pub const MAGIC: &[u8; 4] = b"\x89PYJ";
-const VERSION: u8 = 4;
+pub const MAGIC: &[u8; 4] = b"\x89GPZ";
+/// Current archive format version. Versions 0 (raw model) and 2 (stored) are also written.
+pub const VERSION: u8 = 4;
 const HASH_LEN: usize = 16;
 
 /// A typical PDF fragment both sides feed to the model first, so small files don't pay for a cold start.
@@ -60,10 +61,14 @@ fn looks_compressed(x: &[u8], allowed: bool) -> bool {
         h[b as usize] += 1;
     }
     let n = x.len() as f64;
-    let bits: f64 = h.iter().filter(|&&c| c > 0).map(|&c| {
-        let p = c as f64 / n;
-        -p * p.log2()
-    }).sum();
+    let bits: f64 = h
+        .iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = c as f64 / n;
+            -p * p.log2()
+        })
+        .sum();
     bits >= 7.9
 }
 
@@ -264,7 +269,7 @@ fn info(dict: Option<&Dict>, decoded_sample: Option<&[u8]>) -> Info {
             },
             _ => (1, false),
         };
-        let row = (w * comps * bpc + 7) / 8;
+        let row = (w * comps * bpc).div_ceil(8);
         let bpp = ((comps * bpc) / 8).max(1);
         inf.kind = Kind::Image;
         // Palette indices and packed pixels are symbols: modelled exactly, not as differences.
@@ -277,8 +282,8 @@ fn info(dict: Option<&Dict>, decoded_sample: Option<&[u8]>) -> Info {
                 let cols = int(p, b"Columns").unwrap_or(1).max(1) as usize;
                 let colors = int(p, b"Colors").unwrap_or(1).max(1) as usize;
                 let pbpc = int(p, b"BitsPerComponent").unwrap_or(8).max(1) as usize;
-                let prow = (cols * colors * pbpc + 7) / 8;
-                let pbpp = ((colors * pbpc + 7) / 8).max(1);
+                let prow = (cols * colors * pbpc).div_ceil(8);
+                let pbpp = (colors * pbpc).div_ceil(8).max(1);
                 inf.png = Some((prow, pbpp));
                 inf.geom = Geom { stride: prow, bpp: pbpp, exact: exact || pbpc < 8 };
                 inf.img = None;
@@ -342,7 +347,7 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 
 /// Filtered rows -> (filter types, pixels). None if the data isn't whole valid rows.
 fn unfilter(data: &[u8], row: usize, bpp: usize) -> Option<(Vec<u8>, Vec<u8>)> {
-    if row == 0 || data.len() % (row + 1) != 0 {
+    if row == 0 || !data.len().is_multiple_of(row + 1) {
         return None;
     }
     let rows = data.len() / (row + 1);
@@ -483,11 +488,25 @@ enum Plan {
     Syntax(usize, usize),
     Raw(usize, usize),
     /// `lep`: the decoded data is a JPEG, recompressed with Lepton (when that beats the Flate bytes).
-    Rebuilt { params: zlibexact::Params, data: Vec<u8>, tail: Vec<u8>, lep: Option<Vec<u8>> },
+    Rebuilt {
+        params: zlibexact::Params,
+        data: Vec<u8>,
+        tail: Vec<u8>,
+        lep: Option<Vec<u8>>,
+    },
     /// Rebuilt with the corrections an existing library (preflate) records for non-zlib encoders.
-    Preflated { header: [u8; 2], corrections: Vec<u8>, data: Vec<u8>, adler_ok: bool, rest: Vec<u8>, lep: Option<Vec<u8>> },
+    Preflated {
+        header: [u8; 2],
+        corrections: Vec<u8>,
+        data: Vec<u8>,
+        adler_ok: bool,
+        rest: Vec<u8>,
+        lep: Option<Vec<u8>>,
+    },
     /// A JPEG recompressed with an existing library (Lepton), restored bit for bit.
-    Lepton { data: Vec<u8> },
+    Lepton {
+        data: Vec<u8>,
+    },
 }
 
 fn plan(d: &[u8]) -> Vec<Plan> {
@@ -515,7 +534,7 @@ fn plan(d: &[u8]) -> Vec<Plan> {
 /// For measuring only: the file with every stream we can rebuild replaced by its decoded bytes and the JPEGs
 /// Lepton takes left out, plus the size of what a restore needs on top (rebuild settings, preflate
 /// corrections, Lepton data). A general compressor on the first, plus the second, is the fair "decompress
-/// first, then compress" baseline for the peyaji format: the same preparation, without our model.
+/// first, then compress" baseline for the gpress archive: the same preparation, without our model.
 pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
     let mut out = Vec::with_capacity(d.len() * 2);
     let mut extra = 0;
@@ -707,7 +726,9 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
             }
             T_REBUILT => {
                 let (p_in, data_in, tail_in, lep_in) = match cur.flatten() {
-                    Some(Plan::Rebuilt { params, data, tail, lep }) => (Some(*params), Some(data.as_slice()), Some(tail.as_slice()), Some(lep.as_deref())),
+                    Some(Plan::Rebuilt { params, data, tail, lep }) => {
+                        (Some(*params), Some(data.as_slice()), Some(tail.as_slice()), Some(lep.as_deref()))
+                    }
                     _ => (None, None, None, None),
                 };
                 let level = io.byte(p_in.map(|p| p.level));
@@ -735,7 +756,14 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
             }
             T_PREFLATED => {
                 let cur_p = match cur.flatten() {
-                    Some(Plan::Preflated { header, corrections, data, adler_ok, rest, lep }) => Some((*header, corrections.as_slice(), data.as_slice(), *adler_ok, rest.as_slice(), lep.as_deref())),
+                    Some(Plan::Preflated { header, corrections, data, adler_ok, rest, lep }) => Some((
+                        *header,
+                        corrections.as_slice(),
+                        data.as_slice(),
+                        *adler_ok,
+                        rest.as_slice(),
+                        lep.as_deref(),
+                    )),
                     _ => None,
                 };
                 let h0 = io.byte(cur_p.map(|p| p.0[0]));
@@ -821,7 +849,13 @@ fn lepton_part<C: Coder>(io: &mut Io<C>, src: Option<&[u8]>, n: usize, lep: &mut
 
 /// Codes a decoded stream payload (shared by the rebuilt kinds): its length, then the data with the model
 /// set for what it is; image rows lose their PNG predictor bytes on the way.
-fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, lep_in: Option<Option<&[u8]>>, out: &[u8], stats: &mut PackStats) -> Vec<u8> {
+fn payload<C: Coder>(
+    io: &mut Io<C>,
+    data_in: Option<&[u8]>,
+    lep_in: Option<Option<&[u8]>>,
+    out: &[u8],
+    stats: &mut PackStats,
+) -> Vec<u8> {
     let dlen = io.length(data_in.map(|x| x.len() as u64), MAX_PART);
     // A JPEG behind Flate (as normal-PDF output writes them): Lepton for the JPEG inside.
     if io.byte(lep_in.map(|l| l.is_some() as u8)) == 1 {
@@ -901,7 +935,7 @@ fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, lep_in: Option<Opti
             // The colour space can't always tell the number of components (an ICC profile's /N lives in another
             // object); the data length can. Both sides see the same length and dictionary.
             for c in [comps, 1, 3, 4, 2, 5, 6, 7, 8] {
-                let row = (w * c * bpc + 7) / 8;
+                let row = (w * c * bpc).div_ceil(8);
                 if row > 0 && h > 0 && row.checked_mul(h) == Some(dlen) {
                     inf.geom.stride = row;
                     inf.geom.bpp = ((c * bpc) / 8).max(1);
@@ -910,7 +944,8 @@ fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, lep_in: Option<Opti
             }
         }
         // Decoded data can itself be compressed (a JPEG behind Flate, say).
-        let flat = io.byte(data_in.map(|x| (inf.png.is_none() && looks_compressed(x, PLAIN_WHEN_COMPRESSED)) as u8)) == 1;
+        let flat =
+            io.byte(data_in.map(|x| (inf.png.is_none() && looks_compressed(x, PLAIN_WHEN_COMPRESSED)) as u8)) == 1;
         io.m.set_kind(inf.kind, inf.geom, 0);
         io.m.set_flat(flat);
         io.bytes(data_in, dlen, &mut decoded);
@@ -927,7 +962,11 @@ fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, lep_in: Option<Opti
 /// stream's bytes decide, not its dictionary: a /Filter given by reference, for example, still counts.
 /// Whatever is tried here is checked by rebuilding it exactly (and every pack is restored and compared).
 fn zlib_header(raw: &[u8]) -> bool {
-    raw.len() >= 8 && raw[0] & 0x0f == 8 && raw[0] >> 4 <= 7 && ((raw[0] as u16) << 8 | raw[1] as u16) % 31 == 0 && raw[1] & 0x20 == 0
+    raw.len() >= 8
+        && raw[0] & 0x0f == 8
+        && raw[0] >> 4 <= 7
+        && ((raw[0] as u16) << 8 | raw[1] as u16).is_multiple_of(31)
+        && raw[1] & 0x20 == 0
 }
 
 /// For a Flate payload that zlib made: (parameters, decoded data, bytes after the zlib stream).
@@ -973,7 +1012,7 @@ fn stored(input: &[u8]) -> Vec<u8> {
 /// Restores the original file; checks its length and hash.
 pub fn unpack(a: &[u8]) -> Result<Vec<u8>, String> {
     if a.len() < 6 || &a[..4] != MAGIC {
-        return Err("not a peyaji file".into());
+        return Err("not a gpress archive".into());
     }
     let ver = a[4];
     let mut len: u64 = 0;
@@ -992,7 +1031,7 @@ pub fn unpack(a: &[u8]) -> Result<Vec<u8>, String> {
         }
     }
     if len > MAX_FILE as u64 {
-        return Err("damaged peyaji file (impossible size)".into());
+        return Err("damaged gpress archive (impossible size)".into());
     }
     let len = len as usize;
     let want = a.get(i..i + HASH_LEN).ok_or("truncated header")?.to_vec();
@@ -1002,11 +1041,11 @@ pub fn unpack(a: &[u8]) -> Result<Vec<u8>, String> {
             let mut stats = PackStats::default();
             let (out, _) = run(Decoder::new(body), None, len, &mut stats);
             if stats.damaged {
-                return Err("damaged peyaji file".into());
+                return Err("damaged gpress archive".into());
             }
             out
         }
-        0 => fallback_decode(body, len).ok_or("damaged peyaji file")?,
+        0 => fallback_decode(body, len).ok_or("damaged gpress archive")?,
         2 => body.to_vec(),
         _ => return Err(format!("unknown version {ver}")),
     };
