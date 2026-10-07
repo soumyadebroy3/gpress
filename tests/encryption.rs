@@ -124,7 +124,11 @@ fn every_standard_mode_is_rewritten_with_the_same_encryption() {
         let input = file(name);
         let r = optimize(&input, &opts());
         match &r.outcome {
-            Outcome::Smaller(s) => assert_eq!(s.encryption, how, "{name}"),
+            Outcome::Smaller(s) => {
+                assert_eq!(s.encryption, how, "{name}");
+                // Every stream is re-encoded, encrypted XMP included; XMP left unencrypted stays as it is.
+                assert_eq!(s.streams_kept, (name == "r4_aes_cleartext_md") as usize, "{name}");
+            }
             Outcome::Untouched(why) => panic!("{name}: untouched: {why}"),
         }
         let a = xref::open(&input).unwrap();
