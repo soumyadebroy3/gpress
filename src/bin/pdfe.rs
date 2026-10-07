@@ -280,17 +280,20 @@ fn main() {
             let align = pos.get(4).map(|s| s.as_str()) == Some("1");
             // Prepared as pack prepares it (the stream's byte alignment, or the other one if that reads more).
             let p = part::prepare(&raw, ccitt::Scheme::from_k(k), cols, align).unwrap_or_else(|| die("not stored as a fax part"));
+            // The work budget as if the stream started a file (where it is smallest); the size is measured anyway.
+            let within = part::Work::default().admit(&p, 0);
+            let at = if within { 0 } else { usize::MAX / 4 };
             let t = Instant::now();
             let mut e = engine::cm::Encoder::new();
-            let back = part::code(&mut e, &mut part::FaxCoder::new(raw.len()), Some(&p), raw.len());
+            let back = part::code(&mut e, &mut part::FaxCoder::new(raw.len()), Some(&p), at, raw.len());
             let z = e.finish();
             let t1 = t.elapsed().as_secs_f64();
             let t = Instant::now();
             let mut d = engine::cm::Decoder::new(&z);
-            let restored = part::code(&mut d, &mut part::FaxCoder::new(raw.len()), None, raw.len());
+            let restored = part::code(&mut d, &mut part::FaxCoder::new(raw.len()), None, at, raw.len());
             let t2 = t.elapsed().as_secs_f64();
             println!(
-                "{} -> {} bytes ({} rows, {} trailing), coded in {t1:.2}s, restored in {t2:.2}s, exact: {}",
+                "{} -> {} bytes ({} rows, {} trailing), coded in {t1:.2}s, restored in {t2:.2}s, exact: {}, within the work budget at the start of a file: {within}",
                 raw.len(),
                 z.len(),
                 p.image.rows(),
