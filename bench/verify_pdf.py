@@ -3,12 +3,13 @@
 
   1. qpdf --check on the output (structure);
   2. pikepdf (qpdf's object model): every object reachable from the trailer has the same value, and every
-     stream decodes (lossless filters including RunLength, predictors undone) to the same bytes;
+     stream decodes (lossless filters including RunLength, predictors undone) to the same bytes; a JPEG
+     (DCTDecode) must be the same bytes, or else decode to the same pixels with qpdf's libjpeg and with Pillow;
   3. PDFium (pypdfium2): every page renders to the same pixels and gives the same text.
 
 Usage: verify_pdf.py ORIGINAL OUTPUT [--pages N]   -> prints one JSON line; exit status 0 if identical.
 Run with python3 -I (the files are untrusted)."""
-import hashlib, json, subprocess, sys
+import hashlib, io, json, subprocess, sys
 from decimal import Decimal
 
 import pikepdf
@@ -61,6 +62,70 @@ def stream_content(s):
         return 'undecodable:' + type(e).__name__
 
 
+def filter_names(s):
+    f = s.stream_dict.get('/Filter')
+    if isinstance(f, pikepdf.Name):
+        return [str(f)]
+    if isinstance(f, pikepdf.Array):
+        return [str(x) for x in f]
+    return []
+
+
+def jpeg_bytes(s):
+    """A DCT stream's JPEG: the stream with its general filters undone (by qpdf, on a copy). None if the
+    stream's last filter isn't DCTDecode."""
+    names = filter_names(s)
+    if not names or names[-1] not in ('/DCTDecode', '/DCT'):
+        return None
+    raw = s.read_raw_bytes()
+    if len(names) == 1:
+        return raw
+    scratch = pikepdf.new()
+    t = pikepdf.Stream(scratch, raw)
+    t.Filter = pikepdf.Array([pikepdf.Name(n) for n in names[:-1]])
+    parms = s.stream_dict.get('/DecodeParms')
+    if isinstance(parms, pikepdf.Array) and len(parms) == len(names):
+        t.DecodeParms = pikepdf.Array([scratch.copy_foreign(p) if isinstance(p, pikepdf.Dictionary) else None for p in list(parms)[:-1]])
+    return t.read_bytes(decode_level=pikepdf.StreamDecodeLevel.specialized)
+
+
+def jpeg_pixels(s, data):
+    """Decoded pixels by two decoders: qpdf (libjpeg, decode level all) and Pillow."""
+    from PIL import Image
+    out = []
+    try:
+        out.append(hashlib.sha256(s.read_bytes(decode_level=pikepdf.StreamDecodeLevel.all)).hexdigest())
+    except Exception as e:
+        out.append('qpdf failed:' + type(e).__name__)
+    try:
+        im = Image.open(io.BytesIO(data))
+        im.load()
+        out.append(hashlib.sha256(im.mode.encode() + repr(im.size).encode() + im.tobytes()).hexdigest())
+    except Exception as e:
+        out.append('Pillow failed:' + type(e).__name__)
+    return out
+
+
+def streams_same(x, y):
+    a, b = stream_content(x), stream_content(y)
+    if not (a.startswith('undecodable') and b.startswith('undecodable')):
+        return a == b
+    # qpdf undoes lossy filters (DCT) only at decode level "all": compare a JPEG's own bytes, and when they
+    # differ (other Huffman tables), the pixels two decoders give.
+    try:
+        ja, jb = jpeg_bytes(x), jpeg_bytes(y)
+    except Exception:
+        return False
+    if ja is None and jb is None:
+        return a == b
+    if ja is None or jb is None:
+        return False
+    if ja == jb:
+        return True
+    pa, pb = jpeg_pixels(x, ja), jpeg_pixels(y, jb)
+    return pa == pb and not any('failed' in p for p in pa)
+
+
 def graphs_same(a, b, problems):
     """Walk both object graphs from the same starting points in step; references are followed (not compared
     by number), so objects a reader creates or renumbers on its own don't count as differences."""
@@ -85,7 +150,7 @@ def graphs_same(a, b, problems):
             ix, iy = items(x.stream_dict, SKIP_STREAM_KEYS), items(y.stream_dict, SKIP_STREAM_KEYS)
             if [k for k, _ in ix] != [k for k, _ in iy]:
                 problems.append(f'{path}: stream dictionary keys differ'); continue
-            if stream_content(x) != stream_content(y):
+            if not streams_same(x, y):
                 problems.append(f'{path}: stream content differs'); continue
             stack.extend((vx, vy, path + '/' + k.decode('latin-1')) for (k, vx), (_, vy) in zip(ix, iy))
         elif isinstance(x, pikepdf.Dictionary) or isinstance(y, pikepdf.Dictionary):
