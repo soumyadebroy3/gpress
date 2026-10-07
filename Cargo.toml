@@ -16,9 +16,10 @@ path = "src/bin/pdfe.rs"
 # candidates (the engine keeps whichever result is smaller after the checks).
 [dependencies]
 preflate-rs = { version = "0.7", optional = true }
+lepton_jpeg = { version = "0.5", optional = true }
 
 [features]
-existing = ["dep:preflate-rs"]
+existing = ["dep:preflate-rs", "dep:lepton_jpeg"]
 
 [profile.release]
 opt-level = 3
