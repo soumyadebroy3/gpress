@@ -284,12 +284,12 @@ fn main() {
             }
             let t = Instant::now();
             let mut e = engine::cm::Encoder::new();
-            let back = part::code(&mut e, &mut part::FaxCoder::new(), Some(&p), raw.len());
+            let back = part::code(&mut e, &mut part::FaxCoder::new(raw.len()), Some(&p), raw.len());
             let z = e.finish();
             let t1 = t.elapsed().as_secs_f64();
             let t = Instant::now();
             let mut d = engine::cm::Decoder::new(&z);
-            let restored = part::code(&mut d, &mut part::FaxCoder::new(), None, raw.len());
+            let restored = part::code(&mut d, &mut part::FaxCoder::new(raw.len()), None, raw.len());
             let t2 = t.elapsed().as_secs_f64();
             println!(
                 "{} -> {} bytes ({} rows, {} trailing), coded in {t1:.2}s, restored in {t2:.2}s, exact: {}",
@@ -307,7 +307,7 @@ fn main() {
             let invert = pos.get(3).map(|s| s.as_str()) == Some("invert");
             let img = read_pbm(&data).unwrap_or_else(|| die("not a binary PBM"));
             let s = engine::fax::jbig2::pdf_stream(&img, invert);
-            let back = engine::fax::jbig2::read_pdf_stream(&s, invert);
+            let back = engine::fax::jbig2::read_pdf_stream(&s, invert, usize::MAX);
             std::fs::write(o, &s).unwrap_or_else(|e| die(&e.to_string()));
             println!("{} bytes, our decoder gives the image back: {}", s.len(), back.as_ref() == Some(&img));
         }

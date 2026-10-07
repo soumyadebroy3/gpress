@@ -71,6 +71,18 @@ impl Image {
         self.changes.extend_from_slice(changes);
         self.starts.push(self.changes.len());
     }
+    /// Pixels a pixel-by-pixel coder visits: rows equal to the row above (white above the first) cost one
+    /// decision each, every other row its width.
+    pub fn work(&self) -> u64 {
+        let mut n = 0u64;
+        for r in 0..self.rows() {
+            let same = if r == 0 { self.row(0).is_empty() } else { self.row(r) == self.row(r - 1) };
+            if !same {
+                n += self.width as u64;
+            }
+        }
+        n
+    }
 }
 
 /// One pixel per byte (0 white, 1 black) from a row's changing elements.
