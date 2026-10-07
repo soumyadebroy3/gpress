@@ -14,6 +14,7 @@ use super::matcher::{find_matches, Matches};
 use super::parse::{greedy, optimal_nice, Costs, ParseScratch};
 use super::tables::*;
 use crate::par::{self, Memo, Pool};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -49,28 +50,36 @@ impl Options {
         Options { iterations: 2, exact_rounds: 1, max_chain: 128, segment: 1 << 20, split: true, alternatives: false, multi_start_limit: 0, nice: 64, polish: false, shared: None }
     }
 
-    /// Settings for an effort from 0 (`quick`) to 100 (`max`).
+    /// Settings for an effort from 0 (`quick`) to 100 (`max`), in steps of 20. Measured on 92 sampled PDF
+    /// streams (3.4 MB) and on 6 large images (14.9 MB), against `max` (CPU time; bytes):
+    ///   0: 0.34x, 0.23x; +0.47%, +1.75%      20: 0.43x, 0.39x; +0.15%, +0.10%
+    ///  40: 0.47x, 0.45x; +0.13%, +0.09%      60: 0.77x, 0.71x; +0.03%, +0.00%      80: 0.93x, 0.90x; +0.01%, +0.00%
     pub fn effort(effort: u8) -> Options {
-        let o = |iterations, exact_rounds, max_chain, alternatives, multi_start_limit, nice, polish| Options {
+        let o = |iterations, exact_rounds, max_chain, alternatives, polish| Options {
             iterations,
             exact_rounds,
             max_chain,
             segment: 1 << 20,
             split: true,
             alternatives,
-            multi_start_limit,
-            nice,
+            multi_start_limit: 0,
+            nice: 259,
             polish,
             shared: None,
         };
         match effort {
-            0..=9 => Options::quick(),
-            10..=29 => o(3, 1, 512, false, 0, 128, false),
-            30..=49 => o(4, 2, 1024, false, 0, 259, false),
-            50..=69 => o(5, 2, 2048, true, 0, 259, true),
-            70..=89 => o(6, 3, 4096, true, 1 << 16, 259, true),
+            0..=19 => Options::quick(),
+            20..=39 => o(2, 1, 1024, false, false),
+            40..=59 => o(3, 1, 1024, false, false),
+            60..=79 => o(4, 2, 2048, true, true),
+            80..=99 => o(6, 3, 4096, true, true),
             _ => Options::max(),
         }
+    }
+
+    /// Whether two settings give the same output (`shared` never changes it).
+    pub fn same_output(&self, other: &Options) -> bool {
+        self.fingerprint() == other.fingerprint()
     }
 
     /// The settings that decide the output (everything but `shared`).
@@ -227,11 +236,21 @@ fn plan_price(p: &Plan) -> u64 {
 }
 
 fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &mut ParseScratch) {
+    // A merge or split that was turned down is turned down again while its blocks are the same, so the
+    // second pass skips those (blocks get a new id whenever they change); the result is unchanged.
+    let mut ids: Vec<usize> = (0..plans.len()).collect();
+    let mut next_id = plans.len();
+    let mut no_merge: HashSet<(usize, usize)> = HashSet::new();
+    let mut no_split: HashSet<usize> = HashSet::new();
     for _pass in 0..2 {
         let mut changed = false;
         // Merges.
         let mut k = 0;
         while k + 1 < plans.len() {
+            if no_merge.contains(&(ids[k], ids[k + 1])) {
+                k += 1;
+                continue;
+            }
             let (pa, pb) = (&plans[k], &plans[k + 1]);
             let apart = plan_price(pa) + plan_price(pb);
             let mut joined: Vec<Sym> = Vec::with_capacity(pa.syms.len() + pb.syms.len());
@@ -245,10 +264,14 @@ fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &m
                 if price(&Hist::of(&better), b - a) < apart {
                     plans[k] = Plan { a, b, syms: better };
                     plans.remove(k + 1);
+                    ids[k] = next_id;
+                    ids.remove(k + 1);
+                    next_id += 1;
                     changed = true;
                     continue;
                 }
             }
+            no_merge.insert((ids[k], ids[k + 1]));
             k += 1;
         }
         // Splits: try the best single cut of each block.
@@ -256,7 +279,7 @@ fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &m
         while k < plans.len() {
             let p = &plans[k];
             let n = p.syms.len();
-            if n < 64 {
+            if n < 64 || no_split.contains(&ids[k]) {
                 k += 1;
                 continue;
             }
@@ -278,6 +301,7 @@ fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &m
                 }
             }
             if best.1 == 0 || best.0 + 6 >= whole {
+                no_split.insert(ids[k]);
                 k += 1;
                 continue;
             }
@@ -290,9 +314,13 @@ fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &m
             if split_price < whole {
                 plans[k] = Plan { a, b: mid, syms: l };
                 plans.insert(k + 1, Plan { a: mid, b, syms: r });
+                ids[k] = next_id;
+                ids.insert(k + 1, next_id + 1);
+                next_id += 2;
                 changed = true;
                 k += 2;
             } else {
+                no_split.insert(ids[k]);
                 k += 1;
             }
         }

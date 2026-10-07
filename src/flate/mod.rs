@@ -70,3 +70,32 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod threads {
+    use super::*;
+
+    #[test]
+    fn segments_in_parallel_give_the_same_bytes() {
+        // Many small segments, so that several threads really share the work.
+        let mut s = 5u64;
+        let mut data = Vec::new();
+        for k in 0..400_000usize {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            data.push(if k % 3000 < 1800 { b"stream of text "[k % 15] } else { (s >> 7) as u8 % 7 });
+        }
+        for base in [Options::quick(), Options::effort(50)] {
+            let opt = Options { segment: 40_000, ..base };
+            let one = deflate_zlib(&data, &opt);
+            assert_eq!(zlib::unwrap(&one, data.len() + 1).unwrap().data, data);
+            for t in [2, 3, 8] {
+                let o = Options { shared: Some(deflate::Shared::new(t)), ..opt.clone() };
+                assert!(deflate_zlib(&data, &o) == one, "{t} threads");
+                // A second encode of the same input is remembered (and checked) rather than redone.
+                assert!(deflate_zlib(&data, &o) == one);
+            }
+        }
+    }
+}

@@ -10,6 +10,7 @@
 use crate::cm::model::{Geom, Kind, Model};
 use crate::cm::{Coder, Decoder, Encoder};
 use crate::flate::{zlib, zlibexact};
+use crate::par;
 use crate::pdf::object::{Dict, Obj};
 use crate::pdf::parse::Lexer;
 
@@ -49,8 +50,8 @@ fn primed(bits: u32) -> Model {
 }
 
 /// Data that is already compressed (high byte entropy) may be coded plainly: much faster, but about 1%
-/// larger than the full model even on such data (measured), so only when speed is asked for. Only the encoder
-/// decides; the decision is stored in the file.
+/// larger than the full model even on such data (measured), so only when speed is asked for (see
+/// `PackOptions`). Only the encoder decides; the decision is stored in the file.
 fn looks_compressed(x: &[u8], allowed: bool) -> bool {
     if !allowed || x.len() < 1024 {
         return false;
@@ -85,6 +86,7 @@ fn header(version: u8, input: &[u8]) -> Vec<u8> {
     out
 }
 
+mod pipe;
 mod sha256;
 pub use sha256::sha256;
 
@@ -401,6 +403,8 @@ struct Io<'m, C: Coder> {
     c: C,
     /// Set when decoding meets something only a damaged file can contain; decoding stops there.
     damaged: bool,
+    /// Encoder only: code compressed-looking data plainly (see `PackOptions`).
+    plain: bool,
 }
 
 /// Largest single part a file may declare (decoded stream, corrections, Lepton data): 2 GiB.
@@ -459,8 +463,25 @@ impl<'m, C: Coder> Io<'m, C> {
     }
 }
 
-/// Plain coding for compressed-looking streams: off at the current (maximum) effort.
-const PLAIN_WHEN_COMPRESSED: bool = false;
+/// Choices of the encoder. The decoder needs none of them: what they decide is stored in the file, so a
+/// file restores the same whatever they were.
+#[derive(Clone, Debug)]
+pub struct PackOptions {
+    /// How hard to try, 0 to 100. Below `PLAIN_BELOW`, data that looks compressed already is coded plainly:
+    /// much faster, about 1% larger on such data.
+    pub effort: u8,
+    /// Threads for looking at the streams (0: what the machine offers, at most 8). Never changes the output.
+    pub threads: usize,
+}
+
+impl Default for PackOptions {
+    fn default() -> Self {
+        PackOptions { effort: 100, threads: 0 }
+    }
+}
+
+/// Below this effort, compressed-looking data is coded plainly.
+const PLAIN_BELOW: u8 = 50;
 
 const T_SYNTAX: u8 = 0;
 const T_RAW: u8 = 1;
@@ -490,26 +511,38 @@ enum Plan {
     Lepton { data: Vec<u8> },
 }
 
-fn plan(d: &[u8]) -> Vec<Plan> {
-    segments(d)
-        .into_iter()
-        .map(|s| match s {
-            Seg::Syntax(a, b) => Plan::Syntax(a, b),
-            Seg::Stream(a, b) => match rebuild_params(d, a, &d[a..b]) {
-                Some((params, data, tail)) => {
-                    let lep = nested_lepton(&data, b - a);
-                    Plan::Rebuilt { params, data, tail, lep }
-                }
-                None => match preflated(d, a, &d[a..b]) {
+/// What to do with each part of the file. The streams are looked at in parallel (the biggest first); the
+/// plans keep the file's order.
+fn plan(d: &[u8], opt: &PackOptions) -> Vec<Plan> {
+    let t = std::time::Instant::now();
+    let segs = segments(d);
+    let pool = par::Pool::new(if opt.threads == 0 { par::default_threads() } else { opt.threads });
+    let size = |s: &Seg| match *s {
+        Seg::Syntax(..) => 0,
+        Seg::Stream(a, b) => b - a,
+    };
+    let mut order: Vec<usize> = (0..segs.len()).collect();
+    order.sort_by_key(|&k| (std::cmp::Reverse(size(&segs[k])), k));
+    let plans = par::map(Some(&pool), segs.len(), Some(&order), |k| match segs[k] {
+        Seg::Syntax(a, b) => Plan::Syntax(a, b),
+        Seg::Stream(a, b) => match rebuild_params(d, a, &d[a..b]) {
+            Some((params, data, tail)) => {
+                let lep = nested_lepton(&data, b - a);
+                Plan::Rebuilt { params, data, tail, lep }
+            }
+            None => match preflated(d, a, &d[a..b]) {
+                Some(p) => p,
+                None => match lepton(d, a, &d[a..b]) {
                     Some(p) => p,
-                    None => match lepton(d, a, &d[a..b]) {
-                        Some(p) => p,
-                        None => Plan::Raw(a, b),
-                    },
+                    None => Plan::Raw(a, b),
                 },
             },
-        })
-        .collect()
+        },
+    });
+    if std::env::var_os("PDFE_DEBUG").is_some() {
+        eprintln!("pack: {} parts planned in {:?}", plans.len(), t.elapsed());
+    }
+    plans
 }
 
 /// For measuring only: the file with every stream we can rebuild replaced by its decoded bytes and the JPEGs
@@ -519,7 +552,7 @@ fn plan(d: &[u8]) -> Vec<Plan> {
 pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
     let mut out = Vec::with_capacity(d.len() * 2);
     let mut extra = 0;
-    for p in plan(d) {
+    for p in plan(d, &PackOptions::default()) {
         match p {
             Plan::Syntax(a, b) | Plan::Raw(a, b) => out.extend_from_slice(&d[a..b]),
             Plan::Rebuilt { data, tail, lep, .. } => {
@@ -656,12 +689,12 @@ fn recreate(_data: &[u8], _corrections: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// One pass of the format: encoding `d` (Some) or rebuilding it (None). The same code runs both ways so the
-/// model sees exactly the same sequence of events.
-fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats) -> (Vec<u8>, C) {
+/// model sees exactly the same sequence of events. `opt` only guides the encoder's choices, which are stored.
+fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, opt: &PackOptions, stats: &mut PackStats) -> (Vec<u8>, C) {
     let mut model = primed(table_bits(total_len));
-    let mut io = Io { m: &mut model, c, damaged: false };
+    let mut io = Io { m: &mut model, c, damaged: false, plain: opt.effort < PLAIN_BELOW };
     let mut out: Vec<u8> = Vec::with_capacity(reserve(total_len));
-    let plans = d.map(plan);
+    let plans = d.map(|d| plan(d, opt));
     let mut si = 0;
     loop {
         let cur = plans.as_ref().map(|p| p.get(si));
@@ -693,7 +726,7 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
                     io.m.set_kind(Kind::Syntax, Geom::default(), out.len() as u64);
                     stats.syntax_bytes += n;
                 } else {
-                    flat = io.byte(src.map(|x| looks_compressed(x, PLAIN_WHEN_COMPRESSED) as u8)) == 1;
+                    flat = io.byte(src.map(|x| looks_compressed(x, io.plain) as u8)) == 1;
                     io.m.set_kind(Kind::Raw, Geom::default(), out.len() as u64);
                     stats.streams += 1;
                     stats.raw_stream_bytes += n;
@@ -910,7 +943,7 @@ fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, lep_in: Option<Opti
             }
         }
         // Decoded data can itself be compressed (a JPEG behind Flate, say).
-        let flat = io.byte(data_in.map(|x| (inf.png.is_none() && looks_compressed(x, PLAIN_WHEN_COMPRESSED)) as u8)) == 1;
+        let flat = io.byte(data_in.map(|x| (inf.png.is_none() && looks_compressed(x, io.plain)) as u8)) == 1;
         io.m.set_kind(inf.kind, inf.geom, 0);
         io.m.set_flat(flat);
         io.bytes(data_in, dlen, &mut decoded);
@@ -942,18 +975,47 @@ fn rebuild_params(_d: &[u8], _start: usize, raw: &[u8]) -> Option<(zlibexact::Pa
 }
 
 pub fn pack(input: &[u8]) -> (Vec<u8>, PackStats) {
+    pack_with(input, &PackOptions::default())
+}
+
+/// `pack` with the encoder's choices set by `opt`; any file it makes restores with `unpack`.
+pub fn pack_with(input: &[u8], opt: &PackOptions) -> (Vec<u8>, PackStats) {
     let mut stats = PackStats::default();
-    let (copy, enc) = run(Encoder::new(), Some(input), input.len(), &mut stats);
-    debug_assert_eq!(copy, input);
-    let mut out = header(VERSION, input);
-    out.extend_from_slice(&enc.finish());
-    // Never hand over something we can't restore exactly.
-    let out = match unpack(&out) {
-        Ok(back) if back == input => out,
-        _ => {
-            stats.fallback = true;
-            fallback(input)
-        }
+    let dbg = std::env::var_os("PDFE_DEBUG").is_some();
+    let t = std::time::Instant::now();
+    let threads = if opt.threads == 0 { par::default_threads() } else { opt.threads };
+    // Never hand over something we can't restore exactly. With a second thread the restore runs while the
+    // encoder writes (the same `run`, on the same bytes, as `unpack`); with one, it follows.
+    let (out, restored) = if threads >= 2 {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|s| {
+            let check = s.spawn(move || {
+                let mut st = PackStats::default();
+                let (back, _) = run(pipe::StreamDecoder::new(rx), None, input.len(), &PackOptions::default(), &mut st);
+                !st.damaged && back == input
+            });
+            let (copy, enc) = run(pipe::TeeEncoder::new(tx), Some(input), input.len(), opt, &mut stats);
+            debug_assert_eq!(copy, input);
+            let mut out = header(VERSION, input);
+            out.extend_from_slice(&enc.finish());
+            (out, check.join().unwrap_or(false))
+        })
+    } else {
+        let (copy, enc) = run(Encoder::new(), Some(input), input.len(), opt, &mut stats);
+        debug_assert_eq!(copy, input);
+        let mut out = header(VERSION, input);
+        out.extend_from_slice(&enc.finish());
+        let restored = matches!(unpack(&out), Ok(back) if back == input);
+        (out, restored)
+    };
+    if dbg {
+        eprintln!("pack: planned, coded and restored in {:?} ({threads} threads)", t.elapsed());
+    }
+    let out = if restored {
+        out
+    } else {
+        stats.fallback = true;
+        fallback(input)
     };
     let stored = stored(input);
     if out.len() > stored.len() {
@@ -1000,7 +1062,7 @@ pub fn unpack(a: &[u8]) -> Result<Vec<u8>, String> {
     let out = match ver {
         VERSION => {
             let mut stats = PackStats::default();
-            let (out, _) = run(Decoder::new(body), None, len, &mut stats);
+            let (out, _) = run(Decoder::new(body), None, len, &PackOptions::default(), &mut stats);
             if stats.damaged {
                 return Err("damaged peyaji file".into());
             }

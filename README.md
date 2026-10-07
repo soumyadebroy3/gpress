@@ -15,6 +15,7 @@ tool, measured on public test PDFs against the best existing tools. Nothing here
 | Safety gate | `src/pdf/rewrite.rs` (`gate`) | Encrypted, signed, certified, PDF/A, PDF/X, files with earlier revisions, files we can't read strictly, objects beyond /Size, objects present but not indexed: returned untouched. |
 | peyaji format | `src/pack/`, `src/cm/` | Any PDF, packed with our context-mixing model (bit-history states, mixers, SSE) with PDF-aware contexts: syntax, predicted object numbers and xref offsets, drawing instructions, image samples coded as residuals. Streams are recognised by their bytes (zlib, JPEG), not only by their dictionaries. Format version 4: a long repeat is coded as one 16-bit-precision decision instead of eight model decisions (huge flat images, duplicates); palette and packed-pixel images are modelled by their exact neighbours; an image's row length is confirmed from its data length; a JPEG behind Flate goes through Lepton when that beats the Flate bytes. Restored byte for byte; every pack is restored and checked (SHA-256) before it is returned. A damaged .pyj file is refused with an error: lengths are bounded, decoding stops when the data runs out, and the checksum is checked, so a wrong file is never returned. The model's settings are constants of the format version. |
 | SHA-256 | `src/pack/sha256.rs` | For the restore check. |
+| Threads and effort | `src/par.rs`, `Options::effort` in `src/flate/deflate.rs` and `src/pdf/rewrite.rs`, `PackOptions` in `src/pack/mod.rs` | Standard-library threads only: the segments of a stream, the streams of a PDF and the streams looked at by `pack` are worked on in parallel and put together in their original order, so the output is the same for any thread count. Identical streams are encoded once (a remembered result is checked against the input before it is used). `--effort` 0 to 100: 100 is the strongest setting (the same output as without the option); lower efforts give the expensive settings to the streams that take the most room first, within a work budget proportional to the file's size, choose image predictors from sampled rows, and in `pack` code already-compressed data plainly below 50. Decided from sizes only, never from time. |
 
 ## Existing libraries (optional, `--features existing`)
 
@@ -30,10 +31,13 @@ Apache-2.0 requires shipping its licence and notices with the product.
 ```
 cargo test --release
 cargo build --release --features existing
-target/release/pdfe optimize in.pdf out.pdf        # normal PDF, maximum effort (--quick for fast)
-target/release/pdfe pack in.pdf out.pyj            # peyaji format
+target/release/pdfe optimize in.pdf out.pdf        # normal PDF, maximum effort (--effort 0..100, --quick = 0)
+target/release/pdfe pack in.pdf out.pyj            # peyaji format (--effort 0..100)
 target/release/pdfe unpack out.pyj back.pdf        # exact original
 ```
+
+`--threads N` sets the number of threads (default: what the machine offers, at most 8); it never changes the
+output. `PDFE_DEBUG=1` prints the time of every stream and Flate segment.
 
 ## Benchmarks (`bench/`)
 

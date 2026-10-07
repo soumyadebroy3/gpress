@@ -173,7 +173,7 @@ fn main() {
             let (i, o) = (pos.get(1).unwrap_or_else(|| die("need IN")), pos.get(2).unwrap_or_else(|| die("need OUT")));
             let data = std::fs::read(i).unwrap_or_else(|e| die(&format!("{i}: {e}")));
             let t = Instant::now();
-            let (z, st) = engine::pack::pack(&data);
+            let (z, st) = engine::pack::pack_with(&data, &engine::pack::PackOptions { effort, threads });
             std::fs::write(o, &z).unwrap_or_else(|e| die(&format!("{o}: {e}")));
             println!("{i}\t{}\t{}\t{:.2}\t{:?}", data.len(), z.len(), t.elapsed().as_secs_f64(), st);
         }
@@ -227,7 +227,7 @@ fn main() {
                 let (Some(i), Some(o)) = (it.next(), it.next()) else { continue };
                 let Ok(data) = std::fs::read(i) else { continue };
                 let t = Instant::now();
-                let r = std::panic::catch_unwind(|| engine::pack::pack(&data));
+                let r = std::panic::catch_unwind(|| engine::pack::pack_with(&data, &engine::pack::PackOptions { effort, threads }));
                 match r {
                     Ok((z, st)) => {
                         std::fs::write(o, &z).unwrap();

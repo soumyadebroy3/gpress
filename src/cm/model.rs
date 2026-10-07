@@ -106,6 +106,9 @@ impl Table {
 struct Tok {
     in_tok: bool,
     tok: Vec<u8>,
+    /// Hash of `tok`, kept up to date as bytes are added (hashing the whole token at every byte would take
+    /// time growing with the square of its length).
+    tok_hash: u32,
 
     name_hash: u32,
     since_name: u32,
@@ -113,6 +116,8 @@ struct Tok {
     // content streams
     operands: Vec<Vec<u8>>,
     prev_operands: Vec<Vec<u8>>,
+    /// Hash of each of `prev_operands`, worked out once.
+    prev_hashes: Vec<u32>,
     prev_op: u32,
     prev_op2: u32,
     // syntax: object numbering
@@ -542,9 +547,15 @@ impl Model {
         [(col % bpp) as u32, w, n, nw, ne, ww, nn]
     }
 
+    fn tok_push(&mut self, b: u8) {
+        self.tok.tok.push(b);
+        self.tok.tok_hash = hb(self.tok.tok_hash, b);
+    }
+
     fn token_end(&mut self) -> Option<Vec<u8>> {
         if self.tok.in_tok {
             self.tok.in_tok = false;
+            self.tok.tok_hash = 0;
             let t = std::mem::take(&mut self.tok.tok);
             Some(t)
         } else {
@@ -569,7 +580,7 @@ impl Model {
             }
             if b == b'/' {
                 self.tok.in_tok = true;
-                self.tok.tok.push(b);
+                self.tok_push(b);
             } else if b == b'(' {
                 self.tok.in_string = 1;
             }
@@ -578,7 +589,7 @@ impl Model {
             }
         } else {
             self.tok.in_tok = true;
-            self.tok.tok.push(b);
+            self.tok_push(b);
         }
         self.tok.since_name = (self.tok.since_name + 1).min(15);
     }
@@ -695,11 +706,12 @@ impl Model {
                     self.tok.prev_op2 = self.tok.prev_op;
                     self.tok.prev_op = h;
                     self.tok.prev_operands = std::mem::take(&mut self.tok.operands);
+                    self.tok.prev_hashes = self.tok.prev_operands.iter().map(|v| v.iter().fold(7u32, |h, &x| hb(h, x))).collect();
                 }
             }
             if b == b'/' {
                 self.tok.in_tok = true;
-                self.tok.tok.push(b);
+                self.tok_push(b);
             } else if b == b'(' {
                 self.tok.in_string = 1;
                 self.tok.operands.push(b"(".to_vec());
@@ -714,7 +726,7 @@ impl Model {
             }
         } else {
             self.tok.in_tok = true;
-            self.tok.tok.push(b);
+            self.tok_push(b);
         }
     }
 
@@ -730,7 +742,7 @@ impl Model {
         let k = (self.kind as u32 + 1) << 28;
         let c4 = self.c4;
         let c1 = c4 & 0xff;
-        let tokh = self.tok.tok.iter().fold(0u32, |h, &x| hb(h, x));
+        let tokh = self.tok.tok_hash;
         let tl = self.tok.tok.len() as u32;
         let nb = if self.kind == Kind::Image && self.geom.stride > 0 { self.image_neighbours() } else { (0, 0, 0, 0, 0) };
         let ex = if self.kind == Kind::Image && self.geom.stride > 0 && self.geom.exact { self.exact_neighbours() } else { [0; 7] };
@@ -814,7 +826,7 @@ impl Model {
                     }
                     Kind::Content => {
                         let idx = self.tok.operands.len() as u32;
-                        let col = self.tok.prev_operands.get(idx as usize).map_or(0, |v| v.iter().fold(7u32, |h, &x| hb(h, x)));
+                        let col = self.tok.prev_hashes.get(idx as usize).copied().unwrap_or(0);
                         hs[6] = k ^ h2(21, h2(self.tok.prev_op, idx << 16 | tokh & 0xffff) ^ tl);
                         hs[7] = k ^ h2(22, h2(col, tl << 8 | c1));
                         hs[8] = k ^ h2(23, h2(self.tok.prev_op ^ self.tok.prev_op2.rotate_left(7), idx << 8 | c1));
@@ -832,6 +844,44 @@ impl Model {
         for i in 0..NCTX {
             let h = h2(self.hashes[i], 1);
             self.slot[i] = self.tables[i].find(h);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Null;
+    impl Coder for Null {
+        fn code(&mut self, bit: Option<u32>, _p: i32) -> u32 {
+            bit.unwrap_or(0)
+        }
+    }
+
+    #[test]
+    fn token_hashes_follow_the_tokens() {
+        // Syntax and content with long numbers, names, strings and operands.
+        let mut text = Vec::new();
+        text.extend_from_slice(b"1 0 obj << /Pi 3.");
+        text.extend(std::iter::repeat(b'1').take(5000));
+        text.extend_from_slice(b" /Name#20x (a (nested) string) >> endobj\n");
+        let mut content = Vec::new();
+        for i in 0..40 {
+            content.extend_from_slice(format!("{i} 0 {} Td (text) Tj ", "9".repeat(i * 50)).as_bytes());
+            content.extend_from_slice(b"/F1 12 Tf [<00ff> 3 <0102>] TJ q 1 0 0 1 0 0 cm Q\n");
+        }
+        let mut m = Model::new(12);
+        let mut n = Null;
+        let fold0 = |t: &[u8]| t.iter().fold(0u32, |h, &x| hb(h, x));
+        let fold7 = |t: &[u8]| t.iter().fold(7u32, |h, &x| hb(h, x));
+        for (kind, data) in [(Kind::Syntax, &text), (Kind::Content, &content), (Kind::Syntax, &text)] {
+            m.set_kind(kind, Geom::default(), 0);
+            for &b in data.iter() {
+                m.code_byte(&mut n, Some(b));
+                assert_eq!(m.tok.tok_hash, fold0(&m.tok.tok));
+                assert_eq!(m.tok.prev_hashes, m.tok.prev_operands.iter().map(|v| fold7(v)).collect::<Vec<u32>>());
+            }
         }
     }
 }
