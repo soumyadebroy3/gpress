@@ -15,6 +15,10 @@ tool, measured on public test PDFs against the best existing tools. Nothing here
 | Safety gate | `src/pdf/rewrite.rs` (`gate`) | Encrypted, signed, certified, PDF/A, PDF/X, files with earlier revisions, files we can't read strictly, objects beyond /Size, objects present but not indexed: returned untouched. |
 | peyaji format | `src/pack/`, `src/cm/` | Any PDF, packed with our context-mixing model (bit-history states, mixers, SSE) with PDF-aware contexts: syntax, predicted object numbers and xref offsets, drawing instructions, image samples coded as residuals. Streams are recognised by their bytes (zlib, JPEG), not only by their dictionaries. Format version 4: a long repeat is coded as one 16-bit-precision decision instead of eight model decisions (huge flat images, duplicates); palette and packed-pixel images are modelled by their exact neighbours; an image's row length is confirmed from its data length; a JPEG behind Flate goes through Lepton when that beats the Flate bytes. Restored byte for byte; every pack is restored and checked (SHA-256) before it is returned. A damaged .pyj file is refused with an error: lengths are bounded, decoding stops when the data runs out, and the checksum is checked, so a wrong file is never returned. The model's settings are constants of the format version. |
 | SHA-256 | `src/pack/sha256.rs` | For the restore check. |
+| CCITT fax codec | `src/fax/ccitt.rs`, `tables.rs` | Decoder and encoder for T.4 (1-D, 2-D) and T.6 as CCITTFaxDecode uses them. The decoder records every choice of the original encoder (fill bits, EOLs, tag bits, end codes, padding, bytes after the end, and Adobe's way of choosing between pass and horizontal mode) and keeps a row only if writing it again gives the same bits. Checked against libtiff both ways and against libtiff and Poppler on all 183 fax streams of the test files. |
+| JBIG2 | `src/fax/jbig2.rs` | MQ coder; generic-region encoder and decoder (T.88, template 0, nominal adaptive pixels, typical prediction); the embedded stream PDF reads. jbig2dec decodes our output exactly. |
+| Fax images, normal PDF | `src/fax/pdf.rs` | A CCITT image becomes JBIG2 when that is at least 5% smaller and nothing is uncertain: one CCITT filter with direct parameters, a DeviceGray image or a mask, the width and height the data holds, no byte alignment, every row written back bit for bit, end codes or 0 bits at the end, and our JBIG2 decoder giving the same pixels. JBIG2Decode's output is the same bits as CCITTFaxDecode's (BlackIs1 handled), so Decode, ImageMask and masks keep their meaning. The self-check compares the two by decoded pixels. |
+| Fax images, peyaji format | `src/fax/bilevel.rs`, `part.rs` | Format version 5: a CCITT stream is stored as its image, coded by a bilevel context-mixing model (templates up to four rows high, vertical runs, two mixers, two probability maps, 16-bit precision, typical prediction, a fast path for white areas), plus the encoder's choices; on restore our CCITT encoder writes the original bytes back. Streams under 64 bytes stay plain. |
 
 ## Existing libraries (optional, `--features existing`)
 
@@ -46,7 +50,14 @@ target/release/pdfe unpack out.pyj back.pdf        # exact original
   text of every page, up to 30 pages; no new Poppler errors). pdf.js comes from npm (`pdfjs-dist`,
   `@napi-rs/canvas`), installed outside this folder; the engine itself has no dependencies.
 - `check_the_checkers.py`: the checks must catch one small change (a character, a metadata value, the page
-  size, one bit of one pixel) and pass an unchanged copy.
+  size, one bit of one pixel) and pass an unchanged copy. With `--fax FILE`: a fax image coded again by
+  libtiff (same pixels) must pass, one flipped pixel must be caught.
+- `verify_pdf.py` compares image streams qpdf can't decode (CCITT, JBIG2, JPEG, JPEG 2000) by their decoded
+  pixels: pikepdf's decoders (libtiff, jbig2dec, libjpeg, OpenJPEG), then Poppler's when pikepdf can't
+  decode one or disagrees (noted in its output). jbig2dec and jbig2enc (`apt install jbig2dec jbig2`) are
+  used only by the checks and benchmarks, never by the engine.
+- `fax_bench.py`: files with fax images, both outputs before and after, and every fax stream against xz -9e
+  and jbig2enc's lossless generic coding.
 - `pack_bench.py`: the peyaji format against xz, Brotli, Zstandard and inflate+xz; every file restored and
   compared byte for byte.
 
