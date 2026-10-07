@@ -491,8 +491,8 @@ enum Plan {
     Preflated { header: [u8; 2], corrections: Vec<u8>, data: Vec<u8>, adler_ok: bool, rest: Vec<u8>, lep: Option<Vec<u8>> },
     /// A JPEG recompressed with an existing library (Lepton), restored bit for bit.
     Lepton { data: Vec<u8> },
-    /// A CCITT fax stream: the image and every choice of its encoder (see `crate::fax::part`).
-    Fax { parsed: Box<crate::fax::ccitt::Parsed> },
+    /// A CCITT fax stream at a..b: the image and every choice of its encoder (see `crate::fax::part`).
+    Fax { parsed: Box<crate::fax::ccitt::Parsed>, a: usize, b: usize },
 }
 
 fn plan(d: &[u8]) -> Vec<Plan> {
@@ -525,7 +525,7 @@ fn plan(d: &[u8]) -> Vec<Plan> {
 pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
     let mut out = Vec::with_capacity(d.len() * 2);
     let mut extra = 0;
-    for p in plan(d) {
+    for p in fax_budget(plan(d), d.len()) {
         match p {
             Plan::Syntax(a, b) | Plan::Raw(a, b) => out.extend_from_slice(&d[a..b]),
             Plan::Rebuilt { data, tail, lep, .. } => {
@@ -545,7 +545,7 @@ pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
                 extra += corrections.len();
             }
             Plan::Lepton { data } => extra += data.len(),
-            Plan::Fax { parsed } => {
+            Plan::Fax { parsed, .. } => {
                 out.extend_from_slice(&crate::fax::part::packed(&parsed.image));
                 out.extend_from_slice(&parsed.layout.trailing);
                 extra += 8 + parsed.layout.end.len();
@@ -674,7 +674,7 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
     let mut fax_coder: Option<crate::fax::part::FaxCoder> = None;
     let mut io = Io { m: &mut model, c, damaged: false };
     let mut out: Vec<u8> = Vec::with_capacity(reserve(total_len));
-    let plans = d.map(plan);
+    let plans = d.map(|d| fax_budget(plan(d), total_len));
     let mut si = 0;
     loop {
         let cur = plans.as_ref().map(|p| p.get(si));
@@ -807,7 +807,7 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
             }
             T_FAX => {
                 let src = match cur.flatten() {
-                    Some(Plan::Fax { parsed }) => Some(&**parsed),
+                    Some(Plan::Fax { parsed, .. }) => Some(&**parsed),
                     _ => None,
                 };
                 let fc = fax_coder.get_or_insert_with(|| crate::fax::part::FaxCoder::new(total_len));
@@ -1001,7 +1001,7 @@ const MIN_FAX: usize = 64;
 /// A stream whose only filter is CCITTFaxDecode, when our CCITT decoder understands most of it: the image
 /// and the encoder's choices, checked to give the very same bytes back.
 fn fax(d: &[u8], a: usize, b: usize, objects: &ObjIndex) -> Option<Plan> {
-    use crate::fax::{ccitt, part, pdf::FaxParams};
+    use crate::fax::{ccitt::Scheme, part, pdf::FaxParams};
     let raw = &d[a..b];
     if raw.len() < MIN_FAX {
         return None;
@@ -1030,14 +1030,23 @@ fn fax(d: &[u8], a: usize, b: usize, objects: &ObjIndex) -> Option<Plan> {
         return None;
     }
     let fp = FaxParams::from(stages[0].parms.as_ref())?;
-    let parsed = ccitt::parse(raw, ccitt::Scheme::from_k(fp.k), fp.columns, fp.byte_align, ccitt::Limits::default())?;
-    if parsed.image.rows() == 0 || parsed.layout.trailing.len() * 4 > raw.len() || !part::fits(&parsed) {
-        return None;
+    let parsed = part::prepare(raw, Scheme::from_k(fp.k), fp.columns, fp.byte_align)?;
+    Some(Plan::Fax { parsed: Box::new(parsed), a, b })
+}
+
+/// Keeps the fax streams of a file within the work budget the restore checks (`crate::fax::part::file_budget`
+/// of the file's length), in file order; streams past it are coded plainly.
+fn fax_budget(mut plans: Vec<Plan>, file_len: usize) -> Vec<Plan> {
+    let mut left = crate::fax::part::file_budget(file_len);
+    for p in plans.iter_mut() {
+        if let Plan::Fax { parsed, a, b } = p {
+            match left.checked_sub(crate::fax::part::cost(&parsed.image)) {
+                Some(l) => left = l,
+                None => *p = Plan::Raw(*a, *b),
+            }
+        }
     }
-    if ccitt::encode(&parsed.image, &parsed.layout) != raw {
-        return None;
-    }
-    Some(Plan::Fax { parsed: Box::new(parsed) })
+    plans
 }
 
 /// For a Flate payload that zlib made: (parameters, decoded data, bytes after the zlib stream).

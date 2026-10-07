@@ -188,6 +188,203 @@ fn anything_uncertain_stays_ccitt() {
     assert!(names.contains(&b"CCITTFaxDecode".to_vec()) && !names.contains(&b"JBIG2Decode".to_vec()));
 }
 
+/// What normal-PDF output does with the image of a PDF made by `pdf` (object 4), in words.
+fn explain(d: &[u8]) -> String {
+    let id = |o: &Obj| Some(o.clone());
+    engine::fax::pdf::explain(&image_stream(d), &id)
+}
+
+/// Data that readers see differently stays CCITT: Poppler and xpdf look for an EOL after every row when
+/// EndOfLine is set or when the data starts with an EOL (PDFium and libtiff don't), and huge JBIG2 pages are
+/// beyond PDFium's decoder (it shows nothing where it shows the CCITT image).
+#[test]
+fn what_readers_see_differently_stays_ccitt() {
+    let img = page(600, 400);
+    let gray = "/ColorSpace /DeviceGray";
+    let with = |scheme: Scheme, first_eol_only: bool, parms: &str| {
+        let mut lay = layout(&img, scheme, false);
+        lay.gaps[0].eol = first_eol_only;
+        let k = if scheme == Scheme::G31D { 0 } else if scheme == Scheme::G32D { 2 } else { -1 };
+        pdf(&format!("/Width 600 /Height 400 /BitsPerComponent 1 {gray} /Filter /CCITTFaxDecode /DecodeParms << /K {k} /Columns 600 {parms} >>"), &ccitt::encode(&img, &lay))
+    };
+    let cases = [
+        ("Group 4 data with EndOfLine", with(Scheme::G4, false, "/EndOfLine true"), "kept: EndOfLine set for Group 4 data"),
+        ("K 0, an EOL before the first row only", with(Scheme::G31D, true, ""), "kept: a row without EOL after EndOfLine or a leading EOL"),
+        ("K 2, an EOL before the first row only", with(Scheme::G32D, true, ""), "kept: a row without EOL after EndOfLine or a leading EOL"),
+        ("K 0, EndOfLine but no EOLs", with(Scheme::G31D, false, "/EndOfLine true"), "kept: a row without EOL after EndOfLine or a leading EOL"),
+    ];
+    for (what, d, why) in &cases {
+        assert_eq!(explain(d), *why, "{what}");
+        assert!(stays_ccitt(d), "{what}");
+    }
+    // The same data without the EOL before the first row, or without EndOfLine, is clear to every reader.
+    for (scheme, parms) in [(Scheme::G4, ""), (Scheme::G31D, ""), (Scheme::G32D, ""), (Scheme::G31D, "/EndOfLine false")] {
+        assert!(explain(&with(scheme, false, parms)).starts_with("JBIG2"), "{scheme:?} {parms}");
+    }
+
+    // An all-black image, its width rounded up to 32 times its height: at most 2^30 pixels become JBIG2.
+    let black = |w: usize, h: usize| {
+        let mut img = Image::new(w);
+        for _ in 0..h {
+            img.push_row(&[0]);
+        }
+        pdf(&format!("/Width {w} /Height {h} /BitsPerComponent 1 {gray} /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns {w} >>"), &ccitt::encode(&img, &layout(&img, Scheme::G4, false)))
+    };
+    assert!(explain(&black(32768, 32768)).starts_with("JBIG2"));
+    assert!(explain(&black(32737, 32768)).starts_with("JBIG2"));
+    assert_eq!(explain(&black(32768, 32769)), "kept: too large for some JBIG2 decoders");
+    // Where PDFium's decoder shows nothing: 46368 x 46314.
+    let d = black(46368, 46314);
+    assert_eq!(explain(&d), "kept: too large for some JBIG2 decoders");
+    assert!(stays_ccitt(&d));
+}
+
+/// Normal-PDF output of a PDF made by `pdf`: its image is still CCITT (Flate may be put in front), not JBIG2.
+fn stays_ccitt(d: &[u8]) -> bool {
+    let opt = Options { flate: engine::flate::Options::quick(), ..Default::default() };
+    let s = image_stream(&optimize(d, &opt).data);
+    let names: Vec<Vec<u8>> = engine::pdf::filters::chain(&s.dict).unwrap().into_iter().map(|st| st.name).collect();
+    names.contains(&b"CCITTFaxDecode".to_vec()) && !names.contains(&b"JBIG2Decode".to_vec())
+}
+
+/// Rows of a "bomb": alternately white and with one black pixel, so that no row repeats the row above, at a few
+/// bits per row.
+fn bomb(w: usize, h: usize, x: u32) -> Image {
+    let mut img = Image::new(w);
+    for r in 0..h {
+        if r % 2 == 0 {
+            img.push_row(&[x, x + 1]);
+        } else {
+            img.push_row(&[]);
+        }
+    }
+    img
+}
+
+/// A few bytes of CCITT data can describe a huge image: the work of coding one is bounded by the size of its
+/// data (normal PDF) or of the file (peyaji format), so that a file's size bounds its time.
+#[test]
+fn fax_work_is_bounded_by_the_data() {
+    // Normal PDF: 4096 rows of 131072 pixels from about 4.4 KB of Group 4 data stay CCITT.
+    let img = bomb(131072, 4096, 10);
+    let data = ccitt::encode(&img, &layout(&img, Scheme::G4, false));
+    assert!(data.len() < 5000 && img.work() == 1 << 29, "{} bytes, work {}", data.len(), img.work());
+    let d = pdf("/Width 131072 /Height 4096 /BitsPerComponent 1 /ColorSpace /DeviceGray /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 131072 >>", &data);
+    assert_eq!(explain(&d), "kept: too much work for the size of the data");
+
+    // peyaji format: the file's fax streams may take 2^24 plus 512 per byte of the file together, in file
+    // order; the rest are coded plainly. Each of these images needs nearly 2^24, so only the first fits.
+    let mut objs = Vec::new();
+    for i in 0..3u32 {
+        let img = bomb(131072, 120, 10 + i);
+        let data = ccitt::encode(&img, &layout(&img, Scheme::G4, false));
+        objs.push(("/Width 131072 /Height 120 /BitsPerComponent 1 /ColorSpace /DeviceGray /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 131072 >>".to_string(), data));
+    }
+    let d = pdf_images(&objs);
+    let (budget, cost) = (engine::fax::part::file_budget(d.len()), engine::fax::part::cost(&bomb(131072, 120, 10)));
+    assert!(cost <= budget && budget < 2 * cost, "budget {budget}, cost {cost}");
+    let (packed, stats) = pack(&d);
+    assert_eq!(stats.fax, 1, "{stats:?}");
+    assert_eq!(unpack(&packed).unwrap(), d);
+    // With room for all three (a larger file), all three are coded as images.
+    let per_byte = engine::fax::part::file_budget(1) - engine::fax::part::file_budget(0);
+    let pad = ((3 * cost - budget) / per_byte) as usize + 64;
+    let mut big = d.clone();
+    big.splice(9..9, std::iter::repeat_n(b'%', pad).chain([b'\n']));
+    let big = fix_xref(&big);
+    let (packed, stats) = pack(&big);
+    assert_eq!(stats.fax, 3, "{stats:?}");
+    assert_eq!(unpack(&packed).unwrap(), big);
+}
+
+/// A PDF made by `pdf_images` with its xref table rebuilt (after bytes were inserted before the objects).
+fn fix_xref(d: &[u8]) -> Vec<u8> {
+    let at = |pat: &[u8], from: usize| d[from..].windows(pat.len()).position(|w| w == pat).map(|i| i + from);
+    let xref = at(b"\nxref\n", 0).unwrap() + 1;
+    let mut offs = Vec::new();
+    let mut i = 0;
+    while let Some(j) = at(b" 0 obj\n", i) {
+        if j >= xref {
+            break;
+        }
+        let mut s = j;
+        while s > 0 && d[s - 1].is_ascii_digit() {
+            s -= 1;
+        }
+        offs.push(s);
+        i = j + 1;
+    }
+    let mut out = d[..xref].to_vec();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", offs.len() + 1).as_bytes());
+    for o in &offs {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", offs.len() + 1).as_bytes());
+    out
+}
+
+/// A PDF with one page drawing several image XObjects (objects 4, 5, ...; the content stream is the last).
+fn pdf_images(images: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let n = images.len();
+    let mut content = Vec::new();
+    for i in 0..n {
+        content.extend_from_slice(format!("q 300 0 0 200 50 50 cm /Im{i} Do Q\n").as_bytes());
+    }
+    let xobjects: String = (0..n).map(|i| format!("/Im{i} {} 0 R ", 4 + i)).collect();
+    let mut out = b"%PDF-1.3\n".to_vec();
+    let mut offs = Vec::new();
+    let mut obj = |out: &mut Vec<u8>, body: &[u8]| {
+        offs.push(out.len());
+        out.extend_from_slice(body);
+    };
+    obj(&mut out, b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    obj(&mut out, b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+    obj(&mut out, format!("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300] /Resources << /XObject << {xobjects}>> >> /Contents {} 0 R >>\nendobj\n", 4 + n).as_bytes());
+    for (i, (dict, data)) in images.iter().enumerate() {
+        let mut s = format!("{} 0 obj\n<< /Type /XObject /Subtype /Image {dict} /Length {} >>\nstream\n", 4 + i, data.len()).into_bytes();
+        s.extend_from_slice(data);
+        s.extend_from_slice(b"\nendstream\nendobj\n");
+        obj(&mut out, &s);
+    }
+    let mut c = format!("{} 0 obj\n<< /Length {} >>\nstream\n", 4 + n, content.len()).into_bytes();
+    c.extend_from_slice(&content);
+    c.extend_from_slice(b"\nendstream\nendobj\n");
+    obj(&mut out, &c);
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", 5 + n).as_bytes());
+    for o in &offs {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", 5 + n).as_bytes());
+    out
+}
+
+/// EncodedByteAlign data with the fill before each EOL, so that every EOL ends on a byte boundary (libtiff
+/// writes it so): stored as an image like any other fax stream, and restored exactly.
+#[test]
+fn peyaji_reads_eols_that_end_on_a_byte_boundary() {
+    let img = page(613, 401);
+    let mut lay = layout(&img, Scheme::G31D, true);
+    let mut wr = ccitt::Writer::new();
+    let mut enc = ccitt::RowEncoder::new(img.width, Scheme::G31D, Rule::Standard);
+    for r in 0..img.rows() {
+        lay.gaps[r].fill = ((16 - (wr.bit_pos() + 12) % 8) % 8) as u32;
+        let g = lay.gaps[r];
+        enc.row(&mut wr, &g, img.row(r));
+    }
+    let data = ccitt::encode(&img, &lay);
+    // Read with the alignment the parameters give, an EOL that starts before a byte boundary is not found.
+    let aligned = ccitt::parse(&data, Scheme::G31D, 613, true, ccitt::Limits::default()).unwrap();
+    assert!(aligned.image.rows() < img.rows());
+    let p = engine::fax::part::prepare(&data, Scheme::G31D, 613, true).unwrap();
+    assert_eq!(p.image, img);
+    let d = pdf("/Width 613 /Height 401 /BitsPerComponent 1 /ColorSpace /DeviceGray /Filter /CCITTFaxDecode /DecodeParms << /K 0 /Columns 613 /EncodedByteAlign true /EndOfLine true >>", &data);
+    let (packed, stats) = pack(&d);
+    assert_eq!(stats.fax, 1, "{stats:?}");
+    assert!(packed.len() * 2 < d.len(), "{} -> {}", d.len(), packed.len());
+    assert_eq!(unpack(&packed).unwrap(), d);
+}
+
 #[test]
 fn self_check_compares_fax_and_jbig2_by_pixels() {
     let img = page(600, 400);

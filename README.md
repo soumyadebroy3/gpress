@@ -17,8 +17,8 @@ tool, measured on public test PDFs against the best existing tools. Nothing here
 | SHA-256 | `src/pack/sha256.rs` | For the restore check. |
 | CCITT fax codec | `src/fax/ccitt.rs`, `tables.rs` | Decoder and encoder for T.4 (1-D, 2-D) and T.6 as CCITTFaxDecode uses them. The decoder records every choice of the original encoder (fill bits, EOLs, tag bits, end codes, padding, bytes after the end, and Adobe's way of choosing between pass and horizontal mode) and keeps a row only if writing it again gives the same bits. Checked against libtiff both ways and against libtiff and Poppler on all 183 fax streams of the test files. |
 | JBIG2 | `src/fax/jbig2.rs` | MQ coder; generic-region encoder and decoder (T.88, template 0, nominal adaptive pixels, typical prediction); the embedded stream PDF reads. jbig2dec decodes our output exactly. |
-| Fax images, normal PDF | `src/fax/pdf.rs` | A CCITT image becomes JBIG2 when that is at least 5% smaller and nothing is uncertain: one CCITT filter with direct parameters, a DeviceGray image or a mask, the width and height the data holds, no byte alignment, every row written back bit for bit, end codes or 0 bits at the end, and our JBIG2 decoder giving the same pixels. JBIG2Decode's output is the same bits as CCITTFaxDecode's (BlackIs1 handled), so Decode, ImageMask and masks keep their meaning. The self-check compares the two by decoded pixels. |
-| Fax images, peyaji format | `src/fax/bilevel.rs`, `part.rs` | Format version 5: a CCITT stream is stored as its image, coded by a bilevel context-mixing model (templates up to four rows high, vertical runs, two mixers, two probability maps, 16-bit precision, typical prediction, a fast path for white areas), plus the encoder's choices; on restore our CCITT encoder writes the original bytes back. Streams under 64 bytes stay plain. |
+| Fax images, normal PDF | `src/fax/pdf.rs` | A CCITT image becomes JBIG2 when that is at least 5% smaller and nothing is uncertain: one CCITT filter with direct parameters, a DeviceGray image or a mask, the width and height the data holds, at most 2^30 pixels (width rounded up to 32; PDFium's JBIG2 decoder, which pdf.js also uses, shows nothing above 2^31), no byte alignment, EOLs where every reader expects them (no EndOfLine on Group 4 data; an EOL before every row once EndOfLine is set or the data starts with one, as Poppler and xpdf then look for them), every row written back bit for bit, end codes or 0 bits at the end, coding work of at most 2048 pixels per byte of data, and our JBIG2 decoder giving the same pixels. JBIG2Decode's output is the same bits as CCITTFaxDecode's (BlackIs1 handled), so Decode, ImageMask and masks keep their meaning. The self-check compares the two by decoded pixels. |
+| Fax images, peyaji format | `src/fax/bilevel.rs`, `part.rs` | Format version 5: a CCITT stream is stored as its image, coded by a bilevel context-mixing model (templates up to four rows high, vertical runs, two mixers, two probability maps, 16-bit precision, typical prediction, a fast path for white areas), plus the encoder's choices; on restore our CCITT encoder writes the original bytes back. EncodedByteAlign data whose EOLs end on a byte boundary is read too. Streams under 64 bytes stay plain. The model's work for all fax streams of a file is bounded by the file's size (2^24 plus 512 pixels per byte): streams past it are coded plainly, and a restore that would go past it is refused. |
 
 ## Existing libraries (optional, `--features existing`)
 
@@ -54,8 +54,9 @@ target/release/pdfe unpack out.pyj back.pdf        # exact original
   libtiff (same pixels) must pass, one flipped pixel must be caught.
 - `verify_pdf.py` compares image streams qpdf can't decode (CCITT, JBIG2, JPEG, JPEG 2000) by their decoded
   pixels: pikepdf's decoders (libtiff, jbig2dec, libjpeg, OpenJPEG), then Poppler's when pikepdf can't
-  decode one or disagrees (noted in its output). jbig2dec and jbig2enc (`apt install jbig2dec jbig2`) are
-  used only by the checks and benchmarks, never by the engine.
+  decode one or disagrees (noted in its output; libtiff wants an EOL before every Group 3 row, which PDF
+  doesn't require). jbig2dec and jbig2enc (`apt install jbig2dec jbig2`) are used only by the checks and
+  benchmarks, never by the engine.
 - `fax_bench.py`: files with fax images, both outputs before and after, and every fax stream against xz -9e
   and jbig2enc's lossless generic coding.
 - `pack_bench.py`: the peyaji format against xz, Brotli, Zstandard and inflate+xz; every file restored and

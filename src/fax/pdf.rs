@@ -2,18 +2,27 @@
 //! pixel comparison the self-check uses for such streams.
 //!
 //! A CCITT image is replaced only when nothing about it is uncertain: one CCITTFaxDecode filter with
-//! direct parameters, a DeviceGray image or a stencil mask, the width and height the data describes, no byte
-//! alignment (readers disagree on it), every row decoded and written back bit for bit, the data ending
-//! with end codes or only 0 bits, and the JBIG2 stream at least 5% smaller and decoding (with our decoder) to
-//! the same pixels. JBIG2Decode gives 1 for white, CCITTFaxDecode gives 0 for black unless BlackIs1: the
-//! JBIG2 bitmap is chosen so the filter's output is the same bits, and every other entry of the image
-//! dictionary (Decode, ImageMask, masks) keeps its meaning.
+//! direct parameters, a DeviceGray image or a stencil mask, the width and height the data describes, a size
+//! every JBIG2 decoder can hold, no byte alignment (readers disagree on it), EOL codes where every reader
+//! expects them, every row decoded and written back bit for bit, the data ending with end codes or only 0
+//! bits, coding work in proportion to the data, and the JBIG2 stream at least 5% smaller and decoding (with
+//! our decoder) to the same pixels. JBIG2Decode gives 1 for white, CCITTFaxDecode gives 0 for black unless
+//! BlackIs1: the JBIG2 bitmap is chosen so the filter's output is the same bits, and every other entry of the
+//! image dictionary (Decode, ImageMask, masks) keeps its meaning.
 
-use super::ccitt::{self, Limits, Parsed, Scheme, Stop, MAX_COLUMNS};
+use super::ccitt::{self, Image, Limits, Parsed, Scheme, Stop, MAX_COLUMNS};
 
-/// Most pixels the JBIG2 coder may visit for one image (rows equal to the row above are nearly free): keeps
-/// the time bounded for huge images.
+/// Most work (`Image::work`) for one image: keeps the time bounded for huge images.
 const MAX_WORK: u64 = 1 << 30;
+/// Most work for one image per byte of its CCITT data, plus a small allowance: a few bytes of CCITT data can
+/// describe a huge image, and a file can hold many, so this bounds the time a file takes by its size. Scans
+/// in the test files need at most 270 per byte.
+const WORK_PER_BYTE: u64 = 2048;
+const WORK_BASE: u64 = 1 << 16;
+/// Largest image made JBIG2, in pixels with the width rounded up to 32. A JBIG2 decoder holds the whole page
+/// in memory (PDFium twice), where CCITT is decoded row by row; PDFium (and pdf.js, which uses PDFium's
+/// decoder) shows nothing for pages above 2^31 - 32 such pixels. Half of that leaves a margin.
+const MAX_JBIG2_PIXELS: u64 = 1 << 30;
 /// Most changing elements of one image (memory for the decoded rows: 4 bytes each).
 const MAX_CHANGES: usize = 1 << 24;
 use super::jbig2;
@@ -102,7 +111,16 @@ fn lone_fax(s: &Stream, resolve: Resolve) -> Result<(FaxParams, usize), &'static
     if !(1..=1 << 20).contains(&h) {
         return Err("Height out of range");
     }
+    if (w as u64).next_multiple_of(32) * h as u64 > MAX_JBIG2_PIXELS {
+        return Err("too large for some JBIG2 decoders");
+    }
     Ok((p, h as usize))
+}
+
+/// Is coding this image (`data_len` bytes of CCITT data) within the work bounds?
+fn affordable(img: &Image, data_len: usize) -> bool {
+    let work = img.work();
+    work <= MAX_WORK && work <= WORK_BASE + WORK_PER_BYTE * data_len as u64
 }
 
 /// Decodes a CCITT stream and accepts it only if every reader must see the same image in it: `h` rows,
@@ -136,17 +154,24 @@ fn clean_parse(data: &[u8], p: &FaxParams, h: usize) -> Result<Parsed, &'static 
         // More rows than the height, or data that isn't rows.
         Stop::Limit | Stop::Undecodable => return Err("data after the last row"),
     }
+    // With EndOfLine, Poppler and xpdf look for an EOL after every row and skip whatever comes before it; they
+    // also switch EndOfLine on when the data starts with an EOL. PDFium and libtiff don't.
     match scheme {
-        // Group 4 rows are never preceded by EOL codes or fill bits.
+        // Group 4 rows are never preceded by EOL codes or fill bits, so with EndOfLine Poppler would show only
+        // the first row.
         Scheme::G4 => {
+            if p.end_of_line {
+                return Err("EndOfLine set for Group 4 data");
+            }
             if l.gaps.iter().any(|g| g.eol || g.fill != 0) {
                 return Err("EOL codes in Group 4 data");
             }
         }
-        // With EndOfLine, readers look for an EOL before every row after the first.
+        // Then every row after the first must have its EOL.
         Scheme::G31D | Scheme::G32D => {
-            if p.end_of_line && l.gaps.iter().skip(1).any(|g| !g.eol) {
-                return Err("a row without EOL although EndOfLine is set");
+            let eol_mode = p.end_of_line || l.gaps.first().is_some_and(|g| g.eol);
+            if eol_mode && l.gaps.iter().skip(1).any(|g| !g.eol) {
+                return Err("a row without EOL after EndOfLine or a leading EOL");
             }
         }
     }
@@ -156,8 +181,8 @@ fn clean_parse(data: &[u8], p: &FaxParams, h: usize) -> Result<Parsed, &'static 
 fn decide(s: &Stream, resolve: Resolve) -> Result<(Dict, Vec<u8>), &'static str> {
     let (p, h) = lone_fax(s, resolve)?;
     let parsed = clean_parse(&s.data, &p, h)?;
-    if parsed.image.work() > MAX_WORK {
-        return Err("image too large to code in time");
+    if !affordable(&parsed.image, s.data.len()) {
+        return Err("too much work for the size of the data");
     }
     let out = jbig2::pdf_stream(&parsed.image, p.black_is_1);
     if out.len() * 100 > s.data.len() * 95 {
@@ -202,5 +227,5 @@ pub fn same_image(a: &Stream, b: &Stream, resolve: Resolve) -> bool {
         Ok(x) => x,
         Err(_) => return false,
     };
-    parsed.image.work() <= MAX_WORK && jbig2::read_pdf_stream(&b.data, p.black_is_1, parsed.image.changes.len()).as_ref() == Some(&parsed.image)
+    affordable(&parsed.image, a.data.len()) && jbig2::read_pdf_stream(&b.data, p.black_is_1, parsed.image.changes.len()).as_ref() == Some(&parsed.image)
 }
