@@ -79,6 +79,8 @@ pub struct PackStats {
     pub leptons: usize,
     pub fallback: bool,
     pub stored: bool,
+    /// Restore only: the file is damaged (it can't be restored; nothing wrong is ever returned).
+    pub damaged: bool,
 }
 
 #[derive(Debug)]
@@ -181,7 +183,6 @@ fn dict_before(d: &[u8], k: usize) -> Option<Dict> {
 
 /// What the payload of a stream is, from its dictionary (the decoder sees the same dictionary).
 struct Info {
-    flate: bool,
     kind: Kind,
     geom: Geom,
     /// PNG predictor rows: (bytes per row without the filter byte, bytes per pixel).
@@ -195,16 +196,10 @@ fn int(d: &Dict, k: &[u8]) -> Option<i64> {
 }
 
 fn info(dict: Option<&Dict>, decoded_sample: Option<&[u8]>) -> Info {
-    let mut inf = Info { flate: false, kind: Kind::Raw, geom: Geom::default(), png: None, tiff: None };
+    let mut inf = Info { kind: Kind::Raw, geom: Geom::default(), png: None, tiff: None };
     let d = match dict {
         Some(d) => d,
         None => return inf,
-    };
-    let filter = d.get(b"Filter");
-    inf.flate = match filter {
-        Some(Obj::Name(n)) => n == b"FlateDecode" || n == b"Fl",
-        Some(Obj::Array(a)) if a.len() == 1 => matches!(&a[0], Obj::Name(n) if n == b"FlateDecode" || n == b"Fl"),
-        _ => false,
     };
     let parms = match d.get(b"DecodeParms") {
         Some(Obj::Dict(p)) => Some(p.clone()),
@@ -357,6 +352,17 @@ fn refilter(types: &[u8], px: &[u8], row: usize, bpp: usize) -> Vec<u8> {
 struct Io<'m, C: Coder> {
     m: &'m mut Model,
     c: C,
+    /// Set when decoding meets something only a damaged file can contain; decoding stops there.
+    damaged: bool,
+}
+
+/// Largest single part a file may declare (decoded stream, corrections, Lepton data): 2 GiB.
+const MAX_PART: usize = 1 << 31;
+/// Largest file the format restores: 16 GiB.
+const MAX_FILE: usize = 1 << 34;
+/// Memory reserved up front is capped; vectors grow with what is actually decoded.
+fn reserve(n: usize) -> usize {
+    n.min(1 << 22)
 }
 
 impl<'m, C: Coder> Io<'m, C> {
@@ -387,9 +393,22 @@ impl<'m, C: Coder> Io<'m, C> {
     }
     fn bytes(&mut self, data: Option<&[u8]>, n: usize, out: &mut Vec<u8>) {
         for i in 0..n {
+            if i & 0xfff == 0 && self.c.exhausted() {
+                self.damaged = true;
+                return;
+            }
             let b = self.byte(data.map(|d| d[i]));
             out.push(b);
         }
+    }
+    /// A length that must be at most `max`; anything larger can only come from a damaged file.
+    fn length(&mut self, v: Option<u64>, max: usize) -> usize {
+        let n = self.varint(v);
+        if n > max as u64 {
+            self.damaged = true;
+            return 0;
+        }
+        n as usize
     }
 }
 
@@ -409,6 +428,7 @@ fn table_bits(n: usize) -> u32 {
     b
 }
 
+#[cfg_attr(not(feature = "existing"), allow(dead_code))]
 enum Plan {
     Syntax(usize, usize),
     Raw(usize, usize),
@@ -438,18 +458,47 @@ fn plan(d: &[u8]) -> Vec<Plan> {
         .collect()
 }
 
+/// For measuring only: the file with every stream we can rebuild replaced by its decoded bytes and the JPEGs
+/// Lepton takes left out, plus the size of what a restore needs on top (rebuild settings, preflate
+/// corrections, Lepton data). A general compressor on the first, plus the second, is the fair "decompress
+/// first, then compress" baseline for the peyaji format: the same preparation, without our model.
+pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
+    let mut out = Vec::with_capacity(d.len() * 2);
+    let mut extra = 0;
+    for p in plan(d) {
+        match p {
+            Plan::Syntax(a, b) | Plan::Raw(a, b) => out.extend_from_slice(&d[a..b]),
+            Plan::Rebuilt { data, tail, .. } => {
+                out.extend_from_slice(&data);
+                out.extend_from_slice(&tail);
+                extra += 2;
+            }
+            Plan::Preflated { corrections, data, rest, .. } => {
+                out.extend_from_slice(&data);
+                out.extend_from_slice(&rest);
+                extra += corrections.len();
+            }
+            Plan::Lepton { data } => extra += data.len(),
+        }
+    }
+    (out, extra)
+}
+
 #[cfg(feature = "existing")]
-fn preflated(d: &[u8], start: usize, raw: &[u8]) -> Option<Plan> {
-    let dict = dict_before(d, start.saturating_sub(1));
-    if !info(dict.as_ref(), None).flate || raw.len() < 8 {
+fn preflated(_d: &[u8], _start: usize, raw: &[u8]) -> Option<Plan> {
+    if !zlib_header(raw) {
         return None;
     }
     let (cmf, flg) = (raw[0], raw[1]);
-    if cmf & 0x0f != 8 || ((cmf as u16) << 8 | flg as u16) % 31 != 0 || flg & 0x20 != 0 {
-        return None;
-    }
     let cfg = preflate_rs::PreflateConfig::default();
-    let (res, plain) = preflate_rs::preflate_whole_deflate_stream(&raw[2..], &cfg).ok()?;
+    let r = preflate_rs::preflate_whole_deflate_stream(&raw[2..], &cfg);
+    if std::env::var_os("PDFE_DEBUG").is_some() {
+        match &r {
+            Ok((res, _)) => eprintln!("preflate: raw {} corrections {}", raw.len(), res.corrections.len()),
+            Err(e) => eprintln!("preflate: raw {} error {e:?}", raw.len()),
+        }
+    }
+    let (res, plain) = r.ok()?;
     let used = 2 + res.compressed_size;
     let data = plain.text().to_vec();
     // Worth it only if the corrections are small next to what decoding gains.
@@ -479,21 +528,9 @@ fn lepton_features() -> lepton_jpeg::EnabledFeatures {
 }
 
 #[cfg(feature = "existing")]
-fn lepton(d: &[u8], start: usize, raw: &[u8]) -> Option<Plan> {
-    let dict = dict_before(d, start.saturating_sub(1));
-    if std::env::var_os("PDFE_DEBUG").is_some() {
-        eprintln!("lepton dict: {:?}", dict.as_ref().map(|x| x.get(b"Filter").cloned()));
-    }
-    let dict = dict?;
-    let dct = match dict.get(b"Filter") {
-        Some(Obj::Name(n)) => n == b"DCTDecode" || n == b"DCT",
-        Some(Obj::Array(a)) if a.len() == 1 => matches!(&a[0], Obj::Name(n) if n == b"DCTDecode" || n == b"DCT"),
-        _ => false,
-    };
-    if std::env::var_os("PDFE_DEBUG").is_some() {
-        eprintln!("lepton candidate: dct={dct} len={}", raw.len());
-    }
-    if !dct || raw.len() < 1024 {
+fn lepton(_d: &[u8], _start: usize, raw: &[u8]) -> Option<Plan> {
+    // A JPEG by its bytes (start of image, then a marker); Lepton's result is checked by restoring it.
+    if raw.len() < 1024 || !raw.starts_with(&[0xFF, 0xD8, 0xFF]) {
         return None;
     }
     let pool = lepton_jpeg::SingleThreadPool {};
@@ -546,7 +583,7 @@ fn unlepton(_data: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(feature = "existing")]
 fn recreate(data: &[u8], corrections: &[u8]) -> Option<Vec<u8>> {
-    preflate_rs::recreate_whole_deflate_stream(data, corrections).ok()
+    std::panic::catch_unwind(|| preflate_rs::recreate_whole_deflate_stream(data, corrections).ok()).ok()?
 }
 
 #[cfg(not(feature = "existing"))]
@@ -558,8 +595,8 @@ fn recreate(_data: &[u8], _corrections: &[u8]) -> Option<Vec<u8>> {
 /// model sees exactly the same sequence of events.
 fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats) -> (Vec<u8>, C) {
     let mut model = primed(table_bits(total_len));
-    let mut io = Io { m: &mut model, c };
-    let mut out: Vec<u8> = Vec::with_capacity(total_len);
+    let mut io = Io { m: &mut model, c, damaged: false };
+    let mut out: Vec<u8> = Vec::with_capacity(reserve(total_len));
     let plans = d.map(plan);
     let mut si = 0;
     loop {
@@ -572,6 +609,11 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
             Some(Plan::Preflated { .. }) => T_PREFLATED,
             Some(Plan::Lepton { .. }) => T_LEPTON,
         });
+        if io.damaged || out.len() > total_len || io.c.exhausted() {
+            io.damaged = true;
+            break;
+        }
+        let left = total_len - out.len();
         io.m.set_kind(Kind::Meta, Geom::default(), out.len() as u64);
         let tag = io.byte(tag_in);
         match tag {
@@ -581,7 +623,7 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
                     Some(Plan::Syntax(a, b)) | Some(Plan::Raw(a, b)) => Some(&d.unwrap()[*a..*b]),
                     _ => None,
                 };
-                let n = io.varint(src.map(|x| x.len() as u64)) as usize;
+                let n = io.length(src.map(|x| x.len() as u64), left);
                 if tag == T_SYNTAX {
                     io.m.set_kind(Kind::Syntax, Geom::default(), out.len() as u64);
                     stats.syntax_bytes += n;
@@ -602,10 +644,17 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
                 let mem = io.byte(p_in.map(|p| p.mem_level));
                 let filt = io.byte(p_in.map(|p| p.filtered as u8));
                 let params = zlibexact::Params { level, window_bits: wb, mem_level: mem, filtered: filt != 0 };
-                let tail_n = io.varint(tail_in.map(|t| t.len() as u64)) as usize;
-                let mut tail = Vec::with_capacity(tail_n);
+                if !(1..=9).contains(&level) || !(8..=15).contains(&wb) || !(1..=9).contains(&mem) || filt > 1 {
+                    io.damaged = true;
+                    break;
+                }
+                let tail_n = io.length(tail_in.map(|t| t.len() as u64), left);
+                let mut tail = Vec::with_capacity(reserve(tail_n));
                 io.bytes(tail_in, tail_n, &mut tail);
                 let decoded = payload(&mut io, data_in, &out, stats);
+                if io.damaged {
+                    break;
+                }
                 let z = zlibexact::zlib_stream(&decoded, params);
                 out.extend_from_slice(&z);
                 out.extend_from_slice(&tail);
@@ -620,17 +669,26 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
                 };
                 let h0 = io.byte(cur_p.map(|p| p.0[0]));
                 let h1 = io.byte(cur_p.map(|p| p.0[1]));
-                let clen = io.varint(cur_p.map(|p| p.1.len() as u64)) as usize;
+                let clen = io.length(cur_p.map(|p| p.1.len() as u64), MAX_PART);
                 io.m.set_kind(Kind::Data, Geom::default(), 0);
-                let mut corrections = Vec::with_capacity(clen);
+                let mut corrections = Vec::with_capacity(reserve(clen));
                 io.bytes(cur_p.map(|p| p.1), clen, &mut corrections);
                 io.m.set_kind(Kind::Meta, Geom::default(), 0);
                 let adler_ok = io.byte(cur_p.map(|p| p.3 as u8)) == 1;
-                let rlen = io.varint(cur_p.map(|p| p.4.len() as u64)) as usize;
-                let mut rest = Vec::with_capacity(rlen);
+                let rlen = io.length(cur_p.map(|p| p.4.len() as u64), left);
+                let mut rest = Vec::with_capacity(reserve(rlen));
                 io.bytes(cur_p.map(|p| p.4), rlen, &mut rest);
                 let decoded = payload(&mut io, cur_p.map(|p| p.2), &out, stats);
-                let z = recreate(&decoded, &corrections).unwrap_or_default();
+                if io.damaged {
+                    break;
+                }
+                let z = match recreate(&decoded, &corrections) {
+                    Some(z) => z,
+                    None => {
+                        io.damaged = true;
+                        break;
+                    }
+                };
                 out.push(h0);
                 out.push(h1);
                 out.extend_from_slice(&z);
@@ -646,17 +704,32 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
                     Some(Plan::Lepton { data }) => Some(data.as_slice()),
                     _ => None,
                 };
-                let n = io.varint(src.map(|x| x.len() as u64)) as usize;
+                let n = io.length(src.map(|x| x.len() as u64), MAX_PART);
                 io.m.set_kind(Kind::Raw, Geom::default(), 0);
-                let mut lep = Vec::with_capacity(n);
+                let mut lep = Vec::with_capacity(reserve(n));
                 io.bytes(src, n, &mut lep);
-                out.extend_from_slice(&unlepton(&lep).unwrap_or_default());
+                if io.damaged {
+                    break;
+                }
+                match unlepton(&lep) {
+                    Some(j) => out.extend_from_slice(&j),
+                    None => {
+                        io.damaged = true;
+                        break;
+                    }
+                }
                 stats.streams += 1;
                 stats.leptons += 1;
             }
-            _ => break,
+            _ => {
+                io.damaged = true;
+                break;
+            }
         }
         si += 1;
+    }
+    if io.damaged {
+        stats.damaged = true;
     }
     let Io { c, .. } = io;
     (out, c)
@@ -665,11 +738,11 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
 /// Codes a decoded stream payload (shared by the rebuilt kinds): its length, then the data with the model
 /// set for what it is; image rows lose their PNG predictor bytes on the way.
 fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, out: &[u8], stats: &mut PackStats) -> Vec<u8> {
-    let dlen = io.varint(data_in.map(|x| x.len() as u64)) as usize;
+    let dlen = io.length(data_in.map(|x| x.len() as u64), MAX_PART);
     let dict = dict_before(out, out.len().saturating_sub(1));
     let looks = io.byte(data_in.map(|x| looks_like_content(x) as u8));
     let mut inf = info(dict.as_ref(), Some(if looks == 1 { b"q" as &[u8] } else { b"\x00" as &[u8] }));
-    let mut decoded: Vec<u8> = Vec::with_capacity(dlen);
+    let mut decoded: Vec<u8> = Vec::with_capacity(reserve(dlen));
     let mut used_png = false;
     if let Some((row, bpp)) = inf.png {
         let split = data_in.map(|x| unfilter(x, row, bpp));
@@ -681,11 +754,14 @@ fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, out: &[u8], stats: 
             };
             let rows = dlen / (row + 1);
             io.m.set_kind(Kind::Data, Geom::default(), 0);
-            let mut types = Vec::with_capacity(rows);
+            let mut types = Vec::with_capacity(reserve(rows));
             io.bytes(types_in, rows, &mut types);
             io.m.set_kind(Kind::Image, Geom { stride: row, bpp }, 0);
-            let mut px = Vec::with_capacity(rows * row);
+            let mut px = Vec::with_capacity(reserve(rows * row));
             io.bytes(px_in, rows * row, &mut px);
+            if io.damaged {
+                return Vec::new();
+            }
             decoded = refilter(&types, &px, row, bpp);
             used_png = true;
             stats.unpredicted_images += 1;
@@ -694,7 +770,7 @@ fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, out: &[u8], stats: 
     if let (false, Some((row, bpp))) = (used_png, inf.tiff) {
         // TIFF differences back to samples (per row, 8-bit), and differenced again on the way out.
         let ok = io.byte(data_in.map(|x| (row > 0 && x.len() % row == 0) as u8));
-        if ok == 1 {
+        if ok == 1 && row > 0 {
             let px_in = data_in.map(|x| {
                 let mut v = x.to_vec();
                 for r in v.chunks_mut(row) {
@@ -705,7 +781,7 @@ fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, out: &[u8], stats: 
                 v
             });
             io.m.set_kind(Kind::Image, Geom { stride: row, bpp }, 0);
-            let mut px = Vec::with_capacity(dlen);
+            let mut px = Vec::with_capacity(reserve(dlen));
             io.bytes(px_in.as_deref(), dlen, &mut px);
             for r in px.chunks_mut(row) {
                 for i in (bpp..r.len()).rev() {
@@ -728,11 +804,16 @@ fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, out: &[u8], stats: 
     decoded
 }
 
+/// Starts like a zlib stream: deflate, window at most 32 KiB, no preset dictionary, valid check bits. The
+/// stream's bytes decide, not its dictionary: a /Filter given by reference, for example, still counts.
+/// Whatever is tried here is checked by rebuilding it exactly (and every pack is restored and compared).
+fn zlib_header(raw: &[u8]) -> bool {
+    raw.len() >= 8 && raw[0] & 0x0f == 8 && raw[0] >> 4 <= 7 && ((raw[0] as u16) << 8 | raw[1] as u16) % 31 == 0 && raw[1] & 0x20 == 0
+}
+
 /// For a Flate payload that zlib made: (parameters, decoded data, bytes after the zlib stream).
-fn rebuild_params(d: &[u8], start: usize, raw: &[u8]) -> Option<(zlibexact::Params, Vec<u8>, Vec<u8>)> {
-    let dict = dict_before(d, start.saturating_sub(1));
-    let inf = info(dict.as_ref(), None);
-    if !inf.flate {
+fn rebuild_params(_d: &[u8], _start: usize, raw: &[u8]) -> Option<(zlibexact::Params, Vec<u8>, Vec<u8>)> {
+    if !zlib_header(raw) {
         return None;
     }
     let u = zlib::unwrap(raw, 1 << 28).ok()?;
@@ -791,6 +872,9 @@ pub fn unpack(a: &[u8]) -> Result<Vec<u8>, String> {
             return Err("bad length".into());
         }
     }
+    if len > MAX_FILE as u64 {
+        return Err("damaged peyaji file (impossible size)".into());
+    }
     let len = len as usize;
     let want = a.get(i..i + HASH_LEN).ok_or("truncated header")?.to_vec();
     let body = &a[i + HASH_LEN..];
@@ -798,9 +882,12 @@ pub fn unpack(a: &[u8]) -> Result<Vec<u8>, String> {
         VERSION => {
             let mut stats = PackStats::default();
             let (out, _) = run(Decoder::new(body), None, len, &mut stats);
+            if stats.damaged {
+                return Err("damaged peyaji file".into());
+            }
             out
         }
-        0 => fallback_decode(body, len),
+        0 => fallback_decode(body, len).ok_or("damaged peyaji file")?,
         2 => body.to_vec(),
         _ => return Err(format!("unknown version {ver}")),
     };
@@ -823,13 +910,16 @@ fn fallback(input: &[u8]) -> Vec<u8> {
     out
 }
 
-fn fallback_decode(body: &[u8], len: usize) -> Vec<u8> {
+fn fallback_decode(body: &[u8], len: usize) -> Option<Vec<u8>> {
     let mut model = Model::new(table_bits(len));
     model.set_kind(Kind::Raw, Geom::default(), 0);
     let mut dcd = Decoder::new(body);
-    let mut out = Vec::with_capacity(len);
-    for _ in 0..len {
+    let mut out = Vec::with_capacity(reserve(len));
+    for i in 0..len {
+        if i & 0xfff == 0 && dcd.overrun() {
+            return None;
+        }
         out.push(model.code_byte(&mut dcd, None));
     }
-    out
+    Some(out)
 }

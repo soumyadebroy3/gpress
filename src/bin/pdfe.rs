@@ -168,6 +168,15 @@ fn main() {
             let out = engine::pack::unpack(&data).unwrap_or_else(|e| die(&e));
             std::fs::write(o, &out).unwrap_or_else(|e| die(&format!("{o}: {e}")));
         }
+        Some("expand") => {
+            // For measuring only: pdfe expand IN OUT -> OUT is IN with rebuildable streams decoded (see
+            // pack::expand); prints the bytes a restore would need on top.
+            let (i, o) = (pos.get(1).unwrap_or_else(|| die("need IN")), pos.get(2).unwrap_or_else(|| die("need OUT")));
+            let data = std::fs::read(i).unwrap_or_else(|e| die(&format!("{i}: {e}")));
+            let (x, extra) = engine::pack::expand(&data);
+            std::fs::write(o, &x).unwrap_or_else(|e| die(&format!("{o}: {e}")));
+            println!("{i}\t{}\t{}\t{extra}", data.len(), x.len());
+        }
         Some("cm-test") => {
             // pdfe cm-test FILE KIND [STRIDE BPP]: size of FILE coded by the model as KIND.
             use engine::cm::model::{Geom, Kind, Model};

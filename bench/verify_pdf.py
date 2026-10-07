@@ -3,7 +3,7 @@
 
   1. qpdf --check on the output (structure);
   2. pikepdf (qpdf's object model): every object reachable from the trailer has the same value, and every
-     stream decodes (general filters, predictors undone) to the same bytes;
+     stream decodes (lossless filters including RunLength, predictors undone) to the same bytes;
   3. PDFium (pypdfium2): every page renders to the same pixels and gives the same text.
 
 Usage: verify_pdf.py ORIGINAL OUTPUT [--pages N]   -> prints one JSON line; exit status 0 if identical.
@@ -56,7 +56,7 @@ def items(d, skip=()):
 
 def stream_content(s):
     try:
-        return hashlib.sha256(s.read_bytes(decode_level=pikepdf.StreamDecodeLevel.generalized)).hexdigest()
+        return hashlib.sha256(s.read_bytes(decode_level=pikepdf.StreamDecodeLevel.specialized)).hexdigest()
     except Exception as e:
         return 'undecodable:' + type(e).__name__
 
@@ -133,14 +133,20 @@ def render_same(a_path, b_path, max_pages):
     if len(da) != len(db):
         return [f'page count {len(da)} vs {len(db)}'], 0
     n = min(len(da), max_pages)
-    def shot(p):
+    def shot(p, scale):
         try:
-            return hashlib.sha256(p.render(scale=0.75).to_pil().tobytes()).hexdigest()
+            return hashlib.sha256(p.render(scale=scale).to_pil().tobytes()).hexdigest()
         except Exception as e:
             return 'render failed: ' + type(e).__name__ + ': ' + str(e)[:80]
     for i in range(n):
         pa, pb = da[i], db[i]
-        if shot(pa) != shot(pb):
+        if pa.get_size() != pb.get_size():
+            problems.append(f'page {i + 1} size differs')
+            continue
+        # Same scale for both; giant pages are rendered smaller (at most about 16 million pixels).
+        w, h = pa.get_size()
+        scale = min(0.75, (16e6 / max(w * h, 1)) ** 0.5)
+        if shot(pa, scale) != shot(pb, scale):
             problems.append(f'page {i + 1} renders differently')
         ta, tb = pa.get_textpage().get_text_range(), pb.get_textpage().get_text_range()
         if ta != tb:
