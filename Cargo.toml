@@ -1,0 +1,25 @@
+[package]
+name = "engine"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Our own PDF compression engine: Flate encoder and decoder, PDF reader and writer, and the peyaji format."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "pdfe"
+path = "src/bin/pdfe.rs"
+
+# No dependencies on purpose: every line of compression code is our own.
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+debug = false
+
+[profile.dev]
+opt-level = 1

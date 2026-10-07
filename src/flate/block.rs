@@ -1,0 +1,447 @@
+//! Block costs and block writing: dynamic Huffman blocks with an optimised header, fixed blocks, stored blocks.
+
+use super::bits::BitWriter;
+use super::huffman::{canonical_codes, limited_lengths};
+use super::lz::{d_extra, ll_extra, Hist, Sym};
+use super::tables::*;
+
+/// A dynamic block's codes and how its header is sent.
+#[derive(Clone)]
+pub struct DynCode {
+    pub ll: Vec<u8>,
+    pub d: Vec<u8>,
+    pub header: Header,
+    /// Header bits (after the 3-bit block type) plus data bits including end-of-block.
+    pub bits: u64,
+}
+
+#[derive(Clone)]
+pub struct Header {
+    pub hlit: usize,
+    pub hdist: usize,
+    pub hclen: usize,
+    pub cl: [u8; 19],
+    /// (code-length symbol, extra-bit value)
+    pub tokens: Vec<(u8, u8)>,
+    pub bits: u64,
+}
+
+/// Data bits for a histogram under given lengths (end-of-block included via the histogram).
+pub fn data_bits(h: &Hist, ll: &[u8], d: &[u8]) -> u64 {
+    let mut bits = 0u64;
+    for s in 0..LITLEN_SYMS {
+        if h.ll[s] != 0 {
+            bits += h.ll[s] as u64 * (ll[s] as u64 + ll_extra(s) as u64);
+        }
+    }
+    for s in 0..DIST_SYMS {
+        if h.d[s] != 0 {
+            bits += h.d[s] as u64 * (d[s] as u64 + d_extra(s) as u64);
+        }
+    }
+    bits
+}
+
+pub fn fixed_bits(h: &Hist) -> u64 {
+    let ll = fixed_litlen_lengths();
+    let d = fixed_dist_lengths();
+    data_bits(h, &ll[..LITLEN_SYMS], &d[..DIST_SYMS])
+}
+
+/// Some decoders (zlib 1.2.1 and older, some phones) fail with fewer than two distance codes. Two codes of
+/// length 1 keep the code complete and cost nothing when no match uses them.
+pub fn patch_distances(d: &mut [u8]) {
+    let used: Vec<usize> = (0..d.len()).filter(|&i| d[i] != 0).collect();
+    match used.len() {
+        0 => {
+            d[0] = 1;
+            d[1] = 1;
+        }
+        1 => {
+            if used[0] == 0 {
+                d[1] = 1;
+            } else {
+                d[0] = 1;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A literal/length code with a single symbol (only end-of-block) is incomplete; give it a partner.
+fn patch_litlen(ll: &mut [u8]) {
+    let used = ll.iter().filter(|&&l| l != 0).count();
+    if used == 1 {
+        if ll[0] == 0 {
+            ll[0] = 1;
+        } else {
+            ll[1] = 1;
+        }
+    }
+}
+
+/// Smooths counts so that the code lengths form longer runs (cheaper header), at a small data cost.
+/// Runs of similar counts become equal; counts of zero stay zero.
+fn smooth(counts: &[u32], tolerance: f64) -> Vec<u32> {
+    let mut out = counts.to_vec();
+    let n = counts.len();
+    let mut i = 0;
+    while i < n {
+        if counts[i] == 0 {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        let mut sum = counts[i] as u64;
+        while j < n && counts[j] != 0 {
+            let avg = (sum + counts[j] as u64) as f64 / (j - i + 1) as f64;
+            let ok = (i..=j).all(|k| ((counts[k] as f64) - avg).abs() <= tolerance * avg.max(1.0));
+            if !ok {
+                break;
+            }
+            sum += counts[j] as u64;
+            j += 1;
+        }
+        if j - i >= 4 {
+            let avg = ((sum as f64) / (j - i) as f64).round().max(1.0) as u32;
+            for v in out[i..j].iter_mut() {
+                *v = avg;
+            }
+        }
+        i = j;
+    }
+    out
+}
+
+/// The cheapest dynamic code we can find for a histogram, with its exact size.
+pub fn best_dynamic(h: &Hist) -> DynCode {
+    let mut best: Option<DynCode> = None;
+    let variants: [(Option<f64>, u32); 6] = [(None, 15), (Some(0.25), 15), (Some(0.5), 15), (None, 12), (None, 10), (Some(1.0), 15)];
+    for (tol, maxb) in variants {
+        let llc = match tol {
+            None => h.ll.to_vec(),
+            Some(t) => smooth(&h.ll, t),
+        };
+        let dc = match tol {
+            None => h.d.to_vec(),
+            Some(t) => smooth(&h.d, t),
+        };
+        let used_ll = llc.iter().filter(|&&c| c > 0).count();
+        if used_ll > (1usize << maxb) {
+            continue;
+        }
+        let mut ll = limited_lengths(&llc, maxb);
+        let mut d = limited_lengths(&dc, maxb.min(15));
+        patch_litlen(&mut ll);
+        patch_distances(&mut d);
+        let data = data_bits(h, &ll, &d);
+        if let Some(b) = &best {
+            // The header costs at least 14 bits; skip variants that cannot win.
+            if data + 14 >= b.bits {
+                continue;
+            }
+        }
+        let header = best_header(&ll, &d);
+        let bits = header.bits + data;
+        if best.as_ref().map_or(true, |b| bits < b.bits) {
+            best = Some(DynCode { ll, d, header, bits });
+        }
+    }
+    best.unwrap()
+}
+
+/// Quick size estimate for block splitting: the plain optimal code with a cheap header estimate.
+pub fn estimate_dynamic_bits(h: &Hist) -> u64 {
+    let mut ll = limited_lengths(&h.ll, 15);
+    let mut d = limited_lengths(&h.d, 15);
+    patch_litlen(&mut ll);
+    patch_distances(&mut d);
+    data_bits(h, &ll, &d) + greedy_header_bits(&ll, &d)
+}
+
+fn sequence(ll: &[u8], d: &[u8]) -> (usize, usize, Vec<u8>) {
+    let hlit = (ll.iter().rposition(|&l| l != 0).map_or(0, |p| p + 1)).max(257);
+    let hdist = (d.iter().rposition(|&l| l != 0).map_or(0, |p| p + 1)).max(1);
+    let mut seq = Vec::with_capacity(hlit + hdist);
+    seq.extend_from_slice(&ll[..hlit]);
+    seq.extend_from_slice(&d[..hdist]);
+    (hlit, hdist, seq)
+}
+
+fn tok_extra_bits(sym: u8) -> u64 {
+    match sym {
+        16 => 2,
+        17 => 3,
+        18 => 7,
+        _ => 0,
+    }
+}
+
+/// Zlib-style run-length tokens of a length sequence.
+fn greedy_tokens(seq: &[u8], use16: bool, use17: bool, use18: bool) -> Vec<(u8, u8)> {
+    let mut t = Vec::new();
+    let mut i = 0;
+    while i < seq.len() {
+        let v = seq[i];
+        let mut run = 1;
+        while i + run < seq.len() && seq[i + run] == v {
+            run += 1;
+        }
+        if v == 0 && (use17 || use18) && run >= 3 {
+            let mut r = run;
+            while r >= 3 {
+                if use18 && r >= 11 {
+                    let k = r.min(138);
+                    t.push((18, (k - 11) as u8));
+                    r -= k;
+                } else if use17 {
+                    let k = r.min(10);
+                    t.push((17, (k - 3) as u8));
+                    r -= k;
+                } else {
+                    break;
+                }
+            }
+            for _ in 0..r {
+                t.push((0, 0));
+            }
+        } else if v != 0 && use16 && run >= 4 {
+            t.push((v, 0));
+            let mut r = run - 1;
+            while r >= 3 {
+                let k = r.min(6);
+                t.push((16, (k - 3) as u8));
+                r -= k;
+            }
+            for _ in 0..r {
+                t.push((v, 0));
+            }
+        } else {
+            for _ in 0..run {
+                t.push((v, 0));
+            }
+        }
+        i += run;
+    }
+    t
+}
+
+/// Cheapest tokens for a length sequence given the cost of each code-length symbol.
+fn dp_tokens(seq: &[u8], cost: &[u64; 19]) -> Vec<(u8, u8)> {
+    let n = seq.len();
+    let mut best = vec![u64::MAX; n + 1];
+    let mut from: Vec<(u8, u8, u16)> = vec![(0, 0, 0); n + 1]; // (sym, extra, run)
+    best[0] = 0;
+    // zrun[i]: zeros starting at i; vrun[i]: values equal to seq[i-1] starting at i.
+    let mut zrun = vec![0usize; n + 1];
+    let mut vrun = vec![0usize; n + 1];
+    for i in (0..n).rev() {
+        zrun[i] = if seq[i] == 0 { zrun[i + 1] + 1 } else { 0 };
+    }
+    for i in (1..n).rev() {
+        vrun[i] = if seq[i] == seq[i - 1] { if i + 1 < n && seq[i + 1] == seq[i] { vrun[i + 1] + 1 } else { 1 } } else { 0 };
+    }
+    for i in 0..n {
+        let b = best[i];
+        if b == u64::MAX {
+            continue;
+        }
+        let v = seq[i];
+        let c = b + cost[v as usize];
+        if c < best[i + 1] {
+            best[i + 1] = c;
+            from[i + 1] = (v, 0, 1);
+        }
+        if i >= 1 && vrun[i] >= 3 {
+            let c = b + cost[16] + 2;
+            for k in 3..=vrun[i].min(6) {
+                if c < best[i + k] {
+                    best[i + k] = c;
+                    from[i + k] = (16, (k - 3) as u8, k as u16);
+                }
+            }
+        }
+        if zrun[i] >= 3 {
+            let c = b + cost[17] + 3;
+            for k in 3..=zrun[i].min(10) {
+                if c < best[i + k] {
+                    best[i + k] = c;
+                    from[i + k] = (17, (k - 3) as u8, k as u16);
+                }
+            }
+            if zrun[i] >= 11 {
+                let c = b + cost[18] + 7;
+                for k in 11..=zrun[i].min(138) {
+                    if c < best[i + k] {
+                        best[i + k] = c;
+                        from[i + k] = (18, (k - 11) as u8, k as u16);
+                    }
+                }
+            }
+        }
+    }
+    let mut t = Vec::new();
+    let mut i = n;
+    while i > 0 {
+        let (s, e, r) = from[i];
+        t.push((s, e));
+        i -= r as usize;
+    }
+    t.reverse();
+    t
+}
+
+fn cl_lengths(tokens: &[(u8, u8)]) -> [u8; 19] {
+    let mut f = [0u32; 19];
+    for &(s, _) in tokens {
+        f[s as usize] += 1;
+    }
+    let l = limited_lengths(&f, 7);
+    let mut cl = [0u8; 19];
+    cl.copy_from_slice(&l);
+    // The code-length code must be complete: with one symbol, add a partner.
+    if cl.iter().filter(|&&x| x != 0).count() == 1 {
+        let other = CL_ORDER.iter().copied().find(|&s| cl[s] == 0).unwrap();
+        cl[other] = 1;
+    }
+    cl
+}
+
+fn header_bits(cl: &[u8; 19], tokens: &[(u8, u8)]) -> (usize, u64) {
+    let hclen = (CL_ORDER.iter().rposition(|&s| cl[s] != 0).map_or(0, |p| p + 1)).max(4);
+    let mut bits = 14 + 3 * hclen as u64;
+    for &(s, _) in tokens {
+        bits += cl[s as usize] as u64 + tok_extra_bits(s);
+    }
+    (hclen, bits)
+}
+
+fn greedy_header_bits(ll: &[u8], d: &[u8]) -> u64 {
+    let (_, _, seq) = sequence(ll, d);
+    let t = greedy_tokens(&seq, true, true, true);
+    let cl = cl_lengths(&t);
+    header_bits(&cl, &t).1
+}
+
+/// The cheapest header we can find for these code lengths.
+pub fn best_header(ll: &[u8], d: &[u8]) -> Header {
+    let (hlit, hdist, seq) = sequence(ll, d);
+    let mut best: Option<Header> = None;
+    for flags in 0..8u8 {
+        let mut tokens = greedy_tokens(&seq, flags & 1 != 0, flags & 2 != 0, flags & 4 != 0);
+        for _round in 0..4 {
+            let cl = cl_lengths(&tokens);
+            let (hclen, bits) = header_bits(&cl, &tokens);
+            let improved = best.as_ref().map_or(true, |b| bits < b.bits);
+            if improved {
+                best = Some(Header { hlit, hdist, hclen, cl, tokens: tokens.clone(), bits });
+            }
+            // Re-tokenise for these code-length codes; unused symbols are priced at 7 bits plus a little.
+            let mut cost = [0u64; 19];
+            for s in 0..19 {
+                cost[s] = if cl[s] != 0 { cl[s] as u64 } else { 8 };
+            }
+            let nt = dp_tokens(&seq, &cost);
+            if nt == tokens {
+                break;
+            }
+            tokens = nt;
+        }
+    }
+    best.unwrap()
+}
+
+/// Exact bits of a stored block sequence for `len` bytes, starting at bit offset `bitpos` (mod 8 matters).
+pub fn stored_bits(len: usize, bitpos: u64) -> u64 {
+    let mut pos = bitpos;
+    let mut left = len;
+    let start = bitpos;
+    loop {
+        let k = left.min(65535);
+        pos += 3;
+        pos = (pos + 7) / 8 * 8;
+        pos += 32 + 8 * k as u64;
+        left -= k;
+        if left == 0 {
+            break;
+        }
+    }
+    pos - start
+}
+
+pub fn write_dynamic(w: &mut BitWriter, syms: &[Sym], code: &DynCode, last: bool) {
+    w.put(last as u32, 1);
+    w.put(2, 2);
+    let h = &code.header;
+    w.put((h.hlit - 257) as u32, 5);
+    w.put((h.hdist - 1) as u32, 5);
+    w.put((h.hclen - 4) as u32, 4);
+    for &s in CL_ORDER.iter().take(h.hclen) {
+        w.put(h.cl[s] as u32, 3);
+    }
+    let clc = canonical_codes(&h.cl);
+    for &(s, e) in &h.tokens {
+        w.put(clc[s as usize] as u32, h.cl[s as usize] as u32);
+        let eb = tok_extra_bits(s) as u32;
+        if eb > 0 {
+            w.put(e as u32, eb);
+        }
+    }
+    write_symbols(w, syms, &code.ll, &code.d);
+}
+
+pub fn write_fixed(w: &mut BitWriter, syms: &[Sym], last: bool) {
+    w.put(last as u32, 1);
+    w.put(1, 2);
+    let ll = fixed_litlen_lengths();
+    let d = fixed_dist_lengths();
+    write_symbols(w, syms, &ll, &d);
+}
+
+fn write_symbols(w: &mut BitWriter, syms: &[Sym], ll: &[u8], d: &[u8]) {
+    let llc = canonical_codes(ll);
+    let dc = canonical_codes(d);
+    for s in syms {
+        if s.dist == 0 {
+            let b = s.litlen as usize;
+            w.put(llc[b] as u32, ll[b] as u32);
+        } else {
+            let l = s.litlen as usize;
+            let c = LEN_CODE[l] as usize;
+            w.put(llc[257 + c] as u32, ll[257 + c] as u32);
+            if LEN_EXTRA[c] > 0 {
+                w.put((l - LEN_BASE[c] as usize) as u32, LEN_EXTRA[c] as u32);
+            }
+            let dist = s.dist as usize;
+            let k = dist_code(dist);
+            w.put(dc[k] as u32, d[k] as u32);
+            if DIST_EXTRA[k] > 0 {
+                w.put((dist - DIST_BASE[k] as usize) as u32, DIST_EXTRA[k] as u32);
+            }
+        }
+    }
+    w.put(llc[END_OF_BLOCK] as u32, ll[END_OF_BLOCK] as u32);
+}
+
+pub fn write_stored(w: &mut BitWriter, bytes: &[u8], last: bool) {
+    let mut chunks = bytes.chunks(65535).peekable();
+    if bytes.is_empty() {
+        w.put(last as u32, 1);
+        w.put(0, 2);
+        w.align();
+        w.put(0, 16);
+        w.put(0xffff, 16);
+        return;
+    }
+    while let Some(c) = chunks.next() {
+        let is_last = last && chunks.peek().is_none();
+        w.put(is_last as u32, 1);
+        w.put(0, 2);
+        w.align();
+        w.put(c.len() as u32, 16);
+        w.put(!(c.len() as u32) & 0xffff, 16);
+        for &b in c {
+            w.put(b as u32, 8);
+        }
+    }
+}
