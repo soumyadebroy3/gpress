@@ -416,34 +416,55 @@ fn decoded_len(s: &Stream, limit: usize) -> usize {
     data.len()
 }
 
-/// The extra work allowed below effort 100, as decoded bytes per byte of input: the streams that get the
-/// full settings for the effort may decode to at most this many times the file's size in all.
-fn upgrade_budget(effort: u8) -> f64 {
-    // 1x at effort 1, doubling every 10 points (about 860x at 99).
+/// The extra work allowed below effort 100, per byte of input, in units of quick-encoding one decoded byte:
+/// 1 at effort 1, twice as much every 10 points (about 900 at 99).
+fn work_budget(effort: u8) -> f64 {
     2f64.powf((effort.max(1) - 1) as f64 / 10.0)
 }
 
+/// CPU time of a decoded byte at an effort's Flate settings, against the quick settings (measured, see
+/// `flate::Options::effort`; large images).
+fn work_per_byte(effort: u8) -> f64 {
+    match effort {
+        0..=19 => 1.0,
+        20..=39 => 1.7,
+        40..=59 => 2.0,
+        60..=79 => 3.1,
+        _ => 3.9,
+    }
+}
+
 /// The settings for each distinct stream (see `Options::effort`). At effort 100, `opt` for all of them. Below,
-/// the streams that take the most room in the file come first and get `opt` while the decoded bytes they add
-/// stay within the budget; the rest get the quick settings (effort 0). Sizes decide, never time.
+/// the streams that take the most room in the file come first; each gets the strongest settings up to the
+/// effort (`opt` itself, or a lower step of 20) whose extra work fits in what is left of the budget, and
+/// otherwise the quick settings. Sizes decide, never time.
 fn effort_plan(streams: &[(u32, &Stream)], unique: &[usize], opt: &Options, input_len: usize, pool: Option<&par::Pool>) -> Vec<Options> {
     if opt.effort >= 100 {
         return vec![opt.clone(); unique.len()];
     }
-    let quick = Options { flate: flate::Options { shared: opt.flate.shared.clone(), ..flate::Options::effort(0) }, effort: 0, ..opt.clone() };
+    let at = |e: u8| Options { flate: flate::Options { shared: opt.flate.shared.clone(), ..flate::Options::effort(e) }, effort: e, ..opt.clone() };
+    let quick = at(0);
     if opt.flate.same_output(&quick.flate) && predictor_budget(opt.effort) == predictor_budget(0) {
         return vec![quick; unique.len()];
+    }
+    // The settings that may be given, strongest first, with their extra work per decoded byte.
+    let mut steps = vec![(opt.clone(), work_per_byte(opt.effort) - 1.0)];
+    for e in (20..opt.effort / 20 * 20).step_by(20).rev() {
+        steps.push((at(e), work_per_byte(e) - 1.0));
     }
     let sizes = par::map(pool, unique.len(), None, |u| decoded_len(streams[unique[u]].1, opt.max_stream));
     let mut order: Vec<usize> = (0..unique.len()).collect();
     order.sort_by_key(|&u| (std::cmp::Reverse(streams[unique[u]].1.data.len()), u));
-    let mut budget = input_len as f64 * upgrade_budget(opt.effort);
+    let mut budget = input_len as f64 * work_budget(opt.effort);
     let mut out = vec![quick; unique.len()];
     for u in order {
-        let w = sizes[u] as f64;
-        if w <= budget {
-            budget -= w;
-            out[u] = opt.clone();
+        for (o, extra) in &steps {
+            let w = sizes[u] as f64 * extra;
+            if w <= budget {
+                budget -= w;
+                out[u] = o.clone();
+                break;
+            }
         }
     }
     out

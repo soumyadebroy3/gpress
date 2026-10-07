@@ -333,11 +333,13 @@ impl Model {
     fn predict(&mut self) -> i32 {
         let node = self.nib as usize;
         let kb = self.kind as usize * NCTX;
+        let mut st = [0i32; NCTX];
         for i in 0..NCTX {
             let state = self.tables[i].t[self.slot[i]][node] as usize;
             let p = self.smaps[kb + i][state].p12();
-            self.mx.add(if state == 0 { 0 } else { self.tb.stretch(p) });
+            st[i] = if state == 0 { 0 } else { self.tb.stretch(p) };
         }
+        self.mx.add_all(&st);
         // Long match.
         let mut mm_state = 0;
         let residual = self.pred_on();
