@@ -8,8 +8,8 @@
 //! segments are replaced, by one segment right before each scan with the tables that scan uses.
 //!
 //! Only baseline and extended sequential Huffman JPEG with 8-bit samples is handled. Progressive, arithmetic-
-//! coded, lossless, hierarchical and 12-bit JPEGs, and anything unusual or damaged, are refused (the caller keeps
-//! the original). So are files whose layout readers could take differently once the tables move (fill bytes
+//! coded, lossless, hierarchical and 12-bit JPEGs, fractional sampling, and anything unusual or damaged, are
+//! refused (the caller keeps the original). So are files whose layout readers could take differently once the tables move (fill bytes
 //! before a marker, segments whose contents don't fill them exactly), and files with data bound to their exact
 //! bytes (multi-picture offsets, APP11 boxes such as content credentials). Before a new file is returned it is
 //! read back and compared with the original: the same bytes outside the tables and the coded data, the same
