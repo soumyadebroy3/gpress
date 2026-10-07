@@ -496,6 +496,7 @@ enum Plan {
 }
 
 fn plan(d: &[u8]) -> Vec<Plan> {
+    let objects = std::sync::OnceLock::new();
     segments(d)
         .into_iter()
         .map(|s| match s {
@@ -509,7 +510,7 @@ fn plan(d: &[u8]) -> Vec<Plan> {
                     Some(p) => p,
                     None => match lepton(d, a, &d[a..b]) {
                         Some(p) => p,
-                        None => fax(d, a, b).unwrap_or(Plan::Raw(a, b)),
+                        None => fax(d, a, b, &objects).unwrap_or(Plan::Raw(a, b)),
                     },
                 },
             },
@@ -809,7 +810,7 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, stats: &mut PackStats
                     Some(Plan::Fax { parsed }) => Some(&**parsed),
                     _ => None,
                 };
-                let fc = fax_coder.get_or_insert_with(crate::fax::part::FaxCoder::new);
+                let fc = fax_coder.get_or_insert_with(|| crate::fax::part::FaxCoder::new(total_len));
                 match crate::fax::part::code(&mut io.c, fc, src, left) {
                     Some(bytes) => out.extend_from_slice(&bytes),
                     None => {
@@ -959,24 +960,76 @@ fn zlib_header(raw: &[u8]) -> bool {
     raw.len() >= 8 && raw[0] & 0x0f == 8 && raw[0] >> 4 <= 7 && ((raw[0] as u16) << 8 | raw[1] as u16) % 31 == 0 && raw[1] & 0x20 == 0
 }
 
+/// Where each object "n g obj" of a file starts its value (the last definition wins), found by its bytes:
+/// for guesses that are checked afterwards. Built once per file, when first needed.
+type ObjIndex = std::sync::OnceLock<std::collections::HashMap<(u32, u16), usize>>;
+
+fn object_index(d: &[u8]) -> std::collections::HashMap<(u32, u16), usize> {
+    let mut out = std::collections::HashMap::new();
+    let mut from = 0;
+    while let Some(i) = find(d, b" obj", from) {
+        from = i + 4;
+        // Back over "g" and "n" (digits separated by one space).
+        let digits = |end: usize| -> usize {
+            let mut s = end;
+            while s > 0 && d[s - 1].is_ascii_digit() && end - s < 10 {
+                s -= 1;
+            }
+            s
+        };
+        let gs = digits(i);
+        if gs == i || gs == 0 || d[gs - 1] != b' ' {
+            continue;
+        }
+        let ns = digits(gs - 1);
+        if ns == gs - 1 || (ns > 0 && d[ns - 1].is_ascii_alphanumeric()) {
+            continue;
+        }
+        let num = |a: usize, b: usize| -> Option<u64> { std::str::from_utf8(&d[a..b]).ok()?.parse().ok() };
+        if let (Some(n), Some(g)) = (num(ns, gs - 1), num(gs, i)) {
+            if let (Ok(n), Ok(g)) = (u32::try_from(n), u16::try_from(g)) {
+                out.insert((n, g), i + 4);
+            }
+        }
+    }
+    out
+}
+
 /// Smallest CCITT stream coded as an image (measured on the test files: below this, plain coding wins).
 const MIN_FAX: usize = 64;
 
 /// A stream whose only filter is CCITTFaxDecode, when our CCITT decoder understands most of it: the image
 /// and the encoder's choices, checked to give the very same bytes back.
-fn fax(d: &[u8], a: usize, b: usize) -> Option<Plan> {
+fn fax(d: &[u8], a: usize, b: usize, objects: &ObjIndex) -> Option<Plan> {
     use crate::fax::{ccitt, part, pdf::FaxParams};
-    let dict = dict_before(d, a.checked_sub(1)?)?;
+    let raw = &d[a..b];
+    if raw.len() < MIN_FAX {
+        return None;
+    }
+    let mut dict = dict_before(d, a.checked_sub(1)?)?;
+    // Parameters given by reference (/DecodeParms 13 0 R, /K 7 0 R): looked up in the file. Whatever is
+    // found is only a guess to try; the result is checked by writing the stream again.
+    let resolve = |o: &Obj| match o {
+        Obj::Ref(n, g) => {
+            let at = *objects.get_or_init(|| object_index(d)).get(&(*n, *g))?;
+            Lexer::new(d, at).parse_obj().ok()
+        }
+        x => Some(x.clone()),
+    };
+    if let Some(p) = dict.get(b"DecodeParms").cloned() {
+        let mut p = resolve(&p)?;
+        if let Obj::Dict(pd) = &mut p {
+            for (_, v) in pd.0.iter_mut() {
+                *v = resolve(v)?;
+            }
+        }
+        dict.set(b"DecodeParms", p);
+    }
     let stages = crate::pdf::filters::chain(&dict)?;
     if stages.len() != 1 || stages[0].name != b"CCITTFaxDecode" {
         return None;
     }
     let fp = FaxParams::from(stages[0].parms.as_ref())?;
-    let raw = &d[a..b];
-    // A tiny stream costs less coded as it is than the image model needs to get going.
-    if raw.len() < MIN_FAX {
-        return None;
-    }
     let parsed = ccitt::parse(raw, ccitt::Scheme::from_k(fp.k), fp.columns, fp.byte_align, ccitt::Limits::default())?;
     if parsed.image.rows() == 0 || parsed.layout.trailing.len() * 4 > raw.len() || !part::fits(&parsed) {
         return None;

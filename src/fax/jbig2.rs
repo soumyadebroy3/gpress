@@ -366,8 +366,9 @@ fn row_is_zero(changes: &[u32], w: usize, invert: bool) -> bool {
 
 /// Decodes generic region data (template 0, nominal adaptive pixels, typical prediction on) into an image
 /// (inverted if asked). Any bytes decode to some image (past the end the decoder reads the end marker), so
-/// callers compare the result with the image they expect.
-pub fn decode_generic(data: &[u8], w: usize, h: usize, invert: bool) -> Option<Image> {
+/// callers compare the result with the image they expect; None once it has more than `max_changes`
+/// changing elements (it can't be the expected image, and memory stays bounded).
+pub fn decode_generic(data: &[u8], w: usize, h: usize, invert: bool, max_changes: usize) -> Option<Image> {
     let mut cx = vec![0u8; 1 << 16];
     let mut d = MqDecoder::new(data);
     let mut rows = [vec![0u8; w + 2 * M], vec![0u8; w + 2 * M], vec![0u8; w + 2 * M]];
@@ -399,6 +400,9 @@ pub fn decode_generic(data: &[u8], w: usize, h: usize, invert: bool) -> Option<I
             row_changes(&flipped, &mut ch);
         } else {
             row_changes(&cur[M..M + w], &mut ch);
+        }
+        if img.changes.len() + ch.len() > max_changes {
+            return None;
         }
         img.push_row(&ch);
     }
@@ -444,8 +448,9 @@ pub fn pdf_stream(img: &Image, invert: bool) -> Vec<u8> {
     out
 }
 
-/// Reads back a stream exactly as `pdf_stream` writes it (anything else: None) and decodes the image.
-pub fn read_pdf_stream(s: &[u8], invert: bool) -> Option<Image> {
+/// Reads back a stream exactly as `pdf_stream` writes it (anything else: None) and decodes the image, if it
+/// has at most `max_changes` changing elements.
+pub fn read_pdf_stream(s: &[u8], invert: bool, max_changes: usize) -> Option<Image> {
     let u32_at = |i: usize| -> Option<u32> { Some(u32::from_be_bytes(s.get(i..i + 4)?.try_into().ok()?)) };
     // Page information segment.
     if u32_at(0)? != 0 || s.get(4..7)? != [PAGE_INFO, 0, 1] || u32_at(7)? != 19 {
@@ -469,7 +474,7 @@ pub fn read_pdf_stream(s: &[u8], invert: bool) -> Option<Image> {
     if w == 0 || w > super::ccitt::MAX_COLUMNS || h > 1 << 20 {
         return None;
     }
-    decode_generic(&s[67..], w, h, invert)
+    decode_generic(&s[67..], w, h, invert, max_changes)
 }
 
 #[cfg(test)]
@@ -532,7 +537,7 @@ mod tests {
             for invert in [false, true] {
                 let img = sample(w, h, (w * 7 + h) as u64);
                 let s = pdf_stream(&img, invert);
-                let back = read_pdf_stream(&s, invert).unwrap();
+                let back = read_pdf_stream(&s, invert, usize::MAX).unwrap();
                 assert_eq!(back, img, "{w}x{h} invert={invert}");
             }
         }
@@ -542,12 +547,12 @@ mod tests {
             for _ in 0..20 {
                 img.push_row(&[]);
             }
-            assert_eq!(read_pdf_stream(&pdf_stream(&img, invert), invert).unwrap(), img);
+            assert_eq!(read_pdf_stream(&pdf_stream(&img, invert), invert, usize::MAX).unwrap(), img);
             let mut img = Image::new(50);
             for _ in 0..20 {
                 img.push_row(&[0]);
             }
-            assert_eq!(read_pdf_stream(&pdf_stream(&img, invert), invert).unwrap(), img);
+            assert_eq!(read_pdf_stream(&pdf_stream(&img, invert), invert, usize::MAX).unwrap(), img);
         }
     }
 
@@ -559,11 +564,13 @@ mod tests {
         for i in 0..67 {
             let mut b = s.clone();
             b[i] ^= 0x10;
-            if let Some(x) = read_pdf_stream(&b, false) {
+            if let Some(x) = read_pdf_stream(&b, false, usize::MAX) {
                 assert_eq!(x.width, 120);
             }
         }
-        assert!(read_pdf_stream(&s[..s.len() - 1], false).is_none());
-        assert!(read_pdf_stream(&[], false).is_none());
+        assert!(read_pdf_stream(&s[..s.len() - 1], false, usize::MAX).is_none());
+        assert!(read_pdf_stream(&[], false, usize::MAX).is_none());
+        // A decode that runs past the expected number of changes stops.
+        assert!(read_pdf_stream(&s, false, img.changes.len() - 1).is_none());
     }
 }

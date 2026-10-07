@@ -73,8 +73,8 @@ fn stretch(l: &Logistic, p: u32) -> i32 {
 /// Context models; the mixer gets their stretched predictions plus a bias.
 const N: usize = 7;
 const INPUTS: usize = N + 1;
-/// Table sizes (bits) of the context models.
-const TABLE_BITS: [u32; N] = [16, 12, BIG_BITS, 16, 13, 13, BIG_BITS];
+/// Table sizes (bits) of the context models; 0 marks the hashed ones (sized by `new`).
+const TABLE_BITS: [u32; N] = [16, 12, 0, 16, 13, 13, 0];
 /// Pixels of white margin around each row buffer.
 const M: usize = 16;
 /// Learning rate of the mixer (a shift; larger is slower).
@@ -83,11 +83,12 @@ const MIX_SHIFT: i32 = 15;
 const APM_SHIFT: i32 = 6;
 const LIMIT: u32 = 1023;
 const LIMIT_HASHED: u32 = 1023;
-/// Bits of the hashed table of the large template.
+/// Bits of the hashed tables of the large templates, at most (smaller for small files, see `new`).
 const BIG_BITS: u32 = 22;
 
 pub struct Bilevel {
     l: &'static Logistic,
+    big_bits: u32,
     tables: Vec<Vec<Counter>>,
     fast: [Counter; 8],
     same_row: [Counter; 2],
@@ -104,14 +105,10 @@ pub struct Bilevel {
     prev_same: usize,
 }
 
-impl Default for Bilevel {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Bilevel {
-    pub fn new() -> Bilevel {
+    /// `big_bits`: size of the hashed tables (both sides must use the same; see `part`).
+    pub fn new(big_bits: u32) -> Bilevel {
+        let big_bits = big_bits.clamp(12, BIG_BITS);
         let l = logistic();
         let mut apm = vec![0u16; (1 << 16) * 33];
         for c in 0..(1 << 16) {
@@ -122,8 +119,9 @@ impl Bilevel {
         let apm2 = apm[..(1 << 13) * 33].to_vec();
         Bilevel {
             l,
+            big_bits,
             apm2,
-            tables: TABLE_BITS.iter().map(|&b| vec![Counter::new(); 1 << b]).collect(),
+            tables: TABLE_BITS.iter().map(|&b| vec![Counter::new(); 1 << if b == 0 { big_bits } else { b }]).collect(),
             fast: [Counter::new(); 8],
             same_row: [Counter::new(); 2],
             weights: vec![(1 << 16) * 3 / 10; INPUTS * 32],
@@ -220,7 +218,7 @@ impl Bilevel {
             } else {
                 let t16 = ((c0 & 0xF) | ((a1 >> 5) & 0x7F) << 4 | ((a2 >> 6) & 0x1F) << 11) as usize;
                 let small = ((c0 & 7) | ((a1 >> 5) & 0x3F) << 3 | ((a2 >> 7) & 7) << 9) as usize;
-                let hb = (big.wrapping_mul(0x9E37_79B1) >> (32 - BIG_BITS)) as usize;
+                let hb = (big.wrapping_mul(0x9E37_79B1) >> (32 - self.big_bits)) as usize;
                 let wide = ((c0 & 0xFF) | (a1 & 0x7) << 8 | ((a1 >> 14) & 0x7) << 11 | ((a1 >> 8) & 1) << 14 | ((a2 >> 8) & 1) << 15) as usize;
                 // Distance to the next change to the right in the row above, the pixel above, the run so far.
                 let above = (a1 >> 8) & 1;
@@ -240,7 +238,7 @@ impl Bilevel {
                 // Four rows up and wider: more of a glyph's shape.
                 let deep = (c0 as u64 | (((a1 >> 1) & 0x7FFF) as u64) << 8 | (((a2 >> 3) & 0x7FF) as u64) << 23 | (((a3 >> 5) & 0x7F) as u64) << 34 | (((a4 >> 6) & 0x1F) as u64) << 41)
                     .wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                let hd = (deep >> (64 - BIG_BITS)) as usize;
+                let hd = (deep >> (64 - self.big_bits)) as usize;
                 let cxs = [t16, small, hb, wide, runs, vert, hd];
                 let mut st = [0i32; INPUTS];
                 for i in 0..N {
@@ -363,7 +361,7 @@ mod tests {
                 ch
             })
             .collect();
-        let mut m = Bilevel::new();
+        let mut m = Bilevel::new(20);
         m.start(w);
         let mut e = Encoder::new();
         let mut out = Vec::new();
@@ -373,7 +371,7 @@ mod tests {
         }
         let data = e.finish();
         assert!(data.len() < w * h / 8 / 8, "{} bytes", data.len());
-        let mut m = Bilevel::new();
+        let mut m = Bilevel::new(20);
         m.start(w);
         let mut d = Decoder::new(&data);
         for r in &rows {

@@ -13,6 +13,9 @@ use crate::cm::{Coder, Counter};
 
 /// Largest image the format takes (rows times columns).
 const MAX_PIXELS: u64 = 1 << 32;
+/// Most pixels the model may visit for one image (rows equal to the row above are nearly free): keeps the
+/// time to pack bounded for huge images. Only the encoder checks it.
+const MAX_WORK: u64 = 1 << 30;
 const MAX_ROWS: u64 = 1 << 20;
 const MAX_FILL: u64 = 1 << 16;
 const MAX_END: usize = 63;
@@ -26,6 +29,7 @@ pub fn fits(p: &Parsed) -> bool {
         && w <= MAX_COLUMNS as u64
         && h <= MAX_ROWS
         && w * h <= MAX_PIXELS
+        && p.image.work() <= MAX_WORK
         && p.layout.end.len() <= MAX_END
         && p.layout.gaps.iter().chain(&p.layout.end).all(|g| (g.fill as u64) < MAX_FILL)
 }
@@ -34,12 +38,6 @@ pub fn fits(p: &Parsed) -> bool {
 pub struct FaxCoder {
     model: Bilevel,
     small: Vec<Counter>,
-}
-
-impl Default for FaxCoder {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 // Counter slots of `small`.
@@ -60,8 +58,11 @@ const N_END: usize = 3;
 const N_TRAILING: usize = 4;
 
 impl FaxCoder {
-    pub fn new() -> FaxCoder {
-        FaxCoder { model: Bilevel::new(), small: vec![Counter::new(); S_END] }
+    /// `file_len`: the length of the whole file being packed (the decoder knows it too); small files get
+    /// small hashed tables (quick to set up, and they have few contexts anyway).
+    pub fn new(file_len: usize) -> FaxCoder {
+        let bits = (usize::BITS - file_len.leading_zeros()) + 4;
+        FaxCoder { model: Bilevel::new(bits), small: vec![Counter::new(); S_END] }
     }
 
     fn bit<C: Coder>(&mut self, c: &mut C, slot: usize, bit: Option<u32>) -> u32 {
@@ -293,7 +294,7 @@ mod tests {
     fn pack_one(bytes: &[u8], scheme: Scheme, w: usize, align: bool) -> Vec<u8> {
         let p = parse(bytes, scheme, w, align, Limits::default()).unwrap();
         assert!(fits(&p));
-        let mut fc = FaxCoder::new();
+        let mut fc = FaxCoder::new(bytes.len());
         let mut e = Encoder::new();
         let back = code(&mut e, &mut fc, Some(&p), bytes.len()).unwrap();
         assert_eq!(back, bytes);
@@ -301,7 +302,7 @@ mod tests {
     }
 
     fn unpack_one(data: &[u8], max: usize) -> Option<Vec<u8>> {
-        let mut fc = FaxCoder::new();
+        let mut fc = FaxCoder::new(max);
         let mut d = Decoder::new(data);
         code(&mut d, &mut fc, None, max)
     }

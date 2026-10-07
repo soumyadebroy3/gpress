@@ -10,6 +10,12 @@
 //! dictionary (Decode, ImageMask, masks) keeps its meaning.
 
 use super::ccitt::{self, Limits, Parsed, Scheme, Stop, MAX_COLUMNS};
+
+/// Most pixels the JBIG2 coder may visit for one image (rows equal to the row above are nearly free): keeps
+/// the time bounded for huge images.
+const MAX_WORK: u64 = 1 << 30;
+/// Most changing elements of one image (memory for the decoded rows: 4 bytes each).
+const MAX_CHANGES: usize = 1 << 24;
 use super::jbig2;
 use crate::pdf::filters::chain;
 use crate::pdf::object::{Dict, Obj, Stream};
@@ -112,7 +118,8 @@ fn clean_parse(data: &[u8], p: &FaxParams, h: usize) -> Result<Parsed, &'static 
         return Err("no end of block and no Rows");
     }
     let scheme = Scheme::from_k(p.k);
-    let parsed = ccitt::parse(data, scheme, p.columns, false, Limits { max_rows: h, ..Limits::default() }).ok_or("bad parameters")?;
+    let limits = Limits { max_rows: h, max_changes: MAX_CHANGES, ..Limits::default() };
+    let parsed = ccitt::parse(data, scheme, p.columns, false, limits).ok_or("bad parameters")?;
     if parsed.image.rows() != h {
         return Err("rows decoded differ from Height");
     }
@@ -149,12 +156,15 @@ fn clean_parse(data: &[u8], p: &FaxParams, h: usize) -> Result<Parsed, &'static 
 fn decide(s: &Stream, resolve: Resolve) -> Result<(Dict, Vec<u8>), &'static str> {
     let (p, h) = lone_fax(s, resolve)?;
     let parsed = clean_parse(&s.data, &p, h)?;
+    if parsed.image.work() > MAX_WORK {
+        return Err("image too large to code in time");
+    }
     let out = jbig2::pdf_stream(&parsed.image, p.black_is_1);
     if out.len() * 100 > s.data.len() * 95 {
         return Err("JBIG2 not at least 5% smaller");
     }
     // Our JBIG2 decoder must give the very same pixels back.
-    if jbig2::read_pdf_stream(&out, p.black_is_1).as_ref() != Some(&parsed.image) {
+    if jbig2::read_pdf_stream(&out, p.black_is_1, parsed.image.changes.len()).as_ref() != Some(&parsed.image) {
         return Err("JBIG2 does not decode to the same pixels");
     }
     let mut d = s.dict.clone();
@@ -192,5 +202,5 @@ pub fn same_image(a: &Stream, b: &Stream, resolve: Resolve) -> bool {
         Ok(x) => x,
         Err(_) => return false,
     };
-    jbig2::read_pdf_stream(&b.data, p.black_is_1).as_ref() == Some(&parsed.image)
+    parsed.image.work() <= MAX_WORK && jbig2::read_pdf_stream(&b.data, p.black_is_1, parsed.image.changes.len()).as_ref() == Some(&parsed.image)
 }
