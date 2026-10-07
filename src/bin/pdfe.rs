@@ -278,10 +278,8 @@ fn main() {
             let k: i64 = pos.get(2).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need K"));
             let cols: usize = pos.get(3).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need COLUMNS"));
             let align = pos.get(4).map(|s| s.as_str()) == Some("1");
-            let p = ccitt::parse(&raw, ccitt::Scheme::from_k(k), cols, align, ccitt::Limits::default()).unwrap_or_else(|| die("bad parameters"));
-            if !part::fits(&p) {
-                die("does not fit a fax part");
-            }
+            // Prepared as pack prepares it (the stream's byte alignment, or the other one if that reads more).
+            let p = part::prepare(&raw, ccitt::Scheme::from_k(k), cols, align).unwrap_or_else(|| die("not stored as a fax part"));
             let t = Instant::now();
             let mut e = engine::cm::Encoder::new();
             let back = part::code(&mut e, &mut part::FaxCoder::new(raw.len()), Some(&p), raw.len());

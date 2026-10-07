@@ -73,17 +73,24 @@ impl Image {
         self.changes.extend_from_slice(changes);
         self.starts.push(self.changes.len());
     }
-    /// Pixels a pixel-by-pixel coder visits: rows equal to the row above (white above the first) cost one
-    /// decision each, every other row its width.
+    /// The work of a pixel-by-pixel coder on this image, in pixels (see `row_work`).
     pub fn work(&self) -> u64 {
         let mut n = 0u64;
         for r in 0..self.rows() {
             let same = if r == 0 { self.row(0).is_empty() } else { self.row(r) == self.row(r - 1) };
-            if !same {
-                n += self.width as u64;
-            }
+            n += row_work(self.width, same);
         }
         n
+    }
+}
+
+/// The work of a pixel-by-pixel coder on one row: its width, or for a row equal to the row above (white above
+/// the first), which costs one decision, a 256th of it (the row is still copied).
+pub fn row_work(width: usize, same: bool) -> u64 {
+    if same {
+        width as u64 / 256 + 1
+    } else {
+        width as u64
     }
 }
 
@@ -503,8 +510,9 @@ fn read_gap(r: &mut Reader, scheme: Scheme, byte_align: bool) -> GapRead {
         None => return GapRead::End,
     };
     let mut g = Gap::default();
-    // With byte alignment a row starts at the next byte boundary, and an EOL is looked for only from there
-    // (as readers do): the bits up to the boundary must be 0.
+    // With byte alignment the bits up to the next byte boundary are fill (they must be 0), and an EOL counts
+    // only if it starts there or later. (Data with the fill before each EOL, so that the EOL ends on a byte
+    // boundary, reads as unaligned fill bits and EOLs: see `part::prepare`.)
     let a = if byte_align { (8 - (r.pos & 7)) & 7 } else { 0 };
     if z >= a + 11 {
         g.fill = (z - 11) as u32;
@@ -918,6 +926,18 @@ mod tests {
         assert_eq!(encode(&p.image, &p.layout), bytes);
         assert!(parse(&bytes, Scheme::G4, 0, false, Limits::default()).is_none());
         assert!(parse(&bytes, Scheme::G4, MAX_COLUMNS + 1, false, Limits::default()).is_none());
+    }
+
+    #[test]
+    fn work_counts_rows_by_what_coding_them_costs() {
+        let mut img = Image::new(1000);
+        img.push_row(&[]); // white, like the white row above the image: 1000 / 256 + 1
+        img.push_row(&[0]); // differs: 1000
+        img.push_row(&[0]); // the same: 4
+        img.push_row(&[5, 9]); // differs: 1000
+        assert_eq!(img.work(), 4 + 1000 + 4 + 1000);
+        assert_eq!(row_work(100, true), 1);
+        assert_eq!(row_work(131072, true), 513);
     }
 
     #[test]

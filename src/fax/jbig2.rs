@@ -332,17 +332,15 @@ pub fn encode_generic(img: &Image, invert: bool) -> Vec<u8> {
         e.encode(&mut cx[TPGDON_CX], sltp);
         ltp = same as u32;
         rows.rotate_right(1); // rows[0] = current, rows[1] = above, rows[2] = two above
-        {
-            let cur = &mut rows[0];
-            expand_row(img.row(y), &mut cur[M..M + w]);
-            if invert {
-                cur[M..M + w].iter_mut().for_each(|p| *p ^= 1);
-            }
-        }
+        let (cur, rest) = rows.split_at_mut(1);
         if same {
+            cur[0].copy_from_slice(&rest[0]);
             continue;
         }
-        let (cur, rest) = rows.split_at_mut(1);
+        expand_row(img.row(y), &mut cur[0][M..M + w]);
+        if invert {
+            cur[0][M..M + w].iter_mut().for_each(|p| *p ^= 1);
+        }
         let (cur, r1, r2) = (&cur[0], &rest[0], &rest[1]);
         let mut t = Template::start(r1, r2);
         for x in 0..w {
@@ -376,13 +374,21 @@ pub fn decode_generic(data: &[u8], w: usize, h: usize, invert: bool, max_changes
     let mut ltp = 0u32;
     let mut ch = Vec::new();
     let mut flipped = vec![0u8; w];
-    for _ in 0..h {
+    for y in 0..h {
         ltp ^= d.decode(&mut cx[TPGDON_CX]);
         rows.rotate_right(1);
         let (cur, rest) = rows.split_at_mut(1);
         let (cur, r1, r2) = (&mut cur[0], &rest[0], &rest[1]);
         if ltp == 1 {
             cur.copy_from_slice(r1);
+            if y > 0 {
+                // The same changing elements as the row above (still in `ch`): no scan of the row.
+                if img.changes.len() + ch.len() > max_changes {
+                    return None;
+                }
+                img.push_row(&ch);
+                continue;
+            }
         } else {
             cur.fill(0);
             let mut t = Template::start(r1, r2);
