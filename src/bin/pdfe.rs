@@ -235,14 +235,15 @@ fn describe(name: &str, in_len: usize, r: &engine::pdf::rewrite::Optimized, secs
     use engine::pdf::rewrite::Outcome;
     match &r.outcome {
         Outcome::Smaller(s) => format!(
-            "{name}\tSMALLER\t{in_len}\t{}\t{secs:.2}\tobjects={} streams={} reencoded={} kept={} objstms={} dropped={}",
+            "{name}\tSMALLER\t{in_len}\t{}\t{secs:.2}\tobjects={} streams={} reencoded={} kept={} objstms={} dropped={}{}",
             r.data.len(),
             s.objects,
             s.streams,
             s.streams_reencoded,
             s.streams_kept,
             s.objstms,
-            s.dropped_unreachable
+            s.dropped_unreachable,
+            if s.encryption.is_empty() { String::new() } else { format!(" encrypted={}", s.encryption) }
         ),
         Outcome::Untouched(why) => format!("{name}\tUNTOUCHED\t{in_len}\t{}\t{secs:.2}\t{why}", r.data.len()),
     }

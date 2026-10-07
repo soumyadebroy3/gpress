@@ -1,5 +1,6 @@
 //! Cross-reference tables and streams, and loading every object of a document — strictly.
 
+use super::crypt::Crypt;
 use super::filters::{chain, decode_stage, unpredict};
 use super::object::*;
 use super::parse::{parse_indirect, Lexer};
@@ -33,6 +34,9 @@ pub struct Doc<'a> {
     pub has_revisions: bool,
     /// Bytes after the last %%EOF.
     pub trailing: usize,
+    /// Encrypted files: the security handler when the empty password opens the file (strings and streams are
+    /// then decrypted as objects load), or why it doesn't (objects then load as stored).
+    pub crypt: Option<Result<Crypt, String>>,
     objstm_cache: RefCell<HashMap<u32, (Vec<u8>, Vec<(u32, usize)>, usize)>>,
 }
 
@@ -108,7 +112,7 @@ pub fn open(data: &[u8]) -> Result<Doc<'_>, LoadError> {
     if !trailer.has(b"Root") {
         return Err(LoadError::BadXref("trailer without /Root"));
     }
-    Ok(Doc {
+    let mut doc = Doc {
         data,
         version,
         trailer,
@@ -116,8 +120,93 @@ pub fn open(data: &[u8]) -> Result<Doc<'_>, LoadError> {
         sections: sections.len(),
         has_revisions,
         trailing,
+        crypt: None,
         objstm_cache: RefCell::new(HashMap::new()),
-    })
+    };
+    if doc.trailer.has(b"Encrypt") {
+        doc.crypt = Some(security(&doc));
+        // Metadata left unencrypted is the catalog's (found with the key in place).
+        let md = match &doc.crypt {
+            Some(Ok(c)) if !c.encrypt_metadata => Some(root_metadata(&doc)),
+            _ => None,
+        };
+        match md {
+            Some(Ok(m)) => {
+                if let Some(Ok(c)) = doc.crypt.as_mut() {
+                    c.metadata = m;
+                }
+            }
+            Some(Err(e)) => doc.crypt = Some(Err(e)),
+            None => {}
+        }
+        // Nothing read before the handler was complete is kept.
+        doc.objstm_cache.borrow_mut().clear();
+    }
+    Ok(doc)
+}
+
+/// The standard security handler of an encrypted file, with the empty user password.
+fn security(doc: &Doc) -> Result<Crypt, String> {
+    // Read as stored: the encryption dictionary is never encrypted, nor in an object stream.
+    let plain = |n: u32, g: u16| -> Result<Obj, String> {
+        if !matches!(doc.entries.get(&n), Some(&Entry::Offset(_, eg)) if eg == g) {
+            return Err("encryption dictionary not stored as a plain object".into());
+        }
+        doc.load(n).map(|x| x.1).map_err(|_| "unreadable encryption dictionary".to_string())
+    };
+    let (dict, obj) = match doc.trailer.get(b"Encrypt") {
+        Some(Obj::Dict(d)) => (d.clone(), None),
+        Some(&Obj::Ref(n, g)) => match plain(n, g)? {
+            Obj::Dict(d) => (d, Some((n, g))),
+            _ => return Err("bad /Encrypt".into()),
+        },
+        _ => return Err("bad /Encrypt".into()),
+    };
+    // Values given by reference (a /CF dictionary, say) are read as stored too, a few levels deep, each object
+    // once and without strings, so readers can't disagree on whether they are encrypted.
+    fn resolve(o: &Obj, depth: usize, own: Option<u32>, parts: &mut Vec<(u32, u16, Obj)>, plain: &dyn Fn(u32, u16) -> Result<Obj, String>) -> Result<Obj, String> {
+        Ok(match o {
+            &Obj::Ref(n, g) => {
+                if depth > 4 || own == Some(n) || parts.iter().any(|p| p.0 == n) {
+                    return Err("encryption dictionary with unusual references".into());
+                }
+                let x = plain(n, g)?;
+                if super::crypt::has_string(&x) || matches!(x, Obj::Stream(_)) {
+                    return Err("encryption dictionary with unusual references".into());
+                }
+                parts.push((n, g, x.clone()));
+                resolve(&x, depth + 1, own, parts, plain)?
+            }
+            Obj::Array(a) => Obj::Array(a.iter().map(|x| resolve(x, depth, own, parts, plain)).collect::<Result<_, _>>()?),
+            Obj::Dict(d) => Obj::Dict(Dict(d.0.iter().map(|(k, v)| Ok((k.clone(), resolve(v, depth, own, parts, plain)?))).collect::<Result<_, String>>()?)),
+            x => x.clone(),
+        })
+    }
+    let mut parts: Vec<(u32, u16, Obj)> = Vec::new();
+    let open = match resolve(&Obj::Dict(dict.clone()), 0, obj.map(|o| o.0), &mut parts, &plain)? {
+        Obj::Dict(d) => d,
+        _ => unreachable!(),
+    };
+    let mut c = Crypt::open(&open, obj, doc.trailer.get(b"ID"))?;
+    c.dict = dict;
+    c.parts = parts;
+    Ok(c)
+}
+
+/// The object number of the catalog's /Metadata stream, if any.
+fn root_metadata(doc: &Doc) -> Result<Option<u32>, String> {
+    let root = match doc.trailer.get(b"Root") {
+        Some(&Obj::Ref(n, _)) => n,
+        _ => return Err("bad /Root".into()),
+    };
+    match doc.load(root) {
+        Ok((_, Obj::Dict(cat))) => match cat.get(b"Metadata") {
+            None => Ok(None),
+            Some(&Obj::Ref(m, _)) => Ok(Some(m)),
+            _ => Err("bad /Metadata in the catalog".into()),
+        },
+        _ => Err("unreadable catalog".into()),
+    }
 }
 
 fn read_section(d: &[u8], off: usize) -> Result<(Vec<(u32, Entry)>, Dict), LoadError> {
@@ -205,6 +294,9 @@ fn read_table(d: &[u8], mut pos: usize) -> Result<(Vec<(u32, Entry)>, Dict), Loa
         lx.skip_ws();
         if lx.expect_keyword(b"trailer") {
             let t = lx.parse_obj().map_err(|_| LoadError::BadXref("bad trailer"))?;
+            if lx.raw_cr {
+                return Err(LoadError::BadXref(super::parse::RAW_CR));
+            }
             return match t {
                 Obj::Dict(t) => Ok((out, t)),
                 _ => Err(LoadError::BadXref("trailer is not a dictionary")),
@@ -288,7 +380,13 @@ impl<'a> Doc<'a> {
                 if pn != n || pg != gen {
                     return Err(LoadError::BadObject(n, "object number at offset differs"));
                 }
-                Ok((gen, o))
+                match &self.crypt {
+                    // Encrypted with this object's key (the encryption dictionary itself never is).
+                    Some(Ok(c)) if !c.is_own(n) => {
+                        Ok((gen, c.decrypt_object(n, gen, o).map_err(|e| LoadError::BadObject(n, e))?))
+                    }
+                    _ => Ok((gen, o)),
+                }
             }
             Some(&Entry::InStream(sn, idx)) => {
                 if !self.objstm_cache.borrow().contains_key(&sn) {
@@ -319,6 +417,9 @@ impl<'a> Doc<'a> {
                 }
                 let mut lx = Lexer::new(raw, first + off);
                 let o = lx.parse_obj().map_err(|e| LoadError::BadObject(n, e.msg))?;
+                if lx.raw_cr {
+                    return Err(LoadError::BadObject(n, super::parse::RAW_CR));
+                }
                 Ok((0, o))
             }
         }
