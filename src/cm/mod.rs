@@ -221,6 +221,7 @@ impl StateMap {
 
 /// Weighted combination of stretched predictions, one weight set per selector context.
 pub struct Mixer {
+    pub shift: i32,
     n: usize,
     w: Vec<i32>,
     x: Vec<i32>,
@@ -232,7 +233,7 @@ pub struct Mixer {
 
 impl Mixer {
     pub fn new(inputs: usize, selectors: usize, rate: i32) -> Mixer {
-        Mixer { n: inputs, w: vec![(1 << 16) / 4; inputs * selectors], x: vec![0; inputs], nx: 0, sel: 0, pr: 2048, rate }
+        Mixer { shift: 10, n: inputs, w: vec![(1 << 16) / 4; inputs * selectors], x: vec![0; inputs], nx: 0, sel: 0, pr: 2048, rate }
     }
     #[inline]
     pub fn add(&mut self, st: i32) {
@@ -260,8 +261,9 @@ impl Mixer {
     pub fn update(&mut self, bit: u32) {
         let err = (((bit as i32) << 12) - self.pr) * self.rate;
         let w = &mut self.w[self.sel..self.sel + self.n];
+        let sh = self.shift;
         for i in 0..self.n {
-            w[i] += (self.x[i] * err + (1 << 9)) >> 10;
+            w[i] += ((self.x[i] as i64 * err as i64 + (1 << (sh - 1))) >> sh) as i32;
         }
         self.nx = 0;
     }

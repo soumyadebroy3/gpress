@@ -122,7 +122,8 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>) -> Result<(), String> {
     }
     // Objects numbered at or beyond /Size: readers disagree on whether they exist.
     if let Some(size) = doc.trailer.get(b"Size").and_then(|x| x.as_int()) {
-        let max_used = doc.entries.iter().filter(|(_, e)| !matches!(e, Entry::Free)).map(|(n, _)| *n as i64).max().unwrap_or(0);
+        // Only objects the document uses count (an xref stream numbered at /Size is harmless).
+        let max_used = objs.keys().copied().max().unwrap_or(0) as i64;
         if max_used >= size {
             return Err("object numbers beyond /Size".into());
         }

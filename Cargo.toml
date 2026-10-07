@@ -12,8 +12,13 @@ path = "src/lib.rs"
 name = "pdfe"
 path = "src/bin/pdfe.rs"
 
-# No dependencies on purpose: every line of compression code is our own.
+# Our own code has no dependencies. The "existing" feature adds the best existing libraries as extra
+# candidates (the engine keeps whichever result is smaller after the checks).
 [dependencies]
+preflate-rs = { version = "0.7", optional = true }
+
+[features]
+existing = ["dep:preflate-rs"]
 
 [profile.release]
 opt-level = 3

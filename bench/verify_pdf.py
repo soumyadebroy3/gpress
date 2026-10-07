@@ -46,10 +46,11 @@ def scalar(o):
 def items(d, skip=()):
     """(key bytes, value) pairs; keys that aren't valid UTF-8 are compared as raw names."""
     out = []
-    for k in d.keys():
+    for k, v in d.items():
         if k in skip:
             continue
-        out.append((pikepdf.Name(k).unparse(), d.get(k)))
+        kb = k.encode('utf-8', 'surrogateescape') if isinstance(k, str) else bytes(k)
+        out.append((kb, v))
     return sorted(out, key=lambda x: x[0])
 
 
@@ -120,7 +121,15 @@ def objects_same(a_path, b_path):
 
 def render_same(a_path, b_path, max_pages):
     problems = []
-    da, db = pdfium.PdfDocument(a_path), pdfium.PdfDocument(b_path)
+    def load(p):
+        try:
+            return pdfium.PdfDocument(p), None
+        except Exception as e:
+            return None, type(e).__name__
+    (da, ea), (db, eb) = load(a_path), load(b_path)
+    if da is None or db is None:
+        # Both unreadable by PDFium in the same way is not a difference.
+        return ([] if (da is None and db is None and ea == eb) else [f'PDFium loads one file only ({ea}, {eb})']), 0
     if len(da) != len(db):
         return [f'page count {len(da)} vs {len(db)}'], 0
     n = min(len(da), max_pages)
