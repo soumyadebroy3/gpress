@@ -252,7 +252,66 @@ fn main() {
             let lay = ccitt::Layout { scheme, rule: ccitt::Rule::Standard, gaps, end, pad: 0, trailing: Vec::new() };
             std::fs::write(o, ccitt::encode(&img, &lay)).unwrap_or_else(|e| die(&e.to_string()));
         }
-        _ => die("usage: pdfe deflate|inflate|batch|optimize|pdf-batch|repro|pack|unpack|pack-batch|fax-decode|fax-encode ..."),
+        Some("fax-scan") => {
+            // pdfe fax-scan FILE.pdf: every CCITT image stream our reader finds, and what normal-PDF output does
+            // with it.
+            let data = std::fs::read(pos.get(1).unwrap_or_else(|| die("need FILE"))).unwrap_or_else(|e| die(&e.to_string()));
+            let doc = engine::pdf::xref::open(&data).unwrap_or_else(|e| die(&format!("unreadable: {e:?}")));
+            for &n in doc.entries.keys() {
+                if let Ok((_, engine::pdf::object::Obj::Stream(s))) = doc.load(n) {
+                    let fax = engine::pdf::filters::chain(&s.dict).map_or(false, |c| c.iter().any(|st| st.name == b"CCITTFaxDecode"));
+                    if fax {
+                        let resolve = |o: &engine::pdf::object::Obj| match o {
+                            engine::pdf::object::Obj::Ref(r, _) => doc.load(*r).ok().map(|x| x.1),
+                            x => Some(x.clone()),
+                        };
+                        println!("{n}\t{}", engine::fax::pdf::explain(&s, &resolve));
+                    }
+                }
+            }
+        }
+        Some("fax-model") => {
+            // pdfe fax-model RAW K COLUMNS ALIGN(0|1): size of a raw fax stream as a peyaji fax part, with
+            // the time to code it and to restore it (checked).
+            use engine::fax::{ccitt, part};
+            let raw = std::fs::read(pos.get(1).unwrap_or_else(|| die("need RAW"))).unwrap_or_else(|e| die(&e.to_string()));
+            let k: i64 = pos.get(2).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need K"));
+            let cols: usize = pos.get(3).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need COLUMNS"));
+            let align = pos.get(4).map(|s| s.as_str()) == Some("1");
+            let p = ccitt::parse(&raw, ccitt::Scheme::from_k(k), cols, align, ccitt::Limits::default()).unwrap_or_else(|| die("bad parameters"));
+            if !part::fits(&p) {
+                die("does not fit a fax part");
+            }
+            let t = Instant::now();
+            let mut e = engine::cm::Encoder::new();
+            let back = part::code(&mut e, &mut part::FaxCoder::new(), Some(&p), raw.len());
+            let z = e.finish();
+            let t1 = t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            let mut d = engine::cm::Decoder::new(&z);
+            let restored = part::code(&mut d, &mut part::FaxCoder::new(), None, raw.len());
+            let t2 = t.elapsed().as_secs_f64();
+            println!(
+                "{} -> {} bytes ({} rows, {} trailing), coded in {t1:.2}s, restored in {t2:.2}s, exact: {}",
+                raw.len(),
+                z.len(),
+                p.image.rows(),
+                p.layout.trailing.len(),
+                back.as_deref() == Some(&raw[..]) && restored.as_deref() == Some(&raw[..])
+            );
+        }
+        Some("jbig2-encode") => {
+            // pdfe jbig2-encode IN.pbm OUT.jb2 [invert]: our JBIG2Decode stream (embedded form) of a PBM.
+            let data = std::fs::read(pos.get(1).unwrap_or_else(|| die("need IN.pbm"))).unwrap_or_else(|e| die(&e.to_string()));
+            let o = pos.get(2).unwrap_or_else(|| die("need OUT"));
+            let invert = pos.get(3).map(|s| s.as_str()) == Some("invert");
+            let img = read_pbm(&data).unwrap_or_else(|| die("not a binary PBM"));
+            let s = engine::fax::jbig2::pdf_stream(&img, invert);
+            let back = engine::fax::jbig2::read_pdf_stream(&s, invert);
+            std::fs::write(o, &s).unwrap_or_else(|e| die(&e.to_string()));
+            println!("{} bytes, our decoder gives the image back: {}", s.len(), back.as_ref() == Some(&img));
+        }
+        _ => die("usage: pdfe deflate|inflate|batch|optimize|pdf-batch|repro|pack|unpack|pack-batch|fax-decode|fax-encode|jbig2-encode ..."),
     }
 }
 
