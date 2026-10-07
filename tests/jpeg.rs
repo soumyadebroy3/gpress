@@ -209,20 +209,18 @@ fn smaller_with_the_symbols_libjpeg_reads() {
 
 #[test]
 fn every_other_byte_is_kept() {
-    // Fill bytes before markers, a comment between the tables and the scan, bytes after the end marker.
+    // A comment between the tables and the scan, bytes after the end marker.
     let a = data("base444.jpg");
     let mut b = Vec::new();
     let sos = find(&a, &[0xFF, 0xDA]);
-    b.extend_from_slice(&a[..2]);
-    b.extend_from_slice(&[0xFF, 0xFF]); // fill bytes before the next marker
-    b.extend_from_slice(&a[2..sos]);
+    b.extend_from_slice(&a[..sos]);
     b.extend_from_slice(&[0xFF, 0xFE, 0, 6, b'h', b'e', b'l', b'o']);
     b.extend_from_slice(&a[sos..]);
     b.extend_from_slice(b"\r\nafter the end");
     let o = optimize(&b).unwrap();
     assert!(equivalent(&b, &o));
     assert!(o.ends_with(b"\xFF\xD9\r\nafter the end"));
-    assert_eq!(&o[..6], &[0xFF, 0xD8, 0xFF, 0xFF, 0xFF, 0xE0]);
+    assert_eq!(&o[..4], &[0xFF, 0xD8, 0xFF, 0xE0]);
     assert!(find(&o, b"\xFF\xFE\x00\x06helo") < find(&o, &[0xFF, 0xDA]));
     // ICC profile, JFIF and comment segments are byte for byte the same.
     for seg in [&a[2..20], &a[find(&a, b"ICC_PROFILE") - 4..find(&a, b"ICC_PROFILE") + 780]] {
@@ -293,6 +291,148 @@ fn other_kinds_are_left_alone() {
     let end = a.len() - 2;
     assert_eq!(optimize(&[&a[..end], &[0x12, 0x34], &a[end..]].concat()), Err(Refused("extra entropy-coded data")));
     assert!(optimize(&a[..end]).is_err());
+}
+
+/// A JPEG's segments in order: (marker, its bytes; a scan's include its coded data). For the test files only.
+fn segments(d: &[u8]) -> Vec<(u8, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut i = 2;
+    loop {
+        let s = i;
+        assert_eq!(d[i], 0xFF);
+        let m = d[i + 1];
+        i += 2;
+        if m == 0xD9 {
+            out.push((m, d[s..].to_vec()));
+            return out;
+        }
+        i += u16::from_be_bytes([d[i], d[i + 1]]) as usize;
+        if m == 0xDA {
+            while !(d[i] == 0xFF && d[i + 1] != 0 && !(0xD0..=0xD7).contains(&d[i + 1])) {
+                i += 1;
+            }
+        }
+        out.push((m, d[s..i].to_vec()));
+    }
+}
+
+/// The segments of `d` with marker `m`, joined.
+fn pick(d: &[u8], m: u8) -> Vec<u8> {
+    segments(d).into_iter().filter(|s| s.0 == m).flat_map(|s| s.1).collect()
+}
+
+fn segment(m: u8, body: &[u8]) -> Vec<u8> {
+    [&[0xFF, m][..], &(body.len() as u16 + 2).to_be_bytes(), body].concat()
+}
+
+#[test]
+fn fill_bytes_leave_the_file_as_it_is() {
+    // A valid layout (T.81 allows fill bytes before any marker) that pdf.js decodes as it is but not once the
+    // tables move: a comment holding a small JPEG (so an FF D8 pair), the tables, fill bytes, the rest. With the
+    // tables gone from between them, pdf.js would find 0xFFFF after the comment, take its length for wrong and
+    // stop at the FF D8 inside it.
+    let a = data("base420.jpg");
+    let com = segment(0xFE, &[b"thumbnail:".as_slice(), &data("tiny.jpg")].concat());
+    let layout = |fill: &[u8]| {
+        [&a[..2], &pick(&a, 0xE0), &com, &pick(&a, 0xC4), fill, &pick(&a, 0xDB), &pick(&a, 0xC0), &pick(&a, 0xDA), &pick(&a, 0xD9)].concat()
+    };
+    assert_eq!(optimize(&layout(&[0xFF, 0xFF])), Err(Refused("fill bytes before a marker")));
+    // Without the fill bytes the same layout is optimised, and every segment of the new file is followed by
+    // a marker code readers expect (0xFFC0 to 0xFFFE).
+    let plain = layout(&[]);
+    let o = optimize(&plain).unwrap();
+    assert!(equivalent(&plain, &o));
+    let segs = segments(&o);
+    for w in segs.windows(2) {
+        assert!((0xC0..=0xFE).contains(&w[1].0), "marker {:02X} after {:02X}", w[1].0, w[0].0);
+    }
+    // Fill bytes anywhere else: after the start marker, before the scan, before the end marker.
+    let sos = find(&a, &[0xFF, 0xDA]);
+    let eoi = a.len() - 2;
+    for at in [2, sos, eoi] {
+        let b = [&a[..at], &[0xFF][..], &a[at..]].concat();
+        assert_eq!(optimize(&b), Err(Refused("fill bytes before a marker")), "fill at {at}");
+    }
+}
+
+#[test]
+fn quantisation_tables_are_checked() {
+    let a = data("base420.jpg");
+    let dqt = find(&a, &[0xFF, 0xDB]);
+    let len = u16::from_be_bytes([a[dqt + 2], a[dqt + 3]]) as usize;
+    let end = dqt + 2 + len;
+    let with_len = |b: &mut Vec<u8>, l: usize| b[dqt + 2..dqt + 4].copy_from_slice(&(l as u16).to_be_bytes());
+    // The length 2 too long, with two zero bytes inside the segment: libjpeg refuses this file, and pdf.js reads
+    // the tables, not the length, so it would read the bytes after it as the next marker.
+    let mut b = [&a[..end], &[0, 0][..], &a[end..]].concat();
+    with_len(&mut b, len + 2);
+    assert_eq!(optimize(&b), Err(Refused("bad quantisation table segment")));
+    // The length one short: the last value is left over between segments.
+    let mut b = a.clone();
+    with_len(&mut b, len - 1);
+    assert!(optimize(&b).is_err());
+    // Precision 2, table number 4.
+    for pt in [0x20, 0x04, 0x14] {
+        let mut b = a.clone();
+        b[dqt + 4] = pt;
+        assert_eq!(optimize(&b), Err(Refused("bad quantisation table precision or number")), "{pt:02X}");
+    }
+    // An empty segment.
+    let b = [&a[..dqt], &[0xFF, 0xDB, 0, 2][..], &a[dqt..]].concat();
+    assert_eq!(optimize(&b), Err(Refused("empty quantisation table segment")));
+    // A table no segment defines.
+    let g = data("gray.jpg");
+    let sof = find(&g, &[0xFF, 0xC0]);
+    let mut b = g.clone();
+    b[sof + 12] = 1; // the one component's table number
+    assert_eq!(optimize(&b), Err(Refused("scan uses an undefined quantisation table")));
+    // Defined again after a scan used it (libjpeg keeps the first table, pdf.js the last): left as it is. Table
+    // 1 defined again between the scans, before the scan that first uses it, is fine (readers agree on it).
+    let m = data("multiscan.jpg");
+    let segs = segments(&m);
+    let second_scan = segs.iter().enumerate().filter(|(_, s)| s.0 == 0xDA).nth(1).unwrap().0;
+    let table = |n: u8| segment(0xDB, &[&[n][..], &[1u8; 64]].concat());
+    let insert = |extra: &[u8]| {
+        let mut b = Vec::from(&m[..2]);
+        for (k, s) in segs.iter().enumerate() {
+            if k == second_scan {
+                b.extend_from_slice(extra);
+            }
+            b.extend_from_slice(&s.1);
+        }
+        b
+    };
+    assert_eq!(optimize(&insert(&table(0))), Err(Refused("quantisation table defined again after a scan used it")));
+    let fine = insert(&table(1));
+    let o = optimize(&fine).unwrap();
+    assert!(equivalent(&fine, &o));
+}
+
+#[test]
+fn data_bound_to_the_bytes_leaves_the_file_as_it_is() {
+    // An APP11 segment with a JUMBF box labelled c2pa (content credentials hash the file's bytes).
+    let a = data("base420.jpg");
+    let mut jumbf = b"JP\x00\x01\x00\x00\x00\x01".to_vec();
+    jumbf.extend_from_slice(&[0, 0, 0, 0x21]);
+    jumbf.extend_from_slice(b"jumb\x00\x00\x00\x19jumdc2pa\x00\x11\x00\x10\x80\x00\x00\xaa\x00\x38\x9b\x71\x03c2pa\x00");
+    let b = [&a[..2], &segment(0xEB, &jumbf), &a[2..]].concat();
+    assert_eq!(optimize(&b), Err(Refused("APP11 data (JUMBF, such as content credentials)")));
+    // Any APP11.
+    let b = [&a[..2], &segment(0xEB, b"other"), &a[2..]].concat();
+    assert!(optimize(&b).is_err());
+}
+
+#[test]
+fn many_segments_are_refused() {
+    // Millions of empty comments would cost memory per segment: past 4096 segments, a file is left as it is.
+    let a = data("base420.jpg");
+    let n = segments(&a).len() + 1; // and the start marker
+    let comments = |k: usize| [&a[..2], &[0xFF, 0xFE, 0, 2].repeat(k), &a[2..]].concat();
+    let most = comments(4096 - n);
+    let o = optimize(&most).unwrap();
+    assert!(equivalent(&most, &o));
+    assert_eq!(optimize(&comments(4096 - n + 1)), Err(Refused("too many segments")));
+    assert_eq!(optimize(&comments(1 << 20)), Err(Refused("too many segments")));
 }
 
 /// Damaged input: an error, or a smaller file with exactly the same coefficients.
@@ -438,13 +578,34 @@ fn pdf_images_we_cannot_optimise_stay_as_they_are() {
     let mut flipped = base.clone();
     let n = flipped.len();
     flipped[n - 30] ^= 0x40; // damaged coded data: may still read as a JPEG; then it must keep its coefficients
-    for (what, jpeg) in [("progressive", data("progressive.jpg")), ("arithmetic", data("arithmetic.jpg")), ("12-bit", twelve), ("truncated", truncated), ("flipped", flipped)] {
+    // The layouts of the review: fill bytes after the tables (pdf.js), a quantisation segment 2 bytes too long,
+    // content credentials.
+    let com = segment(0xFE, &[b"thumbnail:".as_slice(), &data("tiny.jpg")].concat());
+    let b = &base;
+    let fill = [&b[..2], &pick(b, 0xE0), &com, &pick(b, 0xC4), &[0xFF, 0xFF], &pick(b, 0xDB), &pick(b, 0xC0), &pick(b, 0xDA), &pick(b, 0xD9)].concat();
+    let dqt = find(b, &[0xFF, 0xDB]);
+    let dqt_end = dqt + 2 + u16::from_be_bytes([b[dqt + 2], b[dqt + 3]]) as usize;
+    let mut long_dqt = [&b[..dqt_end], &[0, 0][..], &b[dqt_end..]].concat();
+    long_dqt[dqt + 3] += 2;
+    let app11 = [&b[..2], &segment(0xEB, b"JP\x00\x01\x00\x00\x00\x01"), &b[2..]].concat();
+    // (what, JPEG, must keep its bytes)
+    let cases = [
+        ("progressive", data("progressive.jpg"), true),
+        ("arithmetic", data("arithmetic.jpg"), true),
+        ("12-bit", twelve, true),
+        ("truncated", truncated, true),
+        ("flipped", flipped, false),
+        ("fill bytes", fill, true),
+        ("long DQT", long_dqt, true),
+        ("APP11", app11, true),
+    ];
+    for (what, jpeg, keep) in cases {
         let pdf = pdf_with_image(&jpeg, "/DCTDecode", 75, 53, "DeviceRGB");
         let r = rewrite::optimize(&pdf, &quick());
         if let Outcome::Smaller(_) = r.outcome {
             let (codecs, bytes) = image_of(&r.data);
             assert_eq!(codecs, vec![b"DCTDecode".to_vec()], "{what}");
-            if optimize(&jpeg).is_err() {
+            if keep || optimize(&jpeg).is_err() {
                 assert_eq!(bytes, jpeg, "{what}: a JPEG we can't optimise keeps its bytes");
             } else {
                 assert!(equivalent(&jpeg, &bytes), "{what}");
