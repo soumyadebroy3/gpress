@@ -7,7 +7,10 @@ write.
   jpeg_bench.py OUT ours            pdfe jpeg-batch (PDFE=path) -> OUT/ours/, OUT/ours.tsv
   jpeg_bench.py OUT tools           jpegtran -optimize -copy all, and -progressive (JPEGTRAN=path, libjpeg-turbo),
                                     and mozjpeg's lossless optimisation (MOZJPEG_PY=folder with the
-                                    mozjpeg-lossless-optimization package, optional) -> OUT/tools.tsv
+                                    mozjpeg-lossless-optimization package, optional) -> OUT/tools.tsv. jpegtran
+                                    exits with 2 when it warns about its input but still writes the whole file;
+                                    such output counts like any other (mozjpeg's binding gives no such status),
+                                    and the report also gives the totals without those JPEGs, for every tool.
   jpeg_bench.py OUT check           every JPEG we changed, against its original: pixels decoded by libjpeg-turbo
                                     (djpeg, DJPEG=path) and by Pillow, and coefficients (jpegtran -copy all with
                                     the standard tables must give the same bytes) -> OUT/check.tsv
@@ -98,9 +101,12 @@ def ours(out):
 
 
 def run_size(cmd, src):
+    """(bytes written or -1, seconds, warned). jpegtran exits with 2 after a warning about its input (for example
+    'Invalid SOS parameters', 'extraneous bytes before marker') and still writes the whole output."""
     t = time.time()
     r = subprocess.run(cmd + [src], capture_output=True)
-    return (len(r.stdout) if r.returncode == 0 and r.stdout else -1), time.time() - t
+    ok = r.returncode in (0, 2) and r.stdout
+    return (len(r.stdout) if ok else -1), time.time() - t, bool(ok) and r.returncode == 2
 
 
 def tools(out):
@@ -111,15 +117,15 @@ def tools(out):
     rows = []
     for h in jpegs(out):
         src = os.path.join(out, 'jpegs', h + '.jpg')
-        opt, t1 = run_size([JPEGTRAN, '-optimize', '-copy', 'all'], src)
-        prog, t2 = run_size([JPEGTRAN, '-optimize', '-progressive', '-copy', 'all'], src)
+        opt, t1, w1 = run_size([JPEGTRAN, '-optimize', '-copy', 'all'], src)
+        prog, t2, w2 = run_size([JPEGTRAN, '-optimize', '-progressive', '-copy', 'all'], src)
         m = -1
         if moz is not None:
             try:
                 m = len(moz.optimize(open(src, 'rb').read(), copy=moz.COPY_MARKERS.ALL))
             except Exception:
                 m = -1
-        rows.append(f'{h}\t{os.path.getsize(src)}\t{opt}\t{prog}\t{m}\t{t1:.3f}\t{t2:.3f}\n')
+        rows.append(f'{h}\t{os.path.getsize(src)}\t{opt}\t{prog}\t{m}\t{t1:.3f}\t{t2:.3f}\t{int(w1 or w2)}\n')
     open(os.path.join(out, 'tools.tsv'), 'w').write(''.join(rows))
 
 
@@ -179,37 +185,46 @@ def report(out):
     tools_rows = {}
     if os.path.exists(os.path.join(out, 'tools.tsv')):
         for l in open(os.path.join(out, 'tools.tsv')):
-            h, size, opt, prog, moz, *_ = l.rstrip('\n').split('\t')
-            tools_rows[h] = (int(size), int(opt), int(prog), int(moz))
-    n = tin = tout = 0
-    secs = 0.0
-    kinds = {}
-    larger = {}
+            h, size, opt, prog, moz, _, _, warned = l.rstrip('\n').split('\t')
+            tools_rows[h] = (int(size), int(opt), int(prog), int(moz), warned == '1')
+    rows = []
     for l in open(os.path.join(out, 'ours.tsv')):
         p = l.rstrip('\n').split('\t')
         if len(p) < 5:
             continue
         h = os.path.basename(p[0])[:-4]
         a, b = int(p[1]), int(p[2])
-        secs += float(p[3])
-        n += 1
-        tin += a
-        tout += b
-        k = kind(p[0], p[4])
-        row = kinds.setdefault(k, [0] * 6)
-        size, opt, prog, moz = tools_rows.get(h, (a, -1, -1, -1))
+        size, opt, prog, moz, warned = tools_rows.get(h, (a, -1, -1, -1, False))
         best = lambda x: x if 0 < x < size else size  # a tool that can't make it smaller leaves it as it is
-        for i, v in enumerate((1, a, b, best(opt), best(prog), best(moz))):
-            row[i] += v
-        if b > best(opt):
-            larger.setdefault(k, []).append(b - best(opt))
-    print(f'{n} distinct JPEGs: {tin} -> {tout} bytes ({100 * (1 - tout / max(tin, 1)):.2f}% smaller), {secs:.1f} s')
-    print('kind\tJPEGs\toriginal\tours\tjpegtran -optimize\tjpegtran -optimize -progressive\tmozjpeg (progressive)')
-    total = [0] * 6
-    for k, row in sorted(kinds.items()):
-        print(k, *row, sep='\t')
-        total = [x + y for x, y in zip(total, row)]
-    print('all', *total, sep='\t')
+        rows.append((h, kind(p[0], p[4]), float(p[3]), a, b, best(opt), best(prog), best(moz), warned))
+    secs = sum(r[2] for r in rows)
+    tin, tout = sum(r[3] for r in rows), sum(r[4] for r in rows)
+    print(f'{len(rows)} distinct JPEGs: {tin} -> {tout} bytes ({100 * (1 - tout / max(tin, 1)):.2f}% smaller), {secs:.1f} s')
+    head = 'kind\tJPEGs\toriginal\tours\tjpegtran -optimize\tjpegtran -optimize -progressive\tmozjpeg (progressive)'
+
+    def table(rows, title):
+        print(title)
+        print(head)
+        kinds = {}
+        for r in rows:
+            row = kinds.setdefault(r[1], [0] * 6)
+            for i, v in enumerate((1,) + r[3:8]):
+                row[i] += v
+        total = [0] * 6
+        for k, row in sorted(kinds.items()):
+            print(k, *row, sep='\t')
+            total = [x + y for x, y in zip(total, row)]
+        print('all', *total, sep='\t')
+
+    table(rows, 'All JPEGs (a tool\'s output counts even when jpegtran warned about the input):')
+    warned = [r for r in rows if r[8]]
+    if warned:
+        print('jpegtran warned about the input of: ' + ', '.join(f'{r[0][:8]} ({r[1]})' for r in warned))
+        table([r for r in rows if not r[8]], f'Without those {len(warned)} JPEGs, for every tool:')
+    larger = {}
+    for r in rows:
+        if r[4] > r[5]:
+            larger.setdefault(r[1], []).append(r[4] - r[5])
     for k, v in sorted(larger.items()):
         print(f'ours larger than jpegtran -optimize: {k}: {len(v)} JPEGs, {sum(v)} bytes')
 
