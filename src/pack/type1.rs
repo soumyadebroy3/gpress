@@ -74,12 +74,13 @@ pub struct Hex {
 const EOLS: [&[u8]; 3] = [b"\n", b"\r", b"\r\n"];
 
 impl Hex {
-    /// Length of the text for `n` bytes (None if it can't be held in memory, or for an unknown line end).
+    /// Length of the text for `n` bytes (None if it doesn't fit a usize, or for an unknown line end). Checked
+    /// arithmetic: a damaged file can ask for any `n`.
     fn text_len(&self, n: usize) -> Option<usize> {
-        let eol = EOLS.get(self.eol as usize)?;
-        let digits = n as u64 * 2;
-        let breaks = if self.line > 0 && digits > 0 { (digits - 1) / self.line as u64 } else { 0 } + self.last_eol as u64;
-        usize::try_from(digits + breaks * eol.len() as u64).ok()
+        let eol = EOLS.get(self.eol as usize)?.len();
+        let digits = n.checked_mul(2)?;
+        let breaks = if self.line > 0 && digits > 0 { (digits - 1) / self.line } else { 0 } + self.last_eol as usize;
+        breaks.checked_mul(eol)?.checked_add(digits)
     }
 
     fn text(&self, bytes: &[u8]) -> Vec<u8> {
@@ -276,7 +277,7 @@ fn hex_value(c: u8) -> Option<u8> {
 
 /// The bytes of a hex text (white space between digits ignored); None unless there are exactly `n`.
 fn unhex(text: &[u8], n: usize) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(n);
+    let mut out = Vec::with_capacity(n.min(text.len() / 2));
     let mut hi: Option<u8> = None;
     for &c in text {
         let v = match hex_value(c) {
@@ -516,28 +517,14 @@ pub(super) fn code<C: Coder>(io: &mut Io<C>, src: Option<&[u8]>, n: usize, dict:
         io.bytes(src, n, out);
         return;
     }
-    let start = delta(io, lay.map(|l| l.start), h1);
-    let count = delta(io, lay.map(|l| l.n), h2);
-    let hex = if form == HEX {
-        let h = lay.and_then(|l| l.hex);
-        let upper = io.byte(h.map(|h| h.upper as u8));
-        let line = io.length(h.map(|h| h.line as u64), n);
-        let eol = io.byte(h.map(|h| h.eol));
-        let last = io.byte(h.map(|h| h.last_eol as u8));
-        if upper > 1 || eol > 2 || last > 1 {
-            io.damaged = true;
-            return;
-        }
-        Some(Hex { upper: upper == 1, line, eol, last_eol: last == 1 })
-    } else {
-        None
-    };
-    // Anything that doesn't fit the font's length can only come from a damaged file.
-    let (Some(start), Some(count), true) = (start, count, form <= HEX && !io.damaged) else {
+    let l = code_layout(io, lay.as_ref(), form == HEX, n, h1, h2);
+    // Anything that doesn't fit the font's length can only come from a damaged file. Every real layout has its
+    // start and count inside the font; that is checked before any length is worked out from them.
+    let Some(l) = l.filter(|l| form <= HEX && !io.damaged && l.start <= n && l.n <= n) else {
         io.damaged = true;
         return;
     };
-    let l = Layout { start, n: count, hex };
+    let (start, count) = (l.start, l.n);
     let Some(end) = l.text_len().and_then(|x| start.checked_add(x)).filter(|&e| e <= n) else {
         io.damaged = true;
         return;
@@ -561,6 +548,28 @@ pub(super) fn code<C: Coder>(io: &mut Io<C>, src: Option<&[u8]>, n: usize, dict:
     }
 }
 
+/// The layout of an opened font (`l` when encoding): start and count as differences from the hints, then the
+/// hex form's line layout. None if a field can't be what it stands for; `code` checks the layout against the
+/// font's length.
+fn code_layout<C: Coder>(io: &mut Io<C>, l: Option<&Layout>, hex: bool, n: usize, h1: usize, h2: usize) -> Option<Layout> {
+    let start = delta(io, l.map(|l| l.start), h1);
+    let count = delta(io, l.map(|l| l.n), h2);
+    let hex = if hex {
+        let h = l.and_then(|l| l.hex);
+        let upper = io.byte(h.map(|h| h.upper as u8));
+        let line = io.length(h.map(|h| h.line as u64), n);
+        let eol = io.byte(h.map(|h| h.eol));
+        let last = io.byte(h.map(|h| h.last_eol as u8));
+        if upper > 1 || eol > 2 || last > 1 {
+            return None;
+        }
+        Some(Hex { upper: upper == 1, line, eol, last_eol: last == 1 })
+    } else {
+        None
+    };
+    Some(Layout { start: start?, n: count?, hex })
+}
+
 /// A count coded as its difference from a hint (usually 0); None if the result can't be a count.
 fn delta<C: Coder>(io: &mut Io<C>, v: Option<usize>, hint: usize) -> Option<usize> {
     let d = v.map(|v| v as i64 - hint as i64);
@@ -572,6 +581,8 @@ fn delta<C: Coder>(io: &mut Io<C>, v: Option<usize>, hint: usize) -> Option<usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cm::model::Model;
+    use crate::cm::{Decoder, Encoder};
 
     fn unhex_str(s: &str) -> Vec<u8> {
         (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
@@ -793,8 +804,99 @@ mod tests {
         }
         let hex = Layout { hex: Some(Hex { upper: true, line: 64, eol: 2, last_eol: true }), ..l };
         assert!(open(&f, &hex).is_none(), "binary bytes read as hex");
-        let huge = Layout { start: 0, n: usize::MAX / 2, hex: hex.hex };
-        assert!(open(&f, &huge).is_none());
+        // Hex text lengths too large for a usize have no length (they used to wrap around to a few bytes:
+        // 2 and 0 for the first two on 64 bits).
+        let one_digit = |eol, last_eol| Some(Hex { upper: true, line: 1, eol, last_eol });
+        for (n, h) in [(usize::MAX / 6 + 1, one_digit(2, true)), (usize::MAX / 4 + 1, one_digit(0, true)), (usize::MAX / 2, hex.hex), (usize::MAX, one_digit(0, false))] {
+            let huge = Layout { start: 0, n, hex: h };
+            assert_eq!(huge.text_len(), None, "{huge:?}");
+            assert!(open(&f, &huge).is_none());
+            assert!(close(&t, &huge).is_none());
+        }
+        // The largest that fits is worked out exactly: 2n digits and 2n - 1 line ends.
+        assert_eq!(Layout { start: 0, n: usize::MAX / 4 + 1, hex: one_digit(0, false) }.text_len(), Some(usize::MAX));
+        assert_eq!(Layout { start: 0, n: 3, hex: one_digit(2, true) }.text_len(), Some(18));
+        assert_eq!(Layout { start: 0, n: 0, hex: hex.hex }.text_len(), Some(2));
+    }
+
+    /// Counts the decisions a coder makes.
+    struct Counted<C> {
+        c: C,
+        decisions: u64,
+    }
+
+    impl<C: Coder> Coder for Counted<C> {
+        fn code(&mut self, bit: Option<u32>, p1: i32) -> u32 {
+            self.decisions += 1;
+            self.c.code(bit, p1)
+        }
+        fn code16(&mut self, bit: Option<u32>, p16: u32) -> u32 {
+            self.decisions += 1;
+            self.c.code16(bit, p16)
+        }
+        fn exhausted(&self) -> bool {
+            self.c.exhausted()
+        }
+    }
+
+    /// What `code` writes for an opened font (no dictionary, so no hints), with a layout of the test's
+    /// choosing: the flag, the layout (written by `code_layout`, as `code` writes it), then `parts`, each with
+    /// its model kind. The real encoder only writes layouts it found in the font.
+    fn write_opened(l: &Layout, n: usize, parts: &[(Kind, &[u8])]) -> Vec<u8> {
+        let mut m = Model::new(14);
+        let mut io = Io { m: &mut m, c: Encoder::new(), damaged: false };
+        io.m.set_kind(Kind::Meta, Geom::default(), 0);
+        io.byte(Some(if l.hex.is_some() { HEX } else { BINARY }));
+        code_layout(&mut io, Some(l), l.hex.is_some(), n, 0, 0);
+        let mut sink = Vec::new();
+        for &(kind, bytes) in parts {
+            io.m.set_kind(kind, Geom::default(), 0);
+            io.bytes(Some(bytes), bytes.len(), &mut sink);
+        }
+        let Io { c, .. } = io;
+        c.finish()
+    }
+
+    /// `code` restoring a font of `n` bytes from `data`: the bytes it gave, whether it found the data damaged,
+    /// and how many decisions it decoded.
+    fn read_font(data: &[u8], n: usize) -> (Vec<u8>, bool, u64) {
+        let mut m = Model::new(14);
+        let mut io = Io { m: &mut m, c: Counted { c: Decoder::new(data), decisions: 0 }, damaged: false };
+        let (mut out, mut stats) = (Vec::new(), PackStats::default());
+        code(&mut io, None, n, None, Kind::Font, &mut out, &mut stats);
+        (out, io.damaged, io.c.decisions)
+    }
+
+    /// A damaged or crafted file can give a font any layout. One that can't fit the font is refused as soon as
+    /// it is read, before anything is decoded for it, so neither time nor memory grows with what the file
+    /// claims. (The first two below used to pass the length check, wrapped around to a few bytes, and their
+    /// private part was then decoded until the data ran out.)
+    #[test]
+    fn layouts_in_a_file_that_dont_fit_are_refused_at_once() {
+        let (f, t, l1, l2) = font(None, "RD", 8);
+        let n = f.len();
+        // The writer above writes what `code` writes: the real layout restores the font.
+        let real = Layout { start: l1, n: l2, hex: None };
+        let data = write_opened(&real, n, &[(Kind::Font, &t[..l1]), (Kind::Charstring, &t[l1..l1 + l2]), (Kind::Font, &t[l1 + l2..])]);
+        assert_eq!(read_font(&data, n).0, f);
+        // Each layout is followed by 256 KiB of zeros where the private part would be: read as one, they take
+        // over 250,000 decisions.
+        let zeros = vec![0u8; 1 << 18];
+        let one_digit = |eol, last_eol| Some(Hex { upper: true, line: 1, eol, last_eol });
+        for bad in [
+            Layout { start: l1, n: usize::MAX / 6 + 1, hex: one_digit(2, true) },
+            Layout { start: l1, n: usize::MAX / 4 + 1, hex: one_digit(0, true) },
+            Layout { start: l1, n: n + 1, hex: one_digit(0, false) },
+            Layout { start: l1, n: n / 2, hex: one_digit(0, false) },
+            Layout { start: l1, n: n - l1 + 1, hex: None },
+            Layout { start: l1, n: usize::MAX, hex: None },
+            Layout { start: n + 1, n: 0, hex: None },
+        ] {
+            let data = write_opened(&bad, n, &[(Kind::Font, &t[..l1]), (Kind::Charstring, &zeros)]);
+            let (out, damaged, decisions) = read_font(&data, n);
+            assert!(damaged && out.is_empty(), "{bad:?}");
+            assert!(decisions < 1000, "{bad:?}: {decisions} decisions decoded");
+        }
     }
 
     #[test]
