@@ -3,6 +3,10 @@
 //!   pdfe deflate IN OUT [--quick] [--raw]     zlib-wrapped (or raw) Deflate of IN
 //!   pdfe inflate IN OUT [--raw]               decode with our decoder
 //!   pdfe batch [--quick]                      stdin lines "IN OUT": compress each, verify, print sizes
+//!   pdfe optimize IN OUT [--effort N]         normal PDF; N from 0 (fast) to 100 (default); --quick = 0
+//!   pdfe pack IN OUT [--effort N]             peyaji format (the effort only changes the encoder's choices)
+//!
+//! --threads N sets the threads (default: what the machine offers, at most 8); the output is the same.
 
 use engine::flate::{self, Options};
 use std::io::{BufRead, Write};
@@ -24,15 +28,17 @@ fn main() {
             continue;
         }
         if a.starts_with("--") {
-            skip_next = matches!(a.as_str(), "--iter" | "--exact" | "--chain");
+            skip_next = matches!(a.as_str(), "--iter" | "--exact" | "--chain" | "--nice" | "--threads" | "--effort");
             continue;
         }
         pos.push(a);
     }
-    let mut opt = if flag("--quick") { Options::quick() } else { Options::max() };
     let num = |name: &str| -> Option<usize> {
         args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok())
     };
+    let effort: u8 = if flag("--quick") { 0 } else { num("--effort").map_or(100, |e| e.min(100) as u8) };
+    let threads = num("--threads").unwrap_or(0);
+    let mut opt = Options::effort(effort);
     if let Some(v) = num("--iter") {
         opt.iterations = v;
     }
@@ -50,6 +56,15 @@ fn main() {
     }
     if flag("--nomulti") {
         opt.multi_start_limit = 0;
+    }
+    if let Some(v) = num("--nice") {
+        opt.nice = v;
+    }
+    if flag("--nopolish") {
+        opt.polish = false;
+    }
+    if threads > 0 {
+        opt.shared = Some(flate::deflate::Shared::new(threads));
     }
     match pos.first().map(|s| s.as_str()) {
         Some("deflate") => {
@@ -99,7 +114,7 @@ fn main() {
             let (i, o) = (pos.get(1).unwrap_or_else(|| die("need IN")), pos.get(2).unwrap_or_else(|| die("need OUT")));
             let data = std::fs::read(i).unwrap_or_else(|e| die(&format!("{i}: {e}")));
             let t = Instant::now();
-            let r = engine::pdf::rewrite::optimize(&data, &pdf_options(&opt));
+            let r = engine::pdf::rewrite::optimize(&data, &pdf_options(&opt, effort, threads));
             std::fs::write(o, &r.data).unwrap_or_else(|e| die(&format!("{o}: {e}")));
             println!("{}", describe(i, data.len(), &r, t.elapsed().as_secs_f64()));
         }
@@ -119,7 +134,7 @@ fn main() {
                     }
                 };
                 let t = Instant::now();
-                let r = std::panic::catch_unwind(|| engine::pdf::rewrite::optimize(&data, &pdf_options(&opt)));
+                let r = std::panic::catch_unwind(|| engine::pdf::rewrite::optimize(&data, &pdf_options(&opt, effort, threads)));
                 match r {
                     Ok(r) => {
                         std::fs::write(o, &r.data).unwrap();
@@ -227,8 +242,8 @@ fn main() {
     }
 }
 
-fn pdf_options(f: &Options) -> engine::pdf::rewrite::Options {
-    engine::pdf::rewrite::Options { flate: f.clone(), ..Default::default() }
+fn pdf_options(f: &Options, effort: u8, threads: usize) -> engine::pdf::rewrite::Options {
+    engine::pdf::rewrite::Options { flate: Options { shared: None, ..f.clone() }, effort, threads, ..Default::default() }
 }
 
 fn describe(name: &str, in_len: usize, r: &engine::pdf::rewrite::Optimized, secs: f64) -> String {
