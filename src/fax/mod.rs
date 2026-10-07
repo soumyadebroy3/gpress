@@ -2,5 +2,9 @@
 //! generic-region encoder and decoder (T.88) for normal PDFs, and a bilevel context model for the peyaji
 //! format.
 
+pub mod bilevel;
 pub mod ccitt;
+pub mod jbig2;
+pub mod part;
+pub mod pdf;
 pub mod tables;

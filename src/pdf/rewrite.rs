@@ -208,6 +208,10 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
     if s.dict.name(b"Type") == Some(b"Metadata") || s.dict.has(b"F") {
         return None; // XMP stays readable by other tools; external file streams are left alone
     }
+    // A scanned black-and-white image: JBIG2 instead of CCITT fax when that is clearly smaller (same pixels).
+    if let Some(x) = crate::fax::pdf::jbig2_candidate(s, resolve) {
+        return Some(x);
+    }
     let stages = chain(&s.dict)?;
     let k = stages.iter().take_while(|st| is_general(&st.name)).count();
     if stages[k..].iter().any(|st| is_general(&st.name)) {
@@ -572,7 +576,11 @@ fn self_check(objs: &BTreeMap<u32, (u16, Obj)>, out: &[u8], trailer: &Dict) -> R
                 }
                 let c1 = content_of(s1).ok_or(format!("self-check: stream {n} undecodable"))?;
                 let c2 = content_of(s2).ok_or(format!("self-check: stream {n} undecodable in output"))?;
-                if c1 != c2 {
+                let resolve = |o: &Obj| match o {
+                    Obj::Ref(r, _) => objs.get(r).map(|x| x.1.clone()),
+                    x => Some(x.clone()),
+                };
+                if c1 != c2 && !crate::fax::pdf::same_image(s1, s2, &resolve) {
                     return Err(format!("self-check: content of stream {n} differs"));
                 }
             }
