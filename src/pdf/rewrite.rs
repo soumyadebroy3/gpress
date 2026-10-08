@@ -11,6 +11,7 @@ use super::filters::{chain, decode_stage, is_general, Stage};
 use super::images;
 use super::object::*;
 use super::xref::{self, Doc, Entry};
+use crate::clock::{self, Deadline};
 use crate::flate;
 use crate::par;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -46,6 +47,9 @@ pub struct Options {
     /// Rewrite files the empty user password opens, keeping their encryption (see `crate::pdf::crypt`). Off,
     /// every encrypted file is left untouched.
     pub rewrite_encrypted: bool,
+    /// Stop when this passes (checked between streams and Flate segments): the outcome is then `TimedOut`
+    /// and nothing is returned. A rewrite that finishes gives the same bytes with or without a deadline.
+    pub deadline: Deadline,
 }
 
 impl Default for Options {
@@ -61,6 +65,7 @@ impl Default for Options {
             jbig2: true,
             jpeg_tables: true,
             rewrite_encrypted: true,
+            deadline: Deadline::NONE,
         }
     }
 }
@@ -73,6 +78,9 @@ impl Options {
     }
 }
 
+/// The reason `rewrite` gives up when its deadline passes (see `Outcome::TimedOut`).
+const TIMED_OUT: &str = "out of time";
+
 #[derive(Debug, Default, Clone)]
 pub struct Stats {
     pub objects: usize,
@@ -81,6 +89,10 @@ pub struct Stats {
     pub streams_kept: usize,
     pub objstms: usize,
     pub dropped_unreachable: usize,
+    /// JPEG images written again with optimal Huffman tables (the same coefficients).
+    pub jpegs_retabled: usize,
+    /// CCITT fax images written as JBIG2 (the same pixels).
+    pub fax_to_jbig2: usize,
     /// How the file is encrypted (kept exactly as it was), e.g. "R4/AESV2"; empty when it isn't.
     pub encryption: String,
 }
@@ -90,7 +102,21 @@ pub enum Outcome {
     Smaller(Stats),
     /// Returned unchanged, with the reason.
     Untouched(String),
+    /// The deadline passed before the work was done; the input is returned unchanged.
+    TimedOut,
 }
+
+/// What a re-encoded stream went through besides our Flate, for the statistics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Change {
+    /// The JPEG was given optimal Huffman tables.
+    pub jpeg_retabled: bool,
+    /// The CCITT fax image became JBIG2.
+    pub fax_to_jbig2: bool,
+}
+
+/// A stream's new dictionary and data, with what changed in it.
+type Reencoded = (Dict, Vec<u8>, Change);
 
 pub struct Optimized {
     pub data: Vec<u8>,
@@ -106,6 +132,7 @@ pub fn optimize(input: &[u8], opt: &Options) -> Optimized {
                 Optimized { data: input.to_vec(), outcome: Outcome::Untouched("no saving possible".into()) }
             }
         }
+        Err(reason) if reason == TIMED_OUT => Optimized { data: input.to_vec(), outcome: Outcome::TimedOut },
         Err(reason) => Optimized { data: input.to_vec(), outcome: Outcome::Untouched(reason) },
     }
 }
@@ -298,15 +325,15 @@ fn set_chain(dict: &mut Dict, stages: &[Stage]) {
     }
 }
 
-/// The best encoding of one stream: (new dict, new data), or None to keep it exactly as it is.
-fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) -> Option<(Dict, Vec<u8>)> {
+/// The best encoding of one stream: (new dict, new data, what changed), or None to keep it exactly as it is.
+fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) -> Option<Reencoded> {
     if s.dict.name(b"Type") == Some(b"Metadata") || s.dict.has(b"F") {
         return None; // XMP stays readable by other tools; external file streams are left alone
     }
     // A scanned black-and-white image: JBIG2 instead of CCITT fax when that is clearly smaller (same pixels).
     if opt.jbig2 {
-        if let Some(x) = crate::fax::pdf::jbig2_candidate(s, resolve) {
-            return Some(x);
+        if let Some((d, z)) = crate::fax::pdf::jbig2_candidate(s, resolve) {
+            return Some((d, z, Change { fax_to_jbig2: true, ..Change::default() }));
         }
     }
     let stages = chain(&s.dict)?;
@@ -345,6 +372,8 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
     let rest = &stages[k..];
     let mut best: Option<(Dict, Vec<u8>)> = None;
     let mut best_len = s.data.len();
+    // Whether `best` holds the JPEG with its new tables (alone, or behind Flate).
+    let mut best_retabled = false;
     // A JPEG with optimal Huffman tables: the same coefficients in fewer bytes, read back and compared before
     // it is used (anything unusual is left as it is).
     let jpeg = match rest {
@@ -359,6 +388,7 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
             set_chain(&mut d, rest);
             best_len = j.len();
             best = Some((d, j.clone()));
+            best_retabled = true;
         }
     }
     // Some readers decide how to read JPEG 2000 and JBIG2 images from the first filter's name (pdf.js reads
@@ -384,11 +414,16 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
         let z = flate::deflate_zlib(jpeg.as_ref().unwrap_or(&data), &opt.flate);
         let again = opt.effort >= 100
             && jpeg.as_ref().is_some_and(|j| z.len() * 10 <= j.len() * 9 && j.len() * 10 <= data.len() * 9);
-        for z in std::iter::once(z).chain(again.then(|| flate::deflate_zlib(&data, &opt.flate))) {
+        // The first candidate is Flate over the JPEG with its new tables (when there is one), the second
+        // over the original bytes.
+        for (z, retabled) in
+            std::iter::once((z, jpeg.is_some())).chain(again.then(|| (flate::deflate_zlib(&data, &opt.flate), false)))
+        {
             let limit = if adds_layer { best_len.min(bare_len - bare_len / 100) } else { best_len };
             if z.len() < limit {
                 best_len = z.len();
                 best = Some((d.clone(), z));
+                best_retabled = retabled;
             }
         }
     }
@@ -398,21 +433,23 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
         set_chain(&mut d, rest);
         best_len = data.len();
         best = Some((d, data.clone()));
+        best_retabled = false;
     }
     // Images: try storing the samples with a different (or no) PNG predictor.
     if rest.is_empty() && data.len() <= 48 << 20 {
         if let Some((d, z)) = repredict(s, &data, carried.as_ref(), opt, resolve) {
             if z.len() < best_len {
                 best = Some((d, z));
+                best_retabled = false;
             }
         }
     }
-    best
+    best.map(|(d, z)| (d, z, Change { jpeg_retabled: best_retabled, ..Change::default() }))
 }
 
 /// An encrypted XMP metadata stream (no tool reads it from the file without decrypting it): our Flate when
 /// that is smaller. Only general filters without parameters are undone; anything else stays as it is.
-fn reencode_xmp(s: &Stream, opt: &Options) -> Option<(Dict, Vec<u8>)> {
+fn reencode_xmp(s: &Stream, opt: &Options) -> Option<Reencoded> {
     let stages = chain(&s.dict)?;
     if s.dict.has(b"F") || stages.iter().any(|st| !is_general(&st.name) || st.parms.is_some()) {
         return None;
@@ -427,7 +464,7 @@ fn reencode_xmp(s: &Stream, opt: &Options) -> Option<(Dict, Vec<u8>)> {
     }
     let mut d = s.dict.clone();
     set_chain(&mut d, &[Stage { name: b"FlateDecode".to_vec(), parms: None }]);
-    Some((d, z))
+    Some((d, z, Change::default()))
 }
 
 fn repredict(
@@ -642,7 +679,11 @@ fn effort_plan(
         return vec![Some(opt.clone()); unique.len()];
     }
     let at = |e: u8| Options {
-        flate: flate::Options { shared: opt.flate.shared.clone(), ..flate::Options::effort(e) },
+        flate: flate::Options {
+            shared: opt.flate.shared.clone(),
+            deadline: opt.flate.deadline,
+            ..flate::Options::effort(e)
+        },
         effort: e,
         ..opt.clone()
     };
@@ -723,6 +764,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     let opt = &Options {
         flate: flate::Options {
             shared: Some(flate::deflate::Shared::with_pool(workers.clone(), false)),
+            deadline: opt.deadline,
             ..opt.flate.clone()
         },
         ..opt.clone()
@@ -738,6 +780,10 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     order.sort_by_key(|&u| (std::cmp::Reverse(streams[unique[u]].1.data.len()), u));
     let dbg = std::env::var_os("PDFE_DEBUG").is_some();
     let mut encoded = par::map(pool, unique.len(), Some(&order), |u| {
+        // Out of time: nothing more is encoded (the whole rewrite is given up below).
+        if opt.deadline.passed() {
+            return None;
+        }
         let (n, s) = streams[unique[u]];
         let resolve = |o: &Obj| -> Option<Obj> {
             match o {
@@ -745,7 +791,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
                 x => Some(x.clone()),
             }
         };
-        let t = std::time::Instant::now();
+        let t = clock::now();
         // XMP stays as it is for tools that read it straight from the file, unless it is encrypted. (Whether
         // it is depends on the dictionary alone, so identical streams agree.)
         let xmp = s.dict.name(b"Type") == Some(b"Metadata")
@@ -774,12 +820,15 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
             eprintln!(
                 "stream {n}: {} -> {new} bytes, {how}, {:?}{}",
                 s.data.len(),
-                t.elapsed(),
+                clock::since(t),
                 if short { " (short image, kept)" } else { "" }
             );
         }
         r
     });
+    if opt.deadline.passed() {
+        return Err(TIMED_OUT.into());
+    }
     if dbg && unique.len() < streams.len() {
         eprintln!("{} streams identical to an earlier one, encoded once", streams.len() - unique.len());
     }
@@ -804,9 +853,11 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
                 uses[u] -= 1;
                 let result = if uses[u] == 0 { encoded[u].take() } else { encoded[u].clone() };
                 let (dict, data) = match result {
-                    Some(x) => {
+                    Some((d, z, change)) => {
                         stats.streams_reencoded += 1;
-                        x
+                        stats.jpegs_retabled += change.jpeg_retabled as usize;
+                        stats.fax_to_jbig2 += change.fax_to_jbig2 as usize;
+                        (d, z)
                     }
                     None => {
                         stats.streams_kept += 1;
@@ -987,6 +1038,11 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
 
     // Read our own output back and compare everything reachable.
     self_check(&objs, &out, &doc.trailer, crypt)?;
+    // Anything written after the deadline passed (object streams, say) went out stored and is not an
+    // output of these settings: a rewrite either finishes in time or gives nothing.
+    if opt.deadline.passed() {
+        return Err(TIMED_OUT.into());
+    }
     Ok((out, stats))
 }
 
@@ -1254,7 +1310,7 @@ mod effort_tests {
         for effort in [100u8, 0] {
             let opt = Options::effort(effort);
             for (k, (s, predicted)) in cases.iter().enumerate() {
-                let (d, z) = reencode(s, &opt, &resolve).expect("Flate makes it smaller");
+                let (d, z, _) = reencode(s, &opt, &resolve).expect("Flate makes it smaller");
                 let mut plain = s.dict.clone();
                 set_chain(&mut plain, &[Stage { name: b"FlateDecode".to_vec(), parms: None }]);
                 let plain_total = total(&plain, &flate::deflate_zlib(&s.data, &opt.flate));

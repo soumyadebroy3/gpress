@@ -148,6 +148,7 @@ fn every_standard_mode_is_rewritten_with_the_same_encryption() {
                 assert_eq!(s.streams_kept, (name == "r4_aes_cleartext_md") as usize, "{name}");
             }
             Outcome::Untouched(why) => panic!("{name}: untouched: {why}"),
+            Outcome::TimedOut => panic!("{name}: timed out"),
         }
         let a = xref::open(&input).unwrap();
         let b = xref::open(&r.data).unwrap();
@@ -227,6 +228,7 @@ fn files_that_need_a_password_or_that_readers_disagree_on_are_left_untouched() {
         match &r.outcome {
             Outcome::Untouched(w) => assert!(w.contains(why), "{what}: {w}"),
             Outcome::Smaller(_) => panic!("{what}: rewritten"),
+            Outcome::TimedOut => panic!("{what}: timed out"),
         }
         assert_eq!(r.data, input, "{what}");
         // The gpress archive restores them exactly too.

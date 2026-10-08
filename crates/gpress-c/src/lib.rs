@@ -8,26 +8,41 @@ use std::ffi::{c_char, c_int, CString};
 use std::ptr;
 use std::time::Duration;
 
-/// Options, laid out for C. `gpress_options_default` fills one in; a zeroed struct is also valid and
-/// means "defaults" for every field that is 0 (effort 0 means quick, so set it explicitly).
+/// Options, laid out for C (the same fields as `gpress::Options`; `include/gpress.h` describes each).
+/// Fill one with `gpress_options_default` and change what you need: a zeroed struct is not the defaults
+/// (it means effort 0 and every switch off), though every size field left at 0 means its default.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct GpressOptions {
     /// 0..=100
     pub effort: u8,
+    /// Worker threads (0 = what the machine offers, at most 8; at most 64).
+    pub threads: u32,
     /// Largest accepted input in bytes (0 = 1 GiB).
     pub max_input: u64,
-    /// Largest decoded stream kept in memory (0 = 64 MiB).
+    /// Normal PDF: largest decoded stream re-encoded (0 = 64 MiB).
     pub max_stream: u64,
-    /// Worker threads (0 = one per CPU).
-    pub threads: u32,
-    /// Wall-time budget in milliseconds (0 = none).
+    /// Archive: largest decoded stream stored decoded (0 = 256 MiB).
+    pub max_stream_archive: u64,
+    /// Expand: largest file restored; an archive declaring more is refused (0 = 16 GiB).
+    pub max_len: u64,
+    /// Normal PDF: most objects per object stream (0 = 200).
+    pub objects_per_stream: u32,
+    /// Wall-time budget in milliseconds (0 = none): the call then fails with GPRESS_ERR_TIME_BUDGET.
     pub time_budget_ms: u64,
     /// 1 = leave PDF/A, PDF/X, signed and certified files untouched (the safe default), 0 = optimise them too.
     pub respect_conformance: u8,
     /// 1 = also try Flate in front of JPEG images.
     pub flate_over_jpeg: u8,
-    /// 1 = use the optional existing libraries when the build has them.
+    /// 1 = give JPEG images optimal Huffman tables.
+    pub jpeg_tables: u8,
+    /// 1 = write CCITT fax images as JBIG2 when that is clearly smaller.
+    pub jbig2: u8,
+    /// 1 = rewrite files the empty password opens, keeping their encryption.
+    pub rewrite_encrypted: u8,
+    /// 1 = archive: store the streams of such files decrypted (encrypted again on expand).
+    pub decrypt: u8,
+    /// 1 = use the optional existing library (Lepton) when the build has it.
     pub use_existing_libraries: u8,
 }
 
@@ -69,20 +84,36 @@ fn message(s: &str) -> *mut c_char {
     CString::new(s.replace('\0', " ")).map(CString::into_raw).unwrap_or(ptr::null_mut())
 }
 
+/// A C size field: 0 keeps the default, anything else is clamped to what this platform addresses.
+fn size(v: u64, default: usize) -> usize {
+    if v == 0 {
+        default
+    } else {
+        usize::try_from(v).unwrap_or(usize::MAX)
+    }
+}
+
 fn options_from(o: Option<&GpressOptions>) -> gpress::Options {
     let mut opt = gpress::Options::default();
     if let Some(o) = o {
         opt.effort = gpress::Effort::new(o.effort);
-        if o.max_input > 0 {
-            opt.max_input = o.max_input.min(usize::MAX as u64) as usize;
-        }
-        if o.max_stream > 0 {
-            opt.max_stream = o.max_stream.min(usize::MAX as u64) as usize;
-        }
         opt.threads = o.threads as usize;
+        opt.max_input = size(o.max_input, opt.max_input);
+        opt.max_stream = size(o.max_stream, opt.max_stream);
+        opt.max_stream_archive = size(o.max_stream_archive, opt.max_stream_archive);
+        if o.max_len > 0 {
+            opt.max_len = o.max_len;
+        }
+        if o.objects_per_stream > 0 {
+            opt.objects_per_stream = o.objects_per_stream as usize;
+        }
         opt.time_budget = if o.time_budget_ms > 0 { Some(Duration::from_millis(o.time_budget_ms)) } else { None };
         opt.respect_conformance = o.respect_conformance != 0;
         opt.flate_over_jpeg = o.flate_over_jpeg != 0;
+        opt.jpeg_tables = o.jpeg_tables != 0;
+        opt.jbig2 = o.jbig2 != 0;
+        opt.rewrite_encrypted = o.rewrite_encrypted != 0;
+        opt.decrypt = o.decrypt != 0;
         opt.use_existing_libraries = o.use_existing_libraries != 0;
     }
     opt
@@ -104,6 +135,9 @@ unsafe fn input_slice<'a>(input: *const u8, len: usize) -> Option<&'a [u8]> {
 fn failure(code: c_int, msg: &str) -> GpressResult {
     GpressResult { code, outcome: 0, output: empty_buffer(), message: message(msg) }
 }
+
+/// A null input with a length: nothing to read, so refused (GPRESS_ERR_BAD_ARGUMENT).
+const BAD_ARGUMENT: c_int = 5;
 
 fn from_error(e: gpress::Error) -> GpressResult {
     failure(e.code(), &e.to_string())
@@ -128,12 +162,19 @@ pub unsafe extern "C" fn gpress_options_default(out: *mut GpressOptions) {
     let d = gpress::Options::default();
     let o = GpressOptions {
         effort: d.effort.level(),
+        threads: d.threads as u32,
         max_input: d.max_input as u64,
         max_stream: d.max_stream as u64,
-        threads: d.threads as u32,
+        max_stream_archive: d.max_stream_archive as u64,
+        max_len: d.max_len,
+        objects_per_stream: d.objects_per_stream as u32,
         time_budget_ms: 0,
         respect_conformance: d.respect_conformance as u8,
         flate_over_jpeg: d.flate_over_jpeg as u8,
+        jpeg_tables: d.jpeg_tables as u8,
+        jbig2: d.jbig2 as u8,
+        rewrite_encrypted: d.rewrite_encrypted as u8,
+        decrypt: d.decrypt as u8,
         use_existing_libraries: d.use_existing_libraries as u8,
     };
     // SAFETY: `out` is non-null and the caller owns the struct it points to.
@@ -146,7 +187,7 @@ pub unsafe extern "C" fn gpress_options_default(out: *mut GpressOptions) {
 /// `input` must point to `len` readable bytes; `options` may be null for defaults.
 #[no_mangle]
 pub unsafe extern "C" fn gpress_optimize(input: *const u8, len: usize, options: *const GpressOptions) -> GpressResult {
-    let Some(data) = input_slice(input, len) else { return failure(5, "null input with a non-zero length") };
+    let Some(data) = input_slice(input, len) else { return failure(BAD_ARGUMENT, "null input with a non-zero length") };
     let opt = options_from(options.as_ref());
     match gpress::optimize(data, &opt) {
         Ok(r) => {
@@ -170,7 +211,7 @@ pub unsafe extern "C" fn gpress_optimize(input: *const u8, len: usize, options: 
 /// `input` must point to `len` readable bytes; `options` may be null for defaults.
 #[no_mangle]
 pub unsafe extern "C" fn gpress_compress(input: *const u8, len: usize, options: *const GpressOptions) -> GpressResult {
-    let Some(data) = input_slice(input, len) else { return failure(5, "null input with a non-zero length") };
+    let Some(data) = input_slice(input, len) else { return failure(BAD_ARGUMENT, "null input with a non-zero length") };
     let opt = options_from(options.as_ref());
     match gpress::compress(data, &opt) {
         Ok(c) => GpressResult {
@@ -189,7 +230,7 @@ pub unsafe extern "C" fn gpress_compress(input: *const u8, len: usize, options: 
 /// `input` must point to `len` readable bytes; `options` may be null for defaults.
 #[no_mangle]
 pub unsafe extern "C" fn gpress_expand(input: *const u8, len: usize, options: *const GpressOptions) -> GpressResult {
-    let Some(data) = input_slice(input, len) else { return failure(5, "null input with a non-zero length") };
+    let Some(data) = input_slice(input, len) else { return failure(BAD_ARGUMENT, "null input with a non-zero length") };
     let opt = options_from(options.as_ref());
     match gpress::expand(data, &opt) {
         Ok(v) => GpressResult { code: 0, outcome: 0, output: buffer_from(v), message: ptr::null_mut() },
@@ -249,18 +290,11 @@ mod tests {
     #[test]
     fn round_trip_through_the_c_surface() {
         let input = b"%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n".to_vec();
-        let mut o = GpressOptions {
-            effort: 0,
-            max_input: 0,
-            max_stream: 0,
-            threads: 1,
-            time_budget_ms: 0,
-            respect_conformance: 1,
-            flate_over_jpeg: 1,
-            use_existing_libraries: 1,
-        };
+        // SAFETY: a zeroed options struct is plain data; gpress_options_default then fills it.
+        let mut o: GpressOptions = unsafe { std::mem::zeroed() };
         unsafe {
             gpress_options_default(&mut o);
+            assert_eq!((o.effort, o.jbig2, o.decrypt, o.max_len), (100, 1, 1, 1 << 34));
             let mut c = gpress_compress(input.as_ptr(), input.len(), &o);
             assert_eq!(c.code, 0);
             let archive = std::slice::from_raw_parts(c.output.data, c.output.len).to_vec();
@@ -277,8 +311,21 @@ mod tests {
             gpress_result_free(&mut bad);
             // Null with length: refused, not read.
             let r = gpress_expand(ptr::null(), 10, ptr::null());
-            assert_eq!(r.code, 5);
+            assert_eq!(r.code, BAD_ARGUMENT);
             gpress_free_message(r.message);
+            // Options the engine refuses: the library's code and message, nothing allocated for output.
+            let mut too_many = o;
+            too_many.threads = 65;
+            let mut r = gpress_compress(input.as_ptr(), input.len(), &too_many);
+            assert_eq!(r.code, 5);
+            assert!(r.output.data.is_null() && !r.message.is_null());
+            gpress_result_free(&mut r);
+            // A declared length over max_len: refused before anything is decoded.
+            let mut small = o;
+            small.max_len = 4;
+            let mut r = gpress_expand(archive.as_ptr(), archive.len(), &small);
+            assert_eq!(r.code, 7);
+            gpress_result_free(&mut r);
             // Double free is harmless.
             let mut z = empty_buffer();
             gpress_free(&mut z);

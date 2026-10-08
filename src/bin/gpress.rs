@@ -1,25 +1,47 @@
-//! Command-line tool for the engine (testing and measuring).
+//! gpress on the command line: the library's three operations with every option as a flag, plus the
+//! engine's measuring tools.
 //!
-//!   gpress deflate IN OUT [--quick] [--raw]     zlib-wrapped (or raw) Deflate of IN
-//!   gpress inflate IN OUT [--raw]               decode with our decoder
-//!   gpress batch [--quick]                      stdin lines "IN OUT": compress each, verify, print sizes
-//!   gpress optimize IN OUT [--effort N]         normal PDF; N from 0 (fast) to 100 (default); --quick = 0;
-//!                                             --no-jbig2, --no-jpeg-tables, --keep-encrypted,
-//!                                             --ignore-conformance, --no-flate-over-jpeg switch steps off
-//!   gpress pack IN OUT [--effort N]             gpress archive (the effort only changes the encoder's choices;
-//!                                             --no-decrypt keeps encrypted streams as stored)
-//!   gpress unpack IN OUT [--max-len N]          the original; a file declaring more than N bytes is refused
+//!   gpress optimize IN OUT [options]   a smaller PDF that any reader opens (or IN untouched, and why)
+//!   gpress pack IN OUT [options]       the gpress archive of IN (any file)
+//!   gpress unpack IN OUT [options]     the original from an archive; a damaged archive is an error
 //!
-//! --threads N sets the threads (default: what the machine offers, at most 8); the output is the same.
+//! Options (the library's `Options`, the same defaults): --effort N (0 fast .. 100 smallest, default 100;
+//! --quick = 0), --threads N (0: what the machine offers, at most 8), --max-input BYTES, --max-stream BYTES
+//! (normal PDF), --max-stream-archive BYTES, --max-len BYTES (unpack: a file declaring more is refused),
+//! --objects-per-stream N, --time-budget MS (give up after that long), --ignore-conformance,
+//! --no-flate-over-jpeg, --no-jpeg-tables, --no-jbig2, --keep-encrypted (normal PDF), --no-decrypt
+//! (archive), --no-existing. The output never depends on the thread count or the time budget: a budget that
+//! runs out gives an error and no file.
+//!
+//! Measuring tools (the engine's own modules, for the benchmarks): deflate, inflate, batch, pdf-batch,
+//! repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info, fax-decode, fax-encode, fax-scan,
+//! fax-model, jbig2-encode. `--iter`, `--exact`, `--chain`, `--nice`, `--nosplit`, `--noalt`, `--nomulti`
+//! and `--nopolish` fine-tune the Flate settings of the deflate tools below the effort.
 
 use gpress::flate::{self, Options};
 use std::io::{BufRead, Write};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 fn die(msg: &str) -> ! {
     eprintln!("gpress: {msg}");
     std::process::exit(2);
 }
+
+/// The flags that take a value.
+const WITH_VALUE: &[&str] = &[
+    "--iter",
+    "--exact",
+    "--chain",
+    "--nice",
+    "--threads",
+    "--effort",
+    "--max-input",
+    "--max-stream",
+    "--max-stream-archive",
+    "--max-len",
+    "--objects-per-stream",
+    "--time-budget",
+];
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -32,29 +54,59 @@ fn main() {
             continue;
         }
         if a.starts_with("--") {
-            skip_next = matches!(
-                a.as_str(),
-                "--iter" | "--exact" | "--chain" | "--nice" | "--threads" | "--effort" | "--max-len"
-            );
+            skip_next = WITH_VALUE.contains(&a.as_str());
             continue;
         }
         pos.push(a);
     }
-    let num = |name: &str| -> Option<usize> {
-        args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok())
+    let num = |name: &str| -> Option<u64> {
+        let i = args.iter().position(|a| a == name)?;
+        let v = args.get(i + 1).unwrap_or_else(|| die(&format!("{name} needs a number")));
+        Some(v.parse().unwrap_or_else(|_| die(&format!("{name}: {v} is not a number"))))
     };
-    let effort: u8 = if flag("--quick") { 0 } else { num("--effort").map_or(100, |e| e.min(100) as u8) };
-    let threads = num("--threads").unwrap_or(0);
-    // pack: --no-decrypt keeps encrypted streams as stored (for measuring).
-    let decrypt = !flag("--no-decrypt");
+    let size = |name: &str| num(name).map(|n| usize::try_from(n).unwrap_or(usize::MAX));
+    // The library's options, from the flags.
+    let effort = if flag("--quick") { 0 } else { num("--effort").unwrap_or(100).min(255) as u8 };
+    let mut lib = gpress::Options::default().effort(effort);
+    if let Some(n) = size("--threads") {
+        lib.threads = n;
+    }
+    if let Some(n) = size("--max-input") {
+        lib.max_input = n;
+    }
+    if let Some(n) = size("--max-stream") {
+        lib.max_stream = n;
+    }
+    if let Some(n) = size("--max-stream-archive") {
+        lib.max_stream_archive = n;
+    }
+    if let Some(n) = num("--max-len") {
+        lib.max_len = n;
+    }
+    if let Some(n) = size("--objects-per-stream") {
+        lib.objects_per_stream = n;
+    }
+    if let Some(ms) = num("--time-budget") {
+        lib.time_budget = Some(Duration::from_millis(ms));
+    }
+    lib.respect_conformance = !flag("--ignore-conformance");
+    lib.flate_over_jpeg = !flag("--no-flate-over-jpeg");
+    lib.jpeg_tables = !flag("--no-jpeg-tables");
+    lib.jbig2 = !flag("--no-jbig2");
+    lib.rewrite_encrypted = !flag("--keep-encrypted");
+    lib.decrypt = !flag("--no-decrypt");
+    lib.use_existing_libraries = !flag("--no-existing");
+    lib.check().unwrap_or_else(|e| die(&e.to_string()));
+    let threads = lib.threads;
+    // The Flate settings of the measuring tools: the effort's, fine-tuned by the flags below it.
     let mut opt = Options::effort(effort);
-    if let Some(v) = num("--iter") {
+    if let Some(v) = size("--iter") {
         opt.iterations = v;
     }
-    if let Some(v) = num("--exact") {
+    if let Some(v) = size("--exact") {
         opt.exact_rounds = v;
     }
-    if let Some(v) = num("--chain") {
+    if let Some(v) = size("--chain") {
         opt.max_chain = v;
     }
     if flag("--nosplit") {
@@ -66,24 +118,12 @@ fn main() {
     if flag("--nomulti") {
         opt.multi_start_limit = 0;
     }
-    if let Some(v) = num("--nice") {
+    if let Some(v) = size("--nice") {
         opt.nice = v;
     }
     if flag("--nopolish") {
         opt.polish = false;
     }
-    // Normal PDF: the steps that can be switched off.
-    let pdf_opt = gpress::pdf::rewrite::Options {
-        flate: Options { shared: None, ..opt.clone() },
-        effort,
-        threads,
-        jbig2: !flag("--no-jbig2"),
-        jpeg_tables: !flag("--no-jpeg-tables"),
-        rewrite_encrypted: !flag("--keep-encrypted"),
-        respect_conformance: !flag("--ignore-conformance"),
-        flate_over_jpeg: !flag("--no-flate-over-jpeg"),
-        ..Default::default()
-    };
     if threads > 0 {
         opt.shared = Some(flate::deflate::Shared::new(threads));
     }
@@ -137,7 +177,7 @@ fn main() {
             let (i, o) = (pos.get(1).unwrap_or_else(|| die("need IN")), pos.get(2).unwrap_or_else(|| die("need OUT")));
             let data = std::fs::read(i).unwrap_or_else(|e| die(&format!("{i}: {e}")));
             let t = Instant::now();
-            let r = gpress::pdf::rewrite::optimize(&data, &pdf_opt);
+            let r = gpress::optimize(&data, &lib).unwrap_or_else(|e| die(&e.to_string()));
             std::fs::write(o, &r.data).unwrap_or_else(|e| die(&format!("{o}: {e}")));
             println!("{}", describe(i, data.len(), &r, t.elapsed().as_secs_f64()));
         }
@@ -157,13 +197,12 @@ fn main() {
                     }
                 };
                 let t = Instant::now();
-                let r = std::panic::catch_unwind(|| gpress::pdf::rewrite::optimize(&data, &pdf_opt));
-                match r {
+                match gpress::optimize(&data, &lib) {
                     Ok(r) => {
                         std::fs::write(o, &r.data).unwrap();
                         writeln!(out, "{}", describe(i, data.len(), &r, t.elapsed().as_secs_f64())).unwrap();
                     }
-                    Err(_) => writeln!(out, "{i}\tPANIC\t{}", data.len()).unwrap(),
+                    Err(e) => writeln!(out, "{i}\tERROR\t{}\t{e}", data.len()).unwrap(),
                 }
                 out.flush().unwrap();
             }
@@ -196,15 +235,14 @@ fn main() {
             let (i, o) = (pos.get(1).unwrap_or_else(|| die("need IN")), pos.get(2).unwrap_or_else(|| die("need OUT")));
             let data = std::fs::read(i).unwrap_or_else(|e| die(&format!("{i}: {e}")));
             let t = Instant::now();
-            let (z, st) = gpress::pack::pack_with(&data, &gpress::pack::PackOptions { effort, threads, decrypt, ..Default::default() });
-            std::fs::write(o, &z).unwrap_or_else(|e| die(&format!("{o}: {e}")));
-            println!("{i}\t{}\t{}\t{:.2}\t{:?}", data.len(), z.len(), t.elapsed().as_secs_f64(), st);
+            let c = gpress::compress(&data, &lib).unwrap_or_else(|e| die(&e.to_string()));
+            std::fs::write(o, &c.data).unwrap_or_else(|e| die(&format!("{o}: {e}")));
+            println!("{}", describe_archive(i, data.len(), &c, t.elapsed().as_secs_f64()));
         }
         Some("unpack") => {
             let (i, o) = (pos.get(1).unwrap_or_else(|| die("need IN")), pos.get(2).unwrap_or_else(|| die("need OUT")));
             let data = std::fs::read(i).unwrap_or_else(|e| die(&format!("{i}: {e}")));
-            let limit = num("--max-len").map_or(gpress::pack::UnpackOptions::default(), |n| gpress::pack::UnpackOptions { max_len: n as u64 });
-            let out = gpress::pack::unpack_with(&data, &limit).unwrap_or_else(|e| die(&e));
+            let out = gpress::expand(&data, &lib).unwrap_or_else(|e| die(&e.to_string()));
             std::fs::write(o, &out).unwrap_or_else(|e| die(&format!("{o}: {e}")));
         }
         Some("expand") => {
@@ -251,13 +289,12 @@ fn main() {
                 let (Some(i), Some(o)) = (it.next(), it.next()) else { continue };
                 let Ok(data) = std::fs::read(i) else { continue };
                 let t = Instant::now();
-                let r = std::panic::catch_unwind(|| gpress::pack::pack_with(&data, &gpress::pack::PackOptions { effort, threads, decrypt, ..Default::default() }));
-                match r {
-                    Ok((z, st)) => {
-                        std::fs::write(o, &z).unwrap();
-                        writeln!(out, "{i}\t{}\t{}\t{:.2}\t{:?}", data.len(), z.len(), t.elapsed().as_secs_f64(), st).unwrap();
+                match gpress::compress(&data, &lib) {
+                    Ok(c) => {
+                        std::fs::write(o, &c.data).unwrap();
+                        writeln!(out, "{}", describe_archive(i, data.len(), &c, t.elapsed().as_secs_f64())).unwrap();
                     }
-                    Err(_) => writeln!(out, "{i}\tPANIC").unwrap(),
+                    Err(e) => writeln!(out, "{i}\tERROR\t{}\t{e}", data.len()).unwrap(),
                 }
                 out.flush().unwrap();
             }
@@ -452,20 +489,39 @@ fn read_pbm(d: &[u8]) -> Option<gpress::fax::ccitt::Image> {
     Some(img)
 }
 
-fn describe(name: &str, in_len: usize, r: &gpress::pdf::rewrite::Optimized, secs: f64) -> String {
-    use gpress::pdf::rewrite::Outcome;
+fn describe(name: &str, in_len: usize, r: &gpress::Optimized, secs: f64) -> String {
     match &r.outcome {
-        Outcome::Smaller(s) => format!(
-            "{name}\tSMALLER\t{in_len}\t{}\t{secs:.2}\tobjects={} streams={} reencoded={} kept={} objstms={} dropped={}{}",
+        gpress::Outcome::Smaller(s) => format!(
+            "{name}\tSMALLER\t{in_len}\t{}\t{secs:.2}\tobjects={} streams={} reencoded={} kept={} objstms={} dropped={} \
+             jpegs_retabled={} fax_to_jbig2={}{}",
             r.data.len(),
             s.objects,
             s.streams,
             s.streams_reencoded,
             s.streams_kept,
-            s.objstms,
-            s.dropped_unreachable,
+            s.object_streams,
+            s.unreachable_objects_dropped,
+            s.jpegs_retabled,
+            s.fax_to_jbig2,
             if s.encryption.is_empty() { String::new() } else { format!(" encrypted={}", s.encryption) }
         ),
-        Outcome::Untouched(why) => format!("{name}\tUNTOUCHED\t{in_len}\t{}\t{secs:.2}\t{why}", r.data.len()),
+        gpress::Outcome::Untouched(why) => format!("{name}\tUNTOUCHED\t{in_len}\t{}\t{secs:.2}\t{why}", r.data.len()),
     }
+}
+
+fn describe_archive(name: &str, in_len: usize, c: &gpress::Compressed, secs: f64) -> String {
+    format!(
+        "{name}\t{in_len}\t{}\t{secs:.2}\t{} streams={} rebuilt={} rebuilt_bytes={} lepton={} type1={} fax={} decrypted={} \
+         decoded_bytes={}",
+        c.data.len(),
+        if c.stored { "STORED" } else { "PACKED" },
+        c.streams,
+        c.streams_rebuilt,
+        c.rebuilt_bytes,
+        c.streams_lepton,
+        c.type1_fonts,
+        c.fax_images,
+        c.streams_decrypted,
+        c.decoded_bytes
+    )
 }

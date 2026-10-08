@@ -13,6 +13,7 @@
 //! coded data. Every part of the coded data starts with a tag byte (T_*); the model's settings, the kinds of
 //! parts and how each is coded are constants of the format version, so a pack restores the same anywhere.
 
+use crate::clock::{self, Deadline};
 use crate::cm::model::{Geom, Kind, Model};
 use crate::cm::{Coder, Decoder, Encoder};
 use crate::flate::{zlib, zlibexact};
@@ -166,6 +167,9 @@ pub struct PackStats {
     pub decrypted_bytes: usize,
     /// CCITT fax streams coded as images (and written back bit for bit).
     pub fax: usize,
+    /// Encoder only: the deadline passed before the pack was done, so the file was stored as it is (see
+    /// `PackOptions::deadline`).
+    pub timed_out: bool,
 }
 
 #[derive(Debug)]
@@ -465,7 +469,13 @@ struct Io<'m, C: Coder> {
     /// Bytes the parts of this file may still claim beyond what they restore (decoded streams, Lepton data):
     /// see `decode_budget`. A damaged file that claims more is refused where it does.
     budget: u64,
+    /// Encoder only: stop coding once this has passed (`timed_out` says so; the output is then dropped).
+    deadline: Deadline,
+    timed_out: bool,
 }
+
+/// Bytes coded between two looks at the deadline (a few milliseconds of model work).
+const DEADLINE_STEP: usize = 1 << 16;
 
 /// Largest single part a file may declare (decoded stream, Lepton data): 2 GiB.
 const MAX_PART: usize = 1 << 31;
@@ -531,9 +541,21 @@ impl<'m, C: Coder> Io<'m, C> {
                 self.damaged = true;
                 return;
             }
+            if i % DEADLINE_STEP == 0 && self.out_of_time() {
+                return;
+            }
             let b = self.byte(data.map(|d| d[i]));
             out.push(b);
         }
+    }
+    /// Encoder only: whether the deadline has passed; the pass is then given up (as if damaged, so nothing
+    /// of it is used) and `timed_out` says why.
+    fn out_of_time(&mut self) -> bool {
+        if !self.timed_out && self.deadline.passed() {
+            self.timed_out = true;
+            self.damaged = true;
+        }
+        self.timed_out
     }
     /// A length that must be at most `max`; anything larger can only come from a damaged file.
     fn length(&mut self, v: Option<u64>, max: usize) -> usize {
@@ -571,11 +593,22 @@ pub struct PackOptions {
     /// A file with parts it made restores only with such a build (`unpack` says so); the default is what the
     /// build has.
     pub existing: bool,
+    /// Stop when this passes (checked while planning and every 64 KiB of coding): the file is then stored
+    /// as it is (a valid archive, restored exactly) and `PackStats::timed_out` says so. A pack that finishes
+    /// gives the same bytes with or without a deadline.
+    pub deadline: Deadline,
 }
 
 impl Default for PackOptions {
     fn default() -> Self {
-        PackOptions { effort: 100, threads: 0, decrypt: true, max_stream: 1 << 28, existing: HAVE_EXISTING }
+        PackOptions {
+            effort: 100,
+            threads: 0,
+            decrypt: true,
+            max_stream: 1 << 28,
+            existing: HAVE_EXISTING,
+            deadline: Deadline::NONE,
+        }
     }
 }
 
@@ -656,7 +689,7 @@ enum Plan {
 /// What to do with each part of the file. The streams are looked at in parallel (the biggest first); the
 /// plans keep the file's order.
 fn plan(d: &[u8], opt: &PackOptions) -> Vec<Plan> {
-    let t = std::time::Instant::now();
+    let t = clock::now();
     let segs = segments(d);
     let pool = par::Pool::new(if opt.threads == 0 { par::default_threads() } else { opt.threads });
     let size = |s: &Seg| match *s {
@@ -668,10 +701,12 @@ fn plan(d: &[u8], opt: &PackOptions) -> Vec<Plan> {
     let objects = ObjIndex::new();
     let plans = par::map(Some(&pool), segs.len(), Some(&order), |k| match segs[k] {
         Seg::Syntax(a, b) => Plan::Syntax(a, b),
+        // Out of time: the cheapest plan (the pass is given up anyway).
+        Seg::Stream(a, b) if opt.deadline.passed() => Plan::Raw(a, b),
         Seg::Stream(a, b) => stream_plan(&d[a..b], opt).or_else(|| fax(d, a, b, &objects)).unwrap_or(Plan::Raw(a, b)),
     });
     if std::env::var_os("PDFE_DEBUG").is_some() {
-        eprintln!("pack: {} parts planned in {:?}", plans.len(), t.elapsed());
+        eprintln!("pack: {} parts planned in {:?}", plans.len(), clock::since(t));
     }
     plans
 }
@@ -833,7 +868,15 @@ fn run_within<C: Coder>(
     budget: u64,
 ) -> (Vec<u8>, C) {
     let mut model = primed(table_bits(total_len));
-    let mut io = Io { m: &mut model, c, damaged: false, plain: opt.effort < PLAIN_BELOW, budget };
+    let mut io = Io {
+        m: &mut model,
+        c,
+        damaged: false,
+        plain: opt.effort < PLAIN_BELOW,
+        budget,
+        deadline: opt.deadline,
+        timed_out: false,
+    };
     let mut out: Vec<u8> = Vec::with_capacity(reserve(total_len));
     // Encrypted files: the file key, and the settings of the stream whose decrypted payload comes next with
     // where that payload starts in `out`.
@@ -858,7 +901,7 @@ fn run_within<C: Coder>(
             Some(Plan::Crypt(..)) => T_CRYPT,
             Some(Plan::Fax { .. }) => T_FAX,
         });
-        if io.damaged || out.len() > total_len || io.c.exhausted() {
+        if io.damaged || out.len() > total_len || io.c.exhausted() || io.out_of_time() {
             io.damaged = true;
             break;
         }
@@ -1049,6 +1092,7 @@ fn run_within<C: Coder>(
     if io.damaged {
         stats.damaged = true;
     }
+    stats.timed_out = io.timed_out;
     stats.bypassed = io.m.bypassed;
     let Io { c, .. } = io;
     (out, c)
@@ -1339,7 +1383,7 @@ pub fn pack_with(input: &[u8], opt: &PackOptions) -> (Vec<u8>, PackStats) {
 fn pack_pass(input: &[u8], opt: &PackOptions) -> (Vec<u8>, PackStats) {
     let mut stats = PackStats::default();
     let dbg = std::env::var_os("PDFE_DEBUG").is_some();
-    let t = std::time::Instant::now();
+    let t = clock::now();
     let threads = if opt.threads == 0 { par::default_threads() } else { opt.threads };
     // Never hand over something we can't restore exactly. With a second thread the restore runs while the
     // encoder writes (the same `run`, on the same bytes, as `unpack`); with one, or when the system refuses
@@ -1353,7 +1397,7 @@ fn pack_pass(input: &[u8], opt: &PackOptions) -> (Vec<u8>, PackStats) {
                 !st.damaged && back == input
             })?;
             let (copy, enc) = run(pipe::TeeEncoder::new(tx), Some(input), input.len(), opt, &mut stats);
-            debug_assert_eq!(copy, input);
+            debug_assert!(stats.timed_out || copy == input);
             let mut out = header(VERSION, input);
             out.extend_from_slice(&enc.finish());
             Some((out, check.join().unwrap_or(false)))
@@ -1363,15 +1407,21 @@ fn pack_pass(input: &[u8], opt: &PackOptions) -> (Vec<u8>, PackStats) {
         Some(r) => r,
         None => {
             let (copy, enc) = run(Encoder::new(), Some(input), input.len(), opt, &mut stats);
-            debug_assert_eq!(copy, input);
+            debug_assert!(stats.timed_out || copy == input);
             let mut out = header(VERSION, input);
             out.extend_from_slice(&enc.finish());
-            let restored = matches!(unpack(&out), Ok(back) if back == input);
+            let restored = !stats.timed_out && matches!(unpack(&out), Ok(back) if back == input);
             (out, restored)
         }
     };
     if dbg {
-        eprintln!("pack: planned, coded and restored in {:?} ({threads} threads)", t.elapsed());
+        eprintln!("pack: planned, coded and restored in {:?} ({threads} threads)", clock::since(t));
+    }
+    // Out of time: the file as it is, which restores exactly and costs nothing more.
+    if stats.timed_out {
+        stats.damaged = false;
+        stats.stored = true;
+        return (stored(input), stats);
     }
     let out = if restored {
         out
@@ -1394,24 +1444,64 @@ fn stored(input: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Why an archive wasn't restored. Never a wrong file: every case returns nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UnpackError {
+    /// The bytes don't start like a gpress archive.
+    NotAnArchive,
+    /// An archive version this build doesn't read (`VERSION`, 0 and 2 are read).
+    UnknownVersion(u8),
+    /// The header declares more than `UnpackOptions::max_len` bytes (nothing was decoded for it).
+    TooLong { declared: u64, limit: u64 },
+    /// Parts made with the existing library (Lepton), which this build doesn't have.
+    NeedsExisting,
+    /// Damaged: what is in the file doesn't restore it (the detail says where it was found out).
+    Damaged(&'static str),
+}
+
+impl std::fmt::Display for UnpackError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UnpackError::NotAnArchive => write!(f, "not a gpress archive"),
+            UnpackError::UnknownVersion(v) => {
+                write!(f, "gpress archive version {v} is not one this build reads (it reads version {VERSION})")
+            }
+            UnpackError::TooLong { declared, limit } => {
+                write!(f, "the archive restores to {declared} bytes, more than the limit of {limit}")
+            }
+            UnpackError::NeedsExisting => write!(
+                f,
+                "this gpress archive has parts made with the existing library (Lepton); restoring it needs a build with it"
+            ),
+            UnpackError::Damaged(why) => write!(f, "damaged gpress archive ({why})"),
+        }
+    }
+}
+
+impl std::error::Error for UnpackError {}
+
 /// Restores the original file; checks its length and hash. Takes any file up to `MAX_FILE`; `unpack_with`
 /// sets a smaller limit.
-pub fn unpack(a: &[u8]) -> Result<Vec<u8>, String> {
+pub fn unpack(a: &[u8]) -> Result<Vec<u8>, UnpackError> {
     unpack_with(a, &UnpackOptions::default())
 }
 
 /// `unpack` with the decoder's choices in `opt`: a file whose header declares more than `opt.max_len` bytes
 /// is refused before anything is decoded or reserved for it.
-pub fn unpack_with(a: &[u8], opt: &UnpackOptions) -> Result<Vec<u8>, String> {
+pub fn unpack_with(a: &[u8], opt: &UnpackOptions) -> Result<Vec<u8>, UnpackError> {
+    use UnpackError::*;
     if a.len() < 6 || &a[..4] != MAGIC {
-        return Err("not a gpress archive".into());
+        return Err(NotAnArchive);
     }
     let ver = a[4];
+    if ver != VERSION && ver != 0 && ver != 2 {
+        return Err(UnknownVersion(ver));
+    }
     let mut len: u64 = 0;
     let mut i = 5;
     let mut shift = 0;
     loop {
-        let b = *a.get(i).ok_or("truncated header")?;
+        let b = *a.get(i).ok_or(Damaged("truncated header"))?;
         i += 1;
         len |= ((b & 0x7f) as u64) << shift;
         if b & 0x80 == 0 {
@@ -1419,36 +1509,35 @@ pub fn unpack_with(a: &[u8], opt: &UnpackOptions) -> Result<Vec<u8>, String> {
         }
         shift += 7;
         if shift > 56 {
-            return Err("bad length".into());
+            return Err(Damaged("bad length"));
         }
     }
     if len > MAX_FILE {
-        return Err("damaged gpress archive (impossible size)".into());
+        return Err(Damaged("impossible size"));
     }
     if len > opt.max_len {
-        return Err(format!("the file restores to {len} bytes, more than the limit of {}", opt.max_len));
+        return Err(TooLong { declared: len, limit: opt.max_len });
     }
-    let len = usize::try_from(len).map_err(|_| "file too large for this platform")?;
-    let want = a.get(i..i + HASH_LEN).ok_or("truncated header")?.to_vec();
+    let len = usize::try_from(len).map_err(|_| Damaged("too large for this platform"))?;
+    let want = a.get(i..i + HASH_LEN).ok_or(Damaged("truncated header"))?.to_vec();
     let body = &a[i + HASH_LEN..];
     let out = match ver {
         VERSION => {
             let mut stats = PackStats::default();
             let (out, _) = run(Decoder::new(body), None, len, &PackOptions::default(), &mut stats);
             if stats.needs_existing {
-                return Err("this gpress archive has parts made with the existing library (Lepton); restoring it needs a build with it".into());
+                return Err(NeedsExisting);
             }
             if stats.damaged {
-                return Err("damaged gpress archive".into());
+                return Err(Damaged("a part doesn't restore"));
             }
             out
         }
-        0 => fallback_decode(body, len).ok_or("damaged gpress archive")?,
-        2 => body.to_vec(),
-        _ => return Err(format!("unknown version {ver}")),
+        0 => fallback_decode(body, len).ok_or(Damaged("the data ran out"))?,
+        _ => body.to_vec(),
     };
     if out.len() != len || sha256(&out)[..HASH_LEN] != want[..] {
-        return Err("restored file does not match its checksum".into());
+        return Err(Damaged("the restored bytes don't match the checksum"));
     }
     Ok(out)
 }
@@ -1617,7 +1706,7 @@ mod tests {
         for (k, part) in cases.into_iter().enumerate() {
             let packed = pack_unbounded(d, vec![Plan::Syntax(0, a), part, Plan::Syntax(a + 4, d.len())]);
             let err = unpack(&packed).unwrap_err();
-            assert!(err.contains("existing library"), "case {k}: {err}");
+            assert_eq!(err, UnpackError::NeedsExisting, "case {k}: {err}");
         }
         assert!(!PackOptions::default().existing);
     }

@@ -7,6 +7,9 @@ edition = "2021"
 [package.metadata]
 cargo-fuzz = true
 
+# Its own workspace: the fuzz targets build with cargo-fuzz (nightly), apart from the library's workspace.
+[workspace]
+
 [dependencies]
 libfuzzer-sys = "0.4"
 gpress = { path = ".." }

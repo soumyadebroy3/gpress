@@ -17,7 +17,7 @@ result files (*.tsv, supply.json, meta.json) are kept in the repository; RUN/wor
 RUN/failures/ (every failing input with the engine's stderr next to it) are not. RUN/notes.md, when it
 exists, is written by whoever looked at the failures and goes into the report as it is.
 
-The engine is $PDFE or $GPRESS (default target/release/pdfe). Every bound, path and size comes from
+The engine is $GPRESS or $PDFE (default target/release/gpress). Every bound, path and size comes from
 DEFAULTS below, a JSON file (--config) and the options. Run with python3 -I: the test files are untrusted.
 
 How a run is measured: each command is its own process, started by bench/measure.c (a parent under 1 MB, so
@@ -39,7 +39,7 @@ SCRATCH = '/tmp/claude-0/-home-claude/b636d578-f2d3-5309-87d4-a4766d45bbac/scrat
 MIB = 1 << 20
 
 DEFAULTS = {
-    'engine': os.environ.get('PDFE') or os.environ.get('GPRESS') or os.path.join(REPO, 'target', 'release', 'pdfe'),
+    'engine': os.environ.get('GPRESS') or os.environ.get('PDFE') or os.path.join(REPO, 'target', 'release', 'gpress'),
     'corpus': os.environ.get('CORPUS') or os.path.join(SCRATCH, 'corpus'),
     'results': os.path.join(HERE, 'results'),
     'run': 'security',
@@ -1433,7 +1433,7 @@ def main():
     ap.add_argument('mode', choices=['archives', 'pdfs', 'fuzz', 'supply', 'selfcheck', 'charness', 'run', 'report'])
     ap.add_argument('run', nargs='?', help='result directory (a name under bench/results/, or a path); default "security"')
     ap.add_argument('--config', help='JSON file whose keys override DEFAULTS')
-    ap.add_argument('--engine', help='the engine binary (default: $PDFE, $GPRESS or target/release/pdfe)')
+    ap.add_argument('--engine', help='the engine binary (default: $GPRESS, $PDFE or target/release/gpress)')
     ap.add_argument('--corpus', help='root of the test files (default: $CORPUS)')
     ap.add_argument('--files', help='the corpus list, one path per line (default: bench/sets/all.txt)')
     ap.add_argument('--effort', type=int, help='engine effort for every run (default 0)')

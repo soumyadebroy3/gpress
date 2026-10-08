@@ -118,6 +118,7 @@ fn every_effort_gives_a_checked_smaller_file() {
                 assert!(r.data.len() < pdf.len());
             }
             Outcome::Untouched(why) => panic!("effort {effort}: untouched ({why})"),
+            Outcome::TimedOut => panic!("effort {effort}: timed out"),
         }
         sizes.push(r.data.len());
     }

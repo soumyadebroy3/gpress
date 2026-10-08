@@ -13,6 +13,7 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod api;
+pub mod clock;
 pub mod cm;
 pub mod fax;
 pub mod flate;
