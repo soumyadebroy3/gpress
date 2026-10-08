@@ -1409,11 +1409,12 @@ def write_meta(cfg, run, build, mode):
 
 
 def main_meta(run):
-    """The entry the report describes: the last full run, or else the last invocation."""
+    """The entry the report describes: the last invocation that measured something (a full run or one of
+    its sections; `report` and `selfcheck` don't count), or else the last invocation."""
     meta = read_json(run.path('meta.json')) or {}
     runs = meta.get('runs', [])
-    full = [r for r in runs if r.get('mode') == 'run']
-    return (full or runs or [{}])[-1]
+    measured = [r for r in runs if r.get('mode') in ('run', 'archives', 'pdfs', 'fuzz', 'supply', 'charness')]
+    return (measured or runs or [{}])[-1]
 
 
 def git_label():

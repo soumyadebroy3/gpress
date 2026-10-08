@@ -1,3 +1,13 @@
+Run on build integration-8892b9e (preflate-rs gone, format version 7, the licence gate in): the two failures
+below are closed, with no change to the engine's bounds. `flate_bomb.pdf` through pack now ends as
+packed-exact in 1.0 s of CPU with a peak of 260 MiB (the failed inflate of the bomb stops at `max_stream`,
+256 MiB, and the stream is then stored as it is, which is what optimize already did); the spec's fallback, a
+decoded-bytes budget for pack, was therefore not added, since it would store some legitimate streams raw at
+low effort and make those archives larger. `cabac` left with preflate-rs, so `supply` reports 0 disallowed
+licences; `deny.toml` and `cargo deny check licenses advisories` keep it that way. What stays open from the
+observations below is in `docs/tasks/` (the model's tables sized by the declared length; the archive's four
+copies of every decoded byte, which also keeps the two large scans out of the fuzz seeds).
+
 Written after looking at each failure of the run on build speed-ca8fa92 (effort 0, 1 thread). The engine is not
 changed here; these are the exact causes, for whoever schedules the fixes, and two observations that passed
 the bounds but belong in the optimisation plan.
