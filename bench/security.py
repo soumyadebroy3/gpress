@@ -15,7 +15,9 @@ bound. Pass or fail, with every failing input saved so it can be replayed. Part 
 RUN is a directory (made under bench/results/ when the name has no slash; default "security"). Its small
 result files (*.tsv, supply.json, meta.json) are kept in the repository; RUN/work/ (generated inputs) and
 RUN/failures/ (every failing input with the engine's stderr next to it) are not. RUN/notes.md, when it
-exists, is written by whoever looked at the failures and goes into the report as it is.
+exists, is written by whoever looked at the failures and goes into the report as it is. A run whose files git
+tracks (the stored baselines, such as the default "security") is not written to unless --overwrite says so:
+name a run of your own (`security.py run mine ...`, then `report mine`).
 
 The engine is $GPRESS or $PDFE (default target/release/gpress). Every bound, path and size comes from
 DEFAULTS below, a JSON file (--config) and the options. Run with python3 -I: the test files are untrusted.
@@ -37,16 +39,15 @@ import argparse, atexit, hashlib, json, os, random, re, shutil, signal, subproce
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
-SCRATCH = '/tmp/claude-0/-home-claude/b636d578-f2d3-5309-87d4-a4766d45bbac/scratchpad'
 MIB = 1 << 20
 
 DEFAULTS = {
     'engine': os.environ.get('GPRESS') or os.environ.get('PDFE') or os.path.join(REPO, 'target', 'release', 'gpress'),
-    'corpus': os.environ.get('CORPUS') or os.path.join(SCRATCH, 'corpus'),
+    # Where bench/fetch_corpus.sh puts the files unless told otherwise.
+    'corpus': os.environ.get('CORPUS') or os.path.join(HERE, 'corpus'),
     'results': os.path.join(HERE, 'results'),
     'run': 'security',
-    # The corpus list: a path, or None for bench/sets/all.txt (relative to the corpus) and then the
-    # scratchpad list of the first measurements.
+    # The corpus list: a path, or None for bench/sets/all.txt (relative to the corpus).
     'files': None,
     'sets': os.path.join(HERE, 'sets'),
     'effort': 0,  # the quick settings: legitimate work stays short, so a long run is the input's doing
@@ -348,7 +349,7 @@ def read_tsv(path):
 def file_list(cfg):
     """The corpus files: --files, else bench/sets/all.txt (relative to the corpus), else the first
     measurements' list. Only files that exist, in the list's order."""
-    candidates = [cfg['files']] if cfg['files'] else [os.path.join(cfg['sets'], 'all.txt'), os.path.join(SCRATCH, 'pdfmax3', 'files.txt')]
+    candidates = [cfg['files']] if cfg['files'] else [os.path.join(cfg['sets'], 'all.txt')]
     for lst in candidates:
         if lst and os.path.exists(lst):
             out = []
@@ -1512,6 +1513,15 @@ def main_meta(run):
     return (measured or runs or [{}])[-1]
 
 
+def tracked_by_git(path):
+    """Whether git tracks any file under path (a stored run); False outside a repository or without git."""
+    try:
+        r = subprocess.run(['git', 'ls-files', '--', os.path.abspath(path)], cwd=REPO, capture_output=True, text=True, timeout=30)
+        return r.returncode == 0 and bool(r.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def git_label():
     try:
         branch = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=REPO, capture_output=True, text=True).stdout.strip()
@@ -1546,6 +1556,7 @@ def main():
     ap.add_argument('--fuzz-mem', type=int, help='fuzz: the hard address-space limit in MiB (default 512)')
     ap.add_argument('--fresh', action='store_true', help='fuzz: run entry points already in fuzz.tsv again')
     ap.add_argument('--build', help='label of the engine build written to meta.json (default: git HEAD of this tree)')
+    ap.add_argument('--overwrite', action='store_true', help='write into a run directory whose files git tracks (a stored baseline)')
     a = ap.parse_args()
 
     cfg = json.loads(json.dumps(DEFAULTS))
@@ -1576,6 +1587,9 @@ def main():
         cfg['fuzz']['mem_mib'] = a.fuzz_mem
     cfg['engine'] = os.path.abspath(cfg['engine'])
     run = Run(cfg)
+    if a.mode != 'report' and not a.overwrite and tracked_by_git(run.dir):
+        sys.exit(f"{run.dir} holds stored results that git tracks; name a run of your own (security.py {a.mode} NAME ...) "
+                 f"or pass --overwrite to write into it")
     if a.mode != 'report':
         if a.mode != 'supply' and not os.path.exists(cfg['engine']):
             sys.exit(f"engine not found: {cfg['engine']} (set PDFE or --engine)")

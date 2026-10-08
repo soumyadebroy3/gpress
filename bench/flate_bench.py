@@ -9,7 +9,8 @@
 Run with python3 -I."""
 import os, subprocess, sys, time, zlib
 
-PDFE = '/home/claude/pdf-engine/target/release/pdfe'
+HERE = os.path.dirname(os.path.abspath(__file__))
+PDFE = os.environ.get('GPRESS') or os.environ.get('PDFE') or os.path.join(HERE, '..', 'target', 'release', 'gpress')
 CAP = 4 << 20
 
 def manifest(d):

@@ -9,6 +9,9 @@ Branch `opt-flate-fixed-costs`. Plan: `docs/optimisation-plan.md`; the rules and
     cargo test --release --workspace && cargo test --release --workspace --features existing
     bench/fetch_corpus.sh && export CORPUS=$PWD/bench/corpus      # 907 public PDFs, pinned in bench/sets/corpus.lock
     export GPRESS=$PWD/target/release/gpress
+    # plus the checking tools (qpdf, xz, brotli, zstd, a C compiler, pikepdf, pypdfium2, Pillow, libjpeg-turbo's
+    # jpegtran, pdf.js with PDFJS_MODULES): the install lines are in docs/tasks/README.md, step 2. benchmark.py
+    # warns about each missing one; a baseline made without them does not run the "no data loss" checks.
 
 The corpus comes from pdf.js `test/pdfs`, pypdf `sample-files`, OCRmyPDF `tests/resources` and pikepdf
 `tests/resources`, each at the commit named in `bench/sets/corpus.lock`; the script checks every sha256 and
@@ -74,10 +77,10 @@ All of these must hold:
 
 - every output byte-identical to the baseline (the `compare` line must count all 120 files in every setting as byte-identical);
 - peak memory not up (`compare` fails over 10%);
-- the random files of the sample (the 80 drawn at random, listed in `bench/sets/sample120.txt`) at least 1.5x faster in CPU time at effort 0 in total, and nothing slower than the baseline by more than the 10% `compare` allows;
+- the random files of the sample (the 86 drawn at random, the `## random` section of `bench/sets/sample120.txt`, measured alone with `--set sample120:random`) at least 1.5x faster in CPU time at effort 0 in total, and nothing slower than the baseline by more than the 10% `compare` allows;
 - `cargo test --release --workspace` with and without `--features existing`;
 - `cargo clippy --workspace --all-targets -- -D warnings` on both feature sets, and `cargo fmt --all --check`;
-- `python3 -I bench/security.py run --fuzz-seconds 120` with 0 failures.
+- `python3 -I bench/security.py run new-security --fuzz-seconds 120` with 0 failures.
 
 The owner's rules (`docs/tasks/README.md`) apply throughout: no data loss, no worse compression,
 deterministic output for any thread count, no panics, bounded memory and time, no new dependency, every

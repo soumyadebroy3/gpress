@@ -1,4 +1,5 @@
-# 120 files: the 20 slowest of ours.tsv at maximum effort, the 20 largest, then random (seed 11); relative to the corpus root
+# 120 files: the 20 slowest of ours.tsv at maximum effort, the 20 largest (34 files, 6 in both lists), then 86 random (seed 11); relative to the corpus root. A "## name" line starts a section that --set sample120:name selects.
+## slowest-and-largest
 pypdf-samples/009-pdflatex-geotopo__GeoTopo.pdf
 pdfjs/issue12963.pdf
 pdfjs/issue1905.pdf
@@ -33,6 +34,7 @@ pdfjs/issue5481.pdf
 pdfjs/bug1978317.pdf
 pikepdf/tests__resources__form_210966.pdf
 pdfjs/issue6127.pdf
+## random
 pypdf-samples/015-arabic__habibi-oneline-cmap.pdf
 pikepdf/tests__resources__pdfa__fpdf2_latin_tr3.pdf
 pdfjs/bug1743245.pdf

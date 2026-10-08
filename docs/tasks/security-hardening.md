@@ -11,6 +11,9 @@ compression, by time and by security).
     cargo test --release --workspace && cargo test --release --workspace --features existing
     bench/fetch_corpus.sh && export CORPUS=$PWD/bench/corpus      # 907 public PDFs, pinned in bench/sets/corpus.lock
     export GPRESS=$PWD/target/release/gpress
+    # plus the checking tools (qpdf, xz, brotli, zstd, a C compiler, pikepdf, pypdfium2, Pillow, libjpeg-turbo's
+    # jpegtran, pdf.js with PDFJS_MODULES): the install lines are in docs/tasks/README.md, step 2. benchmark.py
+    # warns about each missing one; a baseline made without them does not run the "no data loss" checks.
     rustup toolchain install nightly --component miri rust-src     # for S2 to S4
     cargo install cargo-fuzz --locked
 
@@ -65,7 +68,7 @@ or a test setting; nothing reads the environment.
   counts);
 - Miri clean on the tests it runs (give the count);
 - the sanitizer harness: 0 reports on the 1,506 damaged archives and 28 hostile PDFs;
-- `python3 -I bench/security.py run --fuzz-seconds 120`: 0 failures; `supply`: 0 advisories, 0 disallowed
+- `python3 -I bench/security.py run new-security --fuzz-seconds 120`: 0 failures; `supply`: 0 advisories, 0 disallowed
   licences;
 - if any engine code changed: `benchmark.py compare base new` on the sample with every output
   byte-identical and no setting slower by more than 2%;

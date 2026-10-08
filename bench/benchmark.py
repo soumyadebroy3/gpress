@@ -39,11 +39,11 @@ describes a file holds its path relative to the corpus root, so runs made on dif
 import argparse, hashlib, json, os, random, re, select, shutil, statistics, subprocess, sys, tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRATCH = '/tmp/claude-0/-home-claude/b636d578-f2d3-5309-87d4-a4766d45bbac/scratchpad'
 
 DEFAULTS = {
     'engine': os.environ.get('GPRESS') or os.environ.get('PDFE') or os.path.join(HERE, '..', 'target', 'release', 'gpress'),
-    'corpus': os.environ.get('CORPUS') or os.path.join(SCRATCH, 'corpus'),
+    # Where bench/fetch_corpus.sh puts the files unless told otherwise.
+    'corpus': os.environ.get('CORPUS') or os.path.join(HERE, 'corpus'),
     'results': os.path.join(HERE, 'results'),
     'sets': os.path.join(HERE, 'sets'),
     'set': 'sample120',  # a name in bench/sets/ or a path to a list of files
@@ -306,13 +306,28 @@ def opens_child(max_pages):
 # Sets of files
 
 def read_set(cfg, name):
+    """The files of a list: a name in bench/sets/ or a path. `NAME:SECTION` takes one section of the list, the
+    lines after a marker line `## SECTION` up to the next marker (sample120 has `## slowest-and-largest` and
+    `## random`); a marker is a comment to everything else."""
+    name, _, section = name.rpartition(':') if ':' in name and '/' not in name.rpartition(':')[2] else (name, '', '')
     path = name if os.path.sep in name or os.path.exists(name) else os.path.join(cfg['sets'], name + '.txt')
-    files = [l.strip() for l in open(path) if l.strip() and not l.startswith('#')]
+    files, current, seen = [], '', set()
+    for l in open(path):
+        l = l.strip()
+        if l.startswith('## '):
+            current = l[3:].strip()
+            seen.add(current)
+        elif l and not l.startswith('#') and (not section or current == section):
+            files.append(l)
+    if section and section not in seen:
+        sys.exit(f'{path} has no section "## {section}" (sections: {", ".join(sorted(seen)) or "none"})')
     return files
 
 
 def set_name(name):
-    return os.path.splitext(os.path.basename(name))[0]
+    name, _, section = name.rpartition(':') if ':' in name and '/' not in name.rpartition(':')[2] else (name, '', '')
+    base = os.path.splitext(os.path.basename(name))[0]
+    return f'{base}:{section}' if section else base
 
 
 def make_sets(cfg, a):
@@ -344,6 +359,7 @@ def make_sets(cfg, a):
     for r in slow + large:
         if r not in chosen:
             chosen.append(r)
+    picked = len(chosen)
     rest = sorted(rel.values())
     random.Random(a.seed).shuffle(rest)
     for r in rest:
@@ -354,8 +370,13 @@ def make_sets(cfg, a):
     name = f'sample{a.n}'
     with open(os.path.join(cfg['sets'], name + '.txt'), 'w') as w:
         w.write(f'# {len(chosen)} files: the {a.slowest} slowest of {os.path.basename(a.times) if a.times else "-"} at '
-                f'maximum effort, the {a.largest} largest, then random (seed {a.seed}); relative to the corpus root\n')
-        w.writelines(r + '\n' for r in chosen)
+                f'maximum effort, the {a.largest} largest ({picked} files, some in both lists), then {len(chosen) - picked} '
+                f'random (seed {a.seed}); relative to the corpus root. A "## name" line starts a section that --set '
+                f'{name}:name selects.\n')
+        w.write('## slowest-and-largest\n')
+        w.writelines(r + '\n' for r in chosen[:picked])
+        w.write('## random\n')
+        w.writelines(r + '\n' for r in chosen[picked:])
     print(f'{cfg["sets"]}: all.txt ({len(rel)} files), {name}.txt ({len(chosen)} files, '
           f'{sum(os.path.getsize(os.path.join(root, r)) for r in chosen) / 1e6:.2f} MB)')
 
@@ -445,6 +466,39 @@ def calibrate(cfg, tmp):
     return {'what': f"{' '.join(c['cmd'][:-1])} on {c['mb']} MiB of fixed text, smallest of {c['runs']}", 'cpu_s': round(best.cpu, 3), 'wall_s': round(best.wall, 3)}
 
 
+def missing_tools(cfg):
+    """The tools a run's checks need but this machine lacks, each with what is lost without it. A run without
+    them still measures time and size, but its rows say `exact: false` (or `opens-check died`) for outputs the
+    checks could not pass, so `compare` can't tell a lost byte from a missing tool: the list is printed at the
+    start and stored in meta.json."""
+    out = {}
+    try:
+        import pikepdf  # noqa: F401
+    except ImportError:
+        out['pikepdf'] = 'every normal-PDF row becomes "opens-check died" (pip install pikepdf)'
+    try:
+        import pypdfium2  # noqa: F401
+    except ImportError:
+        out['pypdfium2'] = 'verify_pdf.py cannot run (pip install pypdfium2)'
+    try:
+        import PIL  # noqa: F401
+    except ImportError:
+        out['Pillow'] = 'verify_pdf.py cannot compare JPEG pixels (pip install Pillow)'
+    if not (os.environ.get('JPEGTRAN') or shutil.which('jpegtran')):
+        out['jpegtran'] = 'every output with a changed JPEG is reported as not identical (libjpeg-turbo-progs, or JPEGTRAN=path)'
+    mods = os.environ.get('PDFJS_MODULES')
+    if not mods or not os.path.isdir(os.path.join(mods, 'pdfjs-dist')):
+        out['pdf.js'] = 'changed JPEGs are not compared in pdf.js (npm install pdfjs-dist; PDFJS_MODULES=its node_modules)'
+    if not shutil.which('qpdf'):
+        out['qpdf'] = 'verify_pdf.py cannot run qpdf --check, and qpdf cannot be measured'
+    if not shutil.which('cc'):
+        out['cc'] = 'peak memory readings have a floor of about 20 MB (bench/measure.c is not built)'
+    for t in ('xz', 'brotli', 'zstd'):
+        if not shutil.which(t):
+            out[t] = 'no calibration' if t == 'xz' else f'{t} cannot be measured'
+    return out
+
+
 def write_meta(cfg, run, a, calibration):
     meta = {
         'date': time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime()),
@@ -459,13 +513,14 @@ def write_meta(cfg, run, a, calibration):
         'kernel': os.uname().release,
         'python': sys.version.split()[0],
         'tools': {k: tool_version(v['version']) for k, v in cfg['competitors'].items() if 'version' in v},
+        'missing_tools': missing_tools(cfg),
         'measured_by': Launcher.note,
         'calibration': calibration,
     }
     path = os.path.join(run, 'meta.json')
     old = json.load(open(path)) if os.path.exists(path) else {}
     old.setdefault('runs', []).append(meta)
-    for k in ('date', 'build', 'engine', 'engine_sha256', 'set', 'corpus', 'cpus', 'cpu_model', 'mem_total_kb', 'kernel', 'tools', 'measured_by', 'calibration'):
+    for k in ('date', 'build', 'engine', 'engine_sha256', 'set', 'corpus', 'cpus', 'cpu_model', 'mem_total_kb', 'kernel', 'tools', 'missing_tools', 'measured_by', 'calibration'):
         old[k] = meta[k]
     json.dump(old, open(path, 'w'), indent=1)
 
@@ -672,6 +727,10 @@ def measure(cfg, a, with_fixed):
         return
     if not os.path.exists(cfg['engine']) and 'ours' in cfg['who']:
         sys.exit(f'engine not found: {cfg["engine"]} (set PDFE or --engine)')
+    if not os.path.isdir(cfg['corpus']):
+        sys.exit(f'corpus not found: {cfg["corpus"]} (bench/fetch_corpus.sh fetches it; set CORPUS or --corpus for another place)')
+    for tool, what in missing_tools(cfg).items():
+        print(f'WARNING: {tool} is missing: {what}', flush=True)
     r = Runner(cfg, run, a)
     write_meta(cfg, run, a, calibrate(cfg, r.tmp))
     try:
@@ -1118,6 +1177,15 @@ def compare(cfg, a):
     elif not cal[0] or not cal[1]:
         notes.append('no calibration in ' + ' and '.join(x for x, v in zip(('BASE', 'NEW'), cal) if not v) +
                      ': whether both runs were made on the same machine is not known, and the time rules assume it')
+    # The checks behind "exact": a run made without the tools they need has rows that say exact: false for
+    # outputs the checks could not pass, and this comparison can't tell those from a lost byte.
+    for label, x in (('BASE', base), ('NEW', new)):
+        missing = x.meta.get('missing_tools')
+        if missing:
+            notes.append(f'{label} was measured without {", ".join(sorted(missing))}: the checks behind "exact" did not all run '
+                         f'(meta.json missing_tools says what each one lost), so "no longer exact" and "exact" rows prove less')
+        elif 'missing_tools' not in x.meta:
+            notes.append(f'{label} does not record which checking tools were present (an older benchmark.py made it)')
     for n in common:
         b = {r['file']: r for r in base.groups[n] if r.get('status') in ('OK', 'SMALLER', 'UNTOUCHED')}
         w = {r['file']: r for r in new.groups[n] if r.get('status') in ('OK', 'SMALLER', 'UNTOUCHED')}
