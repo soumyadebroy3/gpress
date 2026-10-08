@@ -95,7 +95,7 @@ fn plainly(x: &[u8], allowed: bool) -> bool {
         add(x);
     } else {
         for k in 0..WINDOWS {
-            let a = k * (x.len() - WINDOW) / (WINDOWS - 1);
+            let a = (k as u64 * (x.len() - WINDOW) as u64 / (WINDOWS - 1) as u64) as usize;
             add(&x[a..a + WINDOW]);
         }
     }
