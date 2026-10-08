@@ -15,29 +15,11 @@
    ]
   },
   {
-   "name": "arrayvec",
-   "version": "0.7.8",
+   "name": "aes",
+   "version": "0.9.3",
    "license": "MIT OR Apache-2.0",
    "via": [
-    "preflate-rs",
-    "bitcode"
-   ]
-  },
-  {
-   "name": "bitcode",
-   "version": "0.6.9",
-   "license": "MIT OR Apache-2.0",
-   "via": [
-    "preflate-rs"
-   ]
-  },
-  {
-   "name": "bitcode_derive",
-   "version": "0.6.9",
-   "license": "MIT OR Apache-2.0",
-   "via": [
-    "preflate-rs",
-    "bitcode"
+    "(direct)"
    ]
   },
   {
@@ -47,6 +29,15 @@
    "via": [
     "lepton_jpeg",
     "thread-priority"
+   ]
+  },
+  {
+   "name": "block-buffer",
+   "version": "0.12.1",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "md-5",
+    "digest"
    ]
   },
   {
@@ -66,20 +57,28 @@
    ]
   },
   {
-   "name": "cabac",
-   "version": "0.15.0",
-   "license": "LGPL-3.0-or-later",
-   "via": [
-    "preflate-rs"
-   ]
-  },
-  {
    "name": "cfg-if",
    "version": "1.0.5",
    "license": "MIT OR Apache-2.0",
    "via": [
-    "lepton_jpeg",
-    "thread-priority"
+    "md-5"
+   ]
+  },
+  {
+   "name": "cipher",
+   "version": "0.5.2",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "aes"
+   ]
+  },
+  {
+   "name": "const-oid",
+   "version": "0.10.2",
+   "license": "Apache-2.0 OR MIT",
+   "via": [
+    "md-5",
+    "digest"
    ]
   },
   {
@@ -91,12 +90,37 @@
    ]
   },
   {
+   "name": "cpubits",
+   "version": "0.1.1",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "aes"
+   ]
+  },
+  {
+   "name": "cpufeatures",
+   "version": "0.3.1",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "aes"
+   ]
+  },
+  {
    "name": "crc32fast",
    "version": "1.5.2",
    "license": "MIT OR Apache-2.0",
    "via": [
     "lepton_jpeg",
     "flate2"
+   ]
+  },
+  {
+   "name": "crypto-common",
+   "version": "0.2.2",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "aes",
+    "cipher"
    ]
   },
   {
@@ -117,11 +141,11 @@
    ]
   },
   {
-   "name": "deranged",
-   "version": "0.5.8",
+   "name": "digest",
+   "version": "0.11.3",
    "license": "MIT OR Apache-2.0",
    "via": [
-    "preflate-rs"
+    "md-5"
    ]
   },
   {
@@ -150,12 +174,22 @@
    ]
   },
   {
-   "name": "glam",
-   "version": "0.34.1",
+   "name": "hybrid-array",
+   "version": "0.4.15",
    "license": "MIT OR Apache-2.0",
    "via": [
-    "preflate-rs",
-    "bitcode"
+    "aes",
+    "cipher",
+    "crypto-common"
+   ]
+  },
+  {
+   "name": "inout",
+   "version": "0.2.2",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "aes",
+    "cipher"
    ]
   },
   {
@@ -171,8 +205,8 @@
    "version": "0.2.190",
    "license": "MIT OR Apache-2.0",
    "via": [
-    "lepton_jpeg",
-    "cpu-time"
+    "aes",
+    "cpufeatures"
    ]
   },
   {
@@ -184,20 +218,20 @@
    ]
   },
   {
+   "name": "md-5",
+   "version": "0.11.0",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "(direct)"
+   ]
+  },
+  {
    "name": "miniz_oxide",
    "version": "0.9.1",
    "license": "MIT OR Zlib OR Apache-2.0",
    "via": [
     "lepton_jpeg",
     "flate2"
-   ]
-  },
-  {
-   "name": "preflate-rs",
-   "version": "0.7.6",
-   "license": "Apache-2.0",
-   "via": [
-    "(direct)"
    ]
   },
   {
@@ -239,33 +273,11 @@
    ]
   },
   {
-   "name": "serde",
-   "version": "1.0.229",
+   "name": "sha2",
+   "version": "0.11.0",
    "license": "MIT OR Apache-2.0",
    "via": [
-    "preflate-rs",
-    "bitcode"
-   ]
-  },
-  {
-   "name": "serde_core",
-   "version": "1.0.229",
-   "license": "MIT OR Apache-2.0",
-   "via": [
-    "preflate-rs",
-    "bitcode",
-    "serde"
-   ]
-  },
-  {
-   "name": "serde_derive",
-   "version": "1.0.229",
-   "license": "MIT OR Apache-2.0",
-   "via": [
-    "preflate-rs",
-    "bitcode",
-    "serde",
-    "serde_core"
+    "(direct)"
    ]
   },
   {
@@ -299,23 +311,22 @@
    ]
   },
   {
-   "name": "syn",
-   "version": "3.0.6",
-   "license": "MIT OR Apache-2.0",
-   "via": [
-    "preflate-rs",
-    "bitcode",
-    "serde",
-    "serde_core",
-    "serde_derive"
-   ]
-  },
-  {
    "name": "thread-priority",
    "version": "1.2.0",
    "license": "MIT",
    "via": [
     "lepton_jpeg"
+   ]
+  },
+  {
+   "name": "typenum",
+   "version": "1.20.1",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "aes",
+    "cipher",
+    "crypto-common",
+    "hybrid-array"
    ]
   },
   {
@@ -379,13 +390,13 @@
  "unsafe": [
   {
    "file": "src/flate/parse.rs",
-   "line": 82,
+   "line": 85,
    "text": "return unsafe { parse_avx2(data, a, b, m, c, alt, nice, sc, out) };",
    "comment": true
   },
   {
    "file": "src/flate/parse.rs",
-   "line": 90,
+   "line": 94,
    "text": "unsafe fn parse_avx2(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt: bool, nice: usize, sc: &mut ParseScra",
    "comment": true
   }

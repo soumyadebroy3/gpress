@@ -14,7 +14,7 @@ path = "src/bin/pdfe.rs"
 
 # Our compression code has no dependencies. The "existing" feature adds one existing library, Lepton for JPEG
 # streams, as an extra candidate (the engine keeps whichever result is smaller after the checks). Every
-# dependency is MIT or Apache-2.0.
+# dependency is MIT or Apache-2.0; deny.toml holds the licence rule and `cargo deny` checks it.
 [dependencies]
 # The AES block cipher, MD5 and SHA-2 for encrypted PDFs (RustCrypto, MIT or Apache-2.0).
 aes = "0.9"

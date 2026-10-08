@@ -71,7 +71,9 @@ Apache-2.0 requires shipping its licence and notices with the product. Flate str
 (Adobe, cairo, Quartz) are stored as they are; preflate-rs did that job until its dependency `cabac` turned
 out to be LGPL, which the licence rule (below) doesn't allow, so it is gone and our own re-creation coder for
 those streams is a later roadmap item. The licence rule: our code plus libraries under MIT, Apache-2.0,
-BSD, ISC, Zlib, Unicode or MPL-2.0 only, never GPL, AGPL or LGPL.
+BSD, ISC, Zlib, Unicode or MPL-2.0 only, never GPL, AGPL or LGPL. `deny.toml` holds the rule and `cargo
+deny check licenses advisories` (installed with `cargo install cargo-deny --locked`) checks it, for every
+feature and target, in CI (`.github/workflows/ci.yml`) and in `bench/security.py supply`.
 
 ## Options
 

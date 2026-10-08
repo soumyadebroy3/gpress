@@ -1,0 +1,51 @@
+# cargo-deny: the licence rule and the advisory check (`cargo deny check licenses advisories`, run in CI).
+#
+# The rule: our own code plus libraries under permissive licences only. Anything not on the allow list is an
+# error, so a GPL, AGPL or LGPL crate anywhere in the dependency tree fails the check. Our own crates are
+# not published and carry no licence of their own; `private.ignore` leaves them out.
+
+[graph]
+# Every feature set and the targets the library is built for: native Linux, macOS and Windows, and the
+# WebAssembly package.
+all-features = true
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "wasm32-unknown-unknown",
+]
+
+[advisories]
+version = 2
+yanked = "deny"
+# Nothing is ignored. An advisory that doesn't apply is listed here with its reason, never silenced elsewhere.
+ignore = []
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+# The list is the rule, not a record of what the tree has today: a licence on it that no crate uses is fine.
+unused-allowed-license = "allow"
+# Our own crates (publish = false): no licence field; everything else must match the list above.
+private = { ignore = true }
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
