@@ -1,0 +1,393 @@
+{
+ "audit": {
+  "vulnerabilities": [],
+  "warnings": {}
+ },
+ "licences": [
+  {
+   "name": "adler2",
+   "version": "2.0.1",
+   "license": "0BSD OR MIT OR Apache-2.0",
+   "via": [
+    "lepton_jpeg",
+    "flate2",
+    "miniz_oxide"
+   ]
+  },
+  {
+   "name": "arrayvec",
+   "version": "0.7.8",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "preflate-rs",
+    "bitcode"
+   ]
+  },
+  {
+   "name": "bitcode",
+   "version": "0.6.9",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "preflate-rs"
+   ]
+  },
+  {
+   "name": "bitcode_derive",
+   "version": "0.6.9",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "preflate-rs",
+    "bitcode"
+   ]
+  },
+  {
+   "name": "bitflags",
+   "version": "2.13.2",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "lepton_jpeg",
+    "thread-priority"
+   ]
+  },
+  {
+   "name": "bytemuck",
+   "version": "1.25.2",
+   "license": "Zlib OR Apache-2.0 OR MIT",
+   "via": [
+    "lepton_jpeg"
+   ]
+  },
+  {
+   "name": "byteorder",
+   "version": "1.5.0",
+   "license": "Unlicense OR MIT",
+   "via": [
+    "lepton_jpeg"
+   ]
+  },
+  {
+   "name": "cabac",
+   "version": "0.15.0",
+   "license": "LGPL-3.0-or-later",
+   "via": [
+    "preflate-rs"
+   ]
+  },
+  {
+   "name": "cfg-if",
+   "version": "1.0.5",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "lepton_jpeg",
+    "thread-priority"
+   ]
+  },
+  {
+   "name": "cpu-time",
+   "version": "1.0.0",
+   "license": "MIT/Apache-2.0",
+   "via": [
+    "lepton_jpeg"
+   ]
+  },
+  {
+   "name": "crc32fast",
+   "version": "1.5.2",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "lepton_jpeg",
+    "flate2"
+   ]
+  },
+  {
+   "name": "default-boxed",
+   "version": "0.2.0",
+   "license": "MIT",
+   "via": [
+    "lepton_jpeg"
+   ]
+  },
+  {
+   "name": "default-boxed-derive",
+   "version": "0.2.0",
+   "license": "MIT",
+   "via": [
+    "lepton_jpeg",
+    "default-boxed"
+   ]
+  },
+  {
+   "name": "deranged",
+   "version": "0.5.8",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "preflate-rs"
+   ]
+  },
+  {
+   "name": "flate2",
+   "version": "1.1.10",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "lepton_jpeg"
+   ]
+  },
+  {
+   "name": "git-version",
+   "version": "0.3.9",
+   "license": "BSD-2-Clause",
+   "via": [
+    "lepton_jpeg"
+   ]
+  },
+  {
+   "name": "git-version-macro",
+   "version": "0.3.9",
+   "license": "BSD-2-Clause",
+   "via": [
+    "lepton_jpeg",
+    "git-version"
+   ]
+  },
+  {
+   "name": "glam",
+   "version": "0.34.1",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "preflate-rs",
+    "bitcode"
+   ]
+  },
+  {
+   "name": "lepton_jpeg",
+   "version": "0.5.8",
+   "license": "Apache-2.0",
+   "via": [
+    "(direct)"
+   ]
+  },
+  {
+   "name": "libc",
+   "version": "0.2.190",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "lepton_jpeg",
+    "cpu-time"
+   ]
+  },
+  {
+   "name": "log",
+   "version": "0.4.34",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "lepton_jpeg"
+   ]
+  },
+  {
+   "name": "miniz_oxide",
+   "version": "0.9.1",
+   "license": "MIT OR Zlib OR Apache-2.0",
+   "via": [
+    "lepton_jpeg",
+    "flate2"
+   ]
+  },
+  {
+   "name": "preflate-rs",
+   "version": "0.7.6",
+   "license": "Apache-2.0",
+   "via": [
+    "(direct)"
+   ]
+  },
+  {
+   "name": "proc-macro2",
+   "version": "1.0.107",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "lepton_jpeg",
+    "default-boxed",
+    "default-boxed-derive"
+   ]
+  },
+  {
+   "name": "quote",
+   "version": "1.0.47",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "lepton_jpeg",
+    "default-boxed",
+    "default-boxed-derive"
+   ]
+  },
+  {
+   "name": "rustversion",
+   "version": "1.0.23",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "lepton_jpeg",
+    "thread-priority"
+   ]
+  },
+  {
+   "name": "safe_arch",
+   "version": "0.9.3",
+   "license": "Zlib OR Apache-2.0 OR MIT",
+   "via": [
+    "lepton_jpeg",
+    "wide"
+   ]
+  },
+  {
+   "name": "serde",
+   "version": "1.0.229",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "preflate-rs",
+    "bitcode"
+   ]
+  },
+  {
+   "name": "serde_core",
+   "version": "1.0.229",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "preflate-rs",
+    "bitcode",
+    "serde"
+   ]
+  },
+  {
+   "name": "serde_derive",
+   "version": "1.0.229",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "preflate-rs",
+    "bitcode",
+    "serde",
+    "serde_core"
+   ]
+  },
+  {
+   "name": "simd-adler32",
+   "version": "0.3.10",
+   "license": "MIT",
+   "via": [
+    "lepton_jpeg",
+    "flate2",
+    "miniz_oxide"
+   ]
+  },
+  {
+   "name": "syn",
+   "version": "1.0.109",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "lepton_jpeg",
+    "default-boxed",
+    "default-boxed-derive"
+   ]
+  },
+  {
+   "name": "syn",
+   "version": "2.0.119",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "lepton_jpeg",
+    "git-version",
+    "git-version-macro"
+   ]
+  },
+  {
+   "name": "syn",
+   "version": "3.0.6",
+   "license": "MIT OR Apache-2.0",
+   "via": [
+    "preflate-rs",
+    "bitcode",
+    "serde",
+    "serde_core",
+    "serde_derive"
+   ]
+  },
+  {
+   "name": "thread-priority",
+   "version": "1.2.0",
+   "license": "MIT",
+   "via": [
+    "lepton_jpeg"
+   ]
+  },
+  {
+   "name": "unicode-ident",
+   "version": "1.0.26",
+   "license": "(MIT OR Apache-2.0) AND Unicode-3.0",
+   "via": [
+    "lepton_jpeg",
+    "default-boxed",
+    "default-boxed-derive",
+    "proc-macro2"
+   ]
+  },
+  {
+   "name": "wide",
+   "version": "0.8.3",
+   "license": "Zlib OR Apache-2.0 OR MIT",
+   "via": [
+    "lepton_jpeg"
+   ]
+  },
+  {
+   "name": "winapi",
+   "version": "0.3.9",
+   "license": "MIT/Apache-2.0",
+   "via": [
+    "lepton_jpeg",
+    "cpu-time"
+   ]
+  },
+  {
+   "name": "winapi-i686-pc-windows-gnu",
+   "version": "0.4.0",
+   "license": "MIT/Apache-2.0",
+   "via": [
+    "lepton_jpeg",
+    "cpu-time",
+    "winapi"
+   ]
+  },
+  {
+   "name": "winapi-x86_64-pc-windows-gnu",
+   "version": "0.4.0",
+   "license": "MIT/Apache-2.0",
+   "via": [
+    "lepton_jpeg",
+    "cpu-time",
+    "winapi"
+   ]
+  },
+  {
+   "name": "zlib-rs",
+   "version": "0.6.8",
+   "license": "Zlib",
+   "via": [
+    "lepton_jpeg",
+    "flate2"
+   ]
+  }
+ ],
+ "unsafe": [
+  {
+   "file": "src/flate/parse.rs",
+   "line": 82,
+   "text": "return unsafe { parse_avx2(data, a, b, m, c, alt, nice, sc, out) };",
+   "comment": true
+  },
+  {
+   "file": "src/flate/parse.rs",
+   "line": 90,
+   "text": "unsafe fn parse_avx2(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt: bool, nice: usize, sc: &mut ParseScra",
+   "comment": true
+  }
+ ]
+}

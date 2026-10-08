@@ -1,0 +1,16 @@
+setting	tool	mode	effort	threads	median_kb	p90_kb	peak_kb	peak_file	peak_file_bytes	ratio_median	ratio_max	ratio_n	fit_fixed_mb	fit_bytes_per_byte
+ours-pdf-e0-t1	ours	pdf	0	1	5162.0	42724.8	98268	pdfjs/issue9262_reduced.pdf	5536057	14.626	72.352	23	9.286	9.889
+ours-pdf-e0-t2	ours	pdf	0	2	6370.0	60033.600000000006	151756	pypdf-samples/009-pdflatex-geotopo__GeoTopo.pdf	5321132	19.410	89.262	23	11.742	12.251
+ours-pdf-e50-t1	ours	pdf	50	1	5186.0	48767.2	146108	pdfjs/issue12963.pdf	603342	14.612	72.323	23	11.131	9.780
+ours-pdf-e50-t2	ours	pdf	50	2	6372.0	68482.00000000001	164564	pypdf-samples/009-pdflatex-geotopo__GeoTopo.pdf	5321132	19.698	88.761	23	13.924	12.389
+ours-pdf-e100-t1	ours	pdf	100	1	5138.0	86948.4	173356	pdfjs/issue12963.pdf	603342	16.797	95.971	23	16.862	11.276
+ours-pdf-e100-t2	ours	pdf	100	2	6092.0	119770.00000000003	312824	pypdf-samples/009-pdflatex-geotopo__GeoTopo.pdf	5321132	23.476	165.871	23	22.970	16.399
+qpdf-pdf	qpdf	pdf	None	None	8958.0	14536.40000000001	309752	pdfjs/bug1978317.pdf	1535205	6.613	206.608	23	10.691	3.258
+ours-archive-e0-t1	ours	archive	0	1	16568.0	125763.60000000005	972976	ocrmypdf/tests__resources__enormous.pdf	310761	48.942	681.675	23	36.732	41.804
+ours-archive-e0-t2	ours	archive	0	2	24378.0	230740.00000000015	1112276	ocrmypdf/tests__resources__enormous.pdf	310761	85.769	996.700	23	48.896	74.275
+ours-archive-e50-t1	ours	archive	50	1	16466.0	125858.40000000004	972792	ocrmypdf/tests__resources__enormous.pdf	310761	51.162	681.635	23	36.611	42.115
+ours-archive-e50-t2	ours	archive	50	2	26526.0	229842.80000000016	1111684	ocrmypdf/tests__resources__enormous.pdf	310761	95.576	995.505	23	48.657	75.891
+brotli-archive	brotli	archive	None	None	4556.0	48392.40000000001	112640	pdfjs/issue3188.pdf	8125374	22.833	33.463	23	6.168	13.994
+expandxz-archive	expandxz	archive	None	None	45614.0	123478.00000000001	691372	pikepdf/tests__resources__pdfa__multipage.pdf	1120291	46.700	631.947	23	51.430	33.087
+xz-archive	xz	archive	None	None	59372.0	87332.0	139688	pdfjs/issue3188.pdf	8125374	41.214	71.288	23	34.791	17.804
+zstd-archive	zstd	archive	None	None	3968.0	56818.0	102592	pdfjs/issue3188.pdf	8125374	23.121	35.732	23	4.890	17.063
