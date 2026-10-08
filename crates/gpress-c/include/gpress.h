@@ -108,9 +108,12 @@ gpress_result gpress_expand(const uint8_t *input, size_t len, const gpress_optio
 /* Frees the parts of a result and zeroes it. Safe on NULL and on a result already freed. */
 void gpress_result_free(gpress_result *result);
 
-/* Lower-level frees, for callers that take the buffer or message out of a result. */
+/* Lower-level frees, for callers that take the buffer or message out of a result: each takes the field's
+ * address, frees what it points to and sets it to NULL (or zeroes the buffer), so freeing twice, or freeing
+ * a part and then the whole result, is harmless by construction. Both are safe on NULL and on an empty
+ * part. An empty output (an archive of an empty file, say) has data == NULL and len == 0. */
 void gpress_free(gpress_buffer *buffer);
-void gpress_free_message(char *message);
+void gpress_free_message(char **message);
 
 #ifdef __cplusplus
 }

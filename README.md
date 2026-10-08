@@ -68,8 +68,10 @@ gpress_result_free(&r);
 ```
 
 Every function is thread-safe, never aborts the process, never reads outside the buffers it is given, and
-every buffer it hands out is freed with `gpress_result_free` (or `gpress_free` / `gpress_free_message`),
-which are safe on null and on a result already freed. The options struct has the same fields as the Rust
+every buffer it hands out is freed with `gpress_result_free` (or `gpress_free` / `gpress_free_message`, each
+given the field's address), which are safe on null and on a result already freed: a free clears what it
+freed, so a double free or a part freed before the whole result is harmless by construction. An empty output
+is a null pointer with length 0. The options struct has the same fields as the Rust
 `Options` (fill it with `gpress_options_default` first; a size left at 0 means its default).
 [`examples/roundtrip.c`](crates/gpress-c/examples/roundtrip.c) is a complete program, and
 `bench/gpress_harness.c` sends the security suite's hostile inputs through this API.
