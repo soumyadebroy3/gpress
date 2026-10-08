@@ -337,6 +337,33 @@ fn peyaji_stores_the_streams_decrypted_opened_and_coded() {
     }
 }
 
+#[test]
+fn each_step_has_its_switch() {
+    let pdf = encrypted_pdf(false);
+    let base = settings(100, 1);
+    // Encrypted files are left alone.
+    let r = optimize(&pdf, &Options { rewrite_encrypted: false, ..base.clone() });
+    assert!(matches!(&r.outcome, Outcome::Untouched(why) if why.starts_with("encrypted")), "{:?}", r.outcome);
+    assert_eq!(r.data, pdf);
+    // Without JBIG2 the fax image keeps its CCITT bytes; without the JPEG tables the JPEG keeps its bytes (both
+    // behind our Flate, or not, as the sizes decide). The file is still made smaller and reads back.
+    let r = optimize(&pdf, &Options { jbig2: false, jpeg_tables: false, ..base.clone() });
+    assert!(matches!(r.outcome, Outcome::Smaller(_)), "{:?}", r.outcome);
+    let (a, b) = (xref::open(&pdf).unwrap(), xref::open(&r.data).unwrap());
+    let fax = codec_bytes(&stream(&a, 8), b"CCITTFaxDecode");
+    assert_eq!(codec_bytes(&stream(&b, 8), b"CCITTFaxDecode"), fax);
+    assert_eq!(jpeg_bytes(&stream(&b, 7)), jpeg_bytes(&stream(&a, 7)));
+    // Each alone: the other step still runs.
+    let r = optimize(&pdf, &Options { jbig2: false, ..base.clone() });
+    let b = xref::open(&r.data).unwrap();
+    assert_eq!(codec_bytes(&stream(&b, 8), b"CCITTFaxDecode"), fax);
+    assert_ne!(jpeg_bytes(&stream(&b, 7)), jpeg_bytes(&stream(&a, 7)));
+    let r = optimize(&pdf, &Options { jpeg_tables: false, ..base.clone() });
+    let b = xref::open(&r.data).unwrap();
+    assert_eq!(stream(&b, 8).dict.name(b"Filter"), Some(&b"JBIG2Decode"[..]));
+    assert_eq!(jpeg_bytes(&stream(&b, 7)), jpeg_bytes(&stream(&a, 7)));
+}
+
 /// With PEYAJI_TEST_OUT set to a folder, writes the two documents and their normal-PDF outputs there for
 /// the independent checks (verify_pdf.py, verify_render.py, qpdf).
 #[test]

@@ -95,7 +95,8 @@ cargo test --release
 cargo test --release --features existing
 cargo clippy --all-targets -- -D warnings
 cargo build --release --features existing
-target/release/pdfe optimize in.pdf out.pdf        # normal PDF, maximum effort (--effort 0..100, --quick = 0)
+target/release/pdfe optimize in.pdf out.pdf        # normal PDF, maximum effort (--effort 0..100, --quick = 0; --no-jbig2,
+                                                   # --no-jpeg-tables, --keep-encrypted, --ignore-conformance, --no-flate-over-jpeg)
 target/release/pdfe pack in.pdf out.pyj            # peyaji format (--effort 0..100, --no-decrypt)
 target/release/pdfe unpack out.pyj back.pdf        # exact original (--max-len N refuses a file declaring more)
 target/release/pdfe jpeg in.jpg out.jpg            # one JPEG with optimal Huffman tables (measuring)

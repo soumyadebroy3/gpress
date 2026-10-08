@@ -3,7 +3,9 @@
 //!   pdfe deflate IN OUT [--quick] [--raw]     zlib-wrapped (or raw) Deflate of IN
 //!   pdfe inflate IN OUT [--raw]               decode with our decoder
 //!   pdfe batch [--quick]                      stdin lines "IN OUT": compress each, verify, print sizes
-//!   pdfe optimize IN OUT [--effort N]         normal PDF; N from 0 (fast) to 100 (default); --quick = 0
+//!   pdfe optimize IN OUT [--effort N]         normal PDF; N from 0 (fast) to 100 (default); --quick = 0;
+//!                                             --no-jbig2, --no-jpeg-tables, --keep-encrypted,
+//!                                             --ignore-conformance, --no-flate-over-jpeg switch steps off
 //!   pdfe pack IN OUT [--effort N]             peyaji format (the effort only changes the encoder's choices;
 //!                                             --no-decrypt keeps encrypted streams as stored)
 //!   pdfe unpack IN OUT [--max-len N]          the original; a file declaring more than N bytes is refused
@@ -67,6 +69,18 @@ fn main() {
     if flag("--nopolish") {
         opt.polish = false;
     }
+    // Normal PDF: the steps that can be switched off.
+    let pdf_opt = engine::pdf::rewrite::Options {
+        flate: Options { shared: None, ..opt.clone() },
+        effort,
+        threads,
+        jbig2: !flag("--no-jbig2"),
+        jpeg_tables: !flag("--no-jpeg-tables"),
+        rewrite_encrypted: !flag("--keep-encrypted"),
+        respect_conformance: !flag("--ignore-conformance"),
+        flate_over_jpeg: !flag("--no-flate-over-jpeg"),
+        ..Default::default()
+    };
     if threads > 0 {
         opt.shared = Some(flate::deflate::Shared::new(threads));
     }
@@ -120,7 +134,7 @@ fn main() {
             let (i, o) = (pos.get(1).unwrap_or_else(|| die("need IN")), pos.get(2).unwrap_or_else(|| die("need OUT")));
             let data = std::fs::read(i).unwrap_or_else(|e| die(&format!("{i}: {e}")));
             let t = Instant::now();
-            let r = engine::pdf::rewrite::optimize(&data, &pdf_options(&opt, effort, threads));
+            let r = engine::pdf::rewrite::optimize(&data, &pdf_opt);
             std::fs::write(o, &r.data).unwrap_or_else(|e| die(&format!("{o}: {e}")));
             println!("{}", describe(i, data.len(), &r, t.elapsed().as_secs_f64()));
         }
@@ -140,7 +154,7 @@ fn main() {
                     }
                 };
                 let t = Instant::now();
-                let r = std::panic::catch_unwind(|| engine::pdf::rewrite::optimize(&data, &pdf_options(&opt, effort, threads)));
+                let r = std::panic::catch_unwind(|| engine::pdf::rewrite::optimize(&data, &pdf_opt));
                 match r {
                     Ok(r) => {
                         std::fs::write(o, &r.data).unwrap();
@@ -435,10 +449,6 @@ fn read_pbm(d: &[u8]) -> Option<engine::fax::ccitt::Image> {
     Some(img)
 }
 
-
-fn pdf_options(f: &Options, effort: u8, threads: usize) -> engine::pdf::rewrite::Options {
-    engine::pdf::rewrite::Options { flate: Options { shared: None, ..f.clone() }, effort, threads, ..Default::default() }
-}
 
 fn describe(name: &str, in_len: usize, r: &engine::pdf::rewrite::Optimized, secs: f64) -> String {
     use engine::pdf::rewrite::Outcome;
