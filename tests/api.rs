@@ -263,6 +263,42 @@ fn a_time_budget_stops_the_work_and_changes_no_output() {
     assert!(matches!(optimize(&pdf, &base().time_budget(Some(Duration::ZERO))), Err(Error::InvalidOptions(_))));
 }
 
+/// Cut-off files and the bare header: every prefix of a small PDF, and of the mixed document in steps, goes
+/// through all three operations without reaching the panic guard (`Error::Internal` is a bug, not a refusal).
+/// An 8-byte "%PDF-1.7" once panicked in the search for "startxref".
+#[test]
+fn every_prefix_is_handled_without_a_bug() {
+    let opt = base().effort(0);
+    let small = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\nxref\n0 3\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \ntrailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n110\n%%EOF\n";
+    let mixed = plain_pdf();
+    let mut cases: Vec<&[u8]> = (0..=small.len()).map(|n| &small[..n]).collect();
+    cases.extend((0..=mixed.len()).step_by(1009).map(|n| &mixed[..n]));
+    // Cut just before, inside and just after every stream keyword of the mixed document.
+    for (i, w) in mixed.windows(9).enumerate() {
+        if w == b"endstream" || w.starts_with(b"stream\n") || w.starts_with(b"stream\r") {
+            cases.extend([i.saturating_sub(1), i + 3, i + 9].iter().map(|&n| &mixed[..n.min(mixed.len())]));
+        }
+    }
+    cases.push(&mixed[mixed.len() - 8..]);
+    for input in cases {
+        for (what, r) in [
+            ("optimize", optimize(input, &opt).map(|_| ())),
+            ("compress", compress(input, &opt).map(|_| ())),
+            ("expand", expand(input, &opt).map(|_| ())),
+        ] {
+            if let Err(Error::Internal(why)) = r {
+                panic!("{what} of a {}-byte prefix hit a bug: {why}", input.len());
+            }
+        }
+    }
+    // The 8-byte header alone, and every length of header-looking input up to 16 bytes.
+    for n in 1..=16 {
+        let input = &b"%PDF-1.7\n%%EOF\n\n"[..n];
+        assert!(!matches!(optimize(input, &opt), Err(Error::Internal(_))), "{n} bytes");
+        assert!(!matches!(compress(input, &opt), Err(Error::Internal(_))), "{n} bytes");
+    }
+}
+
 #[test]
 fn a_damaged_archive_is_an_error_with_a_message_and_never_a_file() {
     let pdf = plain_pdf();

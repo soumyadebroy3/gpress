@@ -86,9 +86,12 @@ const archive = g.compress(bytes);
 const original = g.expand(archive.data, { maxLenMiB: 512 });       // throws GpressError on a damaged archive
 ```
 
-The module gives the same bytes as the native library, is single-threaded, has no clock (so no time
-budget: run it in a Web Worker to keep a page responsive and to end it when it has taken too long), and
-never traps. Sizes are 32-bit inside it: the wrapper refuses inputs of 2 GiB and more. Pages that load it
+The module gives the same bytes as the native library, is single-threaded and has no clock (so no time
+budget: run it in a Web Worker to keep a page responsive and to end it when it has taken too long). It is
+built with `panic = "abort"` (the only choice on `wasm32-unknown-unknown`), so the panic guard that turns
+a bug into `Error::Internal` natively catches nothing there: a bug, like a failed memory growth, traps the
+module, and the wrapper turns the trap into a `GpressError` with code 4 and marks the instance dead (load
+a fresh one). Sizes are 32-bit inside it: the wrapper refuses inputs of 2 GiB and more. Pages that load it
 need `'wasm-unsafe-eval'` in their Content Security Policy's `script-src`.
 
 ### Command line
