@@ -158,24 +158,78 @@ fn the_trailer_size_sizes_nothing() {
     assert_eq!(untouched(&quick(&pdf, &Options::effort(100)), &pdf), "object numbers beyond /Size");
 }
 
+/// The page with its content stream numbered `n` and the trailer /Size just above it.
+fn page_with_content_at(n: u64) -> Vec<u8> {
+    let mut objs = page_objects();
+    objs[3].0 = n;
+    objs[2].1 = format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents {n} 0 R >>").into_bytes();
+    classic(&objs, &(n + 1).to_string())
+}
+
 #[test]
 fn numbering_far_apart_is_left_untouched() {
-    // One object numbered 4,000,000,000: as many cross-reference rows would be out of all proportion to the
-    // file, so it is left as it is, at once.
-    let mut objs = page_objects();
-    objs[3].0 = 4_000_000_000;
-    objs[2].1 = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4000000000 0 R >>".to_vec();
-    let pdf = classic(&objs, "4000000001");
-    assert_eq!(untouched(&quick(&pdf, &Options::effort(100)), &pdf), "object numbers far apart");
-    packs_and_restores(&pdf);
-    // Numbers a few thousand apart are what some writers leave behind: still made smaller.
-    let mut objs = page_objects();
-    objs[3].0 = 4000;
-    objs[2].1 = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4000 0 R >>".to_vec();
-    let pdf = classic(&objs, "4001");
-    let r = quick(&pdf, &Options::effort(100));
-    smaller(&r, &pdf);
-    assert_eq!(xref::open(&r.data).unwrap().trailer.get(b"Size"), Some(&Obj::Int(4003)));
+    // The output's cross-reference stream has a row for every number up to the highest one used, and a file
+    // may have at most 16 rows per byte plus 65536 (the reader's bound too). One object numbered
+    // 4,000,000,000, or 120,000 in a 2 KB file: left as it is, at once.
+    for n in [4_000_000_000u64, 120_000] {
+        let pdf = page_with_content_at(n);
+        assert!(pdf.len() < 4096);
+        assert_eq!(untouched(&quick(&pdf, &Options::effort(100)), &pdf), "object numbers far apart", "{n}");
+        packs_and_restores(&pdf);
+    }
+    // Numbers thousands apart are what some writers leave behind (pdf.js's reduced test files keep a few
+    // objects with their original numbers): still made smaller, with the rows that takes (60,000 rows cost
+    // about a second of Flate at effort 100).
+    for n in [4000u64, 60_000] {
+        let pdf = page_with_content_at(n);
+        let r = optimize(&pdf, &Options::effort(100));
+        smaller(&r, &pdf);
+        assert_eq!(xref::open(&r.data).unwrap().trailer.get(b"Size"), Some(&Obj::Int(n as i64 + 3)), "{n}");
+    }
+}
+
+/// The page with a cross-reference stream of `rows` rows (the page's objects, then free rows): a few bytes
+/// of Flate for each thousand rows.
+fn with_free_rows(rows: u32) -> Vec<u8> {
+    let objs = page_objects();
+    let mut d = b"%PDF-1.5\n".to_vec();
+    let mut offs = Vec::new();
+    for (num, body) in &objs {
+        offs.push((*num, d.len()));
+        d.extend_from_slice(format!("{num} 0 obj\n").as_bytes());
+        d.extend_from_slice(body);
+        d.extend_from_slice(b"\nendobj\n");
+    }
+    let x = d.len();
+    let mut rec = vec![0u8; 5];
+    for (_, off) in &offs {
+        rec.push(1);
+        rec.extend_from_slice(&(*off as u32).to_be_bytes());
+    }
+    rec.push(1);
+    rec.extend_from_slice(&(x as u32).to_be_bytes());
+    rec.resize(rows as usize * 5, 0);
+    d.extend_from_slice(b"5 0 obj\n");
+    d.extend_from_slice(&stream(&format!("/Type /XRef /Size {rows} /W [1 4 0] /Root 1 0 R /Filter /FlateDecode"), &z(&rec)));
+    d.extend_from_slice(format!("\nendobj\nstartxref\n{x}\n%%EOF\n").as_bytes());
+    d
+}
+
+#[test]
+fn cross_reference_rows_are_bounded_by_the_file_size() {
+    // 2 million free rows from 10 KB of Flate (20 million took the reader 1.3 GB and 8 CPU seconds):
+    // refused as the rows are read, before anything holds them. 50,000 rows (within the 65,536 every file
+    // may have): read, and the file made smaller.
+    let bomb = with_free_rows(2_000_000);
+    assert!(bomb.len() < 20_000, "{}", bomb.len());
+    let why = untouched(&quick(&bomb, &Options::effort(100)), &bomb);
+    assert!(why.contains("rows than the file can hold"), "{why}");
+    assert!(xref::open(&bomb).is_err());
+    // The pack doesn't read cross-reference data; it stores the stream's 10 MB decoded (a few seconds).
+    let (packed, _) = pack_with(&bomb, &PackOptions { threads: 1, ..PackOptions::default() });
+    assert_eq!(unpack(&packed).unwrap(), bomb);
+    let many = with_free_rows(50_000);
+    smaller(&quick(&many, &Options::effort(100)), &many);
 }
 
 #[test]
