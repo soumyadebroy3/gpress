@@ -27,6 +27,18 @@ fn die(msg: &str) -> ! {
     std::process::exit(2);
 }
 
+const USAGE: &str = "\
+usage: gpress optimize IN OUT [options]   a smaller PDF that any reader opens (or IN untouched, and why)
+       gpress pack IN OUT [options]       the gpress archive of IN (any file)
+       gpress unpack IN OUT [options]     the original from an archive (a damaged archive is an error)
+
+options: --effort N (0 fast .. 100 smallest, default 100; --quick = 0)   --threads N (0: the machine's, at most 8)
+         --max-input BYTES   --max-stream BYTES (normal PDF)   --max-stream-archive BYTES   --max-len BYTES (unpack)
+         --objects-per-stream N   --time-budget MS   --ignore-conformance   --no-flate-over-jpeg   --no-jpeg-tables
+         --no-jbig2   --keep-encrypted (normal PDF)   --no-decrypt (archive)   --no-existing
+measuring tools: deflate, inflate, batch, pdf-batch, repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info,
+         fax-decode, fax-encode, fax-scan, fax-model, jbig2-encode (see the comments at the top of src/bin/gpress.rs)";
+
 /// The flags that take a value.
 const WITH_VALUE: &[&str] = &[
     "--iter",
@@ -160,7 +172,10 @@ fn main() {
                 };
                 let t = Instant::now();
                 // A fresh pool (and memory of inputs) for each file.
-                let opt = Options { shared: opt.shared.as_ref().map(|_| flate::deflate::Shared::new(threads)), ..opt.clone() };
+                let opt = Options {
+                    shared: opt.shared.as_ref().map(|_| flate::deflate::Shared::new(threads)),
+                    ..opt.clone()
+                };
                 let z = flate::deflate_zlib(&data, &opt);
                 let ms = t.elapsed().as_secs_f64() * 1000.0;
                 let ok = flate::zlib::unwrap(&z, data.len() + 1).map(|u| u.data == data).unwrap_or(false);
@@ -222,7 +237,13 @@ fn main() {
                     Ok(u) => {
                         let used = raw.len() - u.trailing;
                         match flate::zlibexact::find_params(&u.data, &raw[..used]) {
-                            Some(p) => format!("L{} W{} M{}{}", p.level, p.window_bits, p.mem_level, if p.filtered { " F" } else { "" }),
+                            Some(p) => format!(
+                                "L{} W{} M{}{}",
+                                p.level,
+                                p.window_bits,
+                                p.mem_level,
+                                if p.filtered { " F" } else { "" }
+                            ),
                             None => "none".into(),
                         }
                     }
@@ -278,7 +299,13 @@ fn main() {
                 m.code_byte(&mut e, Some(b));
             }
             let z = e.finish();
-            println!("{} -> {} bytes ({:.3} bits/byte) in {:.2}s", data.len(), z.len(), 8.0 * z.len() as f64 / data.len() as f64, t.elapsed().as_secs_f64());
+            println!(
+                "{} -> {} bytes ({:.3} bits/byte) in {:.2}s",
+                data.len(),
+                z.len(),
+                8.0 * z.len() as f64 / data.len() as f64,
+                t.elapsed().as_secs_f64()
+            );
         }
         Some("pack-batch") => {
             let stdin = std::io::stdin();
@@ -327,7 +354,8 @@ fn main() {
                 format!("{i}\t{}\t{}\t{secs:.3}\t{why}", data.len(), bytes.len())
             };
             if pos[0] == "jpeg" {
-                let (i, o) = (pos.get(1).unwrap_or_else(|| die("need IN")), pos.get(2).unwrap_or_else(|| die("need OUT")));
+                let (i, o) =
+                    (pos.get(1).unwrap_or_else(|| die("need IN")), pos.get(2).unwrap_or_else(|| die("need OUT")));
                 println!("{}", one(i, o));
             } else {
                 let mut out = std::io::stdout().lock();
@@ -345,20 +373,31 @@ fn main() {
             // gpress fax-decode RAW K COLUMNS ALIGN(0|1) OUT.pbm: our CCITT decoder on raw fax data (for checking
             // it against other decoders); prints rows, why it stopped, and whether the bytes come back exactly.
             use gpress::fax::ccitt;
-            let raw = std::fs::read(pos.get(1).unwrap_or_else(|| die("need RAW"))).unwrap_or_else(|e| die(&e.to_string()));
+            let raw =
+                std::fs::read(pos.get(1).unwrap_or_else(|| die("need RAW"))).unwrap_or_else(|e| die(&e.to_string()));
             let k: i64 = pos.get(2).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need K"));
             let cols: usize = pos.get(3).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need COLUMNS"));
             let align = pos.get(4).map(|s| s.as_str()) == Some("1");
             let o = pos.get(5).unwrap_or_else(|| die("need OUT"));
-            let p = ccitt::parse(&raw, ccitt::Scheme::from_k(k), cols, align, ccitt::Limits::default()).unwrap_or_else(|| die("bad parameters"));
+            let p = ccitt::parse(&raw, ccitt::Scheme::from_k(k), cols, align, ccitt::Limits::default())
+                .unwrap_or_else(|| die("bad parameters"));
             let exact = ccitt::encode(&p.image, &p.layout) == raw;
             std::fs::write(o, pbm(&p.image)).unwrap_or_else(|e| die(&e.to_string()));
-            println!("rows={} stop={:?} rule={:?} end_codes={} trailing={} exact={exact} why={:?}", p.image.rows(), p.stop, p.layout.rule, p.layout.end.len(), p.layout.trailing.len(), p.why);
+            println!(
+                "rows={} stop={:?} rule={:?} end_codes={} trailing={} exact={exact} why={:?}",
+                p.image.rows(),
+                p.stop,
+                p.layout.rule,
+                p.layout.end.len(),
+                p.layout.trailing.len(),
+                p.why
+            );
         }
         Some("fax-encode") => {
             // gpress fax-encode IN.pbm K EOL(0|1) OUT.raw: our CCITT encoder (EOFB for K < 0, RTC otherwise).
             use gpress::fax::ccitt;
-            let data = std::fs::read(pos.get(1).unwrap_or_else(|| die("need IN.pbm"))).unwrap_or_else(|e| die(&e.to_string()));
+            let data =
+                std::fs::read(pos.get(1).unwrap_or_else(|| die("need IN.pbm"))).unwrap_or_else(|e| die(&e.to_string()));
             let k: i64 = pos.get(2).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need K"));
             let eol = pos.get(3).map(|s| s.as_str()) == Some("1");
             let o = pos.get(4).unwrap_or_else(|| die("need OUT"));
@@ -373,11 +412,13 @@ fn main() {
         Some("fax-scan") => {
             // gpress fax-scan FILE.pdf: every CCITT image stream our reader finds, and what normal-PDF output does
             // with it.
-            let data = std::fs::read(pos.get(1).unwrap_or_else(|| die("need FILE"))).unwrap_or_else(|e| die(&e.to_string()));
+            let data =
+                std::fs::read(pos.get(1).unwrap_or_else(|| die("need FILE"))).unwrap_or_else(|e| die(&e.to_string()));
             let doc = gpress::pdf::xref::open(&data).unwrap_or_else(|e| die(&format!("unreadable: {e:?}")));
             for &n in doc.entries.keys() {
                 if let Ok((_, gpress::pdf::object::Obj::Stream(s))) = doc.load(n) {
-                    let fax = gpress::pdf::filters::chain(&s.dict).is_some_and(|c| c.iter().any(|st| st.name == b"CCITTFaxDecode"));
+                    let fax = gpress::pdf::filters::chain(&s.dict)
+                        .is_some_and(|c| c.iter().any(|st| st.name == b"CCITTFaxDecode"));
                     if fax {
                         let resolve = |o: &gpress::pdf::object::Obj| match o {
                             gpress::pdf::object::Obj::Ref(r, _) => doc.load(*r).ok().map(|x| x.1),
@@ -392,12 +433,14 @@ fn main() {
             // gpress fax-model RAW K COLUMNS ALIGN(0|1): size of a raw fax stream as an archive fax part, with
             // the time to code it and to restore it (checked).
             use gpress::fax::{ccitt, part};
-            let raw = std::fs::read(pos.get(1).unwrap_or_else(|| die("need RAW"))).unwrap_or_else(|e| die(&e.to_string()));
+            let raw =
+                std::fs::read(pos.get(1).unwrap_or_else(|| die("need RAW"))).unwrap_or_else(|e| die(&e.to_string()));
             let k: i64 = pos.get(2).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need K"));
             let cols: usize = pos.get(3).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need COLUMNS"));
             let align = pos.get(4).map(|s| s.as_str()) == Some("1");
             // Prepared as pack prepares it (the stream's byte alignment, or the other one if that reads more).
-            let p = part::prepare(&raw, ccitt::Scheme::from_k(k), cols, align).unwrap_or_else(|| die("not stored as a fax part"));
+            let p = part::prepare(&raw, ccitt::Scheme::from_k(k), cols, align)
+                .unwrap_or_else(|| die("not stored as a fax part"));
             // The work budget as if the stream started a file (where it is smallest); the size is measured anyway.
             let within = part::Work::default().admit(&p, 0);
             let at = if within { 0 } else { usize::MAX / 4 };
@@ -421,7 +464,8 @@ fn main() {
         }
         Some("jbig2-encode") => {
             // gpress jbig2-encode IN.pbm OUT.jb2 [invert]: our JBIG2Decode stream (embedded form) of a PBM.
-            let data = std::fs::read(pos.get(1).unwrap_or_else(|| die("need IN.pbm"))).unwrap_or_else(|e| die(&e.to_string()));
+            let data =
+                std::fs::read(pos.get(1).unwrap_or_else(|| die("need IN.pbm"))).unwrap_or_else(|e| die(&e.to_string()));
             let o = pos.get(2).unwrap_or_else(|| die("need OUT"));
             let invert = pos.get(3).map(|s| s.as_str()) == Some("invert");
             let img = read_pbm(&data).unwrap_or_else(|| die("not a binary PBM"));
@@ -430,7 +474,10 @@ fn main() {
             std::fs::write(o, &s).unwrap_or_else(|e| die(&e.to_string()));
             println!("{} bytes, our decoder gives the image back: {}", s.len(), back.as_ref() == Some(&img));
         }
-        _ => die("usage: gpress deflate|inflate|batch|optimize|pdf-batch|repro|pack|unpack|pack-batch|jpeg|jpeg-batch|fax-decode|fax-encode|fax-scan|fax-model|jbig2-encode ..."),
+        _ => {
+            eprintln!("{USAGE}");
+            std::process::exit(2);
+        }
     }
 }
 
