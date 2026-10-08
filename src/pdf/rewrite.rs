@@ -172,7 +172,8 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, conformance: bool) -> Resul
     }
     // Only objects the document uses count (an xref stream numbered at /Size is harmless), and the encryption
     // dictionary's.
-    let enc = crypt_objects(doc.crypt.as_ref().and_then(|c| c.as_ref().ok()));
+    let crypt = doc.crypt.as_ref().and_then(|c| c.as_ref().ok());
+    let enc = crypt_objects(crypt);
     let max_used = objs.keys().copied().chain(enc.iter().map(|o| o.0)).max().unwrap_or(0);
     // Objects numbered at or beyond /Size: readers disagree on whether they exist.
     if let Some(size) = doc.trailer.get(b"Size").and_then(|x| x.as_int()) {
@@ -180,10 +181,10 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, conformance: bool) -> Resul
             return Err("object numbers beyond /Size".into());
         }
     }
-    // The cross-reference stream written has a row for every number up to the highest one used, so a file
-    // whose numbers go beyond what its size allows for rows (the reader's bound on the rows a file may have)
-    // would cost rows out of all proportion to its size. Such a file is left untouched.
-    if max_used as u64 + 1 > xref::row_limit(doc.data.len()) as u64 {
+    // The cross-reference stream written has a row for every number up to the highest one the document
+    // uses, so a file whose numbers go beyond what its size allows for rows (the reader's bound on the rows
+    // a file may have) would cost rows out of all proportion to its size. Such a file is left untouched.
+    if highest_number(doc, objs, crypt) as u64 + 1 > xref::row_limit(doc.data.len()) as u64 {
         return Err("object numbers far apart".into());
     }
     // A reference to an object missing from the cross-reference data is null — unless the object is
@@ -246,6 +247,23 @@ fn encrypted_gate(c: &Crypt, objs: &BTreeMap<u32, (u16, Obj)>) -> Result<(), Str
         return Err("encrypted: the encryption dictionary is also part of the document".into());
     }
     Ok(())
+}
+
+/// The highest object number the document uses: its reachable objects, the encryption dictionary's, and
+/// every number the trailer or a reachable object refers to. New objects are numbered above it: a reference
+/// to a missing object is a null reference, and stays one only while nothing takes its number (a stream's
+/// /Length is written as a direct number, so its target doesn't count).
+fn highest_number(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, crypt: Option<&Crypt>) -> u32 {
+    let mut refs = Vec::new();
+    doc.trailer.0.iter().for_each(|(_, v)| v.refs(&mut refs));
+    for (_, o) in objs.values() {
+        match o {
+            Obj::Stream(st) => st.dict.0.iter().filter(|(k, _)| k != b"Length").for_each(|(_, v)| v.refs(&mut refs)),
+            _ => o.refs(&mut refs),
+        }
+    }
+    let top = objs.keys().copied().max().unwrap_or(0);
+    crypt_objects(crypt).iter().map(|o| o.0).chain(refs.iter().map(|r| r.0)).fold(top, u32::max)
 }
 
 /// Object numbers of the encryption dictionary and the objects it refers to.
@@ -754,12 +772,11 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
 
     // Object streams, grouped by kind so similar objects sit together.
     packable.sort_by(|a, b| kind_key(a.1).cmp(&kind_key(b.1)).then(a.0.cmp(&b.0)));
-    // New objects are numbered after the ones written (the encryption dictionary's objects keep their numbers
-    // too), never after the old /Size: that is a claim of the file, not something it holds, and the gate has
-    // already checked that no object is numbered at or beyond it.
-    let max_num = objs.keys().copied().max().unwrap_or(0);
-    let max_num = crypt_objects(crypt).iter().fold(max_num, |m, o| m.max(o.0));
-    let mut next_num = max_num + 1;
+    // New objects are numbered after the highest number the document uses (the encryption dictionary's
+    // objects keep their numbers; a dangling reference keeps its number free), never after the old /Size:
+    // that is a claim of the file, not something it holds, and the gate has already checked that no object
+    // is numbered at or beyond it.
+    let mut next_num = highest_number(&doc, &objs, crypt) + 1;
     let mut in_stm: HashMap<u32, (u32, u32)> = HashMap::new();
     let chunks: Vec<&[(u32, &Obj)]> = packable.chunks(opt.objstm_size.max(1)).collect();
     let mut raws = Vec::with_capacity(chunks.len());
@@ -852,7 +869,8 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         rows.extend_from_slice(&f2.to_be_bytes()[8 - w1..]);
         rows.extend_from_slice(&f3.to_be_bytes()[8 - w2..]);
     }
-    // PNG "Up" prediction usually helps the column-structured rows; keep whichever is smaller.
+    // PNG "Up" prediction usually helps the column-structured rows; keep whichever is smaller, counting the
+    // bytes its parameters take in the dictionary.
     let cols = 1 + w1 + w2;
     let mut up = Vec::with_capacity(rows.len() + rows.len() / cols + 1);
     for (r, row) in rows.chunks(cols).enumerate() {
@@ -875,10 +893,11 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         }
     }
     xd.set(b"Filter", Obj::Name(b"FlateDecode".to_vec()));
-    let zx = if z_up.len() < z_plain.len() {
-        let mut p = Dict::default();
-        p.set(b"Predictor", Obj::Int(12));
-        p.set(b"Columns", Obj::Int(cols as i64));
+    let mut p = Dict::default();
+    p.set(b"Predictor", Obj::Int(12));
+    p.set(b"Columns", Obj::Int(cols as i64));
+    let parms = to_bytes(&Obj::Dict(p.clone())).len() + b"/DecodeParms".len();
+    let zx = if z_up.len() + parms < z_plain.len() {
         xd.set(b"DecodeParms", Obj::Dict(p));
         z_up
     } else {

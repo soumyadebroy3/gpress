@@ -158,6 +158,27 @@ fn the_trailer_size_sizes_nothing() {
     assert_eq!(untouched(&quick(&pdf, &Options::effort(100)), &pdf), "object numbers beyond /Size");
 }
 
+#[test]
+fn a_dangling_reference_keeps_its_number_free() {
+    // The catalog refers to an outline object that doesn't exist (a null reference, as in a Kodak test file
+    // where /Outlines /First points past the last object). New objects are numbered above every number the
+    // document refers to, so the reference stays null in the output instead of pointing at the new object
+    // stream (which the self-check would refuse).
+    let mut objs = page_objects();
+    objs[0].1 = b"<< /Type /Catalog /Pages 2 0 R /Outlines << /Type /Outlines /First 9 0 R /Count 0 >> >>".to_vec();
+    let pdf = classic(&objs, "10");
+    let r = quick(&pdf, &Options::effort(100));
+    smaller(&r, &pdf);
+    let out = xref::open(&r.data).unwrap();
+    assert!(out.load(9).is_err(), "object 9 must stay missing");
+    let in_use: Vec<u32> = out.entries.iter().filter(|(_, e)| !matches!(e, xref::Entry::Free)).map(|(&n, _)| n).collect();
+    assert!(in_use.iter().all(|&n| n <= 4 || n >= 10), "{in_use:?}");
+    // A dangling reference far away counts like an object there: the file is left as it is.
+    objs[0].1 = b"<< /Type /Catalog /Pages 2 0 R /Outlines << /Type /Outlines /First 4000000000 0 R /Count 0 >> >>".to_vec();
+    let pdf = classic(&objs, "4000000001");
+    assert_eq!(untouched(&quick(&pdf, &Options::effort(100)), &pdf), "object numbers far apart");
+}
+
 /// The page with its content stream numbered `n` and the trailer /Size just above it.
 fn page_with_content_at(n: u64) -> Vec<u8> {
     let mut objs = page_objects();
