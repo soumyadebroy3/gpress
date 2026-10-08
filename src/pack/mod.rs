@@ -152,6 +152,9 @@ pub struct PackStats {
     pub stored: bool,
     /// Restore only: the file is damaged (it can't be restored; nothing wrong is ever returned).
     pub damaged: bool,
+    /// Restore only: the file has parts made with the existing libraries (preflate, Lepton; see
+    /// `PackOptions::existing`) and this build has none, so it can't be restored here.
+    pub needs_existing: bool,
     /// Bytes coded plainly (already compressed) and bytes coded by one long-repeat decision.
     pub flat_bytes: usize,
     pub bypassed: u64,
@@ -543,7 +546,8 @@ impl<'m, C: Coder> Io<'m, C> {
 }
 
 /// Choices of the encoder. The decoder needs none of them: what they decide is stored in the file, so a
-/// file restores the same whatever they were.
+/// file restores the same whatever they were (a file with parts made by the existing libraries needs a
+/// build that has them, see `existing`).
 #[derive(Clone, Debug)]
 pub struct PackOptions {
     /// How hard to try, 0 to 100. Below `PLAIN_BELOW`, data that looks compressed already (no structure in
@@ -563,14 +567,19 @@ pub struct PackOptions {
     /// in all, whatever this was.)
     pub max_stream: usize,
     /// Try the existing libraries (preflate, Lepton) when the build includes them (`--features existing`).
+    /// A file with parts they made restores only with such a build (`unpack` says so); the default is what
+    /// the build has.
     pub existing: bool,
 }
 
 impl Default for PackOptions {
     fn default() -> Self {
-        PackOptions { effort: 100, threads: 0, decrypt: true, max_stream: 1 << 28, existing: true }
+        PackOptions { effort: 100, threads: 0, decrypt: true, max_stream: 1 << 28, existing: HAVE_EXISTING }
     }
 }
+
+/// Whether this build has the existing libraries (preflate, Lepton).
+const HAVE_EXISTING: bool = cfg!(feature = "existing");
 
 /// Below this effort, compressed-looking data is coded plainly.
 const PLAIN_BELOW: u8 = 50;
@@ -962,6 +971,12 @@ fn run_within<C: Coder>(c: C, d: Option<&[u8]>, plans: Option<Vec<Plan>>, total_
                 stats.rebuilt += 1;
                 stats.rebuilt_bytes += z.len();
             }
+            // Parts the existing libraries made restore only where they are (see `PackOptions::existing`).
+            T_PREFLATED | T_LEPTON if !HAVE_EXISTING => {
+                stats.needs_existing = true;
+                io.damaged = true;
+                break;
+            }
             T_PREFLATED => {
                 let cur_p = match cur.flatten() {
                     Some(Plan::Preflated { header, corrections, data, adler_ok, rest, lep }) => Some((*header, corrections.as_slice(), data.as_slice(), *adler_ok, rest.as_slice(), lep.as_deref())),
@@ -1131,6 +1146,11 @@ fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, lep_in: Option<Opti
     let dlen = io.part(data_in.map(|x| x.len() as u64), MAX_PART);
     // A JPEG behind Flate (as normal-PDF output writes them): Lepton for the JPEG inside.
     if io.byte(lep_in.map(|l| l.is_some() as u8)) == 1 {
+        if !HAVE_EXISTING {
+            stats.needs_existing = true;
+            io.damaged = true;
+            return Vec::new();
+        }
         let src = lep_in.flatten();
         let n = io.part(src.map(|x| x.len() as u64), MAX_PART);
         let mut lep = Vec::with_capacity(reserve(n));
@@ -1464,6 +1484,9 @@ pub fn unpack(a: &[u8]) -> Result<Vec<u8>, String> {
         VERSION => {
             let mut stats = PackStats::default();
             let (out, _) = run(Decoder::new(body), None, len, &PackOptions::default(), &mut stats);
+            if stats.needs_existing {
+                return Err("this peyaji file has parts made with the existing libraries (preflate, Lepton); restoring it needs a build with them".into());
+            }
             if stats.damaged {
                 return Err("damaged peyaji file".into());
             }
@@ -1595,6 +1618,27 @@ mod tests {
         let (packed, st) = pack(d);
         assert!(!st.damaged && !st.fallback);
         assert_eq!(unpack(&packed).unwrap(), &d[..]);
+    }
+
+    /// A build without the existing libraries meets a part they made: the error says what the file needs
+    /// instead of calling it damaged, and nothing of the part is decoded first.
+    #[cfg(not(feature = "existing"))]
+    #[test]
+    fn parts_made_with_the_existing_libraries_say_so() {
+        let d = b"%PDF-1.4\n1 0 obj\n<< /Length 4 >>\nstream\nABCD\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
+        let a = d.windows(4).position(|w| w == b"ABCD").unwrap();
+        let params = Params { level: 6, window_bits: 15, mem_level: 8, filtered: false };
+        let cases: Vec<Plan> = vec![
+            Plan::Preflated { header: [0x78, 0x9c], corrections: vec![1, 2, 3], data: b"ABCD".to_vec(), adler_ok: false, rest: Vec::new(), lep: None },
+            Plan::Lepton { data: vec![1, 2, 3, 4] },
+            Plan::Rebuilt { params, data: vec![0xFFu8; 2048], tail: Vec::new(), lep: Some(vec![5, 6, 7, 8]) },
+        ];
+        for (k, part) in cases.into_iter().enumerate() {
+            let packed = pack_unbounded(d, vec![Plan::Syntax(0, a), part, Plan::Syntax(a + 4, d.len())]);
+            let err = unpack(&packed).unwrap_err();
+            assert!(err.contains("existing libraries"), "case {k}: {err}");
+        }
+        assert!(!PackOptions::default().existing);
     }
 
     #[test]
