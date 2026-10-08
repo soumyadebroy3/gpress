@@ -6,9 +6,12 @@
 //! context-mixing model, which knows what kind of data each part is.
 //!
 //! Type 1 fonts lose their two layers of encryption first (`type1`), so the model sees their text and their
-//! charstrings.
+//! charstrings. CCITT fax streams are stored as their image (`crate::fax::part`). In a file the empty
+//! password opens, encrypted streams are stored decrypted (`sealed`).
 //!
-//! Layout: magic (8) | version (1) | original length (8, LE) | SHA-256 of the original (32) | coded data.
+//! Layout: magic (4) | version (1) | original length (varint) | first 16 bytes of the SHA-256 of the original |
+//! coded data. Every part of the coded data starts with a tag byte (T_*); the model's settings, the kinds of
+//! parts and how each is coded are constants of the format version, so a pack restores the same anywhere.
 
 use crate::cm::model::{Geom, Kind, Model};
 use crate::cm::{Coder, Decoder, Encoder};
@@ -18,7 +21,10 @@ use crate::pdf::object::{Dict, Obj};
 use crate::pdf::parse::Lexer;
 
 pub const MAGIC: &[u8; 4] = b"\x89PYJ";
-const VERSION: u8 = 5;
+/// The format version this build writes and reads (plus 0 and 2, the fallback and stored forms). Version 6
+/// is the first with Type 1 fonts, fax images and decrypted streams together; nothing earlier shipped, so
+/// earlier versions are refused.
+pub const VERSION: u8 = 6;
 const HASH_LEN: usize = 16;
 
 /// A typical PDF fragment both sides feed to the model first, so small files don't pay for a cold start.
