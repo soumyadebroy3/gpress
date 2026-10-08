@@ -7,8 +7,8 @@ pub mod model;
 // ---------------------------------------------------------------- logistic helpers (12-bit domain)
 
 const SQUASH_T: [i32; 33] = [
-    1, 2, 3, 6, 10, 16, 27, 45, 73, 120, 194, 310, 488, 747, 1101, 1546, 2047, 2549, 2994, 3348, 3607, 3785, 3901,
-    3975, 4024, 4050, 4068, 4079, 4085, 4089, 4092, 4093, 4094,
+    1, 2, 3, 6, 10, 16, 27, 45, 73, 120, 194, 310, 488, 747, 1101, 1546, 2047, 2549, 2994, 3348, 3607, 3785, 3901, 3975, 4024,
+    4050, 4068, 4079, 4085, 4089, 4092, 4093, 4094,
 ];
 
 /// 1 / (1 + e^-x): x is ln-odds scaled by 256 (-2047..2047), result is a 12-bit probability.
@@ -26,13 +26,13 @@ pub fn squash(d: i32) -> i32 {
 }
 
 pub struct Tables {
-    stretch: Vec<i16>,
+    stretch: Box<[i16; 4096]>,
 }
 
 impl Tables {
     pub fn new() -> Tables {
         // stretch = inverse of squash.
-        let mut stretch = vec![0i16; 4096];
+        let mut stretch = Box::new([0i16; 4096]);
         let mut pi = 0usize;
         for x in -2047..=2047 {
             let v = squash(x) as usize;
@@ -296,35 +296,36 @@ pub struct Mixer {
 
 impl Mixer {
     pub fn new(inputs: usize, selectors: usize, rate: i32) -> Mixer {
-        Mixer {
-            shift: 10,
-            n: inputs,
-            w: vec![(1 << 16) / 4; inputs * selectors],
-            x: vec![0; inputs],
-            nx: 0,
-            sel: 0,
-            pr: 2048,
-            rate,
-        }
+        // Inputs are stretched probabilities (at most 2047 either way) and the error at most 4095 x rate, so an
+        // input times the error fits in 32 bits (see `update`).
+        assert!((1..=256).contains(&rate));
+        Mixer { shift: 10, n: inputs, w: vec![(1 << 16) / 4; inputs * selectors], x: vec![0; inputs], nx: 0, sel: 0, pr: 2048, rate }
     }
     #[inline]
     pub fn add(&mut self, st: i32) {
-        debug_assert!(self.nx < self.n);
+        debug_assert!(self.nx < self.n && st.abs() <= 2047);
         self.x[self.nx] = st;
         self.nx += 1;
     }
+    /// Several inputs at once: the same as adding them one by one.
+    #[inline]
+    pub fn add_all(&mut self, st: &[i32]) {
+        debug_assert!(st.iter().all(|x| x.abs() <= 2047));
+        self.x[self.nx..self.nx + st.len()].copy_from_slice(st);
+        self.nx += st.len();
+    }
     #[inline]
     pub fn mix(&mut self, sel: usize) -> i32 {
-        while self.nx < self.n {
-            self.x[self.nx] = 0;
-            self.nx += 1;
+        let n = self.n;
+        // Inputs not given count as 0.
+        if self.nx < n {
+            self.x[self.nx..n].fill(0);
         }
-        self.sel = sel * self.n;
-        let w = &self.w[self.sel..self.sel + self.n];
-        let mut dot: i64 = 0;
-        for i in 0..self.n {
-            dot += self.x[i] as i64 * w[i] as i64;
-        }
+        self.nx = n;
+        self.sel = sel * n;
+        let w = &self.w[self.sel..self.sel + n];
+        // Integer sums: the order of the terms doesn't matter.
+        let dot: i64 = self.x[..n].iter().zip(w).map(|(&x, &w)| x as i64 * w as i64).sum();
         let d = (dot >> 16).clamp(-2047, 2047) as i32;
         self.pr = squash(d);
         self.pr
@@ -332,10 +333,11 @@ impl Mixer {
     #[inline]
     pub fn update(&mut self, bit: u32) {
         let err = (((bit as i32) << 12) - self.pr) * self.rate;
-        let w = &mut self.w[self.sel..self.sel + self.n];
+        let n = self.n;
         let sh = self.shift;
-        for i in 0..self.n {
-            w[i] += ((self.x[i] as i64 * err as i64 + (1 << (sh - 1))) >> sh) as i32;
+        // |x * err| <= 2047 * 4095 * 256 < 2^31: 32-bit arithmetic gives exactly the 64-bit result.
+        for (w, &x) in self.w[self.sel..self.sel + n].iter_mut().zip(&self.x[..n]) {
+            *w += (x * err + (1 << (sh - 1))) >> sh;
         }
         self.nx = 0;
     }

@@ -19,6 +19,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --features existing -- -D warnings
       - run: cargo test --release --workspace
       - run: cargo test --release --workspace --features existing
       - name: C example against the shared library
@@ -27,6 +28,18 @@ jobs:
           gcc -O2 -Wall -Wextra -Icrates/gpress-c/include crates/gpress-c/examples/roundtrip.c -Ltarget/release -lgpress_c -lpthread -ldl -lm -o roundtrip
           printf '%%PDF-1.4\n%%%%EOF\n' > t.pdf
           LD_LIBRARY_PATH=target/release ./roundtrip t.pdf
+
+  licences:
+    name: Licence and advisory gate (cargo deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-deny --locked
+      # deny.toml: only the permissive licences on its allow list may appear anywhere in the dependency
+      # tree (every feature, every target); known advisories fail the job too.
+      - run: cargo deny check licenses advisories
 
   wasm:
     name: WebAssembly package

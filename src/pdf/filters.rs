@@ -121,7 +121,9 @@ pub fn unpredict(st: &Stage, data: &[u8]) -> Result<Vec<u8>, FilterError> {
         return Err(FilterError::Bad("predictor parameters"));
     }
     let bits_per_pixel = (colors * bpc) as usize;
-    let row = (bits_per_pixel * cols as usize).div_ceil(8);
+    // A row longer than the data holds only one (short) row, whose samples come out the same whatever the
+    // row length beyond them: so the row is cut to the data, and nothing is sized by the parameters alone.
+    let row = (bits_per_pixel * cols as usize).div_ceil(8).min(data.len()).max(1);
     let bpp = bits_per_pixel.div_ceil(8);
     if pred == 2 {
         if bpc != 8 {
@@ -159,13 +161,7 @@ pub fn unpredict(st: &Stage, data: &[u8]) -> Result<Vec<u8>, FilterError> {
                 4 => {
                     let p = a as i16 + b as i16 - c as i16;
                     let (pa, pb, pc) = ((p - a as i16).abs(), (p - b as i16).abs(), (p - c as i16).abs());
-                    let pr = if pa <= pb && pa <= pc {
-                        a
-                    } else if pb <= pc {
-                        b
-                    } else {
-                        c
-                    };
+                    let pr = if pa <= pb && pa <= pc { a } else if pb <= pc { b } else { c };
                     cur[i].wrapping_add(pr)
                 }
                 _ => return Err(FilterError::Bad("unknown PNG filter type")),

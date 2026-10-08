@@ -7,9 +7,7 @@ use gpress::pack::{pack, unpack};
 fn pdf_with_indirect_filter() -> Vec<u8> {
     let mut content = Vec::new();
     for i in 0..200 {
-        content.extend_from_slice(
-            format!("BT /F1 12 Tf 72 {} Td (Line {i} of the test page) Tj ET\n", 700 - i * 3).as_bytes(),
-        );
+        content.extend_from_slice(format!("BT /F1 12 Tf 72 {} Td (Line {i} of the test page) Tj ET\n", 700 - i * 3).as_bytes());
     }
     let z = zlib_stream(&content, Params { level: 6, window_bits: 15, mem_level: 8, filtered: false });
     let mut d = Vec::new();
@@ -74,7 +72,22 @@ fn refuses_damaged_files() {
     cases.push(huge);
     for (k, c) in cases.iter().enumerate() {
         if let Ok(out) = unpack(c) {
-            assert_eq!(out, pdf, "case {k}: a damaged file restored to something else")
+            assert_eq!(out, pdf, "case {k}: a damaged file restored to something else");
         }
     }
+}
+
+/// A PDF packed by the first build of the current format version (`tests/data/format-v7.*`: syntax, a content
+/// stream, an image, long repeats and noise). It must still restore, and packing it again must give the same
+/// bytes: the model is part of the format, so a faster model has to compute exactly the same thing.
+#[test]
+fn stored_format_files_still_restore_and_pack_the_same() {
+    let pdf = include_bytes!("data/format-v7.pdf");
+    let gpz = include_bytes!("data/format-v7.gpz");
+    assert_eq!(unpack(gpz).unwrap(), pdf);
+    assert!(pack(pdf).0 == gpz);
+    // One bit changed is refused, not restored wrongly.
+    let mut bad = gpz.to_vec();
+    bad[gpz.len() / 2] ^= 8;
+    assert!(unpack(&bad).is_err());
 }

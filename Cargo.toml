@@ -14,14 +14,18 @@ path = "src/lib.rs"
 name = "gpress"
 path = "src/bin/gpress.rs"
 
-# Our own code has no dependencies. The "existing" feature adds the best existing libraries as extra
-# candidates (the engine keeps whichever result is smaller after the checks).
+# Our compression code has no dependencies. The "existing" feature adds one existing library, Lepton for JPEG
+# streams, as an extra candidate (the engine keeps whichever result is smaller after the checks). Every
+# dependency is MIT or Apache-2.0; deny.toml holds the licence rule and `cargo deny` checks it.
 [dependencies]
-preflate-rs = { version = "0.7", optional = true }
+# The AES block cipher, MD5 and SHA-2 for encrypted PDFs (RustCrypto, MIT or Apache-2.0).
+aes = "0.9"
+md-5 = "0.11"
+sha2 = "0.11"
 lepton_jpeg = { version = "0.5", optional = true }
 
 [features]
-existing = ["dep:preflate-rs", "dep:lepton_jpeg"]
+existing = ["dep:lepton_jpeg"]
 
 [workspace]
 members = [".", "crates/gpress-c", "crates/gpress-wasm"]

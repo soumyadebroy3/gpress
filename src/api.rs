@@ -60,7 +60,7 @@ pub struct Options {
     pub threads: usize,
     /// Most objects per compressed object stream in a normal PDF.
     pub objects_per_stream: usize,
-    /// Try the optional existing-library candidates (preflate, Lepton) when the build includes them.
+    /// Try the optional existing-library candidate (Lepton, for JPEG streams) when the build includes it.
     pub use_existing_libraries: bool,
     /// Normal PDF: leave files that are PDF/A, PDF/X, signed, certified or have usage rights untouched.
     /// `true` is the safe default; `false` still keeps every object's value but drops those guarantees.
@@ -117,30 +117,9 @@ impl Options {
         self
     }
 
-    /// The Flate encoder settings this effort level means.
+    /// The Flate encoder settings this effort level means (the engine's own steps of 20).
     pub(crate) fn flate(&self) -> crate::flate::Options {
-        let e = self.effort.level() as usize;
-        if e >= 100 {
-            return crate::flate::Options::max();
-        }
-        if e == 0 {
-            return crate::flate::Options::quick();
-        }
-        // Between the two: each knob moves with the level, so neighbouring levels give neighbouring work.
-        let max = crate::flate::Options::max();
-        let quick = crate::flate::Options::quick();
-        let lerp = |a: usize, b: usize| a + (b.saturating_sub(a)) * e / 100;
-        crate::flate::Options {
-            iterations: lerp(quick.iterations, max.iterations),
-            exact_rounds: lerp(quick.exact_rounds, max.exact_rounds),
-            max_chain: lerp(quick.max_chain, max.max_chain),
-            segment: max.segment,
-            split: true,
-            alternatives: e >= 50,
-            multi_start_limit: if e >= 75 { max.multi_start_limit } else { 0 },
-            nice: if e >= 90 { max.nice } else { lerp(quick.nice, 128) },
-            polish: e >= 60,
-        }
+        crate::flate::Options::effort(self.effort.level())
     }
 
     /// The Flate settings for this effort, for the command-line tool's fine-tuning flags.
@@ -154,6 +133,21 @@ impl Options {
             flate: self.flate(),
             objstm_size: self.objects_per_stream.max(1),
             max_stream: self.max_stream,
+            effort: self.effort.level(),
+            threads: self.threads,
+            respect_conformance: self.respect_conformance,
+            flate_over_jpeg: self.flate_over_jpeg,
+            ..rewrite::Options::default()
+        }
+    }
+
+    pub(crate) fn pack(&self) -> pack::PackOptions {
+        pack::PackOptions {
+            effort: self.effort.level(),
+            threads: self.threads,
+            max_stream: self.max_stream,
+            existing: self.use_existing_libraries && pack::PackOptions::default().existing,
+            ..pack::PackOptions::default()
         }
     }
 }
@@ -234,7 +228,6 @@ pub struct Compressed {
     /// Streams the model saw decoded, with an existing library's help, or stored as they were.
     pub streams: usize,
     pub streams_rebuilt: usize,
-    pub streams_preflated: usize,
     pub streams_lepton: usize,
     /// The archive is the whole input stored as it was: nothing could be made smaller.
     pub stored: bool,
@@ -287,13 +280,12 @@ pub fn optimize(input: &[u8], opt: &Options) -> Result<Optimized, Error> {
 pub fn compress(input: &[u8], opt: &Options) -> Result<Compressed, Error> {
     check_size(input, opt)?;
     guard("compress", || {
-        let (data, st) = pack::pack(input);
+        let (data, st) = pack::pack_with(input, &opt.pack());
         Ok(Compressed {
             data,
             rebuilt_bytes: st.rebuilt_bytes,
             streams: st.streams,
             streams_rebuilt: st.rebuilt,
-            streams_preflated: st.preflated,
             streams_lepton: st.leptons,
             stored: st.stored,
         })
