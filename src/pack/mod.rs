@@ -314,7 +314,7 @@ fn info(dict: Option<&Dict>, decoded_sample: Option<&[u8]>) -> Info {
             Some(Obj::Name(n)) if n == b"DeviceGray" || n == b"CalGray" || n == b"G" => (1, false),
             Some(Obj::Array(a)) => match first(a).as_deref() {
                 Some(b"Indexed") | Some(b"I") => (1, true),
-                Some(b"DeviceN") => (a.get(1).and_then(|x| x.as_array()).map_or(1, |v| v.len().max(1)), false),
+                Some(b"DeviceN") => (a.get(1).and_then(|x| x.as_array()).map_or(1, |v| v.len().clamp(1, 32)), false),
                 Some(b"Separation") | Some(b"CalGray") => (1, false),
                 Some(b"CalRGB") | Some(b"Lab") => (3, false),
                 // The real count is in the ICC stream (/N); the data length confirms it below.
@@ -322,7 +322,7 @@ fn info(dict: Option<&Dict>, decoded_sample: Option<&[u8]>) -> Info {
             },
             _ => (1, false),
         };
-        let row = (w * comps * bpc).div_ceil(8);
+        let row = w.saturating_mul(comps * bpc).div_ceil(8);
         let bpp = ((comps * bpc) / 8).max(1);
         inf.kind = Kind::Image;
         // Palette indices and packed pixels are symbols: modelled exactly, not as differences.
@@ -331,19 +331,18 @@ fn info(dict: Option<&Dict>, decoded_sample: Option<&[u8]>) -> Info {
         inf.img = Some((w, h, bpc, comps));
         if let Some(p) = &parms {
             let pred = int(p, b"Predictor").unwrap_or(1);
+            // Guesses, so clamped like the image's own values: the data length confirms them (a predictor
+            // row is checked against it), and both sides read the same dictionary.
+            let cols = int(p, b"Columns").unwrap_or(1).clamp(1, 1 << 24) as usize;
+            let colors = int(p, b"Colors").unwrap_or(1).clamp(1, 32) as usize;
+            let pbpc = int(p, b"BitsPerComponent").unwrap_or(8).clamp(1, 16) as usize;
             if pred >= 10 {
-                let cols = int(p, b"Columns").unwrap_or(1).max(1) as usize;
-                let colors = int(p, b"Colors").unwrap_or(1).max(1) as usize;
-                let pbpc = int(p, b"BitsPerComponent").unwrap_or(8).max(1) as usize;
-                let prow = (cols * colors * pbpc).div_ceil(8);
+                let prow = cols.saturating_mul(colors * pbpc).div_ceil(8);
                 let pbpp = (colors * pbpc).div_ceil(8).max(1);
                 inf.png = Some((prow, pbpp));
                 inf.geom = Geom { stride: prow, bpp: pbpp, exact: exact || pbpc < 8 };
                 inf.img = None;
             } else if pred == 2 {
-                let cols = int(p, b"Columns").unwrap_or(1).max(1) as usize;
-                let colors = int(p, b"Colors").unwrap_or(1).max(1) as usize;
-                let pbpc = int(p, b"BitsPerComponent").unwrap_or(8).max(1) as usize;
                 if pbpc == 8 {
                     inf.tiff = Some((cols * colors, colors));
                     inf.geom = Geom { stride: cols * colors, bpp: colors, exact: false };

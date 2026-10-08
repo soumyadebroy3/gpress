@@ -121,7 +121,9 @@ pub fn unpredict(st: &Stage, data: &[u8]) -> Result<Vec<u8>, FilterError> {
         return Err(FilterError::Bad("predictor parameters"));
     }
     let bits_per_pixel = (colors * bpc) as usize;
-    let row = (bits_per_pixel * cols as usize).div_ceil(8);
+    // A row longer than the data holds only one (short) row, whose samples come out the same whatever the
+    // row length beyond them: so the row is cut to the data, and nothing is sized by the parameters alone.
+    let row = (bits_per_pixel * cols as usize).div_ceil(8).min(data.len()).max(1);
     let bpp = bits_per_pixel.div_ceil(8);
     if pred == 2 {
         if bpc != 8 {

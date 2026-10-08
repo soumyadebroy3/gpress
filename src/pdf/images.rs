@@ -11,13 +11,18 @@ pub struct Geometry {
 }
 
 impl Geometry {
+    /// Bytes per row (never 0: `geometry` refuses what doesn't fit, so the product can't wrap around).
     pub fn row(&self) -> usize {
-        (self.colors * self.bpc * self.columns).div_ceil(8)
+        self.colors.saturating_mul(self.bpc).saturating_mul(self.columns).div_ceil(8).max(1)
     }
     pub fn bpp(&self) -> usize {
-        (self.colors * self.bpc).div_ceil(8).max(1)
+        self.colors.saturating_mul(self.bpc).div_ceil(8).max(1)
     }
 }
+
+/// Widest image whose rows are worked out (16 million samples; the row length must fit a usize on every
+/// target, and nothing real is wider).
+const MAX_COLUMNS: i64 = 1 << 24;
 
 /// Colour components of a colour space (None if unknown).
 pub fn components(cs: &Obj, resolve: &dyn Fn(&Obj) -> Option<Obj>) -> Option<usize> {
@@ -63,9 +68,11 @@ pub fn geometry(d: &Dict, resolve: &dyn Fn(&Obj) -> Option<Obj>) -> Option<Geome
     let mask = d.get(b"ImageMask") == Some(&Obj::Bool(true));
     let bpc = if mask { 1 } else { d.get(b"BitsPerComponent")?.as_int()? };
     let colors = if mask { 1 } else { components(d.get(b"ColorSpace")?, resolve)? };
-    if w <= 0 || ![1, 2, 4, 8, 16].contains(&bpc) || colors == 0 || colors > 32 {
+    if !(1..=MAX_COLUMNS).contains(&w) || ![1, 2, 4, 8, 16].contains(&bpc) || colors == 0 || colors > 32 {
         return None;
     }
+    // At most 2^24 x 32 x 16 bits: fits a usize on 64-bit targets; checked for the others.
+    colors.checked_mul(bpc as usize)?.checked_mul(w as usize)?;
     Some(Geometry { colors, bpc: bpc as usize, columns: w as usize })
 }
 
@@ -117,7 +124,7 @@ pub fn png_unfilter(data: &[u8], row: usize, bpp: usize) -> Option<Vec<u8>> {
 /// TIFF predictor 2 for 8-bit samples back to samples.
 pub fn tiff_unfilter(data: &[u8], row: usize, bpp: usize) -> Vec<u8> {
     let mut out = data.to_vec();
-    for r in out.chunks_mut(row) {
+    for r in out.chunks_mut(row.max(1)) {
         for i in bpp..r.len() {
             r[i] = r[i].wrapping_add(r[i - bpp]);
         }
