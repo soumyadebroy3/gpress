@@ -75,24 +75,29 @@ fetch_one() {
     return 1
 }
 
-# The rows, tab-separated, without the comments and the header. Each runs in the background, at most $jobs at a
-# time; failures are counted through a file (a subshell can't change the parent's variables).
+# The rows, tab-separated, without the comments and the header, in a file: the loop reads them in this shell
+# (a loop fed by a pipe runs in a subshell, whose background jobs the parent's `wait` cannot see, so the last
+# batch would be reported before it finished). Each row runs in the background, at most $jobs at a time;
+# failures are counted through a file (a background job can't change this shell's variables).
+rows=$(mktemp)
 fails=$(mktemp)
+trap 'rm -f "$rows" "$fails"' EXIT
+awk -F'\t' '!/^#/ && $1 != "path" && NF == 6' "$lock" >"$rows"
 : >"$fails"
 running=0
-awk -F'\t' '!/^#/ && $1 != "path" && NF == 6' "$lock" | while IFS="$(printf '\t')" read -r path repo commit member sha size; do
-    fetch_one "$path" "$repo" "$commit" "$member" "$sha" "$size" || echo "$path" >>"$fails" &
+while IFS="$(printf '\t')" read -r path repo commit member sha size; do
+    # The job's stdin is not the rows file, so nothing it runs can eat the rows.
+    { fetch_one "$path" "$repo" "$commit" "$member" "$sha" "$size" || echo "$path" >>"$fails"; } </dev/null &
     running=$((running + 1))
     if [ "$running" -ge "$jobs" ]; then
         wait
         running=0
     fi
-done
+done <"$rows"
 wait
 
-n=$(awk -F'\t' '!/^#/ && $1 != "path" && NF == 6' "$lock" | wc -l | tr -d ' ')
+n=$(wc -l <"$rows" | tr -d ' ')
 bad=$(wc -l <"$fails" | tr -d ' ')
-rm -f "$fails"
 if [ "$bad" -eq 0 ]; then
     echo "corpus ok: $n files in $dir, every sha256 as in sets/corpus.lock"
     exit 0
