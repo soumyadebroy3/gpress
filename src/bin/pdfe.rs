@@ -240,7 +240,49 @@ fn main() {
                 out.flush().unwrap();
             }
         }
-        _ => die("usage: pdfe deflate|inflate|batch|optimize|pdf-batch|repro|pack|unpack|pack-batch ..."),
+        Some("jpeg-info") => {
+            for i in &pos[1..] {
+                let data = std::fs::read(i).unwrap_or_else(|e| die(&format!("{i}: {e}")));
+                match engine::jpeg::info(&data) {
+                    Ok(s) => println!("{i}\t{s}"),
+                    Err(e) => println!("{i}\trefused: {e}"),
+                }
+            }
+        }
+        Some("jpeg") | Some("jpeg-batch") => {
+            // pdfe jpeg IN OUT: one JPEG file with optimal Huffman tables (OUT is a copy of IN when refused);
+            // jpeg-batch: stdin lines "IN<TAB>OUT". Prints IN, bytes in, bytes out, seconds, and why not if refused.
+            let one = |i: &str, o: &str| -> String {
+                let data = match std::fs::read(i) {
+                    Ok(d) => d,
+                    Err(e) => return format!("{i}\tERROR\t{e}"),
+                };
+                let t = Instant::now();
+                let r = engine::jpeg::optimize(&data);
+                let secs = t.elapsed().as_secs_f64();
+                let (bytes, why) = match &r {
+                    Ok(x) => (x.as_slice(), "optimized".to_string()),
+                    Err(e) => (data.as_slice(), format!("refused: {e}")),
+                };
+                std::fs::write(o, bytes).unwrap_or_else(|e| die(&format!("{o}: {e}")));
+                format!("{i}\t{}\t{}\t{secs:.3}\t{why}", data.len(), bytes.len())
+            };
+            if pos[0] == "jpeg" {
+                let (i, o) = (pos.get(1).unwrap_or_else(|| die("need IN")), pos.get(2).unwrap_or_else(|| die("need OUT")));
+                println!("{}", one(i, o));
+            } else {
+                let mut out = std::io::stdout().lock();
+                for line in std::io::stdin().lock().lines() {
+                    let line = line.unwrap();
+                    let mut it = line.split('\t');
+                    let (Some(i), Some(o)) = (it.next(), it.next()) else { continue };
+                    let r = std::panic::catch_unwind(|| one(i, o)).unwrap_or_else(|_| format!("{i}\tPANIC"));
+                    writeln!(out, "{r}").unwrap();
+                    out.flush().unwrap();
+                }
+            }
+        }
+        _ => die("usage: pdfe deflate|inflate|batch|optimize|pdf-batch|repro|pack|unpack|pack-batch|jpeg|jpeg-batch ..."),
     }
 }
 
