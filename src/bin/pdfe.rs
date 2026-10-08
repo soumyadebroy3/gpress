@@ -6,6 +6,7 @@
 //!   pdfe optimize IN OUT [--effort N]         normal PDF; N from 0 (fast) to 100 (default); --quick = 0
 //!   pdfe pack IN OUT [--effort N]             peyaji format (the effort only changes the encoder's choices;
 //!                                             --no-decrypt keeps encrypted streams as stored)
+//!   pdfe unpack IN OUT [--max-len N]          the original; a file declaring more than N bytes is refused
 //!
 //! --threads N sets the threads (default: what the machine offers, at most 8); the output is the same.
 
@@ -29,7 +30,7 @@ fn main() {
             continue;
         }
         if a.starts_with("--") {
-            skip_next = matches!(a.as_str(), "--iter" | "--exact" | "--chain" | "--nice" | "--threads" | "--effort");
+            skip_next = matches!(a.as_str(), "--iter" | "--exact" | "--chain" | "--nice" | "--threads" | "--effort" | "--max-len");
             continue;
         }
         pos.push(a);
@@ -185,7 +186,8 @@ fn main() {
         Some("unpack") => {
             let (i, o) = (pos.get(1).unwrap_or_else(|| die("need IN")), pos.get(2).unwrap_or_else(|| die("need OUT")));
             let data = std::fs::read(i).unwrap_or_else(|e| die(&format!("{i}: {e}")));
-            let out = engine::pack::unpack(&data).unwrap_or_else(|e| die(&e));
+            let limit = num("--max-len").map_or(engine::pack::UnpackOptions::default(), |n| engine::pack::UnpackOptions { max_len: n as u64 });
+            let out = engine::pack::unpack_with(&data, &limit).unwrap_or_else(|e| die(&e));
             std::fs::write(o, &out).unwrap_or_else(|e| die(&format!("{o}: {e}")));
         }
         Some("expand") => {
