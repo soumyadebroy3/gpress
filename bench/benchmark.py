@@ -4,7 +4,7 @@
   benchmark.py time    RUN [options]     measure every file: wall and CPU time, peak memory, bytes, exactness
   benchmark.py space   RUN [options]     the same rows (memory is taken in every run) plus the fixed-cost probe
   benchmark.py report  RUN [options]     tables (text, --markdown, and RUN/*.tsv) from the rows of a run
-  benchmark.py compare BASE NEW [opts]   pass/fail: slower, larger or more memory than the stored run?
+  benchmark.py compare BASE NEW [opts]   pass/fail: slower (CPU time), larger or more memory than the stored run?
   benchmark.py sets    [options]         write the file lists in bench/sets/ from the corpus and earlier results
   benchmark.py selftest                  plant a slower file, a larger output and more memory; compare must fail
   benchmark.py security ...              part 3, in bench/security.py when it exists
@@ -12,6 +12,11 @@
 RUN is a directory (made under bench/results/ when the name has no slash). Every measurement is one row of
 JSON in RUN/<tool>-<mode>[-e<effort>-t<threads>].jsonl, written as soon as the file is done, so a run that
 is stopped continues where it left off, and a second run with other options only does what is missing.
+`report` and `compare` take `--with OTHER_RUN`: settings that RUN lacks (the competitors, measured once and
+stored) are read from there, on the files RUN measured, so a run of ours alone is cheap and still compared.
+Every run starts by timing a fixed job (xz -9e on 4 MiB of fixed text) and stores it in RUN/meta.json as the
+machine's calibration: a CPU second is not the same work on every host, and `compare` says when the two
+runs' machines differ (`--scale` divides the new run's times by the ratio).
 
 What is measured, file by file, one process at a time, with the child's own `wait4` figures (wall time,
 user + system CPU time, peak resident set):
@@ -31,7 +36,7 @@ The corpus root, the engine, the competitors' commands and every threshold come 
 environment (PDFE or GPRESS for the engine, CORPUS for the corpus), a JSON file (--config) and the options.
 Run with python3 -I: the test files are untrusted and nothing from them is ever executed. The row that
 describes a file holds its path relative to the corpus root, so runs made on different machines compare."""
-import argparse, hashlib, json, os, random, select, shutil, statistics, subprocess, sys, tempfile, threading, time
+import argparse, hashlib, json, os, random, re, select, shutil, statistics, subprocess, sys, tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRATCH = '/tmp/claude-0/-home-claude/b636d578-f2d3-5309-87d4-a4766d45bbac/scratchpad'
@@ -73,13 +78,18 @@ DEFAULTS = {
         'zstd': {'mode': 'archive', 'stdout': True, 'cmd': ['zstd', '-19', '--long=27', '-T1', '-q', '-c', '{in}'], 'version': ['zstd', '--version']},
         'expandxz': {'mode': 'archive', 'cmd': ['xz', '-9e', '-k', '-c', '-T1', '{in}'], 'stdout': True, 'expand': True},
     },
+    # The machine's speed, measured at the start of every run and stored in meta.json: a fixed job's CPU time.
+    'calibration': {'cmd': ['xz', '-9e', '-c', '-T1', '{in}'], 'mb': 4, 'seed': 2026, 'runs': 3},  # runs 0: skip it
     'compare': {
-        'metric': 'wall',  # or cpu
+        'metric': 'cpu',  # the child's user + system time: steady on a shared machine; 'wall' is what a user waits
         'total_tolerance': 0.10,  # a setting may not get more than 10% slower in total
         'file_factor': 2.0,  # no file may get more than 2x slower ...
         'min_seconds': 0.05,  # ... counted on files that took at least this long before (process start noise)
         'mem_tolerance': 0.10,  # the peak memory of a setting may not grow more than 10%
         'mem_floor_kb': 4096,  # ... beyond this many KB (page-level noise on tiny files)
+        'load_gap': 1.0,  # a note when the machine's load differed by more than this between the two runs
+        'calibration_gap': 0.10,  # a warning when the two runs' machines differ by more than this in the calibration job
+        'scale': False,  # scale the new run's times by the calibration ratio before the time rules (--scale)
     },
 }
 
@@ -390,7 +400,52 @@ def git_short(path):
         return '?'
 
 
-def write_meta(cfg, run, a):
+def cpu_model():
+    try:
+        for l in open('/proc/cpuinfo'):
+            if l.startswith('model name'):
+                return l.split(':', 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+
+def calibration_text(mb, seed):
+    """A fixed, compressible text of about mb MiB: the same bytes on every machine."""
+    words = ('the', 'of', 'and', 'to', 'in', 'stream', 'endstream', 'obj', 'endobj', 'xref', 'trailer', 'Length', 'Filter', 'FlateDecode',
+             'Type', 'Page', 'Font', 'Contents', 'Resources', 'MediaBox', 'Parent', 'Kids', 'Count', 'Root', 'Size', 'Width', 'Height')
+    rng = random.Random(seed)
+    parts, n = [], 0
+    while n < mb << 20:
+        line = ' '.join(rng.choice(words) + (str(rng.randrange(1000)) if rng.random() < 0.3 else '') for _ in range(12)) + '\n'
+        parts.append(line)
+        n += len(line)
+    return ''.join(parts).encode()
+
+
+def calibrate(cfg, tmp):
+    """How fast this machine is: the CPU seconds of a fixed job (xz -9e on a fixed text, the smallest of a
+    few runs). Stored in meta.json, so `compare` can tell a slower build from a slower machine: a CPU second
+    is not the same amount of work on every host a container lands on (seen here: the same engine work took
+    1.85x the CPU time after a restart)."""
+    c = cfg['calibration']
+    if not c['runs']:
+        return None
+    src = os.path.join(tmp, 'calibration.txt')
+    with open(src, 'wb') as w:
+        w.write(calibration_text(c['mb'], c['seed']))
+    best = None
+    for _ in range(c['runs']):
+        ran = spawn(fill(c['cmd'], **{'in': src}), 600.0, stdout_path=os.path.join(tmp, 'calibration.out'))
+        if ran.rc != 0:
+            return {'what': ' '.join(c['cmd']), 'error': ran.stderr[-200:].decode('utf-8', 'replace')}
+        if best is None or ran.cpu < best.cpu:
+            best = ran
+    os.unlink(src)
+    return {'what': f"{' '.join(c['cmd'][:-1])} on {c['mb']} MiB of fixed text, smallest of {c['runs']}", 'cpu_s': round(best.cpu, 3), 'wall_s': round(best.wall, 3)}
+
+
+def write_meta(cfg, run, a, calibration):
     meta = {
         'date': time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime()),
         'build': a.build or git_short(HERE),
@@ -399,16 +454,18 @@ def write_meta(cfg, run, a):
         'set': set_name(a.set),
         'corpus': os.path.abspath(cfg['corpus']),
         'cpus': os.cpu_count(),
+        'cpu_model': cpu_model(),
         'mem_total_kb': next((int(l.split()[1]) for l in open('/proc/meminfo') if l.startswith('MemTotal')), None),
         'kernel': os.uname().release,
         'python': sys.version.split()[0],
         'tools': {k: tool_version(v['version']) for k, v in cfg['competitors'].items() if 'version' in v},
         'measured_by': Launcher.note,
+        'calibration': calibration,
     }
     path = os.path.join(run, 'meta.json')
     old = json.load(open(path)) if os.path.exists(path) else {}
     old.setdefault('runs', []).append(meta)
-    for k in ('date', 'build', 'engine', 'engine_sha256', 'set', 'corpus', 'cpus', 'mem_total_kb', 'kernel', 'tools', 'measured_by'):
+    for k in ('date', 'build', 'engine', 'engine_sha256', 'set', 'corpus', 'cpus', 'cpu_model', 'mem_total_kb', 'kernel', 'tools', 'measured_by', 'calibration'):
         old[k] = meta[k]
     json.dump(old, open(path, 'w'), indent=1)
 
@@ -616,7 +673,7 @@ def measure(cfg, a, with_fixed):
     if not os.path.exists(cfg['engine']) and 'ours' in cfg['who']:
         sys.exit(f'engine not found: {cfg["engine"]} (set PDFE or --engine)')
     r = Runner(cfg, run, a)
-    write_meta(cfg, run, a)
+    write_meta(cfg, run, a, calibrate(cfg, r.tmp))
     try:
         for name, tool, mode, effort, threads in jobs:
             path = os.path.join(run, name + '.jsonl')
@@ -690,23 +747,38 @@ def fit_line(xs, ys):
 
 
 class Run:
-    """The rows of one run directory, grouped by setting."""
+    """The rows of one run directory, grouped by setting. `only` restricts the files; `extra` names other run
+    directories whose settings this run lacks (the stored competitor rows, say) and are merged in, on the
+    files this run measured, so a run of ours alone still reports against the baselines."""
 
-    def __init__(self, cfg, path, only=None):
+    def __init__(self, cfg, path, only=None, extra=()):
         self.path = path
         self.meta = json.load(open(os.path.join(path, 'meta.json'))) if os.path.exists(os.path.join(path, 'meta.json')) else {}
+        groups = self.read_groups(path, only)
+        self.borrowed = {}
+        if extra:
+            files = {r['file'] for rows in groups.values() for r in rows}
+            for other in extra:
+                for n, rows in self.read_groups(other, files).items():
+                    if n not in groups:
+                        groups[n] = rows
+                        self.borrowed[n] = other
+        # Normal PDF before archive, ours before the competitors, by effort and thread count.
+        order = lambda n: (groups[n][0]['mode'] != 'pdf', groups[n][0]['tool'] != 'ours', groups[n][0].get('effort', -1), groups[n][0].get('threads', -1), n)
+        self.groups = {n: groups[n] for n in sorted(groups, key=order)}
+        self.fixed = load_rows(os.path.join(path, 'fixed.jsonl'))
+
+    @staticmethod
+    def read_groups(path, only):
         groups = {}
-        for fn in os.listdir(path):
+        for fn in sorted(os.listdir(path)):
             if fn.endswith('.jsonl') and fn != 'fixed.jsonl':
                 rows = load_rows(os.path.join(path, fn))
                 if only is not None:
                     rows = [r for r in rows if r['file'] in only]
                 if rows:
                     groups[fn[:-6]] = rows
-        # Normal PDF before archive, ours before the competitors, by effort and thread count.
-        order = lambda n: (groups[n][0]['mode'] != 'pdf', groups[n][0]['tool'] != 'ours', groups[n][0].get('effort', -1), groups[n][0].get('threads', -1), n)
-        self.groups = {n: groups[n] for n in sorted(groups, key=order)}
-        self.fixed = load_rows(os.path.join(path, 'fixed.jsonl'))
+        return groups
 
     def setting(self, name):
         rows = self.groups[name]
@@ -727,6 +799,7 @@ def time_stats(cfg, rows):
     st = {
         'files': len(rows), 'ok': len(ok), 'bytes_in': sum(r['bytes_in'] for r in rows),
         'wall': total_wall, 'cpu': sum(r['cpu'] for r in ok),
+        'load': statistics.mean(r.get('load1', 0.0) for r in rows) if rows else 0.0,  # the machine's 1-minute load while measuring: wall times under a load above the CPU count are inflated
         'median': statistics.median(walls) if walls else 0.0, 'p90': quantile(walls, 0.9), 'p99': quantile(walls, 0.99),
         'slowest': (slowest['wall'], slowest['file']) if slowest else (0.0, '-'),
         'mbps': (sum(r['bytes_in'] for r in ok) / 1e6 / total_wall) if total_wall else 0.0,
@@ -759,7 +832,7 @@ def memory_stats(cfg, rows):
     }
 
 
-def output_stats(run):
+def output_stats(cfg, run):
     """Bytes out against the competitors, per mode, on the files every tool of that mode handled."""
     out = {}
     for mode in ('pdf', 'archive'):
@@ -774,6 +847,9 @@ def output_stats(run):
             tot = sum(by[n][f]['bytes_out'] for f in common)
             wins = sum(1 for f in common if all(by[n][f]['bytes_out'] < by[m][f]['bytes_out'] for m in comps if m != n)) if run.setting(n)[0] == 'ours' and comps else None
             res['tools'][n] = {'bytes_out': tot, 'wins': wins}
+        plain = [m for m in comps if not cfg['competitors'].get(run.setting(m)[0], {}).get('expand')]
+        if len(plain) > 1:  # the best general compressor for every file, as if one could pick after the fact
+            res['best_of'] = (sum(min(by[m][f]['bytes_out'] for m in plain) for f in common), [run.label(m) for m in plain])
         if mode == 'pdf':
             for n in names:
                 if run.setting(n)[0] == 'ours':
@@ -782,7 +858,7 @@ def output_stats(run):
                     reasons = {}
                     for r in rows:
                         if r.get('status') == 'UNTOUCHED':
-                            why = (r.get('details') or '?').split(':')[0]
+                            why = re.sub(r'\d+', 'N', (r.get('details') or '?').split(':')[0])  # "unreadable object 65560" -> one reason
                             reasons[why] = reasons.get(why, 0) + 1
                     q = {r['file']: r for n2 in comps for r in run.groups[n2] if r.get('bytes_out')}
                     both = [r for r in smaller if r['file'] in q]
@@ -811,45 +887,70 @@ def determinism(run):
     return res
 
 
+def extra_runs(cfg, a):
+    return [run_dir(cfg, x) for x in a.with_runs.split(',')] if a.with_runs else []
+
+
+def short_error(cfg, text):
+    """The end of a stderr text (where the error is) without the corpus path, on one line."""
+    return ' '.join(text.replace(os.path.abspath(cfg['corpus']) + os.sep, '').split())[-160:]
+
+
 def report(cfg, a):
-    run = Run(cfg, run_dir(cfg, a.run), set(read_set(cfg, a.set)) if a.set else None)
+    run = Run(cfg, run_dir(cfg, a.run), set(read_set(cfg, a.set)) if a.set else None, extra_runs(cfg, a))
     md = a.markdown
     lines = []
     P = lines.append
     build = run.meta.get('build', '?')
     P(f'Run {os.path.basename(run.path.rstrip(os.sep))}: build {build}, {run.meta.get("cpus", "?")} CPUs, '
       f'{(run.meta.get("mem_total_kb") or 0) // 1024} MB, {run.meta.get("date", "?")}' + (f', files of {set_name(a.set)}' if a.set else ''))
+    cal = run.meta.get('calibration') or {}
+    if run.meta.get('cpu_model') or cal.get('cpu_s'):
+        P(f"Machine: {run.meta.get('cpu_model') or '?'}" + (f"; calibration: {cal['what']} {cal['cpu_s']:.2f} s of CPU" if cal.get('cpu_s') else ''))
     tools = run.meta.get('tools', {})
     if tools:
         P('Competitors: ' + '; '.join(f'{k}: {v}' for k, v in tools.items()))
+    if run.borrowed:
+        P('Taken from other runs, on the files of this one: ' + '; '.join(f'{n} from {os.path.basename(p.rstrip(os.sep))}' for n, p in run.borrowed.items()))
+    if run.meta.get('note'):
+        P('Note: ' + run.meta['note'])
     P('')
 
     # --- time
     P('## Time' if md else 'TIME')
-    head = ['Tool', 'Files', 'MB', 'Total wall s', 'CPU s', 'Median s', 'p90 s', 'p99 s', 'Slowest s', 'Slowest file', 'MB/s'] + [f'< {m:g} s' for m in cfg['fast_marks']] + ['Exact', 'verify_pdf', 'Failed']
+    head = ['Tool', 'Files', 'MB', 'Total wall s', 'CPU s', 'Load', 'Restore s', 'Median s', 'p90 s', 'p99 s', 'Slowest s', 'Slowest file', 'MB/s'] + \
+           [f'< {m:g} s' for m in cfg['fast_marks']] + ['Exact', 'verify_pdf', 'Failed']
     table = []
     tsv_time = []
+    loads = []
     for n in run.groups:
         st = time_stats(cfg, run.groups[n])
         tool, mode, e, t = run.setting(n)
-        row = [run.label(n) + f' ({mode})', st['files'], f"{st['bytes_in'] / 1e6:.2f}", f"{st['wall']:.1f}", f"{st['cpu']:.1f}", f"{st['median']:.3f}", f"{st['p90']:.2f}",
+        loads.append(st['load'])
+        row = [run.label(n) + f' ({mode})', st['files'], f"{st['bytes_in'] / 1e6:.2f}", f"{st['wall']:.1f}", f"{st['cpu']:.1f}", f"{st['load']:.1f}",
+               f"{st['unpack_wall']:.1f}" if 'unpack_wall' in st else '', f"{st['median']:.3f}", f"{st['p90']:.2f}",
                f"{st['p99']:.1f}", f"{st['slowest'][0]:.1f}", os.path.basename(st['slowest'][1]), f"{st['mbps']:.2f}"] + \
               [str(u) if tool == 'ours' else '' for u in st['under']] + \
               [f"{st['exact'][0]}/{st['exact'][1]}" if st['exact'][1] else '-', f"{st['verified']}" + (f" ({st['verify_failed']} failed)" if st['verify_failed'] else '') if tool == 'ours' and mode == 'pdf' else '',
                str(len(st['failed'])) if st['failed'] else '']
-        if 'unpack_wall' in st:
-            row[0] += f"; unpack {st['unpack_wall']:.1f} s"
         table.append(row)
-        tsv_time.append([n, tool, mode, e, t, st['files'], st['ok'], st['bytes_in'], f"{st['wall']:.3f}", f"{st['cpu']:.3f}", f"{st['median']:.4f}", f"{st['p90']:.4f}", f"{st['p99']:.4f}",
+        tsv_time.append([n, tool, mode, e, t, st['files'], st['ok'], st['bytes_in'], f"{st['wall']:.3f}", f"{st['cpu']:.3f}", f"{st['load']:.2f}", f"{st['median']:.4f}", f"{st['p90']:.4f}", f"{st['p99']:.4f}",
                          f"{st['slowest'][0]:.3f}", st['slowest'][1], f"{st['mbps']:.3f}"] + st['under'] + [st['exact'][0], st['exact'][1], st['verified'], st['verify_failed'], len(st['failed']),
                          f"{st.get('unpack_wall', 0):.3f}"])
-    P(fmt_table(head, table, md, ('Files', 'MB', 'p99 s', 'verify_pdf', 'Failed') if a.brief else ()))
+    P(fmt_table(head, table, md, ('Files', 'MB', 'verify_pdf', 'Failed') if a.brief else ()))
+    cpus = run.meta.get('cpus') or os.cpu_count() or 1
+    if loads and max(loads) > cpus:
+        P('')
+        P(f'Load: the 1-minute load average while each setting was measured (mean over its files). This machine has {cpus} CPUs and was '
+          f'shared; a load above that inflates wall times (what a user waited) but not CPU times, which is why the regression check uses CPU time.')
     failed = [(n, r) for n in run.groups for r in time_stats(cfg, run.groups[n])['failed']]
     if failed:
         P('')
         P('Failed files:')
         for n, r in failed[:40]:
-            P(f"  {n} {r['file']}: {r.get('status')} {r.get('check', '')} {r.get('stderr', '')[:160]!r}")
+            P(f"  {n} {r['file']}: {r.get('status')} {r.get('check', '')} {short_error(cfg, r.get('stderr', ''))}")
+        if len(failed) > 40:
+            P(f'  ... {len(failed) - 40} more')
     not_exact = [(n, r) for n in run.groups for r in run.groups[n] if 'exact' in r and not r['exact'] and r.get('status') in ('OK', 'SMALLER', 'UNTOUCHED')]
     if not_exact:
         P('')
@@ -914,31 +1015,48 @@ def report(cfg, a):
 
     # --- output size
     P('## Space: output' if md else 'SPACE: OUTPUT')
-    os_ = output_stats(run)
+    os_ = output_stats(cfg, run)
     tsv_size = []
     for mode, res in os_.items():
-        P(f"{mode}: {res['files']} files every tool handled, {res['bytes_in'] / 1e6:.2f} MB")
+        fair = [(n, t) for n, t in res['tools'].items() if t.get('smaller_n')]
+        P(f"{mode}: {res['files']} files every tool handled, {res['bytes_in'] / 1e6:.2f} MB" +
+          (' (an untouched file counts as it is; qpdf rewrites every file and drops what it cannot read, earlier revisions and unreferenced objects, '
+           'so its total is not a like-for-like figure: the second table is)' if fair else ''))
         head = ['Tool', 'Bytes out', '% of original', 'Saved %', 'Smallest on']
         table = []
         for n, t in res['tools'].items():
             table.append([run.label(n), f"{t['bytes_out']:,}", f"{pct(t['bytes_out'], res['bytes_in']):.1f}", f"{100 - pct(t['bytes_out'], res['bytes_in']):.1f}",
                           f"{t['wins']} of {res['files']}" if t['wins'] is not None else ''])
             tsv_size.append([mode, n, res['files'], res['bytes_in'], t['bytes_out'], f"{pct(t['bytes_out'], res['bytes_in']):.3f}", t['wins'] if t['wins'] is not None else ''])
+        if 'best_of' in res:
+            b, who = res['best_of']
+            table.append([f"best of {', '.join(who)}, file by file", f'{b:,}', f"{pct(b, res['bytes_in']):.1f}", f"{100 - pct(b, res['bytes_in']):.1f}", ''])
+            tsv_size.append([mode, 'best-of-competitors', res['files'], res['bytes_in'], b, f"{pct(b, res['bytes_in']):.3f}", ''])
         P(fmt_table(head, table, md))
-        for n, t in res['tools'].items():
-            if 'smaller' in t:
-                P(f"  {run.label(n)}: {t['smaller']} files made smaller, {t['untouched']} untouched" +
-                  (f"; on the {t['smaller_n']} smaller files qpdf also handled: {t['smaller_in'] / 1e6:.2f} MB -> ours {t['smaller_out'] / 1e6:.2f} MB "
-                   f"({100 - pct(t['smaller_out'], t['smaller_in']):.1f}% saved), qpdf {t['smaller_qpdf'] / 1e6:.2f} MB ({100 - pct(t['smaller_qpdf'], t['smaller_in']):.1f}%)" if t['smaller_n'] else ''))
-                if t['reasons']:
-                    P('    untouched because: ' + ', '.join(f'{k} {v}' for k, v in sorted(t['reasons'].items(), key=lambda x: -x[1])))
+        # Normal PDF, the like-for-like table: the files ours made smaller, against qpdf on the same files.
+        if fair:
+            P('')
+            P('The files ours made smaller, against qpdf on the same files (a qpdf output larger than the input counts as the input):')
+            head = ['Tool', 'Files smaller', 'Untouched', 'Before', 'Ours', 'Saved %', 'qpdf', 'qpdf saved %']
+            table = []
+            for n, t in fair:
+                table.append([run.label(n), t['smaller_n'], t['untouched'], f"{t['smaller_in'] / 1e6:.2f} MB", f"{t['smaller_out'] / 1e6:.2f} MB", f"{100 - pct(t['smaller_out'], t['smaller_in']):.1f}",
+                              f"{t['smaller_qpdf'] / 1e6:.2f} MB", f"{100 - pct(t['smaller_qpdf'], t['smaller_in']):.1f}"])
+                tsv_size.append([mode, n + ':smaller', t['smaller_n'], t['smaller_in'], t['smaller_out'], f"{pct(t['smaller_out'], t['smaller_in']):.3f}", ''])
+                tsv_size.append([mode, n + ':qpdf-on-the-same', t['smaller_n'], t['smaller_in'], t['smaller_qpdf'], f"{pct(t['smaller_qpdf'], t['smaller_in']):.3f}", ''])
+            P(fmt_table(head, table, md))
+            shown = None
+            for n, t in fair:
+                if t['reasons'] and t['reasons'] != shown:  # the gate does not depend on the effort, so this prints once
+                    P(f"  {run.label(n)} left {t['untouched']} files untouched because: " + ', '.join(f'{k} {v}' for k, v in sorted(t['reasons'].items(), key=lambda x: -x[1])))
+                    shown = t['reasons']
         P('')
 
     text = '\n'.join(lines)
     print(text)
     if a.tsv:
         w = lambda name, head, rows: open(os.path.join(run.path, name), 'w').write('\t'.join(head) + '\n' + ''.join('\t'.join(str(x) for x in r) + '\n' for r in rows))
-        w('time.tsv', ['setting', 'tool', 'mode', 'effort', 'threads', 'files', 'ok', 'bytes_in', 'wall_s', 'cpu_s', 'median_s', 'p90_s', 'p99_s', 'slowest_s', 'slowest_file', 'mb_per_s'] +
+        w('time.tsv', ['setting', 'tool', 'mode', 'effort', 'threads', 'files', 'ok', 'bytes_in', 'wall_s', 'cpu_s', 'load1', 'median_s', 'p90_s', 'p99_s', 'slowest_s', 'slowest_file', 'mb_per_s'] +
           [f'under_{m:g}s' for m in cfg['fast_marks']] + ['exact', 'checked', 'verified', 'verify_failed', 'failed', 'unpack_wall_s'], tsv_time)
         w('memory.tsv', ['setting', 'tool', 'mode', 'effort', 'threads', 'median_kb', 'p90_kb', 'peak_kb', 'peak_file', 'peak_file_bytes', 'ratio_median', 'ratio_max', 'ratio_n', 'fit_fixed_mb', 'fit_bytes_per_byte'], tsv_mem)
         w('size.tsv', ['mode', 'setting', 'files', 'bytes_in', 'bytes_out', 'pct_of_original', 'smallest_on'], tsv_size)
@@ -976,11 +1094,30 @@ def compare(cfg, a):
     c = dict(cfg['compare'])
     if a.metric:
         c['metric'] = a.metric
-    base, new = Run(cfg, run_dir(cfg, a.base)), Run(cfg, run_dir(cfg, a.new))
+    if a.tolerance is not None:
+        c['total_tolerance'] = a.tolerance
+    if a.scale:
+        c['scale'] = True
+    extra = extra_runs(cfg, a)
+    base, new = Run(cfg, run_dir(cfg, a.base), extra=extra), Run(cfg, run_dir(cfg, a.new), extra=extra)
     problems, notes = [], []
     common = [n for n in base.groups if n in new.groups]
     if not common:
         sys.exit('nothing to compare: no setting is in both runs')
+    # The machines: a CPU second is not the same amount of work on every host.
+    scale = 1.0
+    cal = [(x.meta.get('calibration') or {}).get('cpu_s') for x in (base, new)]
+    if cal[0] and cal[1]:
+        ratio = cal[1] / cal[0]
+        if abs(ratio - 1) > c['calibration_gap']:
+            notes.append(f'the machines differ: the calibration job took {cal[0]:.2f} s of CPU for BASE and {cal[1]:.2f} s for NEW ({ratio:.2f}x)' +
+                         (f'; NEW times are divided by {ratio:.2f} before the time rules (--scale)' if c['scale'] else
+                          '; a time difference up to that much may be the machine, not the code (--scale takes it out)'))
+            if c['scale']:
+                scale = 1.0 / ratio
+    elif not cal[0] or not cal[1]:
+        notes.append('no calibration in ' + ' and '.join(x for x, v in zip(('BASE', 'NEW'), cal) if not v) +
+                     ': whether both runs were made on the same machine is not known, and the time rules assume it')
     for n in common:
         b = {r['file']: r for r in base.groups[n] if r.get('status') in ('OK', 'SMALLER', 'UNTOUCHED')}
         w = {r['file']: r for r in new.groups[n] if r.get('status') in ('OK', 'SMALLER', 'UNTOUCHED')}
@@ -988,10 +1125,10 @@ def compare(cfg, a):
         if not files:
             continue
         m = c['metric']
-        tb, tw = sum(b[f][m] for f in files), sum(w[f][m] for f in files)
+        tb, tw = sum(b[f][m] for f in files), sum(w[f][m] for f in files) * scale
         if tw > tb * (1 + c['total_tolerance']):
             problems.append(f'{n}: total {m} {tb:.1f} s -> {tw:.1f} s (+{pct(tw - tb, tb):.0f}%, allowed {c["total_tolerance"] * 100:.0f}%)')
-        slow = [(f, b[f][m], w[f][m]) for f in files if b[f][m] >= c['min_seconds'] and w[f][m] > b[f][m] * c['file_factor']]
+        slow = [(f, b[f][m], w[f][m] * scale) for f in files if b[f][m] >= c['min_seconds'] and w[f][m] * scale > b[f][m] * c['file_factor']]
         for f, x, y in slow[:10]:
             problems.append(f'{n}: {f} {x:.2f} s -> {y:.2f} s ({y / x:.1f}x)')
         if len(slow) > 10:
@@ -1012,8 +1149,12 @@ def compare(cfg, a):
             problems.append(f'{n}: {f} failed in the new run')
         same = sum(1 for f in files if b[f].get('sha256') and b[f].get('sha256') == w[f].get('sha256'))
         ob, ow = sum(b[f].get('bytes_out', 0) for f in files), sum(w[f].get('bytes_out', 0) for f in files)
+        load = [statistics.mean(x[f].get('load1', 0) for f in files) for x in (b, w)]  # a slow-down under a higher load is suspect
         notes.append(f'{n}: {len(files)} files, {m} {tb:.1f} s -> {tw:.1f} s ({pct(tw - tb, tb):+.1f}%), bytes out {ob:,} -> {ow:,} ({pct(ow - ob, ob):+.2f}%), '
-                     f'peak memory {mb(pb):.0f} -> {mb(pw):.0f} MB' + (f', {same} outputs byte-identical' if any(b[f].get('sha256') for f in files) else ''))
+                     f'peak memory {mb(pb):.0f} -> {mb(pw):.0f} MB' + (f', {same} outputs byte-identical' if any(b[f].get('sha256') for f in files) else '') +
+                     f', load {load[0]:.1f} -> {load[1]:.1f}')
+        if abs(load[0] - load[1]) > c['load_gap']:
+            notes.append(f'  (the machine load differed, {load[0]:.1f} against {load[1]:.1f}: a time difference may be the machine, not the code; measure both on a quiet machine to be sure)')
     for s in notes:
         print(s)
     if problems:
@@ -1034,12 +1175,12 @@ def selftest(cfg, a):
     for r in rows:
         append_row(os.path.join(base, 'ours-pdf-e100-t1.jsonl'), r)
         append_row(os.path.join(new, 'ours-pdf-e100-t1.jsonl'), r)
-    args = argparse.Namespace(base=base, new=new, metric=None)
+    args = argparse.Namespace(base=base, new=new, metric=None, tolerance=None, with_runs=None, scale=False)
     try:
         compare(cfg, args)
     except SystemExit as e:
         sys.exit(f'selftest: an unchanged run was refused ({e})')
-    cases = {'a file 3x slower': dict(wall=3.0), 'a larger output': dict(bytes_out=501), 'more memory': dict(maxrss_kb=40000), 'not exact': dict(exact=False)}
+    cases = {'a file 3x slower': dict(wall=3.0, cpu=3.0), 'a larger output': dict(bytes_out=501), 'more memory': dict(maxrss_kb=40000), 'not exact': dict(exact=False)}
     for name, change in cases.items():
         shutil.rmtree(new); os.makedirs(new)
         for r in rows:
@@ -1055,13 +1196,30 @@ def selftest(cfg, a):
     # 15% slower in total, spread over every file: caught by the total rule
     shutil.rmtree(new); os.makedirs(new)
     for r in rows:
-        append_row(os.path.join(new, 'ours-pdf-e100-t1.jsonl'), dict(r, wall=1.15))
+        append_row(os.path.join(new, 'ours-pdf-e100-t1.jsonl'), dict(r, wall=1.15, cpu=1.15))
     try:
         compare(cfg, args)
     except SystemExit as e:
         print('selftest: 15% slower in total: caught')
     else:
         sys.exit('selftest: 15% slower in total was NOT caught')
+    # 80% slower in total on a machine whose calibration job is 80% slower: refused as it is, passed with --scale
+    shutil.rmtree(new); os.makedirs(new)
+    for r in rows:
+        append_row(os.path.join(new, 'ours-pdf-e100-t1.jsonl'), dict(r, wall=1.8, cpu=1.8))
+    json.dump({'calibration': {'what': 'planted', 'cpu_s': 1.0}}, open(os.path.join(base, 'meta.json'), 'w'))
+    json.dump({'calibration': {'what': 'planted', 'cpu_s': 1.8}}, open(os.path.join(new, 'meta.json'), 'w'))
+    try:
+        compare(cfg, args)
+    except SystemExit as e:
+        print('selftest: 80% slower on a machine 80% slower: caught without --scale')
+    else:
+        sys.exit('selftest: 80% slower on a slower machine was NOT caught without --scale')
+    try:
+        compare(cfg, argparse.Namespace(**dict(vars(args), scale=True)))
+    except SystemExit as e:
+        sys.exit(f'selftest: 80% slower on a machine 80% slower was refused with --scale ({e})')
+    print('selftest: 80% slower on a machine 80% slower: passed with --scale')
     shutil.rmtree(tmp)
     print('selftest: all planted failures were caught, the unchanged run passed')
 
@@ -1091,7 +1249,12 @@ def main():
     ap.add_argument('--markdown', action='store_true', help='report: Markdown tables')
     ap.add_argument('--brief', action='store_true', help='report: fewer columns (the tables of RESULTS.md)')
     ap.add_argument('--tsv', action='store_true', help='report: also write time.tsv, memory.tsv, size.tsv, files.tsv into the run')
-    ap.add_argument('--metric', choices=['wall', 'cpu'], help='compare: which time (default wall)')
+    ap.add_argument('--metric', choices=['wall', 'cpu'], help='compare: which time counts (default cpu; wall is what a user waits, but it moves with the machine load)')
+    ap.add_argument('--tolerance', type=float, help='compare: allowed growth of the total time, as a fraction (default 0.10)')
+    ap.add_argument('--scale', action='store_true', help='compare: divide the new run\'s times by the ratio of the two machines\' calibration jobs')
+    ap.add_argument('--with', dest='with_runs', metavar='RUNS',
+                    help='report, compare: comma list of runs whose settings are taken when RUN lacks them, on the files of RUN '
+                         '(e.g. the stored competitor rows of all907-speed-ca8fa92, so a run of ours alone reports against them)')
     # sets
     ap.add_argument('--files', help='sets: the corpus list (one path per line)')
     ap.add_argument('--times', help='sets: an earlier ours.tsv (path, status, in, out, seconds) for the slowest files')

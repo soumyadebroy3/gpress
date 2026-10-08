@@ -35,5 +35,6 @@
   "brotli": "brotli 1.1.0",
   "zstd": "*** Zstandard CLI (64-bit) v1.5.5, by Yann Collet ***"
  },
- "measured_by": "bench/measure.c (parent under 1 MB)"
+ "measured_by": "bench/measure.c (parent under 1 MB)",
+ "note": "Measured before a container restart (2026-10-08, 02:11 to 02:25 UTC), on a host that was not calibrated; the host after the restart ran the same engine work 1.85x slower in CPU time (see sample120-speed-ca8fa92-host2)."
 }

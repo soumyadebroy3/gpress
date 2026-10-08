@@ -4,6 +4,10 @@ Test set: 907 public test PDFs, 130.47 MB (the pdf.js test suite, pypdf's sample
 pikepdf test resources). Many of them are deliberately broken or unusual. Measured on a 2-core cloud machine
 in October 2026. Every number below comes from the scripts in this folder.
 
+Which build: sections 1 to 5 are the phase-1 engine (commit d85cd7a) at maximum effort. Sections 6 and 7
+(time and space) are the `speed` build (branch `speed`, commit ca8fa92: `--effort 0..100`, `--threads N`,
+the work budget), measured with `bench/benchmark.py`; its rows are in `bench/results/`.
+
 ## 1. Flate, the compression inside normal PDFs
 
 Every distinct Flate stream in the test files (7,280 streams, 197.6 MB uncompressed), each compressed on its
@@ -136,6 +140,215 @@ With lepton_jpeg built in, JPEG streams are recompressed and restored bit for bi
 | bug854315.pdf | 107,532 | 34,757 | 41,160 |
 | issue1350.pdf | 118,396 | 52,420 | 65,976 |
 | issue12798_page1_reduced.pdf | 128,707 | 21,808 | 29,816 |
+
+## 6. Time (speed build, commit ca8fa92)
+
+How it is measured (`bench/benchmark.py time`, one command for ours and the competitors): every file is one
+process, started from a parent under 1 MB (`bench/measure.c`), and the row records the process's own wall
+time (what a user waits), CPU time (user plus system), peak memory, bytes in and out, and the exactness
+check: a normal-PDF output must open (page count and every page's content decoded with pikepdf) and ten
+outputs per setting go through `verify_pdf.py` (qpdf --check, the object graph by value, PDFium pixels and
+text), an untouched file must be the input byte for byte, and every archive is restored with a separate
+`unpack` and compared byte for byte. The competitors are the same as in sections 2 and 3: qpdf (object
+streams, Flate recompressed at level 9), xz -9e, Brotli 11 (16 MiB window), Zstandard 19 with long matching,
+and expand + xz (our `expand`, then xz, plus the bytes a restore needs), each its own process.
+
+The sample (`bench/sets/sample120.txt`, 120 files, 78.31 MB: 60% of the set's bytes in 13% of its files):
+the 20 slowest files of the phase-1 run at maximum effort, the 20 largest, and 80 drawn at random with seed
+11. It is a hard sample on purpose. Ours was measured on it at efforts 0, 50 and 100 with 1 and 2 threads;
+the competitors on it and on all 907 files. The full run of ours on all 907 files is made on the merged
+engine; `compare` checks it against these rows (the sample's files are a subset of the full set).
+
+Two things about the machine. It is a shared 2-CPU cloud VM: the Load column is the 1-minute load average
+while the setting was measured, and a load above 2 inflates the wall times (processes queue for a CPU) but
+leaves CPU time almost alone, which is why the regression check uses CPU time. And a CPU second is not the
+same amount of work on every host a container lands on: after a container restart between the archive runs
+below, the same engine work (byte-identical archives, packed and unpacked) took 1.85x the CPU time. Since
+then every run stores a calibration (the CPU time of `xz -9e` on 4 MiB of fixed text) in its `meta.json`,
+the report prints it, and `compare` warns when the two runs' machines differ (`--scale` takes the ratio out).
+The rows below come from the first host (`bench/results/sample120-speed-ca8fa92`, not calibrated); the same
+measurements on the host after the restart are in `bench/results/sample120-speed-ca8fa92-host2`
+(calibration 4.86 s), as far as they have got, for the regression check of the merged engine.
+
+### Normal PDF (`optimize`), the 120-file sample
+
+| Tool | Total wall s | CPU s | Load | Median s | p90 s | p99 s | Slowest s | Slowest file | MB/s | < 0.1 s | < 1 s | < 10 s | Exact |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| ours effort 0, 1 thread | 204.6 | 156.0 | 3.6 | 0.051 | 3.99 | 11.9 | 61.0 | GeoTopo.pdf | 0.38 | 69 | 92 | 116 | 120/120 |
+| ours effort 0, 2 threads | 228.0 | 153.6 | 4.2 | 0.023 | 4.22 | 14.2 | 82.7 | GeoTopo.pdf | 0.34 | 75 | 97 | 113 | 120/120 |
+| ours effort 50, 1 thread | 297.7 | 274.4 | 2.3 | 0.017 | 6.58 | 33.6 | 105.5 | GeoTopo.pdf | 0.26 | 75 | 94 | 111 | 120/120 |
+| ours effort 50, 2 threads | 274.5 | 282.6 | 2.9 | 0.020 | 5.44 | 25.1 | 103.5 | GeoTopo.pdf | 0.29 | 75 | 93 | 114 | 120/120 |
+| ours effort 100, 1 thread | 1844.0 | 854.8 | 6.4 | 0.091 | 27.12 | 204.4 | 590.2 | GeoTopo.pdf | 0.04 | 62 | 82 | 96 | 120/120 |
+| ours effort 100, 2 threads | 2481.8 | 901.8 | 4.2 | 0.062 | 33.68 | 290.6 | 992.9 | GeoTopo.pdf | 0.03 | 66 | 85 | 101 | 120/120 |
+| qpdf | 30.7 | 15.0 | 5.4 | 0.018 | 0.61 | 2.8 | 4.4 | bug1978317.pdf | 2.55 | | | | 118 of 120 (2 encrypted files refused) |
+
+- In CPU time, effort 0 costs 10 times qpdf, effort 50 18 times, effort 100 57 times. The slowest file
+  (GeoTopo.pdf: 5.3 MB, 868 streams that decode to 53 MB) takes 61 s at effort 0 and 590 s at effort 100
+  against qpdf's 2.7 s.
+- The second thread saves wall time only where the machine had a CPU free (it had not during most of these
+  runs: the loads above are on 2 CPUs); it costs 1 to 5% more CPU time, and the output is byte-identical:
+  120 of 120 files at every effort.
+- Exactness: every output opened and every untouched file was the input byte for byte; the 8 outputs per
+  setting that went through `verify_pdf.py` were identical by object graph, pixels and text.
+- The median file is fast at every effort (0.02 to 0.09 s); the cost is in the tail: at effort 100, 24 of
+  the 120 files take more than 10 s.
+
+### Archive (`pack`, then a separate `unpack`), the 120-file sample
+
+| Tool | Total wall s | CPU s | Load | Restore s | Median s | p90 s | p99 s | Slowest s | Slowest file | MB/s | < 0.1 s | < 1 s | < 10 s | Exact |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| ours effort 0, 1 thread | 410.1 | 341.7 | 3.0 | 184.6 | 0.169 | 8.31 | 40.5 | 46.3 | GeoTopo.pdf | 0.19 | 55 | 83 | 109 | 120/120 |
+| ours effort 0, 2 threads | 323.9 | 357.0 | 2.4 | 178.7 | 0.138 | 8.36 | 34.4 | 46.5 | GeoTopo.pdf | 0.24 | 56 | 87 | 110 | 120/120 |
+| ours effort 50, 1 thread | 694.4 | 378.7 | 6.0 | 337.4 | 0.525 | 18.08 | 49.9 | 75.9 | issue3188.pdf | 0.11 | 12 | 72 | 100 | 120/120 |
+| ours effort 50, 2 threads | 1062.5 | 414.7 | 6.1 | 469.3 | 0.431 | 25.57 | 110.0 | 122.0 | issue3188.pdf | 0.07 | 27 | 74 | 94 | 120/120 |
+| brotli 11 | 309.9 | 147.7 | 5.1 | | 0.232 | 7.92 | 27.9 | 50.9 | issue3188.pdf | 0.25 | | | | |
+| expand + xz | 405.8 | 196.3 | 4.7 | | 0.120 | 6.63 | 60.3 | 80.6 | bug1978317.pdf | 0.19 | | | | |
+| xz -9e | 55.1 | 27.5 | 4.9 | | 0.074 | 1.26 | 3.9 | 5.6 | issue3188.pdf | 1.42 | | | | |
+| zstd 19 long | 47.8 | 16.8 | 6.5 | | 0.026 | 1.11 | 4.9 | 5.3 | issue3188.pdf | 1.64 | | | | |
+
+- Effort 100 is the same setting as effort 50 for the archive on this build: above 50 the effort changes
+  nothing (below 50 it switches already-compressed data to plain coding), and the outputs are byte-identical
+  (120 of 120 files, 1 and 2 threads). Its rows were measured after the container restart (CPU 698 s with 1
+  thread, 766 s with 2, restore 369 s and 394 s, on the host that runs the same work 1.85x slower) and live in
+  `sample120-speed-ca8fa92-host2`.
+- In CPU time, the pack at effort 50 costs 14 times xz -9e and 2.6 times Brotli 11, and the restore about
+  half of the pack (the pack already contains its own restore check). Effort 0 is 10% cheaper for 0.2%
+  larger archives (section 7).
+- Every archive of every setting restored byte for byte with the separate `unpack` (120 of 120).
+
+### The competitors on all 907 files (130.47 MB)
+
+| Tool | Files done | Total wall s | CPU s | Load | Median s | p90 s | p99 s | Slowest s | Slowest file | MB/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| qpdf | 891 | 28.1 | 25.3 | 1.8 | 0.006 | 0.04 | 0.49 | 2.4 | bug1978317.pdf | 4.59 |
+| brotli 11 | 907 | 350.1 | 273.5 | 3.2 | 0.026 | 0.74 | 6.1 | 31.4 | issue3188.pdf | 0.37 |
+| expand + xz | 907 | 315.5 | 261.9 | 3.0 | 0.036 | 0.32 | 5.2 | 50.0 | bug1978317.pdf | 0.41 |
+| xz -9e | 907 | 63.8 | 57.0 | 2.5 | 0.023 | 0.12 | 0.98 | 3.0 | issue3188.pdf | 2.04 |
+| zstd 19 long | 907 | 31.7 | 23.1 | 2.9 | 0.005 | 0.05 | 0.63 | 1.8 | issue3188.pdf | 4.12 |
+
+qpdf refuses 16 files: 10 encrypted ones (it asks for a password; ours leaves them untouched) and 6 too
+damaged to rebuild. For the record, the phase-1 engine at maximum effort took 2,525 s for the normal PDF of
+all 907 files and 2,421 s for the archive (sections 2 and 3, on an earlier host); the full run of the merged
+engine with this harness replaces those figures.
+
+## 7. Space (speed build, commit ca8fa92)
+
+Two meanings, both measured by the same rows: the memory while working (the process's peak resident set,
+from `wait4`, every file its own process) and the space the output takes.
+
+### Memory while working, the 120-file sample
+
+| Tool | Median MB | Peak MB | Peak on (MB in) | Peak / input, files >= 1 MB: median | max | Fit: fixed MB | + bytes per input byte |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| ours pdf, effort 0, 1 thread | 5.0 | 96.0 | issue9262_reduced.pdf (5.54) | 14.6 | 72.4 | 9.3 | 9.9 |
+| ours pdf, effort 0, 2 threads | 6.2 | 148.2 | GeoTopo.pdf (5.32) | 19.4 | 89.3 | 11.7 | 12.3 |
+| ours pdf, effort 50, 1 thread | 5.1 | 142.7 | issue12963.pdf (0.60) | 14.6 | 72.3 | 11.1 | 9.8 |
+| ours pdf, effort 50, 2 threads | 6.2 | 160.7 | GeoTopo.pdf (5.32) | 19.7 | 88.8 | 13.9 | 12.4 |
+| ours pdf, effort 100, 1 thread | 5.0 | 169.3 | issue12963.pdf (0.60) | 16.8 | 96.0 | 16.9 | 11.3 |
+| ours pdf, effort 100, 2 threads | 5.9 | 305.5 | GeoTopo.pdf (5.32) | 23.5 | 165.9 | 23.0 | 16.4 |
+| qpdf | 8.7 | 302.5 | bug1978317.pdf (1.54) | 6.6 | 206.6 | 10.7 | 3.3 |
+| ours archive, effort 0, 1 thread | 16.2 | 950.2 | enormous.pdf (0.31) | 48.9 | 681.7 | 36.7 | 41.8 |
+| ours archive, effort 0, 2 threads | 23.8 | 1086.2 | enormous.pdf (0.31) | 85.8 | 996.7 | 48.9 | 74.3 |
+| ours archive, effort 50, 1 thread | 16.1 | 950.0 | enormous.pdf (0.31) | 51.2 | 681.6 | 36.6 | 42.1 |
+| ours archive, effort 50, 2 threads | 25.9 | 1085.6 | enormous.pdf (0.31) | 95.6 | 995.5 | 48.7 | 75.9 |
+| brotli 11 | 4.4 | 110.0 | issue3188.pdf (8.13) | 22.8 | 33.5 | 6.2 | 14.0 |
+| expand + xz | 44.5 | 675.2 | pdfa multipage.pdf (1.12) | 46.7 | 631.9 | 51.4 | 33.1 |
+| xz -9e | 58.0 | 136.4 | issue3188.pdf (8.13) | 41.2 | 71.3 | 34.8 | 17.8 |
+| zstd 19 long | 3.9 | 100.2 | issue3188.pdf (8.13) | 23.1 | 35.7 | 4.9 | 17.1 |
+
+- Normal PDF: the typical file needs 5 MB; the peak is 96 to 169 MB with 1 thread and up to 305 MB with 2
+  (GeoTopo.pdf at effort 100: every thread holds its own decoded stream and matcher). The peak is not on the
+  largest input: issue12963.pdf is 0.6 MB and reaches 143 to 169 MB, because its 312 streams decode to
+  52 MB. qpdf's median is higher (8.7 MB) and its peak on bug1978317.pdf (1.5 MB) is 302 MB.
+- Archive: the model's tables cost 13.7 MB before any work (next table), the typical file needs 16 MB with 1
+  thread and 24 to 26 MB with 2, and the peak is 950 MB with 1 thread and 1,086 MB with 2, both on
+  enormous.pdf: a 0.31 MB file whose one image decodes to 243 MB (the peak is four times that; the archive
+  itself is 42 KB). The restore (`unpack`) peaks at 718 MB on the same file. The fit says 37 MB fixed plus 42
+  bytes per input byte (1 thread): the decoded streams, not the model, are what grows. xz's own figures are
+  58 MB typical and 136 MB peak; Brotli and Zstandard stay near 100 MB.
+- The browser constraints apply here: a 32-bit WebAssembly address space holds 2 to 4 GB in all, so the
+  archive of a file like enormous.pdf does not fit today; the optimisation plan takes this up.
+
+Fixed cost on an empty one-page PDF (420 bytes; the smallest wall time of 5 runs, the peak memory):
+
+| Tool | Wall ms | Peak MB | Bytes out |
+| --- | ---: | ---: | ---: |
+| ours pdf, effort 0 / 50, 1 thread | 14.0 / 5.3 | 4.6 / 4.5 | 420 (untouched: no saving possible) |
+| ours pdf, effort 0 / 50, 2 threads | 5.1 / 6.9 | 5.4 / 5.6 | 420 |
+| ours archive, effort 0 / 50, 1 thread | 65.8 / 50.2 | 13.7 / 13.6 | 92 |
+| ours archive, effort 0 / 50, 2 threads | 63.2 / 47.6 | 14.1 / 14.1 | 92 |
+| qpdf | 3.8 | 8.7 | 598 |
+| xz -9e | 2.0 | 3.4 | 296 |
+| brotli 11 | 2.6 | 3.5 | 214 |
+| zstd 19 long | 1.5 | 2.7 | 246 |
+
+The archive's 50 to 65 ms and 13.7 MB on an empty page are the model's tables being made and cleared; a
+browser pays this before any work, and sizing the tables to the input is on the plan. Normal PDF starts in
+5 ms and 4.6 MB (the one 14 ms reading was taken under load).
+
+Peak memory (MB) against the input size on the 10 largest files of the sample (1 thread / 2 threads):
+
+| File | MB in | ours pdf e0 | ours pdf e100 | qpdf | ours archive e50 | brotli | expand + xz | xz | zstd |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| issue3188.pdf | 8.13 | 20 / 19 | 19 / 19 | 11 | 291 / 496 | 110 | 244 | 136 | 100 |
+| issue19517.pdf | 6.26 | 83 / 86 | 83 / 86 | 17 | 216 / 366 | 47 | 120 | 120 | 94 |
+| issue12841_reduced.pdf | 5.85 | 89 / 106 | 94 / 120 | 25 | 174 / 280 | 69 | 73 | 117 | 96 |
+| issue9262_reduced.pdf | 5.54 | 96 / 117 | 88 / 128 | 25 | 248 / 452 | 68 | 155 | 114 | 96 |
+| GeoTopo.pdf | 5.32 | 89 / 148 | 158 / 305 | 28 | 351 / 646 | 93 | 524 | 112 | 95 |
+| issue8795_reduced.pdf | 4.24 | 12 / 12 | 12 / 12 | 23 | 257 / 448 | 63 | 112 | 103 | 93 |
+| PDFJS-9279-reduced.pdf | 3.09 | 42 / 59 | 60 / 90 | 16 | 111 / 201 | 52 | 93 | 93 | 57 |
+| xfa_filled_imm1344e.pdf | 3.02 | 10 / 10 | 9 / 9 | 11 | 112 / 194 | 48 | 87 | 87 | 55 |
+| unreadablemetadata.pdf | 2.82 | 9 / 9 | 8 / 9 | 9 | 122 / 223 | 50 | 124 | 91 | 57 |
+| freeculture.pdf | 2.60 | 47 / 57 | 64 / 73 | 15 | 127 / 240 | 63 | 122 | 89 | 57 |
+
+Memory follows what the streams decode to, not the file size: issue3188.pdf (8.1 MB, left untouched because
+it keeps earlier revisions) needs 20 MB as a normal PDF, while GeoTopo.pdf (5.3 MB, decoding to 53 MB)
+needs 158 MB at effort 100. The archive's second thread nearly doubles the peak on every large file: each
+thread holds a decoded stream and its queued output.
+
+### Output size, the 120-file sample
+
+Normal PDF, the like-for-like table (the files ours made smaller, against qpdf on the same files; a qpdf
+output larger than the input counts as the input):
+
+| | Files | Before | Ours | Saved | qpdf | qpdf saved |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| ours effort 0 | 89 | 52.70 MB | 45.41 MB | 13.8% | 48.30 MB | 8.4% |
+| ours effort 50 | 89 | 52.70 MB | 45.13 MB | 14.4% | 48.30 MB | 8.4% |
+| ours effort 100 | 89 | 52.70 MB | 45.05 MB | 14.5% | 48.30 MB | 8.4% |
+
+The 31 other files are left untouched by the safety gate (7 keep earlier revisions, 10 are not readable by
+the strict parser, 4 have objects beyond /Size, 3 PDF/A, 1 PDF/X, 2 encrypted, 2 with usage rights, 2 with
+nothing to save). Counting those 31 as they are, ours gives 90.2% of the original bytes at effort 100 and
+qpdf 74.7%, which is not a like-for-like figure: qpdf rewrites every file, dropping earlier revisions,
+unreferenced objects and whatever it cannot read (issue3188.pdf, 8.1 MB, comes out at 89 KB). Effort 0 gives
+up 0.8% of the saving of effort 100 (45.41 against 45.05 MB) for 5.5 times less CPU; effort 50 gives up
+0.2% for 3.1 times less.
+
+Archive, all 120 files (78.31 MB):
+
+| Tool | Bytes out | % of original | Saved | Smallest on |
+| --- | ---: | ---: | ---: | ---: |
+| ours effort 0 | 41,563,443 | 53.1% | 46.9% | 112 of 120 |
+| ours effort 50 (= effort 100) | 41,489,487 | 53.0% | 47.0% | 114 of 120 |
+| expand + xz | 45,718,800 | 58.4% | 41.6% | |
+| brotli 11 | 58,515,315 | 74.7% | 25.3% | |
+| xz -9e | 58,598,904 | 74.8% | 25.2% | |
+| zstd 19 long | 58,742,402 | 75.0% | 25.0% | |
+| best of brotli, xz, zstd, file by file | 58,377,654 | 74.5% | 25.5% | |
+
+On all 907 files the competitors give: expand + xz 60.6%, Brotli 76.5%, xz 76.8%, Zstandard 77.0%, the best
+of the three file by file 76.3% (`bench/results/all907-speed-ca8fa92`), the same as section 3 measured.
+
+### The regression check
+
+`bench/benchmark.py compare BASE NEW` reads two runs and fails when a setting's total CPU time grew more
+than 10%, a file got more than 2x slower (counting files that took at least 0.05 s), any output grew, the
+peak memory of a setting grew more than 10% (beyond 4 MB), an output stopped being exact, or a file that
+worked now fails; it prints the load and the calibration of both runs and says when they differ.
+`selftest` plants each of those (and a run 80% slower on a machine 80% slower, which passes only with
+`--scale`) and checks they are caught. Measuring a new build is `benchmark.py time RUN --set all --who ours`;
+`report RUN --with all907-speed-ca8fa92` and `compare` take the competitors from the stored rows.
 
 ## Known limits
 

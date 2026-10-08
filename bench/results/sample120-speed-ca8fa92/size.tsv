@@ -1,0 +1,29 @@
+mode	setting	files	bytes_in	bytes_out	pct_of_original	smallest_on
+pdf	ours-pdf-e0-t1	118	78265106	70978180	90.689	89
+pdf	ours-pdf-e0-t2	118	78265106	70978180	90.689	89
+pdf	ours-pdf-e50-t1	118	78265106	70694171	90.327	91
+pdf	ours-pdf-e50-t2	118	78265106	70694171	90.327	91
+pdf	ours-pdf-e100-t1	118	78265106	70610269	90.219	91
+pdf	ours-pdf-e100-t2	118	78265106	70610269	90.219	91
+pdf	qpdf-pdf	118	78265106	58501545	74.748	
+pdf	ours-pdf-e0-t1:smaller	89	52700066	45413140	86.173	
+pdf	ours-pdf-e0-t1:qpdf-on-the-same	89	52700066	48296070	91.643	
+pdf	ours-pdf-e0-t2:smaller	89	52700066	45413140	86.173	
+pdf	ours-pdf-e0-t2:qpdf-on-the-same	89	52700066	48296070	91.643	
+pdf	ours-pdf-e50-t1:smaller	89	52700066	45129131	85.634	
+pdf	ours-pdf-e50-t1:qpdf-on-the-same	89	52700066	48296070	91.643	
+pdf	ours-pdf-e50-t2:smaller	89	52700066	45129131	85.634	
+pdf	ours-pdf-e50-t2:qpdf-on-the-same	89	52700066	48296070	91.643	
+pdf	ours-pdf-e100-t1:smaller	89	52700066	45045229	85.475	
+pdf	ours-pdf-e100-t1:qpdf-on-the-same	89	52700066	48296070	91.643	
+pdf	ours-pdf-e100-t2:smaller	89	52700066	45045229	85.475	
+pdf	ours-pdf-e100-t2:qpdf-on-the-same	89	52700066	48296070	91.643	
+archive	ours-archive-e0-t1	120	78313418	41563443	53.073	112
+archive	ours-archive-e0-t2	120	78313418	41563443	53.073	112
+archive	ours-archive-e50-t1	120	78313418	41489487	52.979	114
+archive	ours-archive-e50-t2	120	78313418	41489487	52.979	114
+archive	brotli-archive	120	78313418	58515315	74.719	
+archive	expandxz-archive	120	78313418	45718800	58.379	
+archive	xz-archive	120	78313418	58598904	74.826	
+archive	zstd-archive	120	78313418	58742402	75.009	
+archive	best-of-competitors	120	78313418	58377654	74.544	

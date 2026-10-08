@@ -53,12 +53,20 @@ output. `PDFE_DEBUG=1` prints the time of every stream and Flate segment.
   continues where it was. `report` makes the tables (text, Markdown, and `time.tsv`, `memory.tsv`,
   `size.tsv`, `files.tsv`); `compare BASE NEW` fails when a setting got more than 10% slower in total, a file
   more than 2x slower, any output larger, or the peak memory more than 10% higher; `selftest` plants each of
-  those and checks they are caught. `measure.c` is the small parent process that runs each command (Linux
-  gives a process the peak memory of the one that forked it, so a Python parent would hide everything under
-  20 MB). File lists are in `sets/` (`all`, and `sample120`: the 20 slowest, the 20 largest and 80 random
-  files, seed 11), relative to the corpus root (`CORPUS`); the engine comes from `PDFE` (or `GPRESS`).
-  This replaces the earlier `pdf_bench.py` and `pack_bench.py`; the "qpdf + xz" baseline they had is gone
-  for good (qpdf drops objects and revisions, so it was never comparable).
+  those and checks they are caught. Time is measured as both wall time (what a user waits) and the process's
+  CPU time; the check uses CPU time (`--metric wall` to change), which moves far less than wall time when
+  the machine is shared, though not nothing: a neighbour that fills the cache slows memory-bound code (the
+  archive's model) in CPU time too. The report prints the machine's load next to every setting and `compare`
+  says when the two runs saw a different load; numbers that are to be compared come from a quiet machine.
+  The competitors need measuring only once: `--with RUN` lets `report` and `compare` take the settings a run
+  lacks from a stored one (`results/all907-speed-ca8fa92` has every competitor on all 907 files), so
+  measuring a new build is `time RUN --set all --who ours` and nothing more. `measure.c` is the small parent
+  process that runs each command (Linux gives a process the peak memory of the one that forked it, so a
+  Python parent would hide everything under 20 MB). File lists are in `sets/` (`all`, and `sample120`: the
+  20 slowest, the 20 largest and 80 random files, seed 11), relative to the corpus root (`CORPUS`); the
+  engine comes from `PDFE` (or `GPRESS`). This replaces the earlier `pdf_bench.py` and `pack_bench.py`; the
+  "qpdf + xz" baseline they had is gone for good (qpdf drops objects and revisions, so it was never
+  comparable).
 - `verify_pdf.py`: the independent check of one output: qpdf --check, pikepdf (object graph followed by
   value, streams decoded) and PDFium (pixels and text of every page, up to 30 pages).
 - `verify_render.py`, `verify_pdfjs.mjs`: two more renderers on every output, Poppler and pdf.js (pixels and

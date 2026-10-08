@@ -1,6 +1,6 @@
-setting	tool	mode	effort	threads	files	ok	bytes_in	wall_s	cpu_s	median_s	p90_s	p99_s	slowest_s	slowest_file	mb_per_s	under_0.1s	under_1s	under_10s	exact	checked	verified	verify_failed	failed	unpack_wall_s
-qpdf-pdf	qpdf	pdf	None	None	907	891	130469001	28.052	25.332	0.0056	0.0416	0.4947	2.422	pdfjs/bug1978317.pdf	4.589	843	886	891	0	0	0	0	16	0.000
-brotli-archive	brotli	archive	None	None	907	907	130469001	350.105	273.526	0.0263	0.7433	6.0828	31.352	pdfjs/issue3188.pdf	0.373	622	833	905	0	0	0	0	0	0.000
-expandxz-archive	expandxz	archive	None	None	907	907	130469001	315.454	261.925	0.0359	0.3185	5.2107	49.961	pdfjs/bug1978317.pdf	0.414	673	864	901	0	0	0	0	0	0.000
-xz-archive	xz	archive	None	None	907	907	130469001	63.826	56.954	0.0234	0.1221	0.9809	3.033	pdfjs/issue3188.pdf	2.044	793	898	907	0	0	0	0	0	0.000
-zstd-archive	zstd	archive	None	None	907	907	130469001	31.693	23.065	0.0050	0.0525	0.6343	1.788	pdfjs/issue3188.pdf	4.117	844	899	907	0	0	0	0	0	0.000
+setting	tool	mode	effort	threads	files	ok	bytes_in	wall_s	cpu_s	load1	median_s	p90_s	p99_s	slowest_s	slowest_file	mb_per_s	under_0.1s	under_1s	under_10s	exact	checked	verified	verify_failed	failed	unpack_wall_s
+qpdf-pdf	qpdf	pdf	None	None	907	891	130469001	28.052	25.332	1.79	0.0056	0.0416	0.4947	2.422	pdfjs/bug1978317.pdf	4.589	843	886	891	0	0	0	0	16	0.000
+brotli-archive	brotli	archive	None	None	907	907	130469001	350.105	273.526	3.24	0.0263	0.7433	6.0828	31.352	pdfjs/issue3188.pdf	0.373	622	833	905	0	0	0	0	0	0.000
+expandxz-archive	expandxz	archive	None	None	907	907	130469001	315.454	261.925	3.00	0.0359	0.3185	5.2107	49.961	pdfjs/bug1978317.pdf	0.414	673	864	901	0	0	0	0	0	0.000
+xz-archive	xz	archive	None	None	907	907	130469001	63.826	56.954	2.52	0.0234	0.1221	0.9809	3.033	pdfjs/issue3188.pdf	2.044	793	898	907	0	0	0	0	0	0.000
+zstd-archive	zstd	archive	None	None	907	907	130469001	31.693	23.065	2.93	0.0050	0.0525	0.6343	1.788	pdfjs/issue3188.pdf	4.117	844	899	907	0	0	0	0	0	0.000
