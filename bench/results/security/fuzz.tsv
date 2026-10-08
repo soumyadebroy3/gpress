@@ -1,0 +1,4 @@
+entry	seeds	seconds	iterations	crashes	oom_aborts	hangs	wrong_files	panics
+optimize	38	600	6228	0	0	0	0	0
+pack	38	600	870	0	0	0	0	0
+unpack	12	600	1667	0	0	0	0	0

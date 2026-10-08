@@ -1,0 +1,10 @@
+check	outcome	ok	detail
+wrong-file	caught	ok	WRONG-FILE
+crash	caught	ok	crash:SIGSEGV
+hang	caught	ok	hang
+memory-over-bound	caught	ok	over-bound:mem 608MiB>512
+oom-abort	caught	ok	oom-abort
+licence-gpl	caught	ok	
+licence-dual-ok	caught	ok	
+unsafe-without-reason	caught	ok	2 found
+clean-run-not-flagged	passed	ok	restored

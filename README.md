@@ -53,5 +53,16 @@ output. `PDFE_DEBUG=1` prints the time of every stream and Flate segment.
   size, one bit of one pixel) and pass an unchanged copy.
 - `pack_bench.py`: the peyaji format against xz, Brotli, Zstandard and inflate+xz; every file restored and
   compared byte for byte.
+- `security.py`: hostile input, pass or fail (`run` does everything; `benchmark.py security ...` reaches it
+  too). Twenty packs damaged every way (bit flips, cuts, garbage, header fields, checksum) must be refused or
+  restored exactly, never a wrong file; hostile PDFs (nesting 100,000 deep, loops in the xref chain and the
+  object streams, Flate, LZW and RunLength bombs, a 100,000 x 100,000 image, a million objects, bad UTF-16)
+  must come back untouched, smaller or with a clean error inside a time and memory bound that grows with
+  the input; mutation fuzzing of optimize, pack and unpack for ten minutes each under a hard 512 MiB address
+  space; `cargo audit`, the licence of every dependency and every `unsafe` block with its reason; the same
+  inputs through the C library (`gpress_harness.c`) when `crates/gpress-c` is in the tree. `selfcheck`
+  plants a wrong file, a crash, a hang, a memory blow-up, a bad licence and a bare `unsafe` and checks that
+  each is caught. Every failing input is saved under `results/security/failures/` with the engine's stderr;
+  `measure.c` runs each command from a parent under 1 MB so the peak memory is the command's own.
 
 Results: `bench/RESULTS.md`.
