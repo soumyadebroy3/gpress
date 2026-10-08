@@ -66,7 +66,7 @@ impl States {
             let (n0, n1, _) = st_unpack(s);
             let up = |a: usize, b: usize| -> (usize, usize) {
                 // a: count of the bit seen (incremented), b: opposite count (discounted)
-                ((a + 1).min(7), if b > 2 { (b + 1) / 2 } else { b })
+                ((a + 1).min(7), if b > 2 { b.div_ceil(2) } else { b })
             };
             let (a1, b1) = up(n1, n0);
             next[s][1] = st_pack(b1, a1, 1) as u8;
@@ -213,7 +213,7 @@ fn int_token(t: &[u8]) -> Option<i64> {
 fn cmd_class(c: u32) -> usize {
     match c {
         8 | 30 | 31 => 1,
-        5 | 6 | 7 => 2,
+        5..=7 => 2,
         21 | 22 | 4 => 3,
         1 | 3 | 33 | 34 => 4,
         0 => 0,
@@ -352,7 +352,7 @@ impl Model {
             bypassed: 0,
         };
         m.mx.shift = MIXER_SHIFT;
-        m.smaps = vec![std::array::from_fn(|st| Counter(((m.states.init_p[st] as u32) << 20) | 0)); NCTX * KINDS];
+        m.smaps = vec![std::array::from_fn(|st| Counter((m.states.init_p[st] as u32) << 20)); NCTX * KINDS];
         m.contexts();
         m
     }
@@ -1105,7 +1105,7 @@ mod tests {
         // Syntax and content with long numbers, names, strings and operands.
         let mut text = Vec::new();
         text.extend_from_slice(b"1 0 obj << /Pi 3.");
-        text.extend(std::iter::repeat(b'1').take(5000));
+        text.extend(std::iter::repeat_n(b'1', 5000));
         text.extend_from_slice(b" /Name#20x (a (nested) string) >> endobj\n");
         let mut content = Vec::new();
         for i in 0..40 {

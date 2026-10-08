@@ -498,15 +498,15 @@ mod tests {
     fn mq_coder_round_trips() {
         for skew in [1u64, 3, 20, 400] {
             let mut s = 99 + skew;
-            let mut cx_e = vec![0u8; 64];
-            let bits: Vec<(usize, u32)> = (0..100_000).map(|_| ((rng(&mut s) % 64) as usize, (rng(&mut s) % skew == 0) as u32)).collect();
+            let mut cx_e = [0u8; 64];
+            let bits: Vec<(usize, u32)> = (0..100_000).map(|_| ((rng(&mut s) % 64) as usize, rng(&mut s).is_multiple_of(skew) as u32)).collect();
             let mut e = MqEncoder::new();
             for &(c, b) in &bits {
                 e.encode(&mut cx_e[c], b);
             }
             let data = e.finish();
             assert_eq!(&data[data.len() - 2..], &[0xFF, 0xAC]);
-            let mut cx_d = vec![0u8; 64];
+            let mut cx_d = [0u8; 64];
             let mut d = MqDecoder::new(&data);
             for &(c, b) in &bits {
                 assert_eq!(d.decode(&mut cx_d[c]), b);
@@ -526,7 +526,7 @@ mod tests {
                 px.fill(1);
             } else if y % 5 != 0 {
                 for x in 0..w {
-                    if rng(&mut s) % 9 == 0 {
+                    if rng(&mut s).is_multiple_of(9) {
                         px[x] ^= 1;
                     }
                 }

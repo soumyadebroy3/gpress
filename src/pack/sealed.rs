@@ -265,7 +265,7 @@ mod tests {
         }
         // The header is looked for in the last 16 KiB only.
         let mut far = b"1 0 obj\n<< /Length 3 /Pad (".to_vec();
-        far.extend(std::iter::repeat(b'x').take(20000));
+        far.extend(std::iter::repeat_n(b'x', 20000));
         far.extend_from_slice(b") >>\nstream\n");
         assert!(stream_header(&far).is_none());
     }
@@ -320,7 +320,7 @@ mod tests {
     fn crypt_parts_that_make_no_progress_are_refused() {
         // A long run of syntax, then a stream whose header is far away (the slowest case for the decoder).
         let mut d = b"%PDF-1.4\n%".to_vec();
-        d.extend(std::iter::repeat(b'x').take(70000));
+        d.extend(std::iter::repeat_n(b'x', 70000));
         d.extend_from_slice(b"\n<<>>stream\n");
         let a = d.len();
         d.extend_from_slice(b"\nendstream\n%%EOF\n");

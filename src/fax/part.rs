@@ -348,7 +348,7 @@ pub fn code<C: Coder>(c: &mut C, fc: &mut FaxCoder, src: Option<&Parsed>, at: us
 /// after the same preparation.
 pub fn packed(img: &Image) -> Vec<u8> {
     let w = img.width;
-    let mut out = Vec::with_capacity((w + 7) / 8 * img.rows());
+    let mut out = Vec::with_capacity(w.div_ceil(8) * img.rows());
     let mut px = vec![0u8; w];
     for r in 0..img.rows() {
         super::ccitt::expand_row(img.row(r), &mut px);

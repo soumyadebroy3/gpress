@@ -228,7 +228,7 @@ pub fn deflate_like_zlib(d: &[u8], p: Params) -> Vec<u8> {
 /// Whether `d` compressed with these parameters gives exactly `target` (raw Deflate data). Stops at the
 /// first block that differs, so a wrong guess costs little.
 pub fn rebuilds(d: &[u8], p: Params, target: &[u8]) -> bool {
-    run_zlib(d, p, Some(target)).map_or(false, |z| z == target)
+    run_zlib(d, p, Some(target)).is_some_and(|z| z == target)
 }
 
 /// The compressed data, or None as soon as it is known to differ from `target`.
@@ -243,7 +243,7 @@ fn run_zlib(d: &[u8], p: Params, target: Option<&[u8]>) -> Option<Vec<u8>> {
         max_dist: w_size - MIN_LOOKAHEAD,
         hash_bits,
         hash_mask: (1 << hash_bits) - 1,
-        hash_shift: (hash_bits + MIN_MATCH as u32 - 1) / MIN_MATCH as u32,
+        hash_shift: hash_bits.div_ceil(MIN_MATCH as u32),
         head: vec![NIL; 1 << hash_bits],
         prev: vec![NIL; w_size],
         ins_h: 0,
@@ -578,7 +578,7 @@ fn scan_tree(len: &[u16], max_code: isize, mut emit: impl FnMut(u16, u16)) {
     let (mut max_count, mut min_count) = if nextlen == 0 { (138, 3) } else { (7, 4) };
     for n in 0..=max_code as usize {
         let curlen = nextlen;
-        nextlen = if n + 1 <= max_code as usize { len[n + 1] as i32 } else { 0xffff };
+        nextlen = if n < max_code as usize { len[n + 1] as i32 } else { 0xffff };
         count += 1;
         if count < max_count && curlen == nextlen {
             continue;
@@ -794,7 +794,7 @@ mod tests {
         let text = std::fs::read(dir.join("text.raw")).unwrap();
         for k in 0..60 {
             data.extend_from_slice(&text);
-            data.extend(std::iter::repeat((k * 7) as u8).take(k * 13));
+            data.extend(std::iter::repeat_n((k * 7) as u8, k * 13));
         }
         let mut tried = 0;
         for level in [1u8, 4, 6, 9] {

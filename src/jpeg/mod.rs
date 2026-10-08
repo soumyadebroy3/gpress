@@ -130,7 +130,7 @@ fn write_scan(j: &Jpeg, s: &Scan, specs: &[&[Option<Spec>]], out: &mut Vec<u8>) 
     let mut seg = vec![0xFF, 0xC4, 0, 0];
     for (slot, spec) in specs[0].iter().enumerate() {
         if let Some(spec) = spec {
-            seg.push(((slot / 4) << 4 | slot % 4) as u8);
+            seg.push((((slot / 4) << 4) | (slot % 4)) as u8);
             seg.extend_from_slice(&spec.counts);
             seg.extend_from_slice(&spec.values);
         }

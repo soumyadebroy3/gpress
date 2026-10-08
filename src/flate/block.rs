@@ -151,7 +151,7 @@ fn dynamic_search(h: &Hist, variants: &[(Option<f64>, u32)], thorough: bool) -> 
         }
         let header = if thorough { best_header(&ll, &d) } else { quick_header(&ll, &d) };
         let bits = header.bits + data;
-        if best.as_ref().map_or(true, |b| bits < b.bits) {
+        if best.as_ref().is_none_or(|b| bits < b.bits) {
             best = Some(DynCode { ll, d, header, bits });
         }
     }
@@ -268,7 +268,10 @@ fn tok_extra_bits(sym: u8) -> u64 {
 }
 
 /// Zlib-style run-length tokens of a length sequence.
-fn greedy_tokens(seq: &[u8], use16: bool, use17: bool, use18: bool) -> Vec<(u8, u8)> {
+/// Code-length tokens: (symbol 0 to 18, the extra bits of 16 to 18).
+type Tokens = Vec<(u8, u8)>;
+
+fn greedy_tokens(seq: &[u8], use16: bool, use17: bool, use18: bool) -> Tokens {
     let mut t = Vec::new();
     let mut i = 0;
     while i < seq.len() {
@@ -340,7 +343,7 @@ fn dp_tokens(seq: &[u8], cost: &[u64; 19]) -> Vec<(u8, u8)> {
         let b = best[i];
         if b != u64::MAX && zrun[i] >= 11 {
             let c = b + cost[18] + 7;
-            while win.back().map_or(false, |&(_, x)| x > c) {
+            while win.back().is_some_and(|&(_, x)| x > c) {
                 win.pop_back();
             }
             win.push_back((i, c));
@@ -348,7 +351,7 @@ fn dp_tokens(seq: &[u8], cost: &[u64; 19]) -> Vec<(u8, u8)> {
         let t = i + 11;
         if t <= n {
             // Starts too far back, or in a run of zeros that ends before t, can't reach t (nor anything later).
-            while win.front().map_or(false, |&(j, _)| j + 138 < t || j + zrun[j] < t) {
+            while win.front().is_some_and(|&(j, _)| j + 138 < t || j + zrun[j] < t) {
                 win.pop_front();
             }
             if let Some(&(j, c)) = win.front() {
@@ -438,7 +441,7 @@ fn header_search(ll: &[u8], d: &[u8], flag_sets: &[u8], rounds: usize) -> Header
     // Token lists already tried, with what followed them. The searches from different starting points often
     // meet; a list seen before can't improve on the best (its size was compared already), and its next
     // list is known, so it is not worked out again. The result is the same as without this.
-    let mut seen: Vec<(Vec<(u8, u8)>, Vec<(u8, u8)>)> = Vec::new();
+    let mut seen: Vec<(Tokens, Tokens)> = Vec::new();
     for &flags in flag_sets {
         let mut tokens = greedy_tokens(&seq, flags & 1 != 0, flags & 2 != 0, flags & 4 != 0);
         for _round in 0..rounds {
@@ -447,7 +450,7 @@ fn header_search(ll: &[u8], d: &[u8], flag_sets: &[u8], rounds: usize) -> Header
                 None => {
                     let cl = cl_lengths(&tokens);
                     let (hclen, bits) = header_bits(&cl, &tokens);
-                    let improved = best.as_ref().map_or(true, |b| bits < b.bits);
+                    let improved = best.as_ref().is_none_or(|b| bits < b.bits);
                     if improved {
                         best = Some(Header { hlit, hdist, hclen, cl, tokens: tokens.clone(), bits });
                     }
@@ -478,7 +481,7 @@ pub fn stored_bits(len: usize, bitpos: u64) -> u64 {
     loop {
         let k = left.min(65535);
         pos += 3;
-        pos = (pos + 7) / 8 * 8;
+        pos = pos.div_ceil(8) * 8;
         pos += 32 + 8 * k as u64;
         left -= k;
         if left == 0 {
@@ -675,12 +678,12 @@ mod tests {
         for _ in 0..200 {
             let mut h = Hist::empty();
             for i in 0..LITLEN_SYMS {
-                if rng(&mut s) % 3 == 0 {
+                if rng(&mut s).is_multiple_of(3) {
                     h.ll[i] = (rng(&mut s) % 1000) as u32;
                 }
             }
             for i in 0..DIST_SYMS {
-                if rng(&mut s) % 2 == 0 {
+                if rng(&mut s).is_multiple_of(2) {
                     h.d[i] = (rng(&mut s) % 300) as u32;
                 }
             }
@@ -691,10 +694,10 @@ mod tests {
                     match sym {
                         16 => {
                             let last = *lens.last().unwrap();
-                            lens.extend(std::iter::repeat(last).take(3 + e as usize));
+                            lens.extend(std::iter::repeat_n(last, 3 + e as usize));
                         }
-                        17 => lens.extend(std::iter::repeat(0).take(3 + e as usize)),
-                        18 => lens.extend(std::iter::repeat(0).take(11 + e as usize)),
+                        17 => lens.extend(std::iter::repeat_n(0, 3 + e as usize)),
+                        18 => lens.extend(std::iter::repeat_n(0, 11 + e as usize)),
                         v => lens.push(v),
                     }
                 }

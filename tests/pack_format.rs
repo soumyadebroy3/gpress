@@ -71,9 +71,8 @@ fn refuses_damaged_files() {
     huge[5..10].copy_from_slice(&[0xff, 0xff, 0xff, 0xff, 0x7f]);
     cases.push(huge);
     for (k, c) in cases.iter().enumerate() {
-        match unpack(c) {
-            Ok(out) => assert_eq!(out, pdf, "case {k}: a damaged file restored to something else"),
-            Err(_) => {}
+        if let Ok(out) = unpack(c) {
+            assert_eq!(out, pdf, "case {k}: a damaged file restored to something else");
         }
     }
 }
