@@ -171,12 +171,12 @@ fn pack_options_change_speed_never_the_restore() {
     let pdf = sample_pdf();
     let mut packed = Vec::new();
     for effort in [0u8, 49, 50, 100] {
-        let (one, st) = pack_with(&pdf, &PackOptions { effort, threads: 1 });
+        let (one, st) = pack_with(&pdf, &PackOptions { effort, threads: 1, ..PackOptions::default() });
         assert_eq!(unpack(&one).unwrap(), pdf, "effort {effort}");
         // Plain coding of the incompressible stream only below effort 50.
         assert_eq!(st.flat_bytes > 0, effort < 50, "effort {effort}: {st:?}");
         for threads in [2, 4] {
-            let (z, _) = pack_with(&pdf, &PackOptions { effort, threads });
+            let (z, _) = pack_with(&pdf, &PackOptions { effort, threads, ..PackOptions::default() });
             assert!(z == one, "effort {effort}: {threads} threads give other bytes");
         }
         packed.push(one);
@@ -227,9 +227,9 @@ fn pack_codes_plainly_only_data_without_structure() {
         stream_obj("/Filter /FlateDecode", &zlib(b"q 512 0 0 512 50 100 cm /I0 Do Q")),
         stream_obj(&format!("/Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode"), &zlib(&px)),
     ]);
-    let (best, _) = pack_with(&pdf, &PackOptions { effort: 100, threads: 1 });
+    let (best, _) = pack_with(&pdf, &PackOptions { effort: 100, threads: 1, ..PackOptions::default() });
     for effort in [0u8, 49] {
-        let (fast, st) = pack_with(&pdf, &PackOptions { effort, threads: 1 });
+        let (fast, st) = pack_with(&pdf, &PackOptions { effort, threads: 1, ..PackOptions::default() });
         assert_eq!(unpack(&fast).unwrap(), pdf);
         assert_eq!(st.flat_bytes, 0, "effort {effort}: {st:?}");
         assert!(fast.len() <= best.len() + best.len() / 20, "effort {effort}: {} against {}", fast.len(), best.len());

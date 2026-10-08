@@ -4,7 +4,8 @@
 //!   pdfe inflate IN OUT [--raw]               decode with our decoder
 //!   pdfe batch [--quick]                      stdin lines "IN OUT": compress each, verify, print sizes
 //!   pdfe optimize IN OUT [--effort N]         normal PDF; N from 0 (fast) to 100 (default); --quick = 0
-//!   pdfe pack IN OUT [--effort N]             peyaji format (the effort only changes the encoder's choices)
+//!   pdfe pack IN OUT [--effort N]             peyaji format (the effort only changes the encoder's choices;
+//!                                             --no-decrypt keeps encrypted streams as stored)
 //!
 //! --threads N sets the threads (default: what the machine offers, at most 8); the output is the same.
 
@@ -38,6 +39,8 @@ fn main() {
     };
     let effort: u8 = if flag("--quick") { 0 } else { num("--effort").map_or(100, |e| e.min(100) as u8) };
     let threads = num("--threads").unwrap_or(0);
+    // pack: --no-decrypt keeps encrypted streams as stored (for measuring).
+    let decrypt = !flag("--no-decrypt");
     let mut opt = Options::effort(effort);
     if let Some(v) = num("--iter") {
         opt.iterations = v;
@@ -175,7 +178,7 @@ fn main() {
             let (i, o) = (pos.get(1).unwrap_or_else(|| die("need IN")), pos.get(2).unwrap_or_else(|| die("need OUT")));
             let data = std::fs::read(i).unwrap_or_else(|e| die(&format!("{i}: {e}")));
             let t = Instant::now();
-            let (z, st) = engine::pack::pack_with(&data, &engine::pack::PackOptions { effort, threads });
+            let (z, st) = engine::pack::pack_with(&data, &engine::pack::PackOptions { effort, threads, decrypt });
             std::fs::write(o, &z).unwrap_or_else(|e| die(&format!("{o}: {e}")));
             println!("{i}\t{}\t{}\t{:.2}\t{:?}", data.len(), z.len(), t.elapsed().as_secs_f64(), st);
         }
@@ -229,7 +232,7 @@ fn main() {
                 let (Some(i), Some(o)) = (it.next(), it.next()) else { continue };
                 let Ok(data) = std::fs::read(i) else { continue };
                 let t = Instant::now();
-                let r = std::panic::catch_unwind(|| engine::pack::pack_with(&data, &engine::pack::PackOptions { effort, threads }));
+                let r = std::panic::catch_unwind(|| engine::pack::pack_with(&data, &engine::pack::PackOptions { effort, threads, decrypt }));
                 match r {
                     Ok((z, st)) => {
                         std::fs::write(o, &z).unwrap();
@@ -294,14 +297,15 @@ fn describe(name: &str, in_len: usize, r: &engine::pdf::rewrite::Optimized, secs
     use engine::pdf::rewrite::Outcome;
     match &r.outcome {
         Outcome::Smaller(s) => format!(
-            "{name}\tSMALLER\t{in_len}\t{}\t{secs:.2}\tobjects={} streams={} reencoded={} kept={} objstms={} dropped={}",
+            "{name}\tSMALLER\t{in_len}\t{}\t{secs:.2}\tobjects={} streams={} reencoded={} kept={} objstms={} dropped={}{}",
             r.data.len(),
             s.objects,
             s.streams,
             s.streams_reencoded,
             s.streams_kept,
             s.objstms,
-            s.dropped_unreachable
+            s.dropped_unreachable,
+            if s.encryption.is_empty() { String::new() } else { format!(" encrypted={}", s.encryption) }
         ),
         Outcome::Untouched(why) => format!("{name}\tUNTOUCHED\t{in_len}\t{}\t{secs:.2}\t{why}", r.data.len()),
     }

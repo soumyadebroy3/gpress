@@ -13,10 +13,47 @@ tool, measured on public test PDFs against the best existing tools. Nothing here
 | PDF reader | `src/pdf/parse.rs`, `xref.rs`, `filters.rs` | Strict parser: objects, xref tables and streams, object streams, LZW, ASCIIHex, ASCII85, RunLength, predictors. |
 | PDF writer | `src/pdf/rewrite.rs`, `images.rs` | Keeps every reachable object's value; re-encodes streams with our Flate; picks a better PNG predictor (or none) for images, counting the bytes its parameters take; gives JPEGs optimal Huffman tables; puts Flate in front of a JPEG only when that saves at least 1% (never in front of JPEG 2000 or JBIG2, whose filter chain keeps its shape for readers such as pdf.js); packs objects into compressed object streams grouped by type; writes a compressed xref stream; reads its own output back and compares before returning it (a changed JPEG must read back with the same coded symbols). An image with fewer samples than its size needs is kept exactly as it is (readers differ on such images). |
 | JPEG tables | `src/jpeg/` | Baseline and extended sequential JPEG (8-bit) written again with optimal Huffman tables, the same coefficients (like `jpegtran -optimize -copy all`): every scan is read to its coded symbols, which are written back with the best code of at most 16 bits that leaves the all-ones code word free (package-merge); of three orders of the symbols within a code length, the one with the fewest stuffed 0xFF bytes is kept. Every other byte stays (ICC and Adobe markers, comments, restart markers, bytes after the end); one table segment goes before each scan. The new file is read back and compared symbol by symbol before it is used. Progressive, arithmetic-coded, lossless, hierarchical, 12-bit, fractionally sampled (libjpeg can't decode those) and anything unusual or damaged is left as it is, and so are layouts readers could take differently once the tables move (fill bytes before a marker; every segment's contents must fill it exactly, as pdf.js reads tables by their contents), data bound to the file's bytes (multi-picture offsets, APP11 boxes such as content credentials), and files of more than 4096 segments. |
-| Safety gate | `src/pdf/rewrite.rs` (`gate`) | Encrypted, signed, certified, PDF/A, PDF/X, files with earlier revisions, files we can't read strictly, objects beyond /Size, objects present but not indexed: returned untouched. |
+| Safety gate | `src/pdf/rewrite.rs` (`gate`) | Encrypted files the empty password doesn't open, signed, certified, PDF/A, PDF/X, files with earlier revisions, files we can't read strictly (including a literal string with a raw carriage return, which qpdf reads as a line feed and pdf.js, PDFium and Poppler keep), objects beyond /Size, objects present but not indexed: returned untouched. |
+| Encrypted PDFs | `src/pdf/crypt.rs`, `src/pack/sealed.rs` | The standard security handler with the empty user password (see below). RC4 and the key derivations are ours; AES, MD5 and SHA-2 come from RustCrypto. |
 | peyaji format | `src/pack/`, `src/cm/` | Any PDF, packed with our context-mixing model (bit-history states, mixers, SSE) with PDF-aware contexts: syntax, predicted object numbers and xref offsets, drawing instructions, image samples coded as residuals. Streams are recognised by their bytes (zlib, JPEG), not only by their dictionaries. Format version 4: a long repeat is coded as one 16-bit-precision decision instead of eight model decisions (huge flat images, duplicates); palette and packed-pixel images are modelled by their exact neighbours; an image's row length is confirmed from its data length; a JPEG behind Flate goes through Lepton when that beats the Flate bytes. Restored byte for byte; every pack is restored and checked before it is returned (with a second thread, the restore decodes the bytes while the encoder writes them: the same code on the same bytes, in about half the time). A damaged .pyj file is refused with an error: lengths are bounded, decoding stops when the data runs out, and the checksum is checked, so a wrong file is never returned. The model's settings are constants of the format version. |
 | SHA-256 | `src/pack/sha256.rs` | For the restore check. |
 | Threads and effort | `src/par.rs`, `Options::effort` in `src/flate/deflate.rs` and `src/pdf/rewrite.rs`, `PackOptions` in `src/pack/mod.rs` | Standard-library threads only: the segments of a stream, the streams of a PDF and the streams `pack` looks at are worked on in parallel and put together in their original order, so the output is the same for any thread count (one thread uses no thread machinery at all, as in a browser). A thread the system refuses (thread or process limits) is no loss: the calling thread does the work, and `pack` checks the restore after encoding instead of alongside. Identical streams are encoded once (a remembered result is checked against its input before it is used); encoded outputs are remembered for one stream at a time, so memory follows the file's size. `--effort` 0 to 100: 100 is the strongest setting; below, Flate works in steps of 20 (measured: effort 0 is 3 to 4 times faster than 100 and about 0.5% larger on typical streams), the streams that take the most room get the strongest step that fits a work budget proportional to the file's size, and image predictors are ranked on sampled rows. The quick settings have a budget too (16 decoded bytes per byte of the file at effort 0, twice as much every 10 points, at least 4 MiB): a stream beyond it is kept as it is, so the time follows the file's size even when streams decode to a hundred times their size. In `pack`, already-compressed data (evenly spread bytes, and evenly spread differences between neighbouring bytes) is coded plainly below 50. Decided from sizes only, never from time. |
+
+## Encrypted PDFs
+
+Only files that open with the empty user password (anyone can read them) and use the standard security handler:
+/V 1, 2, 4, 5 and /R 2 to 6 (RC4, AES-128, AES-256), one crypt filter (/CFM /V2, /AESV2 or /AESV3, or /Identity)
+named by both /StmF and /StrF, and /EncryptMetadata false. The key comes from the empty password only
+(algorithms 2, 2.A and 2.B), and is confirmed by /U (algorithms 6 and 11) and, for AES-256, by /Perms (algorithm
+13).
+
+- Normal PDF: strings and streams are decrypted while reading, optimised as usual, and written with the same
+  encryption: the same /Encrypt dictionary (and the objects it refers to), /ID, file key and permissions. Each
+  string and stream is encrypted with its own object's key; object streams are encrypted as streams, the
+  cross-reference stream is not; AES initialization vectors are derived from the file key and the object, so
+  the output is the same on every run. Encrypted XMP metadata is compressed (no tool can read it from the file
+  anyway); metadata left unencrypted stays as it is. The self-check reads the output back, checks that it opens
+  with the same key and dictionary, and compares the decrypted objects.
+- Permissions (/P): the file keeps exactly the same encryption, permission bits and content, so the engine
+  proceeds whatever /P says.
+- peyaji format: each encrypted stream that encrypts back to exactly its stored bytes is stored decrypted (so it
+  gets the zlib rebuild, preflate, Lepton and the model) and encrypted again on restore. The pack carries the
+  file key once and, per stream, its method, object number and generation (usually "those of the `N G obj` just
+  before") and its AES initialization vector. When the pack isn't clearly smaller than the encrypted streams
+  alone, the pack without decryption is made too and the smaller kept. Unencrypted files encode exactly as
+  before (format version 4). The decoder refuses crypt parts out of place (a second key, settings not right
+  after the syntax before a stream, an empty payload) and more than two parts in a row that restore nothing.
+- Left untouched (normal PDF): files that need a password, other security handlers, signed files, streams
+  with their own /Crypt filter, and anything readers may take differently: a /CF entry named /Identity (qpdf
+  and pdf.js use it, PDFium and Poppler don't), /CFM /None or no /CFM (qpdf decrypts as AES, PDFium as RC4),
+  /StmF and /StrF missing or naming different filters, a /V 4 or 5 key length given nowhere (Poppler takes 40
+  bits), a /V 4 key that isn't 128 bits, /V 2 without /Length, /R 2 with more than 40 bits, /O or /U of unusual
+  length, a /P outside 32 bits, and literal strings with a raw carriage return (decrypted differently by
+  readers that keep it and readers that read a line feed). Everything else the gate refuses (PDF/A, earlier
+  revisions, ...) still applies.
+- peyaji format: files whose handler isn't opened as above are packed exactly as before. In the others, a
+  stream with its own /Crypt filter, or one that doesn't encrypt back to its stored bytes, is kept as stored;
+  strings are never changed, so signatures and raw carriage returns don't matter there.
 
 ## Existing libraries (optional, `--features existing`)
 
@@ -53,7 +90,9 @@ output. `PDFE_DEBUG=1` prints the time of every stream and Flate segment.
   (`PDFJS_MODULES`); without them it is reported, never passed.
 - `verify_render.py`, `verify_pdfjs.mjs`: two more renderers on every output, Poppler and pdf.js (pixels and
   text of every page, up to 30 pages; no new Poppler errors). pdf.js comes from npm (`pdfjs-dist`,
-  `@napi-rs/canvas`), installed outside this folder; the engine itself has no dependencies.
+  `@napi-rs/canvas`), installed outside this folder.
+- `verify_encryption.py`: an output keeps the original's encryption exactly (qpdf's own reading of the revision,
+  permissions, methods and file key, the /ID and the /Encrypt dictionary, compared with pikepdf and qpdf).
 - `check_the_checkers.py`: the checks must catch one small change (a character, a metadata value, the page
   size, one bit of one pixel, one JPEG coefficient, a coefficient one larger that libjpeg's pixels don't show,
   a JPEG layout only pdf.js reads differently) and pass an unchanged copy and a JPEG with other Huffman tables.
