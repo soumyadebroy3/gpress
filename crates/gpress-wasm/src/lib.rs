@@ -157,7 +157,17 @@ pub unsafe extern "C" fn gpress_optimize(
     })
 }
 
-/// The gpress archive (outcome 1, or 2 when it had to be stored as it was).
+/// A decoded-bytes budget given in MiB (0 = the library's default), a u64 on every target.
+fn budget(v: u32, default: u64) -> u64 {
+    if v == 0 {
+        default
+    } else {
+        (v as u64) << 20
+    }
+}
+
+/// The gpress archive (outcome 1, or 2 when it had to be stored as it was). `max_decoded_mb` is the
+/// archive's decoded-bytes budget (0 = the library's default): streams past it are stored as they are.
 ///
 /// # Safety
 /// See `input`.
@@ -168,10 +178,12 @@ pub unsafe extern "C" fn gpress_compress(
     effort: u32,
     max_input_mb: u32,
     max_stream_mb: u32,
+    max_decoded_mb: u32,
     flags: u32,
 ) -> i32 {
     let data = input(ptr, len);
-    let opt = options(effort, max_input_mb, max_stream_mb, 0, flags);
+    let mut opt = options(effort, max_input_mb, max_stream_mb, 0, flags);
+    opt.max_decoded = budget(max_decoded_mb, opt.max_decoded);
     run(|| {
         let c = gpress::compress(data, &opt)?;
         Ok((c.data, if c.stored { 2 } else { 1 }, String::new()))
@@ -179,17 +191,23 @@ pub unsafe extern "C" fn gpress_compress(
 }
 
 /// The original bytes from an archive, or an error code (never a wrong file). An archive declaring more
-/// than `max_len_mb` MiB (0 = the library's default) is refused before anything is decoded.
+/// than `max_len_mb` MiB, or parts claiming more than `max_decoded_mb` MiB of decoded bytes in all (0 = the
+/// library's default for either), is refused before anything is decoded.
 ///
 /// # Safety
 /// See `input`.
 #[no_mangle]
-pub unsafe extern "C" fn gpress_expand(ptr: *const u8, len: usize, max_input_mb: u32, max_len_mb: u32) -> i32 {
+pub unsafe extern "C" fn gpress_expand(
+    ptr: *const u8,
+    len: usize,
+    max_input_mb: u32,
+    max_len_mb: u32,
+    max_decoded_mb: u32,
+) -> i32 {
     let data = input(ptr, len);
     let mut opt = options(100, max_input_mb, 0, 0, 0);
-    if max_len_mb > 0 {
-        opt.max_len = (max_len_mb as u64) << 20;
-    }
+    opt.max_len = budget(max_len_mb, opt.max_len);
+    opt.max_decoded = budget(max_decoded_mb, opt.max_decoded);
     run(|| Ok((gpress::expand(data, &opt)?, 0, String::new())))
 }
 
@@ -242,19 +260,19 @@ mod tests {
         unsafe {
             let p = gpress_alloc(input.len());
             std::ptr::copy_nonoverlapping(input.as_ptr(), p, input.len());
-            assert_eq!(gpress_compress(p, input.len(), 100, 0, 0, 0), 0);
+            assert_eq!(gpress_compress(p, input.len(), 100, 0, 0, 0, 0), 0);
             let archive = std::slice::from_raw_parts(gpress_out_ptr(), gpress_out_len()).to_vec();
             gpress_free_input(p, input.len());
             let q = gpress_alloc(archive.len());
             std::ptr::copy_nonoverlapping(archive.as_ptr(), q, archive.len());
-            assert_eq!(gpress_expand(q, archive.len(), 0, 0), 0);
+            assert_eq!(gpress_expand(q, archive.len(), 0, 0, 0), 0);
             assert_eq!(std::slice::from_raw_parts(gpress_out_ptr(), gpress_out_len()), &input[..]);
             // A declared length over max_len (1 MiB here is plenty for 15 bytes, so a limit of 0 MiB can't be
             // asked for; the native test uses the library directly for that).
             gpress_free_input(q, archive.len());
             // Damaged: code 2 and a message.
             let bad = gpress_alloc(3);
-            assert_eq!(gpress_expand(bad, 3, 0, 0), 2);
+            assert_eq!(gpress_expand(bad, 3, 0, 0, 0), 2);
             assert!(gpress_message_len() > 0);
             gpress_free_input(bad, 3);
             gpress_clear_out();
@@ -267,7 +285,7 @@ mod tests {
             assert!(gpress_message_len() > 0);
             gpress_free_input(r, 5);
         }
-        assert_eq!(gpress_archive_version(), 7);
+        assert_eq!(gpress_archive_version(), 8);
     }
 
     #[test]
@@ -282,7 +300,9 @@ mod tests {
         assert!(o.jbig2 && o.respect_conformance && o.flate_over_jpeg && o.use_existing_libraries);
         let d = options(100, 0, 0, 0, 0);
         assert_eq!(d, gpress::Options::default().threads(1));
-        // A size past the module's address space is clamped, never wrapped.
+        // A size past the module's address space is clamped, never wrapped; a budget is a u64 everywhere.
         assert_eq!(mib(u32::MAX, 0), usize::try_from((u32::MAX as u64) << 20).unwrap_or(usize::MAX));
+        assert_eq!(budget(u32::MAX, 0), (u32::MAX as u64) << 20);
+        assert_eq!(budget(0, 7), 7);
     }
 }

@@ -9,6 +9,9 @@ Branch `opt-model-loops`. Plan: `docs/optimisation-plan.md`; the rules and the p
     cargo test --release --workspace && cargo test --release --workspace --features existing
     bench/fetch_corpus.sh && export CORPUS=$PWD/bench/corpus      # 907 public PDFs, pinned in bench/sets/corpus.lock
     export GPRESS=$PWD/target/release/gpress
+    # plus the checking tools (qpdf, xz, brotli, zstd, a C compiler, pikepdf, pypdfium2, Pillow, libjpeg-turbo's
+    # jpegtran, pdf.js with PDFJS_MODULES): the install lines are in docs/tasks/README.md, step 2. benchmark.py
+    # warns about each missing one; a baseline made without them does not run the "no data loss" checks.
 
 The corpus comes from pdf.js `test/pdfs`, pypdf `sample-files`, OCRmyPDF `tests/resources` and pikepdf
 `tests/resources`, each at the commit named in `bench/sets/corpus.lock`; the script checks every sha256 and
@@ -28,7 +31,7 @@ full sample. Work on a branch named `opt-model-loops`.
 
 Two pure speed-ups of the context-mixing model (`src/cm/`), from `docs/optimisation-plan.md` section 8,
 group D. The model is part of the archive format: a faster model has to compute exactly the same thing, and
-`tests/pack_format.rs` holds a stored archive (`tests/data/format-v7.*`) that must still pack to the same
+`tests/pack_format.rs` holds a stored archive (`tests/data/format-v8.*`) that must still pack to the same
 bytes and restore.
 
 **D1. The model without bounds checks and with a vector mixer.** About 30% of the model's 1,400
@@ -65,7 +68,7 @@ All of these must hold:
 - the archive settings of the sample at least 1.3x faster in CPU time in total at effort 100 (pack, and the separate unpack the benchmark measures), and nothing slower than the baseline by more than the 10% `compare` allows;
 - `cargo test --release --workspace` with and without `--features existing`;
 - `cargo clippy --workspace --all-targets -- -D warnings` on both feature sets, and `cargo fmt --all --check`;
-- `python3 -I bench/security.py run --fuzz-seconds 120` with 0 failures.
+- `python3 -I bench/security.py run new-security --fuzz-seconds 120` with 0 failures.
 
 The owner's rules (`docs/tasks/README.md`) apply throughout: no data loss, no worse compression,
 deterministic output for any thread count, no panics, bounded memory and time, no new dependency, every

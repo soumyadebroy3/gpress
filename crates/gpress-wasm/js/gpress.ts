@@ -25,6 +25,12 @@ export interface GpressOptions {
   maxInputMiB?: number;
   /** Largest decoded stream re-encoded (normal PDF) or stored decoded (archive), MiB (default 64 / 256). */
   maxStreamMiB?: number;
+  /**
+   * Archive: the most decoded bytes the parts of one archive may claim in all, MiB (default 256); streams
+   * past it are stored as they are. The archive's header declares the total, and expand() refuses an archive
+   * declaring more than its own maxDecodedMiB before anything is decoded.
+   */
+  maxDecodedMiB?: number;
   /** Normal PDF: most objects per object stream (default 200). */
   objectsPerStream?: number;
   /** Leave PDF/A, PDF/X, signed and certified files untouched (default true). */
@@ -46,8 +52,15 @@ export interface GpressOptions {
 export interface ExpandOptions {
   /** Largest accepted archive in MiB (default 1024). */
   maxInputMiB?: number;
-  /** Largest file restored, MiB: an archive declaring more is refused before anything is decoded (default 16384). */
+  /** Largest file restored, MiB: an archive declaring more is refused before anything is decoded (default 1024). */
   maxLenMiB?: number;
+  /**
+   * Most decoded bytes the archive's parts may claim in all, MiB: an archive declaring more is refused before
+   * anything is decoded (default 256). The module's memory while expanding is about maxLenMiB + maxDecodedMiB
+   * for the model's history plus twice the largest part (at most maxDecodedMiB) and the model's tables (up to
+   * 164 MiB), so a page sets both to what it can afford.
+   */
+  maxDecodedMiB?: number;
 }
 
 export interface GpressResult {
@@ -70,6 +83,7 @@ export class GpressError extends Error {
   static readonly TIME_BUDGET = 6;
   static readonly DECLARED_TOO_LARGE = 7;
   static readonly NEEDS_EXISTING_LIBRARY = 8;
+  static readonly DECODED_TOO_LARGE = 9;
 }
 
 /** Largest input the 32-bit module takes: under 2 GiB. */
@@ -89,8 +103,8 @@ interface Exports {
   gpress_alloc(len: number): number;
   gpress_free_input(ptr: number, len: number): void;
   gpress_optimize(ptr: number, len: number, effort: number, maxIn: number, maxStream: number, objectsPerStream: number, flags: number): number;
-  gpress_compress(ptr: number, len: number, effort: number, maxIn: number, maxStream: number, flags: number): number;
-  gpress_expand(ptr: number, len: number, maxIn: number, maxLen: number): number;
+  gpress_compress(ptr: number, len: number, effort: number, maxIn: number, maxStream: number, maxDecoded: number, flags: number): number;
+  gpress_expand(ptr: number, len: number, maxIn: number, maxLen: number, maxDecoded: number): number;
   gpress_out_ptr(): number;
   gpress_out_len(): number;
   gpress_outcome(): number;
@@ -107,6 +121,7 @@ interface Packed {
   effort: number;
   maxIn: number;
   maxStream: number;
+  maxDecoded: number;
   objectsPerStream: number;
   flags: number;
 }
@@ -162,14 +177,15 @@ export class Gpress {
   /** The gpress archive of any input; expand() restores it byte for byte. */
   compress(input: Uint8Array, options: GpressOptions = {}): GpressResult {
     const o = pack(options);
-    return this.run(input, (ptr, len) => this.ex.gpress_compress(ptr, len, o.effort, o.maxIn, o.maxStream, o.flags));
+    return this.run(input, (ptr, len) => this.ex.gpress_compress(ptr, len, o.effort, o.maxIn, o.maxStream, o.maxDecoded, o.flags));
   }
 
   /** The original bytes from an archive. A damaged archive throws GpressError, never returns a wrong file. */
   expand(archive: Uint8Array, options: ExpandOptions = {}): Uint8Array {
     const maxIn = clamp(options.maxInputMiB ?? 0, 0, 1 << 20);
     const maxLen = clamp(options.maxLenMiB ?? 0, 0, 1 << 24);
-    return this.run(archive, (ptr, len) => this.ex.gpress_expand(ptr, len, maxIn, maxLen)).data;
+    const maxDecoded = clamp(options.maxDecodedMiB ?? 0, 0, 1 << 24);
+    return this.run(archive, (ptr, len) => this.ex.gpress_expand(ptr, len, maxIn, maxLen, maxDecoded)).data;
   }
 
   /** True when the bytes start like a gpress archive. */
@@ -226,6 +242,7 @@ function pack(options: GpressOptions): Packed {
     effort: clamp(options.effort ?? 100, 0, 100),
     maxIn: clamp(options.maxInputMiB ?? 0, 0, 1 << 20),
     maxStream: clamp(options.maxStreamMiB ?? 0, 0, 1 << 20),
+    maxDecoded: clamp(options.maxDecodedMiB ?? 0, 0, 1 << 24),
     objectsPerStream: clamp(options.objectsPerStream ?? 0, 0, 1 << 20),
     flags:
       (options.respectConformance === false ? FLAG_IGNORE_CONFORMANCE : 0) |

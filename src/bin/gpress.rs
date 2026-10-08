@@ -7,7 +7,8 @@
 //!
 //! Options (the library's `Options`, the same defaults): --effort N (0 fast .. 100 smallest, default 100;
 //! --quick = 0), --threads N (0: what the machine offers, at most 8), --max-input BYTES, --max-stream BYTES
-//! (normal PDF), --max-stream-archive BYTES, --max-len BYTES (unpack: a file declaring more is refused),
+//! (normal PDF), --max-stream-archive BYTES, --max-decoded BYTES (the archive's decoded-bytes budget, for pack
+//! and unpack), --max-len BYTES (unpack: a file declaring more is refused),
 //! --objects-per-stream N, --time-budget MS (give up after that long), --ignore-conformance,
 //! --no-flate-over-jpeg, --no-jpeg-tables, --no-jbig2, --keep-encrypted (normal PDF), --no-decrypt
 //! (archive), --no-existing. The output never depends on the thread count or the time budget: a budget that
@@ -15,7 +16,7 @@
 //!
 //! Measuring tools (the engine's own modules, for the benchmarks): deflate, inflate, batch, pdf-batch,
 //! repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info, fax-decode, fax-encode, fax-scan,
-//! fax-model, jbig2-encode. `--iter`, `--exact`, `--chain`, `--nice`, `--nosplit`, `--noalt`, `--nomulti`
+//! fax-model, jbig2-encode, claim-archive (the security suite's crafted archive). `--iter`, `--exact`, `--chain`, `--nice`, `--nosplit`, `--noalt`, `--nomulti`
 //! and `--nopolish` fine-tune the Flate settings of the deflate tools below the effort.
 //!
 //! Exit status: 0 done; a library error exits with its code (1 input too large, 2 not an archive or damaged,
@@ -46,11 +47,13 @@ usage: gpress optimize IN OUT [options]   a smaller PDF that any reader opens (o
        gpress unpack IN OUT [options]     the original from an archive (a damaged archive is an error)
 
 options: --effort N (0 fast .. 100 smallest, default 100; --quick = 0)   --threads N (0: the machine's, at most 8)
-         --max-input BYTES   --max-stream BYTES (normal PDF)   --max-stream-archive BYTES   --max-len BYTES (unpack)
-         --objects-per-stream N   --time-budget MS   --ignore-conformance   --no-flate-over-jpeg   --no-jpeg-tables
-         --no-jbig2   --keep-encrypted (normal PDF)   --no-decrypt (archive)   --no-existing
+         --max-input BYTES   --max-stream BYTES (normal PDF)   --max-stream-archive BYTES   --max-decoded BYTES (archive,
+         pack and unpack)   --max-len BYTES (unpack)   --objects-per-stream N   --time-budget MS   --ignore-conformance
+         --no-flate-over-jpeg   --no-jpeg-tables   --no-jbig2   --keep-encrypted (normal PDF)   --no-decrypt (archive)
+         --no-existing
 measuring tools: deflate, inflate, batch, pdf-batch, repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info,
-         fax-decode, fax-encode, fax-scan, fax-model, jbig2-encode (see the comments at the top of src/bin/gpress.rs)";
+         fax-decode, fax-encode, fax-scan, fax-model, jbig2-encode, claim-archive (see the comments at the top of
+         src/bin/gpress.rs)";
 
 /// The flags that take a value.
 const WITH_VALUE: &[&str] = &[
@@ -63,6 +66,7 @@ const WITH_VALUE: &[&str] = &[
     "--max-input",
     "--max-stream",
     "--max-stream-archive",
+    "--max-decoded",
     "--max-len",
     "--objects-per-stream",
     "--time-budget",
@@ -104,6 +108,9 @@ fn main() {
     }
     if let Some(n) = size("--max-stream-archive") {
         lib.max_stream_archive = n;
+    }
+    if let Some(n) = num("--max-decoded") {
+        lib.max_decoded = n;
     }
     if let Some(n) = num("--max-len") {
         lib.max_len = n;
@@ -278,6 +285,14 @@ fn main() {
             let data = std::fs::read(i).unwrap_or_else(|e| die(&format!("{i}: {e}")));
             let out = gpress::expand(&data, &lib).unwrap_or_else(|e| fail(&e));
             std::fs::write(o, &out).unwrap_or_else(|e| die(&format!("{o}: {e}")));
+        }
+        Some("claim-archive") => {
+            // For the security suite: gpress claim-archive IN OUT BYTES -> OUT is an archive of IN whose one
+            // decoded part claims BYTES (see pack::crafted_claim); unpack must refuse it within its budget.
+            let (i, o) = (pos.get(1).unwrap_or_else(|| die("need IN")), pos.get(2).unwrap_or_else(|| die("need OUT")));
+            let claim: u64 = pos.get(3).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need BYTES"));
+            let data = std::fs::read(i).unwrap_or_else(|e| die(&format!("{i}: {e}")));
+            std::fs::write(o, gpress::pack::crafted_claim(&data, claim)).unwrap_or_else(|e| die(&format!("{o}: {e}")));
         }
         Some("expand") => {
             // For measuring only: gpress expand IN OUT -> OUT is IN with rebuildable streams decoded (see

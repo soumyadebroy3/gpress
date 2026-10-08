@@ -1,3 +1,21 @@
+Since this run (the review fixes on main, format version 8): the decoded-bytes budget the spec asked for is
+in after all, on both sides. The reviewers showed that `pack`'s memory followed the sum of what a file's
+streams decode to (a 490 KB file with eight 60 MiB Flate streams took 1.5 GB) and that `expand`'s followed
+what a crafted archive claimed (1033 bytes per byte of the declared length, up to 2 GiB per part, for the
+whole run). Now `Options::max_decoded` (256 MiB by default; the suite runs every pack and unpack with
+`--max-decoded` at 64 MiB) bounds what the parts of one archive may claim in all: compress stores streams
+past it as they are, in file order, and declares the total in the header; expand refuses an archive declaring
+more before anything is decoded and holds every part to what the header declared. The planner keeps no
+decoded data any more (a stream is inflated again when its turn comes) and the residual history lives per
+segment, so the pack of a 154 KB file with three 50 MiB streams went from 549 MB to 368 MB and its restore
+from 382 MB to 283 MB with one thread, with the same coded bytes. New cases in this suite: the header's
+declared total over, at and below the budget, a crafted archive whose one part claims the whole budget
+(`claim-archive`, refused in 1.6 s of CPU and 206 MiB at 64 MiB), and `flate_bomb_multi.pdf` (eight 60 MiB
+streams: packed-exact in 7.8 s of CPU and 266 MiB). The tool now exits with the library's code, so a panic the
+guard caught (exit 4) counts as a bug in every section, like the C harness's. These numbers are from the
+sections run on the fixed build; the tables below are still those of the stored run until the suite is run
+again in full.
+
 Run on build integration-8892b9e (preflate-rs gone, format version 7, the licence gate in): the two failures
 below are closed, with no change to the engine's bounds. `flate_bomb.pdf` through pack now ends as
 packed-exact in 1.0 s of CPU with a peak of 260 MiB (the failed inflate of the bomb stops at `max_stream`,

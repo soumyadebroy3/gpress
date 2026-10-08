@@ -256,7 +256,9 @@ fn run_zlib(d: &[u8], p: Params, target: Option<&[u8]>) -> Option<Vec<u8>> {
         base: 0,
         match_start: 0,
         prev_length: MIN_MATCH - 1,
-        out: BitWriter::with_capacity(d.len() / 2 + 64),
+        // Reserved up front: half the input, but at most 4 MiB (the vector grows with what is written, so
+        // a large part costs no more than its output).
+        out: BitWriter::with_capacity((d.len() / 2 + 64).min(1 << 22)),
         block_start: 0,
         read_upto: 0,
         target,

@@ -15,7 +15,12 @@
 //!
 //! The output is the same bytes for any thread count, on any machine, with or without a time budget: the
 //! engine decides from sizes only, never from time. A budget that runs out gives [`Error::TimeBudget`] and no
-//! output.
+//! output, in all three operations.
+//!
+//! Memory on hostile input follows the options, never what a file claims: `max_input` for the input,
+//! `max_stream` and `max_stream_archive` per decoded stream, and for the archive `max_decoded` (what the
+//! parts of one archive may claim in all, declared in its header and refused up front when over the
+//! caller's limit) with `max_len` (the restored length, likewise).
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
@@ -72,13 +77,22 @@ pub struct Options {
     /// Normal PDF: largest decoded stream re-encoded, in bytes. A stream that decodes to more is kept as it is.
     pub max_stream: usize,
     /// Archive: largest decoded stream stored in its decoded form, in bytes. A stream that decodes to more
-    /// is stored as it is. (The decoder takes up to 2 GiB per part and 1032 bytes per byte of the archive in
-    /// all, whatever this was: an archive restores the same wherever it was made.)
+    /// is stored as it is. (The decoder takes up to 2 GiB per part, whatever this was.)
     pub max_stream_archive: usize,
+    /// Archive, both ways: the most decoded bytes the parts of one archive may claim in all (decoded streams,
+    /// and Lepton data). Compress: in file order, a stream whose claim doesn't fit in what is left is stored
+    /// as it is, decided from sizes alone; the header declares the total. Expand: an archive whose header
+    /// declares more is refused with [`Error::DecodedTooLarge`] before anything is decoded, and every part
+    /// is then held to what the header declared. Memory while expanding is about `max_len` for the output,
+    /// `max_len + max_decoded` for the model's history, twice the largest part (at most `max_decoded`) and
+    /// the model's tables (up to 164 MiB), so a service that takes archives from anyone sets this and
+    /// `max_len` to what it can afford. An archive made with a budget restores wherever that budget is
+    /// allowed.
+    pub max_decoded: u64,
     /// Expand: largest file restored, in bytes. An archive whose header declares more is refused with
-    /// [`Error::DeclaredTooLarge`] before anything is decoded or reserved for it. The decoder's work and
-    /// memory follow the declared length, so a service that takes archives from anyone sets this to what it
-    /// can afford. At most 16 GiB, the format's own limit.
+    /// [`Error::DeclaredTooLarge`] before anything is decoded or reserved for it. At most 16 GiB, the
+    /// format's own limit; the default is the default `max_input`, which no archive made with default
+    /// options exceeds.
     pub max_len: u64,
     /// Normal PDF: most objects per compressed object stream (at least 1).
     pub objects_per_stream: usize,
@@ -103,7 +117,8 @@ pub struct Options {
     /// Give up after this much wall time: the call then returns [`Error::TimeBudget`] and nothing else, and
     /// the input is unchanged. A call that finishes in time gives the same bytes as one without a budget
     /// (the engine never decides anything from time). Checked between streams, Flate segments and archive
-    /// parts, so a budget may be overshot by a little. `None` = no limit. On a platform without a clock
+    /// parts (every 64 KiB of model work) in all three operations, so a budget may be overshot by a little
+    /// (on expand by one part's zlib re-creation). `None` = no limit. On a platform without a clock
     /// (WebAssembly without a host clock) there is no budget.
     pub time_budget: Option<Duration>,
 }
@@ -116,7 +131,8 @@ impl Default for Options {
             max_input: 1 << 30,
             max_stream: 64 << 20,
             max_stream_archive: 256 << 20,
-            max_len: 1 << 34,
+            max_decoded: pack::DEFAULT_MAX_DECODED,
+            max_len: 1 << 30,
             objects_per_stream: 200,
             respect_conformance: true,
             flate_over_jpeg: true,
@@ -152,6 +168,10 @@ impl Options {
     }
     pub fn max_stream_archive(mut self, bytes: usize) -> Options {
         self.max_stream_archive = bytes;
+        self
+    }
+    pub fn max_decoded(mut self, bytes: u64) -> Options {
+        self.max_decoded = bytes;
         self
     }
     pub fn max_len(mut self, bytes: u64) -> Options {
@@ -256,6 +276,7 @@ impl Options {
             threads: self.threads,
             decrypt: self.decrypt,
             max_stream: self.max_stream_archive,
+            max_decoded: self.max_decoded,
             existing: self.use_existing_libraries && Options::has_existing_libraries(),
             deadline: self.deadline(),
         }
@@ -263,7 +284,7 @@ impl Options {
 
     /// The expand settings these options mean.
     pub fn unpack(&self) -> pack::UnpackOptions {
-        pack::UnpackOptions { max_len: self.max_len }
+        pack::UnpackOptions { max_len: self.max_len, max_decoded: self.max_decoded, deadline: self.deadline() }
     }
 }
 
@@ -287,6 +308,9 @@ pub enum Error {
     DeclaredTooLarge { declared: u64, limit: u64 },
     /// Expand: the archive has parts made with the existing library (Lepton) and this build doesn't have it.
     NeedsExistingLibrary,
+    /// Expand: the archive's parts claim more decoded bytes in all than `Options::max_decoded`. Nothing was
+    /// decoded.
+    DecodedTooLarge { declared: u64, limit: u64 },
 }
 
 impl std::fmt::Display for Error {
@@ -307,6 +331,9 @@ impl std::fmt::Display for Error {
                 f,
                 "this gpress archive has parts made with the existing library (Lepton); expanding it needs a build with it"
             ),
+            Error::DecodedTooLarge { declared, limit } => {
+                write!(f, "the archive's parts claim {declared} decoded bytes, more than the limit of {limit}")
+            }
         }
     }
 }
@@ -325,6 +352,7 @@ impl Error {
             Error::TimeBudget(_) => 6,
             Error::DeclaredTooLarge { .. } => 7,
             Error::NeedsExistingLibrary => 8,
+            Error::DecodedTooLarge { .. } => 9,
         }
     }
 }
@@ -384,6 +412,9 @@ pub struct Compressed {
     pub streams_decrypted: usize,
     /// Decoded bytes that went through the model.
     pub decoded_bytes: usize,
+    /// The decoded bytes the archive's parts claim in all, as its header declares: what `max_decoded` must
+    /// cover to expand it (at most this call's `max_decoded`).
+    pub declared_decoded: u64,
 }
 
 fn guard<T>(what: &str, f: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
@@ -459,6 +490,7 @@ pub fn compress(input: &[u8], opt: &Options) -> Result<Compressed, Error> {
             fax_images: st.fax,
             streams_decrypted: st.decrypted,
             decoded_bytes: st.decoded_bytes,
+            declared_decoded: st.claimed,
         })
     })
 }
@@ -472,7 +504,9 @@ pub fn expand(archive: &[u8], opt: &Options) -> Result<Vec<u8>, Error> {
         pack::unpack_with(archive, &opt.unpack()).map_err(|e| match e {
             pack::UnpackError::UnknownVersion(v) => Error::UnsupportedVersion(v),
             pack::UnpackError::TooLong { declared, limit } => Error::DeclaredTooLarge { declared, limit },
+            pack::UnpackError::TooMuchDecoded { declared, limit } => Error::DecodedTooLarge { declared, limit },
             pack::UnpackError::NeedsExisting => Error::NeedsExistingLibrary,
+            pack::UnpackError::TimedOut => Error::TimeBudget(opt.time_budget.unwrap_or_default()),
             other => Error::Damaged(other.to_string()),
         })
     })
@@ -527,8 +561,8 @@ mod tests {
         let mut other = compress(b"x", &opt).unwrap().data;
         other[4] = 200;
         assert_eq!(expand(&other, &opt), Err(Error::UnsupportedVersion(200)));
-        other[4] = 6;
-        assert_eq!(expand(&other, &opt), Err(Error::UnsupportedVersion(6)));
+        other[4] = 7;
+        assert_eq!(expand(&other, &opt), Err(Error::UnsupportedVersion(7)));
     }
 
     #[test]
@@ -542,9 +576,10 @@ mod tests {
             Error::TimeBudget(Duration::from_millis(5)),
             Error::DeclaredTooLarge { declared: 2, limit: 1 },
             Error::NeedsExistingLibrary,
+            Error::DecodedTooLarge { declared: 2, limit: 1 },
         ];
         let codes: Vec<i32> = errors.iter().map(Error::code).collect();
-        assert_eq!(codes, (1..=8).collect::<Vec<i32>>());
+        assert_eq!(codes, (1..=9).collect::<Vec<i32>>());
         for e in &errors {
             let m = e.to_string();
             assert!(!m.is_empty() && !m.contains("src/") && !m.contains(".rs:"), "{m}");
@@ -574,6 +609,7 @@ mod tests {
             .threads(3)
             .max_stream(1000)
             .max_stream_archive(2000)
+            .max_decoded(2500)
             .max_len(3000)
             .objects_per_stream(7)
             .respect_conformance(false)
@@ -589,9 +625,11 @@ mod tests {
         assert!(!r.respect_conformance && !r.flate_over_jpeg && !r.jpeg_tables && !r.jbig2 && !r.rewrite_encrypted);
         assert!(r.deadline.is_set() && r.flate.deadline == Deadline::NONE, "the pool sets the Flate deadline");
         let p = opt.pack();
-        assert_eq!((p.effort, p.threads, p.max_stream), (40, 3, 2000));
+        assert_eq!((p.effort, p.threads, p.max_stream, p.max_decoded), (40, 3, 2000, 2500));
         assert!(!p.decrypt && !p.existing && p.deadline.is_set());
-        assert_eq!(opt.unpack().max_len, 3000);
+        let u = opt.unpack();
+        assert_eq!((u.max_len, u.max_decoded), (3000, 2500));
+        assert!(u.deadline.is_set() && !Options::default().unpack().deadline.is_set());
         assert!(!Options::default().rewrite().deadline.is_set());
         assert_eq!(Options::default().pack().existing, Options::has_existing_libraries());
     }

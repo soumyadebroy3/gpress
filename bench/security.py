@@ -28,9 +28,11 @@ the hang limit in wall time is killed and counted as a hang. The engine runs sin
 
 The bounds (also in the report): a damaged archive is refused in under 5 s with a peak under 512 MiB; a
 hostile PDF returns or errors in under 30 s plus 5 s per MiB of input, with a peak under 512 MiB or 16 bytes
-per input byte, whichever is more (time and memory may grow with the input, never with what the input
-claims); the fuzzer runs with a hard 512 MiB address space and 60 s, so an allocation failure there means
-the engine asked for more than that on a small file."""
+per input byte, whichever is more (time and memory may grow with the input and with the engine's decoded-bytes
+budget, never with what the input claims beyond it); the fuzzer runs with a hard 512 MiB address space and 60 s,
+so an allocation failure there means the engine asked for more than that on a small file. Every pack and
+unpack runs with the budget `--max-decoded` (default 64 MiB; Options::max_decoded in the library): what a
+service that takes files from anyone sets to what it can afford, and the setting the bounds are for."""
 import argparse, atexit, hashlib, json, os, random, re, shutil, signal, subprocess, sys, tempfile, time, zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -49,6 +51,10 @@ DEFAULTS = {
     'sets': os.path.join(HERE, 'sets'),
     'effort': 0,  # the quick settings: legitimate work stays short, so a long run is the input's doing
     'threads': 1,
+    # The engine's decoded-bytes budget (Options::max_decoded) for every pack and unpack: what a service that
+    # takes files from anyone sets to what it can afford. The archive bounds below hold for this setting; an
+    # archive declaring more is refused before anything is decoded, and pack stores streams past it as they are.
+    'max_decoded_mib': 64,
     'time_metric': 'cpu',  # cpu or wall: which time the bounds apply to
     'hang': 60.0,  # a run past this many seconds of wall time is killed and is a hang ...
     'hang_factor': 2.0,  # ... or past this multiple of its time bound, whichever is more
@@ -61,6 +67,7 @@ DEFAULTS = {
     'pdf': {
         'time': 30.0, 'time_per_mib': 5.0, 'mem_mib': 512, 'mem_per_byte': 16,
         'nesting': 100_000, 'bomb_mib': 1024, 'nested_bomb_mib': 256, 'image_side': 100_000,
+        'multi_bomb_streams': 8, 'multi_bomb_mib': 60,
         'objects': 1_000_000, 'runlength_mib': 2,
     },
     'fuzz': {
@@ -268,15 +275,17 @@ class Tool:
     def __init__(self, path, cfg, kind='binary'):
         self.path, self.kind = os.path.abspath(path), kind
         self.effort, self.threads = cfg['effort'], cfg['threads']
+        self.max_decoded = cfg['max_decoded_mib'] * MIB
 
     def argv(self, op, inp, out):
+        budget = ['--max-decoded', self.max_decoded]
         if self.kind == 'binary':
-            args = [self.path, op, inp, out]
+            args = [self.path, op, inp, out] + budget
             if op != 'unpack':
                 args += ['--effort', self.effort, '--threads', self.threads]
             return args
         name = {'optimize': 'optimize', 'pack': 'compress', 'unpack': 'expand'}[op]
-        return [self.path, name, inp, out, '--effort', self.effort, '--threads', self.threads]
+        return [self.path, name, inp, out, '--effort', self.effort, '--threads', self.threads] + budget
 
     def special(self, r):
         """A verdict the tool's own exit codes carry, or None. Both tools exit 4 for a panic the library's guard
@@ -456,6 +465,18 @@ def hostile_pdfs(cfg, dst):
     # 1 GiB is not reachable in one pass of Flate, LZW or RunLength). The nested one keeps the file small.
     bomb = zeros_deflated(p['bomb_mib'] * MIB)
     doc(stream_obj(bomb, filters=b'/FlateDecode'), 'flate_bomb.pdf', f'Flate stream of {len(bomb) // 1024} KiB that decodes to {p["bomb_mib"]} MiB')
+    # Several streams each under the per-stream cap: pack's memory must follow its decoded budget, not the
+    # sum of what the streams decode to.
+    piece = zeros_deflated(p['multi_bomb_mib'] * MIB)
+    objs = {1: b"<< /Type /Catalog /Pages 2 0 R >>", 2: PAGES}
+    xo = b" ".join(f"/Im{k} {4 + k} 0 R".encode() for k in range(p['multi_bomb_streams']))
+    objs[3] = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XObject << " + xo + b" >> >> >>"
+    for k in range(p['multi_bomb_streams']):
+        objs[4 + k] = stream_obj(piece, filters=b'/FlateDecode',
+                                 extra=f"/Subtype /Image /Width {p['multi_bomb_mib'] * 1024} /Height 1024 /BitsPerComponent 8 /ColorSpace /DeviceGray".encode())
+    add('flate_bomb_multi.pdf', make_pdf(objs),
+        f"{p['multi_bomb_streams']} Flate streams of {len(piece) // 1024} KiB each decoding to {p['multi_bomb_mib']} MiB, "
+        f"{p['multi_bomb_streams'] * p['multi_bomb_mib']} MiB in all")
     inner = zeros_deflated(p['nested_bomb_mib'] * MIB)
     outer = zlib.compress(inner, 9)
     doc(stream_obj(outer, filters=b'[/FlateDecode /FlateDecode]'), 'flate_bomb_nested.pdf', f'two-stage Flate ({len(outer)} B) decoding to {p["nested_bomb_mib"]} MiB')
@@ -609,11 +630,13 @@ def varied_seeds(cfg, run):
     return picked[:want]
 
 
-def damage_cases(cfg, packed):
+def damage_cases(cfg, packed, crafted=None):
     """Every damage the spec asks for, as (kind, bytes). The header layout is the engine's: 4 bytes of
-    magic, a version byte, the original length as a base-128 varint, a 16-byte hash, then the coded body
-    (the parts and their lengths are inside the coded body, so a "part count of a billion" can only come
-    from a damaged body: the garbage-body and flip cases stand in for it)."""
+    magic, a version byte, the original length as a base-128 varint, the decoded bytes the parts claim in
+    all as a second varint, a 16-byte hash, then the coded body (the parts and their lengths are inside the
+    coded body, so a "part count of a billion" can only come from a damaged body: the garbage-body and flip
+    cases stand in for it, and `crafted`, an archive the engine's measuring tool wrote whose part claims the
+    whole decoded budget, is the shape a crafted file takes)."""
     a = cfg['archive']
     n = len(packed)
     cases = []
@@ -648,7 +671,17 @@ def damage_cases(cfg, packed):
         if len(b) >= 5:
             b[4] = v
             cases.append((f'version_{v}_declared_16gb', bytes(b)))
-    hpos = varint_end(packed)
+    # The decoded total the header declares: over the engine's budget (refused before anything is decoded),
+    # at the budget exactly (the body is unchanged, so it restores), zero (the first decoded part is refused
+    # when its length is read), and huge.
+    budget = cfg['max_decoded_mib'] * MIB
+    cases.append(('declared_decoded_over_max', reset_decoded(packed, budget + 1)))
+    cases.append(('declared_decoded_at_max', reset_decoded(packed, budget)))
+    cases.append(('declared_decoded_zero', reset_decoded(packed, 0)))
+    cases.append(('declared_decoded_huge', reset_decoded(packed, 1 << 40)))
+    if crafted:
+        cases.append(('crafted_claim_at_max', crafted))
+    hpos = header_end(packed)
     if hpos is not None and hpos < n:
         b = bytearray(packed)
         b[hpos] ^= 0xFF
@@ -669,13 +702,14 @@ def varint_end(packed, start=5):
     return None
 
 
-def reset_length(packed, newlen):
-    """The archive with its declared original length replaced by newlen."""
+def header_end(packed):
+    """Where the 16-byte hash starts: after the version byte and the two varints (length, decoded total)."""
     end = varint_end(packed)
-    if end is None:
-        return packed
+    return varint_end(packed, end) if end is not None else None
+
+
+def varint(n):
     v = bytearray()
-    n = newlen
     while True:
         b = n & 0x7F
         n >>= 7
@@ -683,8 +717,36 @@ def reset_length(packed, newlen):
             v.append(b | 0x80)
         else:
             v.append(b)
-            break
-    return bytes(packed[:5]) + bytes(v) + bytes(packed[end:])
+            return bytes(v)
+
+
+def reset_length(packed, newlen):
+    """The archive with its declared original length replaced by newlen."""
+    end = varint_end(packed)
+    if end is None:
+        return packed
+    return bytes(packed[:5]) + varint(newlen) + bytes(packed[end:])
+
+
+def reset_decoded(packed, newtotal):
+    """The archive with the decoded total its header declares replaced by newtotal."""
+    start = varint_end(packed)
+    end = varint_end(packed, start) if start is not None else None
+    if end is None:
+        return packed
+    return bytes(packed[:start]) + varint(newtotal) + bytes(packed[end:])
+
+
+def crafted_claim(cfg, tool, seed, out):
+    """An archive of `seed` whose one decoded part claims the whole decoded budget (the engine's measuring
+    tool `claim-archive` writes it; the C harness has no such tool, so the suite's own engine makes it): a
+    crafted file's shape, which the decoder must refuse within the bounds. None when it can't be made."""
+    engine = cfg['engine']
+    r = spawn([engine, 'claim-archive', seed, out, cfg['max_decoded_mib'] * MIB], timeout=cfg['hang'])
+    if r['rc'] != 0 or not os.path.exists(out):
+        return None
+    with open(out, 'rb') as f:
+        return f.read()
 
 
 def archive_verdict(cfg, tool, r, orig, outp):
@@ -725,7 +787,8 @@ def archives(cfg, run, tool=None, tag=''):
             continue
         with open(pyj, 'rb') as f:
             packed = f.read()
-        for kind, bad in damage_cases(cfg, packed):
+        crafted = crafted_claim(cfg, tool, seed, os.path.join(packs_dir, f'seed{i}-crafted.pyj'))
+        for kind, bad in damage_cases(cfg, packed, crafted):
             badp = os.path.join(run.work, 'case.pyj')
             with open(badp, 'wb') as f:
                 f.write(bad)
@@ -1165,7 +1228,9 @@ def report(cfg, run):
               f"times include waiting for a CPU." if load is not None and meta.get('cpus') and load > meta['cpus'] else '')
     L += [f"Every number here comes from `bench/security.py` (run `{os.path.basename(run.dir)}`"
           + (f", build {meta['build']}, {meta['date']}" if meta else '') + f"), engine at effort {cfg['effort']} with "
-          f"{cfg['threads']} thread, each command its own process measured by {meta.get('measured_by', 'wait4')}. "
+          f"{cfg['threads']} thread and a decoded-bytes budget (`--max-decoded`) of {cfg['max_decoded_mib']} MiB for every "
+          f"pack and unpack (the setting a service makes; an archive declaring more is refused before anything is decoded), "
+          f"each command its own process measured by {meta.get('measured_by', 'wait4')}. "
           f"Time bounds apply to the child's {metric}.{shared} The bounds: a damaged archive is refused in under "
           f"{a['time']:.0f} s with a peak under {a['mem_mib']} MiB; a hostile PDF returns (untouched, or smaller "
           f"and proven by the engine's own self-check) or gives a clean error in under {p['time']:.0f} s plus "
@@ -1405,7 +1470,8 @@ def write_meta(cfg, run, build, mode):
              'engine_sha256': sha256_file(cfg['engine']) if os.path.exists(cfg['engine']) else None,
              'corpus': cfg['corpus'], 'cpus': os.cpu_count(), 'load_at_start': load, 'kernel': os.uname().release,
              'python': sys.version.split()[0], 'measured_by': Launcher.note, 'tools': tools,
-             'bounds': {'archive': cfg['archive'], 'pdf': cfg['pdf'], 'fuzz': cfg['fuzz'], 'hang': cfg['hang'], 'time_metric': cfg['time_metric']}}
+             'bounds': {'archive': cfg['archive'], 'pdf': cfg['pdf'], 'fuzz': cfg['fuzz'], 'hang': cfg['hang'], 'time_metric': cfg['time_metric'],
+                        'max_decoded_mib': cfg['max_decoded_mib']}}
     meta = read_json(run.path('meta.json')) or {}
     runs = meta.get('runs', [])
     runs.append(entry)
@@ -1443,6 +1509,7 @@ def main():
     ap.add_argument('--files', help='the corpus list, one path per line (default: bench/sets/all.txt)')
     ap.add_argument('--effort', type=int, help='engine effort for every run (default 0)')
     ap.add_argument('--threads', type=int, help='engine threads (default 1)')
+    ap.add_argument('--max-decoded', type=int, help='the engine\'s decoded-bytes budget in MiB for every pack and unpack (default 64)')
     ap.add_argument('--packs', type=int, help='archives: packs to damage (default 20)')
     ap.add_argument('--archive-time', type=float, help='seconds a damaged archive may take to be refused (default 5)')
     ap.add_argument('--pdf-time', type=float, help='base seconds a hostile PDF may take (default 30)')
@@ -1463,6 +1530,8 @@ def main():
     for k in ('engine', 'corpus', 'files', 'effort', 'threads', 'hang', 'time_metric'):
         if getattr(a, k) is not None:
             cfg[k] = getattr(a, k)
+    if a.max_decoded is not None:
+        cfg['max_decoded_mib'] = a.max_decoded
     if a.run:
         cfg['run'] = a.run
     if a.packs is not None:

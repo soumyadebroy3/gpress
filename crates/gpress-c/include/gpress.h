@@ -35,8 +35,10 @@ enum {
                                             objects_per_stream of 0) */
   GPRESS_ERR_TIME_BUDGET = 6,            /* the time budget ran out; the input is unchanged */
   GPRESS_ERR_DECLARED_TOO_LARGE = 7,     /* expand: the archive declares more than options.max_len bytes */
-  GPRESS_ERR_NEEDS_EXISTING_LIBRARY = 8  /* expand: the archive has parts made with the existing library
+  GPRESS_ERR_NEEDS_EXISTING_LIBRARY = 8, /* expand: the archive has parts made with the existing library
                                             (Lepton) and this build doesn't have it */
+  GPRESS_ERR_DECODED_TOO_LARGE = 9       /* expand: the archive declares more decoded bytes than
+                                            options.max_decoded; nothing was decoded */
 };
 
 /* Outcomes in gpress_result.outcome (optimize and compress). */
@@ -56,8 +58,12 @@ typedef struct gpress_options {
   uint64_t max_input;             /* largest accepted input in bytes; 0 = 1 GiB */
   uint64_t max_stream;            /* normal PDF: largest decoded stream re-encoded; 0 = 64 MiB */
   uint64_t max_stream_archive;    /* archive: largest decoded stream stored decoded; 0 = 256 MiB */
+  uint64_t max_decoded;           /* archive: most decoded bytes the parts of one archive may claim in all;
+                                     compress stores streams past it as they are, expand refuses an archive
+                                     declaring more before anything is decoded (its memory follows this
+                                     and max_len, see README "Options"); 0 = 256 MiB */
   uint64_t max_len;               /* expand: largest file restored; an archive declaring more is refused
-                                     before anything is decoded; 0 = 16 GiB (the format's limit) */
+                                     before anything is decoded; 0 = 1 GiB */
   uint32_t objects_per_stream;    /* normal PDF: most objects per object stream; 0 = 200 */
   uint64_t time_budget_ms;        /* give up after this many milliseconds (GPRESS_ERR_TIME_BUDGET);
                                      0 = no limit */

@@ -1,13 +1,14 @@
 // Runs against dist/gpress.wasm and dist/gpress.js after `npm run build`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { deflateSync as zlibSync } from "node:zlib";
 import { Gpress, GpressError } from "../dist/gpress.js";
 
 const g = await Gpress.load(new URL("../dist/gpress.wasm", import.meta.url).pathname);
 
 test("version is set", () => {
   assert.match(g.version, /^\d+\.\d+\.\d+$/);
-  assert.equal(g.archiveVersion, 7);
+  assert.equal(g.archiveVersion, 8);
 });
 
 test("compress and expand restore any bytes exactly", () => {
@@ -25,8 +26,26 @@ test("a damaged archive is refused, never a wrong file", () => {
   bad[bad.length - 3] ^= 0x40;
   assert.throws(() => g.expand(bad), GpressError);
   const other = c.data.slice();
-  other[4] = 6;
+  other[4] = 7;
   assert.throws(() => g.expand(other), (e) => e instanceof GpressError && e.code === GpressError.UNSUPPORTED_VERSION);
+});
+
+test("the decoded-bytes budget is the caller's on both sides", () => {
+  // 3 MiB of zeros in one zlib stream: within a 4 MiB budget the stream is modelled and the archive is tiny;
+  // with a 1 MiB budget it is stored as it is (still restored exactly), and an archive made with the larger
+  // budget is refused under the smaller one before anything is decoded.
+  const zeros = new Uint8Array(3 << 20);
+  const z = zlibSync(zeros);
+  const head = new TextEncoder().encode(`%PDF-1.4\n1 0 obj\n<< /Filter /FlateDecode /Length ${z.length} >>\nstream\n`);
+  const tail = new TextEncoder().encode("\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
+  const file = new Uint8Array(head.length + z.length + tail.length);
+  file.set(head, 0); file.set(z, head.length); file.set(tail, head.length + z.length);
+  const wide = g.compress(file, { maxDecodedMiB: 4 });
+  const narrow = g.compress(file, { maxDecodedMiB: 1 });
+  assert.ok(wide.data.length < narrow.data.length);
+  assert.deepEqual(g.expand(wide.data, { maxDecodedMiB: 4 }), file);
+  assert.deepEqual(g.expand(narrow.data, { maxDecodedMiB: 1 }), file);
+  assert.throws(() => g.expand(wide.data, { maxDecodedMiB: 1 }), (e) => e instanceof GpressError && e.code === GpressError.DECODED_TOO_LARGE);
 });
 
 test("a /Length that wraps to an earlier endstream on 32 bits is not trusted", () => {
