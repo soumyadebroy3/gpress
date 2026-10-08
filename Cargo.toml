@@ -29,6 +29,8 @@ existing = ["dep:lepton_jpeg"]
 
 [workspace]
 members = [".", "crates/gpress-c", "crates/gpress-wasm"]
+# fuzz/ is its own package (cargo-fuzz, nightly); it depends on this crate by path.
+exclude = ["fuzz"]
 
 [profile.release]
 opt-level = 3

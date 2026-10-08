@@ -5,7 +5,10 @@ import { Gpress, GpressError } from "../dist/gpress.js";
 
 const g = await Gpress.load(new URL("../dist/gpress.wasm", import.meta.url).pathname);
 
-test("version is set", () => assert.match(g.version, /^\d+\.\d+\.\d+$/));
+test("version is set", () => {
+  assert.match(g.version, /^\d+\.\d+\.\d+$/);
+  assert.equal(g.archiveVersion, 7);
+});
 
 test("compress and expand restore any bytes exactly", () => {
   for (const input of [new Uint8Array(0), new TextEncoder().encode("%PDF-1.7\n%%EOF\n"), Uint8Array.from({ length: 5000 }, (_, i) => (i * 7919) % 251)]) {
@@ -21,10 +24,21 @@ test("a damaged archive is refused, never a wrong file", () => {
   const bad = c.data.slice();
   bad[bad.length - 3] ^= 0x40;
   assert.throws(() => g.expand(bad), GpressError);
+  const other = c.data.slice();
+  other[4] = 6;
+  assert.throws(() => g.expand(other), (e) => e instanceof GpressError && e.code === GpressError.UNSUPPORTED_VERSION);
 });
 
 test("optimize returns untouched with a reason for non-PDF input", () => {
-  const r = g.optimize(new TextEncoder().encode("hello"));
+  const r = g.optimize(new TextEncoder().encode("hello"), { jbig2: false, jpegTables: false, objectsPerStream: 50 });
   assert.equal(r.outcome, "untouched");
   assert.ok(r.reason && r.reason.length > 0);
+});
+
+test("the limits are the caller's", () => {
+  const big = new Uint8Array(3 << 20);
+  assert.throws(() => g.compress(big, { maxInputMiB: 2 }), (e) => e instanceof GpressError && e.code === GpressError.TOO_LARGE);
+  const c = g.compress(big);
+  assert.throws(() => g.expand(c.data, { maxLenMiB: 1 }), (e) => e instanceof GpressError && e.code === GpressError.DECLARED_TOO_LARGE);
+  assert.deepEqual(g.expand(c.data, { maxLenMiB: 3 }), big);
 });

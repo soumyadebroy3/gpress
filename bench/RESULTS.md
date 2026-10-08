@@ -357,7 +357,7 @@ NEW has not measured every file of BASE (an unfinished run compares only the fil
 
 ## Security (hostile input)
 
-Every number here comes from `bench/security.py` (run `security`, build integration-8892b9e, 2026-10-08 16:54:23 UTC), engine at effort 0 with 1 thread, each command its own process measured by bench/measure.c (parent under 1 MB); address-space limit by prlimit. Time bounds apply to the child's CPU time. The bounds: a damaged archive is refused in under 5 s with a peak under 512 MiB; a hostile PDF returns (untouched, or smaller and proven by the engine's own self-check) or gives a clean error in under 30 s plus 5 s per MiB of input, with a peak under 512 MiB or 16 bytes per input byte, whichever is more; a run past 60 s of wall time (2x its bound when that is more) is a hang. The fuzzer runs with a hard 512 MiB address space.
+Every number here comes from `bench/security.py` (run `security`, build main-d86b799, 2026-10-08 17:45:03 UTC), engine at effort 0 with 1 thread, each command its own process measured by bench/measure.c (parent under 1 MB); address-space limit by prlimit. Time bounds apply to the child's CPU time. The bounds: a damaged archive is refused in under 5 s with a peak under 512 MiB; a hostile PDF returns (untouched, or smaller and proven by the engine's own self-check) or gives a clean error in under 30 s plus 5 s per MiB of input, with a peak under 512 MiB or 16 bytes per input byte, whichever is more; a run past 60 s of wall time (2x its bound when that is more) is a hang. The fuzzer runs with a hard 512 MiB address space.
 
 ### Damaged archives
 
@@ -448,7 +448,56 @@ Planted failures (a wrong file returned with exit 0, a crash, a hang, a 600 MiB 
 
 ### C library
 
-Skipped: no crates/gpress-c in this tree. The harness (`bench/gpress_harness.c`) builds against `crates/gpress-c/include/gpress.h` and runs the same damaged archives and hostile PDFs through `gpress_optimize`, `gpress_compress` and `gpress_expand`; a panic that escapes the library's guard aborts it and counts as a crash, one the guard catches comes back as exit 4 and counts as a bug.
+The same inputs through the C API: 0 failures.
+
+#### Damaged archives through gpress_expand
+
+1506 damaged versions of 20 packs (bit flips at 3 bits of 17 positions, cuts at every 1/16 of the length, trailing garbage, a garbage body, a future version and the older versions 0 and 2 with this body, a declared length of 16 GiB, over the format's maximum, and zero, the checksum flipped and zeroed). expand must error or restore the exact original.
+
+| Result | Cases | Slowest refusal | Peak memory |
+| --- | ---: | ---: | ---: |
+| Passed (1476 refused, 30 restored exactly) | 1506 | 0.99 s (1.46 s wall) | 167 MiB |
+| Failed (wrong file, crash, hang or over bound) | 0 | | |
+
+| Damage | Passed | Failed |
+| --- | ---: | ---: |
+| checksum_flipped | 20 | 0 |
+| checksum_zeroed | 20 | 0 |
+| cut | 300 | 0 |
+| declared_16gb | 20 | 0 |
+| declared_over_max | 20 | 0 |
+| declared_zero | 20 | 0 |
+| flip | 966 | 0 |
+| future_version | 20 | 0 |
+| garbage_body | 20 | 0 |
+| trailing_garbage | 20 | 0 |
+| version_0_body | 20 | 0 |
+| version_0_declared_16gb | 20 | 0 |
+| version_2_body | 20 | 0 |
+| version_2_declared_16gb | 20 | 0 |
+
+#### Hostile PDFs through gpress_optimize and gpress_compress
+
+28 runs over the files below, each through optimize and pack (pack's archive is then unpacked and compared). Verdicts: `untouched` or `smaller` (optimize), `packed-exact`, `clean-error`, or the failure.
+
+| File | What it is | Bytes | optimize | pack | Bound |
+| --- | --- | ---: | --- | --- | --- |
+| `nested_array.pdf` | array nested 100,000 deep | 200,344 | untouched (0.00 s, 4 MiB) | packed-exact (0.05 s, 17 MiB) | 31 s, 512 MiB |
+| `nested_dict.pdf` | dictionary nested 100,000 deep | 900,344 | untouched (0.00 s, 5 MiB) | packed-exact (0.13 s, 36 MiB) | 34 s, 512 MiB |
+| `length_overflow.pdf` | /Length 9,999,999,999 on a 3-byte stream | 426 | untouched (0.00 s, 3 MiB) | packed-exact (0.04 s, 14 MiB) | 30 s, 512 MiB |
+| `huge_image.pdf` | image 100,000 x 100,000 with 64 bytes of data | 570 | smaller (0.01 s, 5 MiB) | packed-exact (0.03 s, 14 MiB) | 30 s, 512 MiB |
+| `flate_bomb.pdf` | Flate stream of 1019 KiB that decodes to 1024 MiB | 1,044,090 | untouched (0.42 s, 70 MiB) | packed-exact (0.98 s, 260 MiB) | 35 s, 512 MiB |
+| `flate_bomb_nested.pdf` | two-stage Flate (564 B) decoding to 256 MiB | 1,017 | untouched (0.43 s, 67 MiB) | packed-exact (0.05 s, 16 MiB) | 30 s, 512 MiB |
+| `lzw_bomb.pdf` | LZW stream of 5409 B that keeps repeating one byte | 5,847 | smaller (0.40 s, 32 MiB) | packed-exact (0.05 s, 14 MiB) | 30 s, 512 MiB |
+| `runlength_bomb.pdf` | RunLength stream of 2 MiB expanding 128x | 2,097,603 | smaller (0.13 s, 29 MiB) | packed-exact (0.31 s, 91 MiB) | 40 s, 512 MiB |
+| `bad_utf16_name.pdf` | invalid UTF-16 strings and #-escaped names | 492 | smaller (0.01 s, 5 MiB) | packed-exact (0.04 s, 14 MiB) | 30 s, 512 MiB |
+| `prev_loop.pdf` | /Prev pointing in a loop (classic tables) | 263 | untouched (0.00 s, 3 MiB) | packed-exact (0.03 s, 14 MiB) | 30 s, 512 MiB |
+| `xref_stream_loop.pdf` | xref stream whose /Prev is itself and /XRefStm points back | 223 | untouched (0.00 s, 3 MiB) | packed-exact (0.03 s, 14 MiB) | 30 s, 512 MiB |
+| `objstm_selfref.pdf` | xref stream saying an object lives inside object stream 2: itself | 165 | untouched (0.00 s, 3 MiB) | packed-exact (0.05 s, 14 MiB) | 30 s, 512 MiB |
+| `objstm_loop.pdf` | object stream that contains itself and /Extends itself | 401 | untouched (0.00 s, 3 MiB) | packed-exact (0.04 s, 14 MiB) | 30 s, 512 MiB |
+| `million_objects.pdf` | 1,000,000 tiny objects reachable from the catalog | 52,778,080 | smaller (26.89 s, 523 MiB) | packed-exact (119.83 s, 471 MiB) | 282 s, 805 MiB |
+
+Passed 28 of 28 runs.
 
 ### Failures to fix
 

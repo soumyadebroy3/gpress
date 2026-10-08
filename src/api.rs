@@ -1,28 +1,40 @@
 //! The public face of gpress: one options type, three operations, typed results, and no panics.
 //!
 //! Everything a caller can tune lives in [`Options`]. The only constants that are not options are the
-//! ones that define the file formats (a decoder must agree with its encoder on those).
+//! ones that define the file formats (a decoder must agree with its encoder on those), the ones PDF readers
+//! set, and measured thresholds; `README.md` lists them.
 //!
 //! The three operations:
 //! - [`optimize`]: a smaller PDF that any PDF reader opens, with every object's value preserved.
 //! - [`compress`]: the gpress archive (`.gpz`), restored byte for byte by [`expand`].
 //! - [`expand`]: the original bytes back from an archive, or an error; never a wrong file.
 //!
-//! Every call checks its input against the limits in `Options` first, runs the engine inside a panic
+//! Every call checks the options and the input against the limits first, runs the engine inside a panic
 //! guard (a bug can never take the host process down, which matters for the C and WebAssembly bindings),
-//! and returns a plain [`Error`] instead.
+//! and returns a plain [`Error`] with a stable code instead.
+//!
+//! The output is the same bytes for any thread count, on any machine, with or without a time budget: the
+//! engine decides from sizes only, never from time. A budget that runs out gives [`Error::TimeBudget`] and no
+//! output.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
 
+use crate::clock::Deadline;
 use crate::pack;
 use crate::pdf::rewrite;
 
 /// Library version, from Cargo.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The archive format version this build writes and reads.
+pub const ARCHIVE_VERSION: u8 = pack::VERSION;
+
+/// Most worker threads a caller may ask for.
+pub const MAX_THREADS: usize = 64;
+
 /// How hard to try, 0 to 100. 0 is the quick setting (still optimal-parsed Flate), 100 is everything the
-/// engine knows how to do. The peyaji.com percentage control maps straight onto this.
+/// engine knows how to do. A percentage control maps straight onto this.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Effort(u8);
 
@@ -44,31 +56,55 @@ impl Default for Effort {
     }
 }
 
-/// Everything a caller can tune. `Options::default()` is maximum effort with sensible limits; the
-/// builder methods adjust one thing each.
-#[derive(Clone, Debug)]
+/// Everything a caller can tune. `Options::default()` is maximum effort with the limits the engine was
+/// measured with; the builder methods adjust one thing each, and `check` says whether a set of options is
+/// one the engine accepts (every operation runs it first).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
-    /// Effort for both operations.
+    /// Effort for both outputs, 0 to 100 (see [`Effort`]).
     pub effort: Effort,
+    /// Worker threads for independent work: 0 = what the machine offers (at most 8), else at most
+    /// [`MAX_THREADS`]. Output is identical whatever the count; this only changes speed. A thread the system
+    /// refuses is no loss: the calling thread does the work.
+    pub threads: usize,
     /// Largest input accepted, in bytes. Inputs over this return [`Error::TooLarge`] at once.
     pub max_input: usize,
-    /// Largest single decoded stream the engine will hold in memory. Streams that decode to more than
-    /// this are kept as they are (optimize) or stored (compress).
+    /// Normal PDF: largest decoded stream re-encoded, in bytes. A stream that decodes to more is kept as it is.
     pub max_stream: usize,
-    /// Worker threads for independent work (0 = one per available CPU). Output is identical whatever the
-    /// count; this only changes speed.
-    pub threads: usize,
-    /// Most objects per compressed object stream in a normal PDF.
+    /// Archive: largest decoded stream stored in its decoded form, in bytes. A stream that decodes to more
+    /// is stored as it is. (The decoder takes up to 2 GiB per part and 1032 bytes per byte of the archive in
+    /// all, whatever this was: an archive restores the same wherever it was made.)
+    pub max_stream_archive: usize,
+    /// Expand: largest file restored, in bytes. An archive whose header declares more is refused with
+    /// [`Error::DeclaredTooLarge`] before anything is decoded or reserved for it. The decoder's work and
+    /// memory follow the declared length, so a service that takes archives from anyone sets this to what it
+    /// can afford. At most 16 GiB, the format's own limit.
+    pub max_len: u64,
+    /// Normal PDF: most objects per compressed object stream (at least 1).
     pub objects_per_stream: usize,
-    /// Try the optional existing-library candidate (Lepton, for JPEG streams) when the build includes it.
-    pub use_existing_libraries: bool,
-    /// Normal PDF: leave files that are PDF/A, PDF/X, signed, certified or have usage rights untouched.
+    /// Normal PDF: leave files that are PDF/A, PDF/X, signed, certified or carry usage rights untouched.
     /// `true` is the safe default; `false` still keeps every object's value but drops those guarantees.
     pub respect_conformance: bool,
-    /// Normal PDF: also try putting Flate in front of JPEG images (never JPEG 2000 or JBIG2).
+    /// Normal PDF: also try our Flate in front of JPEG images (never JPEG 2000 or JBIG2).
     pub flate_over_jpeg: bool,
-    /// Stop early and return what the engine has when this much wall time has passed. `None` = no limit.
-    /// The result is still fully verified; it is simply the result of less effort.
+    /// Normal PDF: give JPEG images optimal Huffman tables (the same coefficients, read back and compared).
+    pub jpeg_tables: bool,
+    /// Normal PDF: write CCITT fax images as JBIG2 when that is clearly smaller (the same pixels).
+    pub jbig2: bool,
+    /// Normal PDF: rewrite files the empty user password opens, keeping their encryption exactly. Off,
+    /// every encrypted file is left untouched.
+    pub rewrite_encrypted: bool,
+    /// Archive: store the streams of a file the empty user password opens decrypted (so they can be rebuilt
+    /// and modelled) and encrypt them again on expand. Off, encrypted streams are stored as they are.
+    pub decrypt: bool,
+    /// Try the optional existing library (Lepton, for JPEG streams) when the build includes it (feature
+    /// `existing`). An archive with parts it made expands only with such a build.
+    pub use_existing_libraries: bool,
+    /// Give up after this much wall time: the call then returns [`Error::TimeBudget`] and nothing else, and
+    /// the input is unchanged. A call that finishes in time gives the same bytes as one without a budget
+    /// (the engine never decides anything from time). Checked between streams, Flate segments and archive
+    /// parts, so a budget may be overshot by a little. `None` = no limit. On a platform without a clock
+    /// (WebAssembly without a host clock) there is no budget.
     pub time_budget: Option<Duration>,
 }
 
@@ -76,13 +112,19 @@ impl Default for Options {
     fn default() -> Self {
         Options {
             effort: Effort::MAX,
+            threads: 0,
             max_input: 1 << 30,
             max_stream: 64 << 20,
-            threads: 0,
+            max_stream_archive: 256 << 20,
+            max_len: 1 << 34,
             objects_per_stream: 200,
-            use_existing_libraries: true,
             respect_conformance: true,
             flate_over_jpeg: true,
+            jpeg_tables: true,
+            jbig2: true,
+            rewrite_encrypted: true,
+            decrypt: true,
+            use_existing_libraries: true,
             time_budget: None,
         }
     }
@@ -96,6 +138,10 @@ impl Options {
         self.effort = Effort::new(level);
         self
     }
+    pub fn threads(mut self, n: usize) -> Options {
+        self.threads = n;
+        self
+    }
     pub fn max_input(mut self, bytes: usize) -> Options {
         self.max_input = bytes;
         self
@@ -104,17 +150,75 @@ impl Options {
         self.max_stream = bytes;
         self
     }
-    pub fn threads(mut self, n: usize) -> Options {
-        self.threads = n;
+    pub fn max_stream_archive(mut self, bytes: usize) -> Options {
+        self.max_stream_archive = bytes;
+        self
+    }
+    pub fn max_len(mut self, bytes: u64) -> Options {
+        self.max_len = bytes;
+        self
+    }
+    pub fn objects_per_stream(mut self, n: usize) -> Options {
+        self.objects_per_stream = n;
+        self
+    }
+    pub fn respect_conformance(mut self, yes: bool) -> Options {
+        self.respect_conformance = yes;
+        self
+    }
+    pub fn flate_over_jpeg(mut self, yes: bool) -> Options {
+        self.flate_over_jpeg = yes;
+        self
+    }
+    pub fn jpeg_tables(mut self, yes: bool) -> Options {
+        self.jpeg_tables = yes;
+        self
+    }
+    pub fn jbig2(mut self, yes: bool) -> Options {
+        self.jbig2 = yes;
+        self
+    }
+    pub fn rewrite_encrypted(mut self, yes: bool) -> Options {
+        self.rewrite_encrypted = yes;
+        self
+    }
+    pub fn decrypt(mut self, yes: bool) -> Options {
+        self.decrypt = yes;
+        self
+    }
+    pub fn use_existing_libraries(mut self, yes: bool) -> Options {
+        self.use_existing_libraries = yes;
         self
     }
     pub fn time_budget(mut self, budget: Option<Duration>) -> Options {
         self.time_budget = budget;
         self
     }
-    pub fn respect_conformance(mut self, yes: bool) -> Options {
-        self.respect_conformance = yes;
-        self
+
+    /// Whether the engine accepts these options; every operation checks this first.
+    pub fn check(&self) -> Result<(), Error> {
+        if self.threads > MAX_THREADS {
+            return Err(Error::InvalidOptions(format!("threads is {}, more than {MAX_THREADS}", self.threads)));
+        }
+        if self.time_budget == Some(Duration::ZERO) {
+            return Err(Error::InvalidOptions("a time budget of zero would stop at once".into()));
+        }
+        if self.max_input == 0 {
+            return Err(Error::InvalidOptions("max_input is 0, so every input would be refused".into()));
+        }
+        if self.objects_per_stream == 0 {
+            return Err(Error::InvalidOptions("objects_per_stream is 0; an object stream holds at least 1".into()));
+        }
+        Ok(())
+    }
+
+    /// Whether this build has the existing library (Lepton) at all.
+    pub fn has_existing_libraries() -> bool {
+        cfg!(feature = "existing")
+    }
+
+    fn deadline(&self) -> Deadline {
+        self.time_budget.map_or(Deadline::NONE, Deadline::after)
     }
 
     /// The Flate encoder settings this effort level means (the engine's own steps of 20).
@@ -128,7 +232,8 @@ impl Options {
         self.flate()
     }
 
-    pub(crate) fn rewrite(&self) -> rewrite::Options {
+    /// The normal-PDF settings these options mean.
+    pub fn rewrite(&self) -> rewrite::Options {
         rewrite::Options {
             flate: self.flate(),
             objstm_size: self.objects_per_stream.max(1),
@@ -137,18 +242,28 @@ impl Options {
             threads: self.threads,
             respect_conformance: self.respect_conformance,
             flate_over_jpeg: self.flate_over_jpeg,
-            ..rewrite::Options::default()
+            jbig2: self.jbig2,
+            jpeg_tables: self.jpeg_tables,
+            rewrite_encrypted: self.rewrite_encrypted,
+            deadline: self.deadline(),
         }
     }
 
-    pub(crate) fn pack(&self) -> pack::PackOptions {
+    /// The archive settings these options mean.
+    pub fn pack(&self) -> pack::PackOptions {
         pack::PackOptions {
             effort: self.effort.level(),
             threads: self.threads,
-            max_stream: self.max_stream,
-            existing: self.use_existing_libraries && pack::PackOptions::default().existing,
-            ..pack::PackOptions::default()
+            decrypt: self.decrypt,
+            max_stream: self.max_stream_archive,
+            existing: self.use_existing_libraries && Options::has_existing_libraries(),
+            deadline: self.deadline(),
         }
+    }
+
+    /// The expand settings these options mean.
+    pub fn unpack(&self) -> pack::UnpackOptions {
+        pack::UnpackOptions { max_len: self.max_len }
     }
 }
 
@@ -160,26 +275,45 @@ pub enum Error {
     TooLarge { size: usize, limit: usize },
     /// Not a gpress archive, or a damaged one. Nothing was restored.
     Damaged(String),
-    /// The archive was made by a newer gpress than this one.
+    /// The archive's format version is not the one this build reads.
     UnsupportedVersion(u8),
     /// The engine hit a bug. The input is unchanged; please report it with the file.
     Internal(String),
+    /// The options are outside what the engine accepts (see `Options::check`).
+    InvalidOptions(String),
+    /// The time budget ran out before the work was done. The input is unchanged.
+    TimeBudget(Duration),
+    /// Expand: the archive declares a restored size over `Options::max_len`. Nothing was decoded.
+    DeclaredTooLarge { declared: u64, limit: u64 },
+    /// Expand: the archive has parts made with the existing library (Lepton) and this build doesn't have it.
+    NeedsExistingLibrary,
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::TooLarge { size, limit } => write!(f, "input is {size} bytes, over the limit of {limit}"),
-            Error::Damaged(why) => write!(f, "damaged gpress archive: {why}"),
-            Error::UnsupportedVersion(v) => write!(f, "gpress archive version {v} needs a newer gpress"),
+            Error::Damaged(why) => write!(f, "{why}"),
+            Error::UnsupportedVersion(v) => {
+                write!(f, "gpress archive version {v} is not one this build reads (it reads version {ARCHIVE_VERSION})")
+            }
             Error::Internal(why) => write!(f, "internal error: {why}"),
+            Error::InvalidOptions(why) => write!(f, "invalid options: {why}"),
+            Error::TimeBudget(budget) => write!(f, "the time budget of {} ms ran out", budget.as_millis()),
+            Error::DeclaredTooLarge { declared, limit } => {
+                write!(f, "the archive restores to {declared} bytes, more than the limit of {limit}")
+            }
+            Error::NeedsExistingLibrary => write!(
+                f,
+                "this gpress archive has parts made with the existing library (Lepton); expanding it needs a build with it"
+            ),
         }
     }
 }
 
 impl std::error::Error for Error {}
 
-/// Numeric codes for the C and WebAssembly layers (stable across versions).
+/// Numeric codes for the C and WebAssembly layers (stable across versions; 0 is success).
 impl Error {
     pub fn code(&self) -> i32 {
         match self {
@@ -187,6 +321,10 @@ impl Error {
             Error::Damaged(_) => 2,
             Error::UnsupportedVersion(_) => 3,
             Error::Internal(_) => 4,
+            Error::InvalidOptions(_) => 5,
+            Error::TimeBudget(_) => 6,
+            Error::DeclaredTooLarge { .. } => 7,
+            Error::NeedsExistingLibrary => 8,
         }
     }
 }
@@ -210,6 +348,12 @@ pub struct Report {
     pub streams_kept: usize,
     pub object_streams: usize,
     pub unreachable_objects_dropped: usize,
+    /// JPEG images written again with optimal Huffman tables (the same coefficients).
+    pub jpegs_retabled: usize,
+    /// CCITT fax images written as JBIG2 (the same pixels).
+    pub fax_to_jbig2: usize,
+    /// How the file is encrypted, kept exactly as it was (e.g. "R4/AESV2"); empty when it isn't.
+    pub encryption: String,
 }
 
 /// A normal-PDF result.
@@ -220,17 +364,26 @@ pub struct Optimized {
 }
 
 /// A gpress archive and what went into it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Compressed {
     pub data: Vec<u8>,
-    /// Bytes of streams rebuilt exactly from their decoded form (the gain comes from these).
-    pub rebuilt_bytes: usize,
-    /// Streams the model saw decoded, with an existing library's help, or stored as they were.
-    pub streams: usize,
-    pub streams_rebuilt: usize,
-    pub streams_lepton: usize,
     /// The archive is the whole input stored as it was: nothing could be made smaller.
     pub stored: bool,
+    /// Streams the model saw: decoded, with the existing library's help, or stored as they were.
+    pub streams: usize,
+    /// Streams stored decoded and rebuilt exactly on expand (the gain comes from these), and their bytes.
+    pub streams_rebuilt: usize,
+    pub rebuilt_bytes: usize,
+    /// JPEG streams recompressed with the existing library (Lepton).
+    pub streams_lepton: usize,
+    /// Type 1 font programs stored with both layers of their encryption removed.
+    pub type1_fonts: usize,
+    /// CCITT fax images stored as their pixels.
+    pub fax_images: usize,
+    /// Encrypted streams stored decrypted.
+    pub streams_decrypted: usize,
+    /// Decoded bytes that went through the model.
+    pub decoded_bytes: usize,
 }
 
 fn guard<T>(what: &str, f: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
@@ -242,12 +395,19 @@ fn guard<T>(what: &str, f: impl FnOnce() -> Result<T, Error>) -> Result<T, Error
                 .map(|s| s.to_string())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "unknown panic".to_string());
-            Err(Error::Internal(format!("{what}: {msg}")))
+            Err(Error::Internal(format!("{what}: {}", without_paths(&msg))))
         }
     }
 }
 
-fn check_size(input: &[u8], opt: &Options) -> Result<(), Error> {
+/// A panic message without the source path a panic carries ("at src/x.rs:1:2" is the host's business,
+/// not the caller's).
+fn without_paths(msg: &str) -> String {
+    msg.lines().next().unwrap_or("").trim().to_string()
+}
+
+fn check(input: &[u8], opt: &Options) -> Result<(), Error> {
+    opt.check()?;
     if input.len() > opt.max_input {
         return Err(Error::TooLarge { size: input.len(), limit: opt.max_input });
     }
@@ -257,7 +417,7 @@ fn check_size(input: &[u8], opt: &Options) -> Result<(), Error> {
 /// A smaller PDF that any reader opens. Every object's value is preserved and the output is read back
 /// and compared before it is returned; when in doubt the input comes back untouched.
 pub fn optimize(input: &[u8], opt: &Options) -> Result<Optimized, Error> {
-    check_size(input, opt)?;
+    check(input, opt)?;
     guard("optimize", || {
         let r = rewrite::optimize(input, &opt.rewrite());
         let outcome = match r.outcome {
@@ -268,8 +428,12 @@ pub fn optimize(input: &[u8], opt: &Options) -> Result<Optimized, Error> {
                 streams_kept: s.streams_kept,
                 object_streams: s.objstms,
                 unreachable_objects_dropped: s.dropped_unreachable,
+                jpegs_retabled: s.jpegs_retabled,
+                fax_to_jbig2: s.fax_to_jbig2,
+                encryption: s.encryption,
             }),
             rewrite::Outcome::Untouched(why) => Outcome::Untouched(why),
+            rewrite::Outcome::TimedOut => return Err(Error::TimeBudget(opt.time_budget.unwrap_or_default())),
         };
         Ok(Optimized { data: r.data, outcome })
     })
@@ -278,33 +442,40 @@ pub fn optimize(input: &[u8], opt: &Options) -> Result<Optimized, Error> {
 /// The gpress archive: any file (a PDF gains the most), restored byte for byte by [`expand`]. Every
 /// archive is expanded and compared before it is returned.
 pub fn compress(input: &[u8], opt: &Options) -> Result<Compressed, Error> {
-    check_size(input, opt)?;
+    check(input, opt)?;
     guard("compress", || {
         let (data, st) = pack::pack_with(input, &opt.pack());
+        if st.timed_out {
+            return Err(Error::TimeBudget(opt.time_budget.unwrap_or_default()));
+        }
         Ok(Compressed {
             data,
-            rebuilt_bytes: st.rebuilt_bytes,
+            stored: st.stored,
             streams: st.streams,
             streams_rebuilt: st.rebuilt,
+            rebuilt_bytes: st.rebuilt_bytes,
             streams_lepton: st.leptons,
-            stored: st.stored,
+            type1_fonts: st.type1,
+            fax_images: st.fax,
+            streams_decrypted: st.decrypted,
+            decoded_bytes: st.decoded_bytes,
         })
     })
 }
 
 /// The original bytes from an archive. A damaged archive is an error, never a wrong file: the length and
-/// a 128-bit hash of the restored bytes are checked against the header.
+/// a 128-bit hash of the restored bytes are checked against the header. An archive declaring more than
+/// `Options::max_len` is refused before anything is decoded.
 pub fn expand(archive: &[u8], opt: &Options) -> Result<Vec<u8>, Error> {
-    check_size(archive, opt)?;
-    if archive.len() >= 5
-        && &archive[..4] == pack::MAGIC
-        && archive[4] > pack::VERSION
-        && archive[4] != 0
-        && archive[4] != 2
-    {
-        return Err(Error::UnsupportedVersion(archive[4]));
-    }
-    guard("expand", || pack::unpack(archive).map_err(Error::Damaged))
+    check(archive, opt)?;
+    guard("expand", || {
+        pack::unpack_with(archive, &opt.unpack()).map_err(|e| match e {
+            pack::UnpackError::UnknownVersion(v) => Error::UnsupportedVersion(v),
+            pack::UnpackError::TooLong { declared, limit } => Error::DeclaredTooLarge { declared, limit },
+            pack::UnpackError::NeedsExisting => Error::NeedsExistingLibrary,
+            other => Error::Damaged(other.to_string()),
+        })
+    })
 }
 
 /// True when the bytes start like a gpress archive (cheap; no decoding).
@@ -326,17 +497,59 @@ mod tests {
     }
 
     #[test]
+    fn options_outside_the_engine_are_refused_with_a_code() {
+        let bad = [
+            Options::new().threads(MAX_THREADS + 1),
+            Options::new().time_budget(Some(Duration::ZERO)),
+            Options::new().max_input(0),
+            Options::new().objects_per_stream(0),
+        ];
+        for opt in &bad {
+            let e = compress(b"x", opt).unwrap_err();
+            assert!(matches!(e, Error::InvalidOptions(_)), "{opt:?}: {e}");
+            assert_eq!(e.code(), 5);
+            assert_eq!(opt.check(), Err(e));
+        }
+        assert_eq!(Options::new().threads(MAX_THREADS).check(), Ok(()));
+        assert_eq!(Options::new().effort(255).effort, Effort::MAX);
+    }
+
+    #[test]
     fn anything_round_trips_and_garbage_is_refused() {
         let opt = Options::default();
         for input in [b"".to_vec(), b"%PDF-1.7\n%%EOF".to_vec(), (0..3000u32).map(|i| (i * 7919 % 251) as u8).collect()]
         {
             let c = compress(&input, &opt).unwrap();
+            assert!(is_archive(&c.data));
             assert_eq!(expand(&c.data, &opt).unwrap(), input);
         }
         assert!(matches!(expand(b"not an archive", &opt), Err(Error::Damaged(_))));
-        let mut future = compress(b"x", &opt).unwrap().data;
-        future[4] = 200;
-        assert_eq!(expand(&future, &opt), Err(Error::UnsupportedVersion(200)));
+        let mut other = compress(b"x", &opt).unwrap().data;
+        other[4] = 200;
+        assert_eq!(expand(&other, &opt), Err(Error::UnsupportedVersion(200)));
+        other[4] = 6;
+        assert_eq!(expand(&other, &opt), Err(Error::UnsupportedVersion(6)));
+    }
+
+    #[test]
+    fn every_error_has_its_own_code_and_a_message_without_paths() {
+        let errors = [
+            Error::TooLarge { size: 2, limit: 1 },
+            Error::Damaged("damaged gpress archive (x)".into()),
+            Error::UnsupportedVersion(9),
+            Error::Internal("boom".into()),
+            Error::InvalidOptions("threads".into()),
+            Error::TimeBudget(Duration::from_millis(5)),
+            Error::DeclaredTooLarge { declared: 2, limit: 1 },
+            Error::NeedsExistingLibrary,
+        ];
+        let codes: Vec<i32> = errors.iter().map(Error::code).collect();
+        assert_eq!(codes, (1..=8).collect::<Vec<i32>>());
+        for e in &errors {
+            let m = e.to_string();
+            assert!(!m.is_empty() && !m.contains("src/") && !m.contains(".rs:"), "{m}");
+        }
+        assert_eq!(without_paths("boom\nat src/api.rs:1:2"), "boom");
     }
 
     #[test]
@@ -352,5 +565,34 @@ mod tests {
         }
         assert_eq!(Options::new().effort(100).flate().max_chain, crate::flate::Options::max().max_chain);
         assert_eq!(Options::new().effort(0).flate().max_chain, crate::flate::Options::quick().max_chain);
+    }
+
+    #[test]
+    fn the_options_reach_the_engine() {
+        let opt = Options::new()
+            .effort(40)
+            .threads(3)
+            .max_stream(1000)
+            .max_stream_archive(2000)
+            .max_len(3000)
+            .objects_per_stream(7)
+            .respect_conformance(false)
+            .flate_over_jpeg(false)
+            .jpeg_tables(false)
+            .jbig2(false)
+            .rewrite_encrypted(false)
+            .decrypt(false)
+            .use_existing_libraries(false)
+            .time_budget(Some(Duration::from_secs(9)));
+        let r = opt.rewrite();
+        assert_eq!((r.effort, r.threads, r.max_stream, r.objstm_size), (40, 3, 1000, 7));
+        assert!(!r.respect_conformance && !r.flate_over_jpeg && !r.jpeg_tables && !r.jbig2 && !r.rewrite_encrypted);
+        assert!(r.deadline.is_set() && r.flate.deadline == Deadline::NONE, "the pool sets the Flate deadline");
+        let p = opt.pack();
+        assert_eq!((p.effort, p.threads, p.max_stream), (40, 3, 2000));
+        assert!(!p.decrypt && !p.existing && p.deadline.is_set());
+        assert_eq!(opt.unpack().max_len, 3000);
+        assert!(!Options::default().rewrite().deadline.is_set());
+        assert_eq!(Options::default().pack().existing, Options::has_existing_libraries());
     }
 }

@@ -598,6 +598,7 @@ fn delta<C: Coder>(io: &mut Io<C>, v: Option<usize>, hint: usize) -> Option<usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::Deadline;
     use crate::cm::model::Model;
     use crate::cm::{Decoder, Encoder};
 
@@ -878,7 +879,15 @@ mod tests {
     /// its model kind. The real encoder only writes layouts it found in the font.
     fn write_opened(l: &Layout, n: usize, parts: &[(Kind, &[u8])]) -> Vec<u8> {
         let mut m = Model::new(14);
-        let mut io = Io { m: &mut m, c: Encoder::new(), damaged: false, plain: false, budget: u64::MAX };
+        let mut io = Io {
+            m: &mut m,
+            c: Encoder::new(),
+            damaged: false,
+            plain: false,
+            budget: u64::MAX,
+            deadline: Deadline::NONE,
+            timed_out: false,
+        };
         io.m.set_kind(Kind::Meta, Geom::default(), 0);
         io.byte(Some(if l.hex.is_some() { HEX } else { BINARY }));
         code_layout(&mut io, Some(l), l.hex.is_some(), n, 0, 0);
@@ -901,6 +910,8 @@ mod tests {
             damaged: false,
             plain: false,
             budget: u64::MAX,
+            deadline: Deadline::NONE,
+            timed_out: false,
         };
         let (mut out, mut stats) = (Vec::new(), PackStats::default());
         code(&mut io, None, n, None, Kind::Font, &mut out, &mut stats);

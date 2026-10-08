@@ -13,6 +13,7 @@ use super::lz::{Hist, Sym};
 use super::matcher::{find_matches, Matches};
 use super::parse::{greedy, optimal_nice, Costs, ParseScratch};
 use super::tables::*;
+use crate::clock::{self, Deadline};
 use crate::par::{self, Memo, Pool};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -38,6 +39,9 @@ pub struct Options {
     pub polish: bool,
     /// Threads and earlier results shared by the encodes of one job. Never changes the output.
     pub shared: Option<Arc<Shared>>,
+    /// Once this has passed, the segments still to do are written stored (cheap) so the job ends soon; the
+    /// caller checks the deadline afterwards and never uses such an output. Never changes a finished output.
+    pub deadline: Deadline,
 }
 
 impl Options {
@@ -54,6 +58,7 @@ impl Options {
             nice: 259,
             polish: true,
             shared: None,
+            deadline: Deadline::NONE,
         }
     }
     /// Fast but still optimal-parsed.
@@ -69,6 +74,7 @@ impl Options {
             nice: 64,
             polish: false,
             shared: None,
+            deadline: Deadline::NONE,
         }
     }
 
@@ -88,6 +94,7 @@ impl Options {
             nice: 259,
             polish,
             shared: None,
+            deadline: Deadline::NONE,
         };
         match effort {
             0..=19 => Options::quick(),
@@ -99,12 +106,12 @@ impl Options {
         }
     }
 
-    /// Whether two settings give the same output (`shared` never changes it).
+    /// Whether two settings give the same output (`shared` and `deadline` never change it).
     pub fn same_output(&self, other: &Options) -> bool {
         self.fingerprint() == other.fingerprint()
     }
 
-    /// The settings that decide the output (everything but `shared`).
+    /// The settings that decide the output (everything but `shared` and `deadline`).
     fn fingerprint(&self) -> [usize; 9] {
         [
             self.iterations,
@@ -169,9 +176,13 @@ pub fn deflate(data: &[u8], opt: &Options) -> Vec<u8> {
     for group in bounds.chunks(SEGMENTS_AT_ONCE) {
         let plans = par::map(pool, group.len(), None, |k| {
             let (a, b) = group[k];
-            let t0 = std::time::Instant::now();
+            // Out of time: this segment goes out stored, and the caller drops the whole output.
+            if opt.deadline.passed() {
+                return None;
+            }
+            let t0 = clock::now();
             let m = find_matches(data, a, b, opt.max_chain, opt.alternatives);
-            let t1 = t0.elapsed();
+            let t1 = clock::since(t0);
             let plans = optimize_segment(data, a, b, &m, opt);
             if dbg {
                 eprintln!(
@@ -180,17 +191,22 @@ pub fn deflate(data: &[u8], opt: &Options) -> Vec<u8> {
                     b,
                     t1,
                     m.steps.len(),
-                    t0.elapsed() - t1,
+                    clock::since(t0).saturating_sub(t1),
                     plans.len()
                 );
             }
-            plans
+            Some(plans)
         });
-        for (&(_, b), plans) in group.iter().zip(&plans) {
-            let n = plans.len();
-            for (k, p) in plans.iter().enumerate() {
-                let last = b == data.len() && k + 1 == n;
-                write_best(&mut w, data, p, last);
+        for (&(a, b), plans) in group.iter().zip(&plans) {
+            let last_segment = b == data.len();
+            match plans {
+                Some(plans) => {
+                    let n = plans.len();
+                    for (k, p) in plans.iter().enumerate() {
+                        write_best(&mut w, data, p, last_segment && k + 1 == n);
+                    }
+                }
+                None => write_stored(&mut w, &data[a..b], last_segment),
             }
         }
     }
@@ -247,7 +263,7 @@ fn write_best(w: &mut BitWriter, data: &[u8], p: &Plan, last: bool) {
 
 fn optimize_segment(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options) -> Vec<Plan> {
     let dbg = std::env::var_os("PDFE_DEBUG").is_some();
-    let t = std::time::Instant::now();
+    let t = clock::now();
     let mut sc = ParseScratch::default();
     // 1. The whole segment, from neutral prices and (for smaller segments) also from a greedy parse's
     //    statistics; the better result goes on.
@@ -264,23 +280,23 @@ fn optimize_segment(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options)
             syms = other;
         }
     }
-    let t1 = t.elapsed();
+    let t1 = clock::since(t);
     // 2. Split into blocks.
     let mut plans = if opt.split { split(data, a, b, syms) } else { vec![Plan { a, b, syms }] };
-    let t2 = t.elapsed();
+    let t2 = clock::since(t);
     // 3. Each block under its own codes.
     for p in plans.iter_mut() {
         let s = std::mem::take(&mut p.syms);
         let s = refine(data, p.a, p.b, m, opt, s, &mut sc);
         p.syms = exact(data, p.a, p.b, m, opt, s, &mut sc);
     }
-    let t3 = t.elapsed();
+    let t3 = clock::since(t);
     // 4. Polish: merge neighbours that are cheaper together, split blocks that are cheaper apart.
     if opt.split && opt.polish {
         polish(data, m, opt, &mut plans, &mut sc);
     }
     if dbg {
-        eprintln!("  global {:?}, split {:?}, blocks {:?}, polish {:?}", t1, t2 - t1, t3 - t2, t.elapsed() - t3);
+        eprintln!("  global {:?}, split {:?}, blocks {:?}, polish {:?}", t1, t2 - t1, t3 - t2, clock::since(t) - t3);
     }
     plans
 }

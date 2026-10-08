@@ -3,7 +3,7 @@
 //! handled from what the file holds, in well under a second, with no panic and no allocation that could fail.
 
 use gpress::flate::zlibexact::{zlib_stream, Params};
-use gpress::pack::{pack, pack_with, unpack, unpack_with, PackOptions, UnpackOptions, MAGIC};
+use gpress::pack::{pack, pack_with, unpack, unpack_with, PackOptions, UnpackError, UnpackOptions, MAGIC};
 use gpress::pdf::object::Obj;
 use gpress::pdf::rewrite::{optimize, Options, Outcome};
 use gpress::pdf::xref;
@@ -107,6 +107,7 @@ fn untouched(r: &gpress::pdf::rewrite::Optimized, input: &[u8]) -> String {
     match &r.outcome {
         Outcome::Untouched(why) => why.clone(),
         Outcome::Smaller(s) => panic!("made smaller: {s:?}"),
+        Outcome::TimedOut => panic!("timed out"),
     }
 }
 
@@ -330,7 +331,8 @@ fn the_decoder_refuses_a_declared_length_over_its_limit() {
     let pdf = classic(&objs, "6");
     let (packed, _) = pack(&pdf);
     let err = unpack_with(&packed, &UnpackOptions { max_len: 50_000 }).unwrap_err();
-    assert!(err.contains("limit"), "{err}");
+    assert_eq!(err, UnpackError::TooLong { declared: pdf.len() as u64, limit: 50_000 });
+    assert!(err.to_string().contains("limit"), "{err}");
     assert_eq!(unpack_with(&packed, &UnpackOptions { max_len: pdf.len() as u64 }).unwrap(), pdf);
     assert_eq!(unpack(&packed).unwrap(), pdf);
     // A crafted header declaring 1 GiB over 16 KB of zeros (the review's file grew past 800 MB before failing):
@@ -352,7 +354,7 @@ fn the_decoder_refuses_a_declared_length_over_its_limit() {
     for limit in [1u64 << 20, (1 << 30) - 1] {
         let t = Instant::now();
         let err = unpack_with(&crafted, &UnpackOptions { max_len: limit }).unwrap_err();
-        assert!(err.contains("limit"), "{err}");
+        assert_eq!(err, UnpackError::TooLong { declared: 1 << 30, limit });
         assert!(t.elapsed().as_millis() < 50, "{:?}", t.elapsed());
     }
     // The default limit is the format's own.

@@ -33,7 +33,7 @@ user + system CPU time, peak resident set):
                      xz -9e, plus the bytes a restore needs: the fair "same input, general compressor" line.
 
 The corpus root, the engine, the competitors' commands and every threshold come from DEFAULTS below, the
-environment (PDFE or GPRESS for the engine, CORPUS for the corpus), a JSON file (--config) and the options.
+environment (GPRESS or PDFE for the engine, CORPUS for the corpus), a JSON file (--config) and the options.
 Run with python3 -I: the test files are untrusted and nothing from them is ever executed. The row that
 describes a file holds its path relative to the corpus root, so runs made on different machines compare."""
 import argparse, hashlib, json, os, random, re, select, shutil, statistics, subprocess, sys, tempfile, threading, time
@@ -42,7 +42,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCRATCH = '/tmp/claude-0/-home-claude/b636d578-f2d3-5309-87d4-a4766d45bbac/scratchpad'
 
 DEFAULTS = {
-    'engine': os.environ.get('PDFE') or os.environ.get('GPRESS') or os.path.join(HERE, '..', 'target', 'release', 'pdfe'),
+    'engine': os.environ.get('GPRESS') or os.environ.get('PDFE') or os.path.join(HERE, '..', 'target', 'release', 'gpress'),
     'corpus': os.environ.get('CORPUS') or os.path.join(SCRATCH, 'corpus'),
     'results': os.path.join(HERE, 'results'),
     'sets': os.path.join(HERE, 'sets'),
@@ -1235,7 +1235,7 @@ def main():
     ap.add_argument('mode', choices=['time', 'space', 'report', 'compare', 'sets', 'selftest', 'security', '_opens'])
     ap.add_argument('args', nargs='*')
     ap.add_argument('--config', help='JSON file whose keys override DEFAULTS')
-    ap.add_argument('--engine', help='the engine binary (default: $PDFE, $GPRESS or target/release/pdfe)')
+    ap.add_argument('--engine', help='the engine binary (default: $GPRESS, $PDFE or target/release/gpress)')
     ap.add_argument('--corpus', help='root of the test files (default: $CORPUS)')
     ap.add_argument('--set', help='file list: a name in bench/sets/ or a path (default sample120; report: restrict to these files)')
     ap.add_argument('--who', help='comma list of ours,qpdf,xz,brotli,zstd,expandxz')
