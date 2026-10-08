@@ -215,7 +215,9 @@ impl Bilevel {
             let bit;
             if big == 0 {
                 // A white neighbourhood: one counter, chosen by what is a little farther away.
-                let f = ((a1 & 0x7) != 0) as usize | ((((a2 & 0x1F) | (a3 & 0x3F)) != 0) as usize * 2) | ((c0 >> 7) as usize * 4);
+                let f = ((a1 & 0x7) != 0) as usize
+                    | ((((a2 & 0x1F) | (a3 & 0x3F)) != 0) as usize * 2)
+                    | ((c0 >> 7) as usize * 4);
                 let ct = &mut self.fast[f];
                 bit = c.code16(px_in, ct.p16());
                 ct.update(bit, LIMIT);
@@ -223,7 +225,11 @@ impl Bilevel {
                 let t16 = ((c0 & 0xF) | ((a1 >> 5) & 0x7F) << 4 | ((a2 >> 6) & 0x1F) << 11) as usize;
                 let small = ((c0 & 7) | ((a1 >> 5) & 0x3F) << 3 | ((a2 >> 7) & 7) << 9) as usize;
                 let hb = (big.wrapping_mul(0x9E37_79B1) >> (32 - self.big_bits)) as usize;
-                let wide = ((c0 & 0xFF) | (a1 & 0x7) << 8 | ((a1 >> 14) & 0x7) << 11 | ((a1 >> 8) & 1) << 14 | ((a2 >> 8) & 1) << 15) as usize;
+                let wide = ((c0 & 0xFF)
+                    | (a1 & 0x7) << 8
+                    | ((a1 >> 14) & 0x7) << 11
+                    | ((a1 >> 8) & 1) << 14
+                    | ((a2 >> 8) & 1) << 15) as usize;
                 // Distance to the next change to the right in the row above, the pixel above, the run so far.
                 let above = (a1 >> 8) & 1;
                 let v = (a1 ^ if above == 1 { 0xFF } else { 0 }) & 0xFF;
@@ -236,11 +242,27 @@ impl Bilevel {
                     14..=20 => 7,
                     _ => 8,
                 };
-                let runs = (rq | (c0 & 1) << 4 | right << 5 | above << 9 | ((a1 >> 7) & 1) << 10 | ((a1 >> 9) & 1) << 11 | ((a2 >> 8) & 1) << 12) as usize;
+                let runs = (rq
+                    | (c0 & 1) << 4
+                    | right << 5
+                    | above << 9
+                    | ((a1 >> 7) & 1) << 10
+                    | ((a1 >> 9) & 1) << 11
+                    | ((a2 >> 8) & 1) << 12) as usize;
                 // Vertical runs here and next to here.
-                let vert = (vq(vrun[M + x]) | above << 3 | vq(vrun[M + x - 1]) << 4 | vq(vrun[M + x + 1]) << 7 | (c0 & 1) << 10 | ((a1 >> 7) & 1) << 11 | ((a1 >> 9) & 1) << 12) as usize;
+                let vert = (vq(vrun[M + x])
+                    | above << 3
+                    | vq(vrun[M + x - 1]) << 4
+                    | vq(vrun[M + x + 1]) << 7
+                    | (c0 & 1) << 10
+                    | ((a1 >> 7) & 1) << 11
+                    | ((a1 >> 9) & 1) << 12) as usize;
                 // Four rows up and wider: more of a glyph's shape.
-                let deep = (c0 as u64 | (((a1 >> 1) & 0x7FFF) as u64) << 8 | (((a2 >> 3) & 0x7FF) as u64) << 23 | (((a3 >> 5) & 0x7F) as u64) << 34 | (((a4 >> 6) & 0x1F) as u64) << 41)
+                let deep = (c0 as u64
+                    | (((a1 >> 1) & 0x7FFF) as u64) << 8
+                    | (((a2 >> 3) & 0x7FF) as u64) << 23
+                    | (((a3 >> 5) & 0x7F) as u64) << 34
+                    | (((a4 >> 6) & 0x1F) as u64) << 41)
                     .wrapping_mul(0x9E37_79B9_7F4A_7C15);
                 let hd = (deep >> (64 - self.big_bits)) as usize;
                 let cxs = [t16, small, hb, wide, runs, vert, hd];
@@ -267,9 +289,11 @@ impl Bilevel {
                 let pos = (sm + SMAX) * 32 * 64 / (2 * SMAX);
                 let (lo, fr) = ((pos >> 6) as usize, pos & 63);
                 let base = t16 * 33;
-                let pa = ((self.apm[base + lo] as i32 * (64 - fr) + self.apm[base + (lo + 1).min(32)] as i32 * fr) >> 6) as u32;
+                let pa = ((self.apm[base + lo] as i32 * (64 - fr) + self.apm[base + (lo + 1).min(32)] as i32 * fr) >> 6)
+                    as u32;
                 let base2 = vert * 33;
-                let pb = ((self.apm2[base2 + lo] as i32 * (64 - fr) + self.apm2[base2 + (lo + 1).min(32)] as i32 * fr) >> 6) as u32;
+                let pb = ((self.apm2[base2 + lo] as i32 * (64 - fr) + self.apm2[base2 + (lo + 1).min(32)] as i32 * fr)
+                    >> 6) as u32;
                 let p = ((pm + pa + 2 * pb + 2) >> 2).clamp(1, 65535);
                 bit = c.code16(px_in, p);
                 // Learn.

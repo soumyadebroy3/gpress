@@ -211,7 +211,8 @@ impl<'a> Tokens<'a> {
             let i = s.tables[slot as usize].ok_or("scan uses an undefined Huffman table")?;
             j.tables.get(i).ok_or("bad table index")
         };
-        let blocks = blocks.iter().map(|&(dc, ac)| Ok((table(dc)?, table(ac)?, dc, ac))).collect::<Result<Vec<_>, Fail>>()?;
+        let blocks =
+            blocks.iter().map(|&(dc, ac)| Ok((table(dc)?, table(ac)?, dc, ac))).collect::<Result<Vec<_>, Fail>>()?;
         let bits = Bits { d: j.data, pos: s.data.start, end: s.data.end, acc: 0, n: 0, at_marker: false };
         Ok(Tokens { bits, blocks, mcus, restart: s.restart as u64, mcu: 0, blk: 0, rst: 0, done: false })
     }
@@ -267,7 +268,8 @@ impl<'a> Tokens<'a> {
             if self.blk == self.blocks.len() {
                 // The end of the scan or of an interval is for the next call.
                 let next = self.mcu + 1;
-                if count >= BATCH_BLOCKS || next == self.mcus || (self.restart > 0 && next.is_multiple_of(self.restart)) {
+                if count >= BATCH_BLOCKS || next == self.mcus || (self.restart > 0 && next.is_multiple_of(self.restart))
+                {
                     return Ok(n);
                 }
                 self.blk = 0;
@@ -281,7 +283,15 @@ impl<'a> Tokens<'a> {
     /// One block into `out` from position `n`: the DC token, then AC tokens up to the end-of-block symbol or the
     /// 64th coefficient. Returns the position after it (at most 64 more).
     #[inline]
-    fn block(&mut self, tdc: &DecodeTable, tac: &DecodeTable, dc: u8, ac: u8, out: &mut Buffer, mut n: usize) -> Result<usize, Fail> {
+    fn block(
+        &mut self,
+        tdc: &DecodeTable,
+        tac: &DecodeTable,
+        dc: u8,
+        ac: u8,
+        out: &mut Buffer,
+        mut n: usize,
+    ) -> Result<usize, Fail> {
         let s = self.bits.symbol(tdc)?;
         if s > 11 {
             return Err("DC difference too large for 8-bit samples");

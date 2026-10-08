@@ -16,8 +16,20 @@ fn data(name: &str) -> Vec<u8> {
 }
 
 const GOOD: [&str; 14] = [
-    "base420", "base444", "base422", "base440", "gray", "restart1", "restart5", "optimized", "sof1", "tiny", "edge17x9",
-    "multiscan", "multiscan2", "cmyk",
+    "base420",
+    "base444",
+    "base422",
+    "base440",
+    "gray",
+    "restart1",
+    "restart5",
+    "optimized",
+    "sof1",
+    "tiny",
+    "edge17x9",
+    "multiscan",
+    "multiscan2",
+    "cmyk",
 ];
 
 fn find(h: &[u8], n: &[u8]) -> usize {
@@ -60,8 +72,14 @@ fn coefficients(d: &[u8]) -> Option<Vec<Vec<[i32; 64]>>> {
         match m {
             0xC0 | 0xC1 => {
                 let n = body[5] as usize;
-                let comps = (0..n).map(|i| (body[6 + 3 * i], (body[7 + 3 * i] >> 4) as usize, (body[7 + 3 * i] & 15) as usize)).collect();
-                frame = Some((u16::from_be_bytes([body[3], body[4]]) as usize, u16::from_be_bytes([body[1], body[2]]) as usize, comps));
+                let comps = (0..n)
+                    .map(|i| (body[6 + 3 * i], (body[7 + 3 * i] >> 4) as usize, (body[7 + 3 * i] & 15) as usize))
+                    .collect();
+                frame = Some((
+                    u16::from_be_bytes([body[3], body[4]]) as usize,
+                    u16::from_be_bytes([body[1], body[2]]) as usize,
+                    comps,
+                ));
             }
             0xC4 => {
                 let mut b = body;
@@ -338,7 +356,18 @@ fn fill_bytes_leave_the_file_as_it_is() {
     let a = data("base420.jpg");
     let com = segment(0xFE, &[b"thumbnail:".as_slice(), &data("tiny.jpg")].concat());
     let layout = |fill: &[u8]| {
-        [&a[..2], &pick(&a, 0xE0), &com, &pick(&a, 0xC4), fill, &pick(&a, 0xDB), &pick(&a, 0xC0), &pick(&a, 0xDA), &pick(&a, 0xD9)].concat()
+        [
+            &a[..2],
+            &pick(&a, 0xE0),
+            &com,
+            &pick(&a, 0xC4),
+            fill,
+            &pick(&a, 0xDB),
+            &pick(&a, 0xC0),
+            &pick(&a, 0xDA),
+            &pick(&a, 0xD9),
+        ]
+        .concat()
     };
     assert_eq!(optimize(&layout(&[0xFF, 0xFF])), Err(Refused("fill bytes before a marker")));
     // Without the fill bytes the same layout is optimised, and every segment of the new file is followed by
@@ -418,7 +447,8 @@ fn data_bound_to_the_bytes_leaves_the_file_as_it_is() {
     let a = data("base420.jpg");
     let mut jumbf = b"JP\x00\x01\x00\x00\x00\x01".to_vec();
     jumbf.extend_from_slice(&[0, 0, 0, 0x21]);
-    jumbf.extend_from_slice(b"jumb\x00\x00\x00\x19jumdc2pa\x00\x11\x00\x10\x80\x00\x00\xaa\x00\x38\x9b\x71\x03c2pa\x00");
+    jumbf
+        .extend_from_slice(b"jumb\x00\x00\x00\x19jumdc2pa\x00\x11\x00\x10\x80\x00\x00\xaa\x00\x38\x9b\x71\x03c2pa\x00");
     let b = [&a[..2], &segment(0xEB, &jumbf), &a[2..]].concat();
     assert_eq!(optimize(&b), Err(Refused("APP11 data (JUMBF, such as content credentials)")));
     // Any APP11.
@@ -439,10 +469,21 @@ fn more_blocks_than_the_data_can_hold_are_refused_at_once() {
     assert!(t.elapsed().as_millis() < 100);
     // At exactly the bound it is read: 1-bit codes for the one DC difference and the end of block, 4 blocks of
     // 2 bits in one byte of coded data (the new file saves 4 bytes with one table segment instead of two).
-    let dht = |class: u8| segment(0xC4, &[&[class][..], &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], &[0]].concat());
+    let dht =
+        |class: u8| segment(0xC4, &[&[class][..], &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], &[0]].concat());
     let frame = segment(0xC0, &[8, 0, 16, 0, 16, 1, 1, 0x11, 0]);
     let scan = segment(0xDA, &[1, 1, 0x00, 0, 63, 0]);
-    let jpeg = [&[0xFF, 0xD8][..], &segment(0xDB, &[&[0u8][..], &[1u8; 64]].concat()), &frame, &dht(0x00), &dht(0x10), &scan, &[0x00], &[0xFF, 0xD9]].concat();
+    let jpeg = [
+        &[0xFF, 0xD8][..],
+        &segment(0xDB, &[&[0u8][..], &[1u8; 64]].concat()),
+        &frame,
+        &dht(0x00),
+        &dht(0x10),
+        &scan,
+        &[0x00],
+        &[0xFF, 0xD9],
+    ]
+    .concat();
     assert_eq!(coefficients(&jpeg).map(|s| s[0].len()), Some(4));
     let o = optimize(&jpeg).unwrap();
     assert!(o.len() < jpeg.len() && equivalent(&jpeg, &o));
@@ -532,7 +573,9 @@ fn pdf_with_image(img: &[u8], filter: &str, w: u32, h: u32, cs: &str) -> Vec<u8>
     for o in offsets {
         d.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
     }
-    d.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    d.extend_from_slice(
+        format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes(),
+    );
     d
 }
 
@@ -560,7 +603,9 @@ fn quick() -> rewrite::Options {
 
 #[test]
 fn pdf_images_get_optimised_tables() {
-    for (name, cs) in [("base420", "DeviceRGB"), ("gray", "DeviceGray"), ("restart1", "DeviceRGB"), ("cmyk", "DeviceCMYK")] {
+    for (name, cs) in
+        [("base420", "DeviceRGB"), ("gray", "DeviceGray"), ("restart1", "DeviceRGB"), ("cmyk", "DeviceCMYK")]
+    {
         let jpeg = data(&format!("{name}.jpg"));
         let (w, h) = if name == "gray" { (61, 37) } else { (75, 53) };
         // A lone JPEG, and a JPEG behind Flate.
@@ -590,7 +635,10 @@ fn pdf_jpeg_behind_flate_is_the_optimised_one() {
     assert!(matches!(r.outcome, Outcome::Smaller(_)));
     let doc = gpress::pdf::xref::open(&r.data).unwrap();
     let Obj::Stream(s) = doc.load(4).unwrap().1 else { panic!() };
-    assert_eq!(s.dict.get(b"Filter"), Some(&Obj::Array(vec![Obj::Name(b"FlateDecode".to_vec()), Obj::Name(b"DCTDecode".to_vec())])));
+    assert_eq!(
+        s.dict.get(b"Filter"),
+        Some(&Obj::Array(vec![Obj::Name(b"FlateDecode".to_vec()), Obj::Name(b"DCTDecode".to_vec())]))
+    );
     let (_, inner) = image_of(&r.data);
     assert_eq!(inner, optimize(&jpeg).unwrap());
 }
@@ -605,11 +653,22 @@ fn pdf_images_we_cannot_optimise_stay_as_they_are() {
     let mut flipped = base.clone();
     let n = flipped.len();
     flipped[n - 30] ^= 0x40; // damaged coded data: may still read as a JPEG; then it must keep its coefficients
-    // The layouts of the review: fill bytes after the tables (pdf.js), a quantisation segment 2 bytes too long,
-    // content credentials.
+                             // The layouts of the review: fill bytes after the tables (pdf.js), a quantisation segment 2 bytes too long,
+                             // content credentials.
     let com = segment(0xFE, &[b"thumbnail:".as_slice(), &data("tiny.jpg")].concat());
     let b = &base;
-    let fill = [&b[..2], &pick(b, 0xE0), &com, &pick(b, 0xC4), &[0xFF, 0xFF], &pick(b, 0xDB), &pick(b, 0xC0), &pick(b, 0xDA), &pick(b, 0xD9)].concat();
+    let fill = [
+        &b[..2],
+        &pick(b, 0xE0),
+        &com,
+        &pick(b, 0xC4),
+        &[0xFF, 0xFF],
+        &pick(b, 0xDB),
+        &pick(b, 0xC0),
+        &pick(b, 0xDA),
+        &pick(b, 0xD9),
+    ]
+    .concat();
     let dqt = find(b, &[0xFF, 0xDB]);
     let dqt_end = dqt + 2 + u16::from_be_bytes([b[dqt + 2], b[dqt + 3]]) as usize;
     let mut long_dqt = [&b[..dqt_end], &[0, 0][..], &b[dqt_end..]].concat();

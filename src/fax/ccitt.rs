@@ -625,7 +625,10 @@ pub fn parse(data: &[u8], scheme: Scheme, columns: usize, byte_align: bool, limi
             }
         }
         let rows = image.rows();
-        if rows >= limits.max_rows || (rows as u64 + 1) * columns as u64 > limits.max_pixels || image.changes.len() > limits.max_changes {
+        if rows >= limits.max_rows
+            || (rows as u64 + 1) * columns as u64 > limits.max_pixels
+            || image.changes.len() > limits.max_changes
+        {
             r.pos = save;
             stop = Stop::Limit;
             break;
@@ -801,7 +804,20 @@ mod tests {
 
     #[test]
     fn round_trips_every_scheme_and_layout() {
-        for &(w, h) in &[(1usize, 3usize), (7, 5), (8, 8), (9, 17), (63, 40), (64, 9), (65, 30), (1728, 20), (2561, 6), (2623, 4), (2624, 4), (5300, 6)] {
+        for &(w, h) in &[
+            (1usize, 3usize),
+            (7, 5),
+            (8, 8),
+            (9, 17),
+            (63, 40),
+            (64, 9),
+            (65, 30),
+            (1728, 20),
+            (2561, 6),
+            (2623, 4),
+            (2624, 4),
+            (5300, 6),
+        ] {
             for scheme in [Scheme::G4, Scheme::G31D, Scheme::G32D] {
                 for (eol, align) in [(false, false), (true, false), (false, true), (true, true)] {
                     for rule in Rule::ALL {
@@ -878,11 +894,25 @@ mod tests {
         // One white row of 1728 in 1-D: make-up 1728 (010011011) and terminating 0 (00110101).
         let mut img = Image::new(1728);
         img.push_row(&[]);
-        let lay = Layout { scheme: Scheme::G31D, rule: Rule::Standard, gaps: vec![Gap::default()], end: vec![], pad: 0, trailing: vec![] };
+        let lay = Layout {
+            scheme: Scheme::G31D,
+            rule: Rule::Standard,
+            gaps: vec![Gap::default()],
+            end: vec![],
+            pad: 0,
+            trailing: vec![],
+        };
         let b = encode(&img, &lay);
         assert_eq!(b, vec![0b0100_1101, 0b1001_1010, 0b1000_0000]);
         // Group 4: a white row on a white reference is V0 ("1"); EOFB is two EOLs.
-        let lay = Layout { scheme: Scheme::G4, rule: Rule::Standard, gaps: vec![Gap::default()], end: vec![Gap { fill: 0, eol: true, tag: false }; 2], pad: 0, trailing: vec![] };
+        let lay = Layout {
+            scheme: Scheme::G4,
+            rule: Rule::Standard,
+            gaps: vec![Gap::default()],
+            end: vec![Gap { fill: 0, eol: true, tag: false }; 2],
+            pad: 0,
+            trailing: vec![],
+        };
         let b = encode(&img, &lay);
         assert_eq!(b, vec![0b1000_0000, 0b0000_1000, 0b0000_0000, 0b1000_0000]);
     }
@@ -920,7 +950,14 @@ mod tests {
     fn limits_hold() {
         // Every row white: one bit per row in Group 4. A limit stops the rows; the rest is kept as bytes.
         let bytes = vec![0xffu8; 1000];
-        let p = parse(&bytes, Scheme::G4, 50_000, false, Limits { max_rows: 100, max_pixels: 1 << 40, max_changes: 1 << 20 }).unwrap();
+        let p = parse(
+            &bytes,
+            Scheme::G4,
+            50_000,
+            false,
+            Limits { max_rows: 100, max_pixels: 1 << 40, max_changes: 1 << 20 },
+        )
+        .unwrap();
         assert_eq!(p.stop, Stop::Limit);
         assert_eq!(p.image.rows(), 100);
         assert_eq!(encode(&p.image, &p.layout), bytes);

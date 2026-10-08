@@ -81,7 +81,8 @@ pub fn find_matches(data: &[u8], from: usize, to: usize, max_depth: usize, alter
     let n = to - from;
     let mut start = Vec::with_capacity(n + 1);
     let mut steps: Vec<(u16, u16)> = Vec::with_capacity(n * 2);
-    let (mut chain_start, mut chain) = if alternatives { (Vec::with_capacity(n + 1), Vec::with_capacity(n)) } else { (Vec::new(), Vec::new()) };
+    let (mut chain_start, mut chain) =
+        if alternatives { (Vec::with_capacity(n + 1), Vec::with_capacity(n)) } else { (Vec::new(), Vec::new()) };
 
     let mut same = vec![0u16; to - hist];
     for i in (hist..to).rev() {
@@ -270,7 +271,11 @@ mod validity {
                     let (l, d) = (l as usize, d as usize);
                     assert!((1..=WINDOW).contains(&d) && d <= i, "pos {i}: dist {d}");
                     assert!(i + l <= to, "pos {i}: len {l} past end");
-                    assert!(l > prev.0 as usize && (d > prev.1 as usize), "pos {i}: steps not increasing {:?}", m.at(i));
+                    assert!(
+                        l > prev.0 as usize && (d > prev.1 as usize),
+                        "pos {i}: steps not increasing {:?}",
+                        m.at(i)
+                    );
                     assert_eq!(&data[i - d..i - d + l], &data[i..i + l], "pos {i}: len {l} dist {d}");
                     prev = (l as u16, d as u16);
                 }

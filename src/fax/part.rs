@@ -9,7 +9,9 @@
 //! image and per file.
 
 use super::bilevel::Bilevel;
-use super::ccitt::{encode, parse, row_work, Gap, Image, Layout, Limits, Parsed, RowEncoder, Rule, Scheme, Stop, Writer, MAX_COLUMNS};
+use super::ccitt::{
+    encode, parse, row_work, Gap, Image, Layout, Limits, Parsed, RowEncoder, Rule, Scheme, Stop, Writer, MAX_COLUMNS,
+};
 use crate::cm::{Coder, Counter};
 
 /// Largest image the format takes (rows times columns).
@@ -206,7 +208,14 @@ impl FaxCoder {
     }
 
     /// What comes before a row (or one end code): EOL or not, fill bits, tag bit.
-    fn gap<C: Coder>(&mut self, c: &mut C, g: Option<&Gap>, st: &mut GapState, scheme: Scheme, end: bool) -> Option<Gap> {
+    fn gap<C: Coder>(
+        &mut self,
+        c: &mut C,
+        g: Option<&Gap>,
+        st: &mut GapState,
+        scheme: Scheme,
+        end: bool,
+    ) -> Option<Gap> {
         let eol = if end {
             true
         } else {
@@ -252,7 +261,13 @@ struct GapState {
 /// Codes one fax stream, which starts at byte `at` of the file: encoding when `src` is given (it must pass
 /// `fits`, and `Work::admit` must have let it in), restoring otherwise. Returns the stream's bytes, or None
 /// when the data can only come from a damaged file. The result is never longer than `max_len`.
-pub fn code<C: Coder>(c: &mut C, fc: &mut FaxCoder, src: Option<&Parsed>, at: usize, max_len: usize) -> Option<Vec<u8>> {
+pub fn code<C: Coder>(
+    c: &mut C,
+    fc: &mut FaxCoder,
+    src: Option<&Parsed>,
+    at: usize,
+    max_len: usize,
+) -> Option<Vec<u8>> {
     let lay = src.map(|p| &p.layout);
     let img = src.map(|p| &p.image);
     // Header.
@@ -405,9 +420,13 @@ mod tests {
     #[test]
     fn every_layout_comes_back_exactly() {
         for scheme in [Scheme::G4, Scheme::G31D, Scheme::G32D] {
-            for (eol, fill, trailing) in [(false, 0, &b""[..]), (true, 3, &b"\r\n"[..]), (true, 40, &b"junk after the end"[..])] {
+            for (eol, fill, trailing) in
+                [(false, 0, &b""[..]), (true, 3, &b"\r\n"[..]), (true, 40, &b"junk after the end"[..])]
+            {
                 let img = sample(301, 47);
-                let gaps = (0..img.rows()).map(|r| Gap { fill: if r % 2 == 0 { fill } else { 0 }, eol, tag: r % 4 == 0 }).collect();
+                let gaps = (0..img.rows())
+                    .map(|r| Gap { fill: if r % 2 == 0 { fill } else { 0 }, eol, tag: r % 4 == 0 })
+                    .collect();
                 let end = vec![Gap { fill: 1, eol: true, tag: true }; if scheme == Scheme::G4 { 2 } else { 6 }];
                 let lay = Layout { scheme, rule: Rule::Standard, gaps, end, pad: 0, trailing: trailing.to_vec() };
                 let bytes = encode(&img, &lay);
@@ -421,7 +440,14 @@ mod tests {
     fn damaged_parts_are_refused_never_wrong() {
         let img = sample(200, 150);
         let gaps = (0..img.rows()).map(|_| Gap::default()).collect();
-        let lay = Layout { scheme: Scheme::G4, rule: Rule::Standard, gaps, end: vec![Gap { fill: 0, eol: true, tag: false }; 2], pad: 0, trailing: vec![] };
+        let lay = Layout {
+            scheme: Scheme::G4,
+            rule: Rule::Standard,
+            gaps,
+            end: vec![Gap { fill: 0, eol: true, tag: false }; 2],
+            pad: 0,
+            trailing: vec![],
+        };
         let bytes = encode(&img, &lay);
         let packed = pack_one(&bytes, Scheme::G4, 200, false);
         let mut wrong = 0;
@@ -448,12 +474,14 @@ mod tests {
         // Garbage of every length: refused or bounded, and quickly.
         let mut s = 1u64;
         for n in [0usize, 1, 5, 50, 500, 5000] {
-            let g: Vec<u8> = (0..n).map(|_| {
-                s ^= s << 13;
-                s ^= s >> 7;
-                s ^= s << 17;
-                s as u8
-            }).collect();
+            let g: Vec<u8> = (0..n)
+                .map(|_| {
+                    s ^= s << 13;
+                    s ^= s >> 7;
+                    s ^= s << 17;
+                    s as u8
+                })
+                .collect();
             if let Some(out) = unpack_one(&g, 10_000) {
                 assert!(out.len() <= 10_000);
             }
@@ -470,7 +498,14 @@ mod tests {
             img.push_row(if r % 2 == 0 { &[10, 11][..] } else { &[] });
         }
         let gaps = (0..img.rows()).map(|_| Gap::default()).collect();
-        let lay = Layout { scheme: Scheme::G4, rule: Rule::Standard, gaps, end: vec![Gap { fill: 0, eol: true, tag: false }; 2], pad: 0, trailing: vec![] };
+        let lay = Layout {
+            scheme: Scheme::G4,
+            rule: Rule::Standard,
+            gaps,
+            end: vec![Gap { fill: 0, eol: true, tag: false }; 2],
+            pad: 0,
+            trailing: vec![],
+        };
         let bytes = encode(&img, &lay);
         let p = parse(&bytes, Scheme::G4, 131072, false, Limits::default()).unwrap();
         let c = cost(&img);

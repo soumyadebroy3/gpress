@@ -7,7 +7,9 @@ use gpress::pack::{pack, unpack};
 fn pdf_with_indirect_filter() -> Vec<u8> {
     let mut content = Vec::new();
     for i in 0..200 {
-        content.extend_from_slice(format!("BT /F1 12 Tf 72 {} Td (Line {i} of the test page) Tj ET\n", 700 - i * 3).as_bytes());
+        content.extend_from_slice(
+            format!("BT /F1 12 Tf 72 {} Td (Line {i} of the test page) Tj ET\n", 700 - i * 3).as_bytes(),
+        );
     }
     let z = zlib_stream(&content, Params { level: 6, window_bits: 15, mem_level: 8, filtered: false });
     let mut d = Vec::new();

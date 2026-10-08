@@ -7,8 +7,8 @@ pub mod model;
 // ---------------------------------------------------------------- logistic helpers (12-bit domain)
 
 const SQUASH_T: [i32; 33] = [
-    1, 2, 3, 6, 10, 16, 27, 45, 73, 120, 194, 310, 488, 747, 1101, 1546, 2047, 2549, 2994, 3348, 3607, 3785, 3901, 3975, 4024,
-    4050, 4068, 4079, 4085, 4089, 4092, 4093, 4094,
+    1, 2, 3, 6, 10, 16, 27, 45, 73, 120, 194, 310, 488, 747, 1101, 1546, 2047, 2549, 2994, 3348, 3607, 3785, 3901,
+    3975, 4024, 4050, 4068, 4079, 4085, 4089, 4092, 4093, 4094,
 ];
 
 /// 1 / (1 + e^-x): x is ln-odds scaled by 256 (-2047..2047), result is a 12-bit probability.
@@ -299,7 +299,16 @@ impl Mixer {
         // Inputs are stretched probabilities (at most 2047 either way) and the error at most 4095 x rate, so an
         // input times the error fits in 32 bits (see `update`).
         assert!((1..=256).contains(&rate));
-        Mixer { shift: 10, n: inputs, w: vec![(1 << 16) / 4; inputs * selectors], x: vec![0; inputs], nx: 0, sel: 0, pr: 2048, rate }
+        Mixer {
+            shift: 10,
+            n: inputs,
+            w: vec![(1 << 16) / 4; inputs * selectors],
+            x: vec![0; inputs],
+            nx: 0,
+            sel: 0,
+            pr: 2048,
+            rate,
+        }
     }
     #[inline]
     pub fn add(&mut self, st: i32) {

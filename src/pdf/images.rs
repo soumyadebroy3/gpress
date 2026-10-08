@@ -190,7 +190,9 @@ mod tests {
                 ((i % row) as u8).wrapping_mul(3).wrapping_add((s % 5) as u8)
             })
             .collect();
-        for how in [Choice::Fixed(0), Choice::Fixed(1), Choice::Fixed(2), Choice::Fixed(3), Choice::Fixed(4), Choice::MinSum] {
+        for how in
+            [Choice::Fixed(0), Choice::Fixed(1), Choice::Fixed(2), Choice::Fixed(3), Choice::Fixed(4), Choice::MinSum]
+        {
             let f = png_filter(&px, row, bpp, how);
             assert_eq!(png_unfilter(&f, row, bpp).unwrap(), px);
         }

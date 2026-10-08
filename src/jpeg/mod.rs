@@ -163,7 +163,8 @@ fn write_scan(j: &Jpeg, s: &Scan, specs: &[&[Option<Spec>]], out: &mut Vec<u8>) 
                 others.iter_mut().for_each(|c| c.restart(tok.sym()));
                 continue;
             }
-            let (slot, sym, nbits, bits) = (tok.slot() as usize, tok.sym() as usize, tok.nbits() as u32, tok.bits() as u32);
+            let (slot, sym, nbits, bits) =
+                (tok.slot() as usize, tok.sym() as usize, tok.nbits() as u32, tok.bits() as u32);
             let e = codes[0][slot][sym];
             let len = e & 0xFF;
             if len == 0 {
@@ -186,7 +187,12 @@ fn write_scan(j: &Jpeg, s: &Scan, specs: &[&[Option<Spec>]], out: &mut Vec<u8>) 
 /// only lead to the end of their block.
 pub fn info(d: &[u8]) -> Result<String, Refused> {
     let j = parse(d).map_err(Refused)?;
-    let mut out = format!("{}x{} comps {:?}", j.frame.width, j.frame.height, j.frame.comps.iter().map(|c| (c.h, c.v)).collect::<Vec<_>>());
+    let mut out = format!(
+        "{}x{} comps {:?}",
+        j.frame.width,
+        j.frame.height,
+        j.frame.comps.iter().map(|c| (c.h, c.v)).collect::<Vec<_>>()
+    );
     let mut buf = Tokens::buffer();
     for s in &j.scans {
         let mut t = Tokens::new(&j, s).map_err(Refused)?;

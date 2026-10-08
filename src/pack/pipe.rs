@@ -70,7 +70,17 @@ pub struct StreamDecoder {
 
 impl StreamDecoder {
     pub fn new(rx: Receiver<Vec<u8>>) -> StreamDecoder {
-        let mut d = StreamDecoder { x1: 0, x2: 0xffff_ffff, x: 0, rx, buf: Vec::new(), at: 0, pos: 0, received: 0, closed: false };
+        let mut d = StreamDecoder {
+            x1: 0,
+            x2: 0xffff_ffff,
+            x: 0,
+            rx,
+            buf: Vec::new(),
+            at: 0,
+            pos: 0,
+            received: 0,
+            closed: false,
+        };
         for _ in 0..4 {
             d.x = (d.x << 8) | d.next() as u32;
         }
@@ -171,7 +181,10 @@ mod tests {
             let (bytes, got) = std::thread::scope(|s| {
                 let check = s.spawn(|| {
                     let mut d = StreamDecoder::new(rx);
-                    let bits: Vec<u32> = it.iter().map(|&(wide, p, _)| if wide { d.code16(None, p) } else { d.code(None, p as i32) }).collect();
+                    let bits: Vec<u32> = it
+                        .iter()
+                        .map(|&(wide, p, _)| if wide { d.code16(None, p) } else { d.code(None, p as i32) })
+                        .collect();
                     (bits, d.exhausted())
                 });
                 let mut e = TeeEncoder::new(tx);
@@ -189,7 +202,8 @@ mod tests {
             assert!(!got.1);
             // The plain decoder on the same bytes gives the same bits.
             let mut d = Decoder::new(&bytes);
-            let plain: Vec<u32> = it.iter().map(|&(wide, p, _)| if wide { d.code16(None, p) } else { d.code(None, p as i32) }).collect();
+            let plain: Vec<u32> =
+                it.iter().map(|&(wide, p, _)| if wide { d.code16(None, p) } else { d.code(None, p as i32) }).collect();
             assert_eq!(plain, want);
         }
     }
@@ -215,7 +229,11 @@ mod tests {
         let mut sd = StreamDecoder::new(rx);
         let mut pd = Decoder::new(cut);
         for &(wide, p, _) in &it {
-            let (a, b) = if wide { (sd.code16(None, p), pd.code16(None, p)) } else { (sd.code(None, p as i32), pd.code(None, p as i32)) };
+            let (a, b) = if wide {
+                (sd.code16(None, p), pd.code16(None, p))
+            } else {
+                (sd.code(None, p as i32), pd.code(None, p as i32))
+            };
             assert_eq!(a, b);
             assert_eq!(sd.exhausted(), pd.exhausted());
         }

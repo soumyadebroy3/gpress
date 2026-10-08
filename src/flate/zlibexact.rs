@@ -173,7 +173,11 @@ impl<'a> State<'a> {
         let mut scan_end = self.byte(scan + best);
         loop {
             let m = cur;
-            if !(self.byte(m + best) != scan_end || self.byte(m + best - 1) != scan_end1 || self.byte(m) != self.byte(scan) || self.byte(m + 1) != self.byte(scan + 1)) {
+            if !(self.byte(m + best) != scan_end
+                || self.byte(m + best - 1) != scan_end1
+                || self.byte(m) != self.byte(scan)
+                || self.byte(m + 1) != self.byte(scan + 1))
+            {
                 // Bytes 0, 1 match; byte 2 matches by the hash; compare from 3 up to 258.
                 let mut len = 3;
                 while len < MAX_MATCH && self.byte(scan + len) == self.byte(m + len) {
@@ -345,7 +349,9 @@ fn run_slow(s: &mut State, t: &mut Tally) {
         match_length = MIN_MATCH - 1;
         if hash_head != NIL && s.prev_length < s.cfg.lazy && s.strstart - hash_head <= s.max_dist {
             match_length = s.longest_match(hash_head);
-            if match_length <= 5 && (s.p.filtered || (match_length == MIN_MATCH && s.strstart - s.match_start > TOO_FAR)) {
+            if match_length <= 5
+                && (s.p.filtered || (match_length == MIN_MATCH && s.strstart - s.match_start > TOO_FAR))
+            {
                 match_length = MIN_MATCH - 1;
             }
         }
@@ -406,7 +412,14 @@ struct Tree {
 
 /// zlib's Huffman construction (heap with depth tie-break, then the overflow fix). Returns (tree, opt bits,
 /// static bits) where the bit counts include extra bits.
-fn build_tree(freqs: &[u32], extra: &dyn Fn(usize) -> u32, static_len: Option<&dyn Fn(usize) -> u32>, max_length: u16, opt: &mut u64, stat: &mut u64) -> Tree {
+fn build_tree(
+    freqs: &[u32],
+    extra: &dyn Fn(usize) -> u32,
+    static_len: Option<&dyn Fn(usize) -> u32>,
+    max_length: u16,
+    opt: &mut u64,
+    stat: &mut u64,
+) -> Tree {
     let elems = freqs.len();
     let nodes = 2 * elems + 1;
     let mut freq = vec![0u32; nodes];
@@ -443,7 +456,9 @@ fn build_tree(freqs: &[u32], extra: &dyn Fn(usize) -> u32, static_len: Option<&d
             *stat = stat.wrapping_sub(sl(node) as u64);
         }
     }
-    let smaller = |freq: &Vec<u32>, depth: &Vec<u8>, n: usize, m: usize| freq[n] < freq[m] || (freq[n] == freq[m] && depth[n] <= depth[m]);
+    let smaller = |freq: &Vec<u32>, depth: &Vec<u8>, n: usize, m: usize| {
+        freq[n] < freq[m] || (freq[n] == freq[m] && depth[n] <= depth[m])
+    };
     let down = |heap: &mut Vec<usize>, heap_len: usize, freq: &Vec<u32>, depth: &Vec<u8>, mut k: usize| {
         let v = heap[k];
         let mut j = k << 1;
@@ -746,7 +761,15 @@ pub fn find_params(data: &[u8], raw: &[u8]) -> Option<Params> {
 /// The full zlib stream for these parameters (header, data, Adler-32).
 pub fn zlib_stream(data: &[u8], p: Params) -> Vec<u8> {
     let cmf = ((p.window_bits - 8) << 4) | 8;
-    let flevel = if p.level < 2 { 0 } else if p.level < 6 { 1 } else if p.level == 6 { 2 } else { 3 };
+    let flevel = if p.level < 2 {
+        0
+    } else if p.level < 6 {
+        1
+    } else if p.level == 6 {
+        2
+    } else {
+        3
+    };
     let mut hdr = ((cmf as u16) << 8) | ((flevel as u16) << 6);
     hdr += 31 - (hdr % 31);
     let mut out = vec![(hdr >> 8) as u8, hdr as u8];
@@ -778,7 +801,12 @@ mod tests {
             }
             let zb = std::fs::read(dir.join(z)).unwrap();
             let data = std::fs::read(dir.join(raw)).unwrap();
-            let p = Params { level, window_bits: wbits, mem_level: if level == 9 { 9 } else { 8 }, filtered: strat == "filt" };
+            let p = Params {
+                level,
+                window_bits: wbits,
+                mem_level: if level == 9 { 9 } else { 8 },
+                filtered: strat == "filt",
+            };
             let ours = zlib_stream(&data, p);
             assert!(ours == zb, "{z}: {} vs {} bytes", ours.len(), zb.len());
             checked += 1;
@@ -799,11 +827,16 @@ mod tests {
         let mut tried = 0;
         for level in [1u8, 4, 6, 9] {
             for mem in [1u8, 8] {
-                let target = deflate_like_zlib(&data, Params { level, window_bits: 15, mem_level: mem, filtered: false });
+                let target =
+                    deflate_like_zlib(&data, Params { level, window_bits: 15, mem_level: mem, filtered: false });
                 for l2 in [1u8, 4, 6, 9] {
                     for m2 in [1u8, 8] {
                         let p = Params { level: l2, window_bits: 15, mem_level: m2, filtered: false };
-                        assert_eq!(rebuilds(&data, p, &target), deflate_like_zlib(&data, p) == target, "{level}/{mem} vs {p:?}");
+                        assert_eq!(
+                            rebuilds(&data, p, &target),
+                            deflate_like_zlib(&data, p) == target,
+                            "{level}/{mem} vs {p:?}"
+                        );
                         tried += 1;
                     }
                 }

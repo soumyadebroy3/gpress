@@ -188,7 +188,12 @@ pub(super) fn code_key<C: Coder>(io: &mut Io<C>, key_in: Option<&[u8]>) -> Optio
 
 /// Codes an encrypted stream's settings (part T_CRYPT). `out` is the file restored so far (it ends just before
 /// the payload). None if the file is damaged.
-pub(super) fn code_settings<C: Coder>(io: &mut Io<C>, s_in: Option<&Sealed>, out: &[u8], key: Option<&[u8]>) -> Option<Sealed> {
+pub(super) fn code_settings<C: Coder>(
+    io: &mut Io<C>,
+    s_in: Option<&Sealed>,
+    out: &[u8],
+    key: Option<&[u8]>,
+) -> Option<Sealed> {
     let code = |m: Method| match m {
         Method::Rc4 => 1u8,
         Method::Aes128 => 2,
@@ -254,13 +259,20 @@ mod tests {
     #[test]
     fn finds_the_object_before_a_stream() {
         // "obj" inside the dictionary twice (a name and a string) and in the "endobj" before it.
-        let d = b"%PDF-1.4\n7 0 obj\n<< /Length 5 >>\nendobj\n12 3 obj\n<< /Name /obj /S (obj) /Length 4 >>\nstream\r\n";
+        let d =
+            b"%PDF-1.4\n7 0 obj\n<< /Length 5 >>\nendobj\n12 3 obj\n<< /Name /obj /S (obj) /Length 4 >>\nstream\r\n";
         let (n, g, dict) = stream_header(d).unwrap();
         assert_eq!((n, g), (12, 3));
         assert_eq!(dict.get(b"Length"), Some(&Obj::Int(4)));
         assert_eq!(stream_header(b"1 0 obj<</Length 3>>stream\n").map(|h| (h.0, h.1)), Some((1, 0)));
         // Not a stream start, no numbers, a number glued to a word, a dictionary that doesn't reach the keyword.
-        for bad in [&b"1 0 obj<</Length 3>>streamx"[..], b"obj<</Length 3>>stream\n", b"x1 0 obj<<>>stream\n", b"1 0 obj<<>> 5 stream\n", b""] {
+        for bad in [
+            &b"1 0 obj<</Length 3>>streamx"[..],
+            b"obj<</Length 3>>stream\n",
+            b"x1 0 obj<<>>stream\n",
+            b"1 0 obj<<>> 5 stream\n",
+            b"",
+        ] {
             assert!(stream_header(bad).is_none(), "{}", String::from_utf8_lossy(bad));
         }
         // The header is looked for in the last 16 KiB only.
@@ -311,7 +323,13 @@ mod tests {
         let mut x = d[..a].to_vec();
         x.extend_from_slice(&seal_payload(&s, &key, b"HELLO").unwrap());
         x.extend_from_slice(&d[a + 5..]);
-        let plans = vec![Plan::Syntax(0, a), Plan::CryptKey(key), Plan::Crypt(s), Plan::Plain(b"HELLO".to_vec()), Plan::Syntax(a + 5, x.len())];
+        let plans = vec![
+            Plan::Syntax(0, a),
+            Plan::CryptKey(key),
+            Plan::Crypt(s),
+            Plan::Plain(b"HELLO".to_vec()),
+            Plan::Syntax(a + 5, x.len()),
+        ];
         let packed = pack_parts(&x, plans);
         assert_eq!(unpack(&packed).unwrap(), x);
     }
@@ -341,8 +359,27 @@ mod tests {
         v.push(Plan::Syntax(a, d.len()));
         cases.push(v);
         // Two keys; settings not right after syntax; a key not followed by settings; settings at the end.
-        cases.push(vec![Plan::Syntax(0, a), key(), rc4_settings(), Plan::Plain(b"x".to_vec()), Plan::Syntax(a, a + 1), key(), rc4_settings(), Plan::Plain(b"y".to_vec()), tail]);
-        cases.push(vec![Plan::Syntax(0, a), key(), rc4_settings(), Plan::Plain(b"x".to_vec()), Plan::Syntax(a, a + 1), Plan::Raw(a, a), rc4_settings(), Plan::Plain(b"y".to_vec())]);
+        cases.push(vec![
+            Plan::Syntax(0, a),
+            key(),
+            rc4_settings(),
+            Plan::Plain(b"x".to_vec()),
+            Plan::Syntax(a, a + 1),
+            key(),
+            rc4_settings(),
+            Plan::Plain(b"y".to_vec()),
+            tail,
+        ]);
+        cases.push(vec![
+            Plan::Syntax(0, a),
+            key(),
+            rc4_settings(),
+            Plan::Plain(b"x".to_vec()),
+            Plan::Syntax(a, a + 1),
+            Plan::Raw(a, a),
+            rc4_settings(),
+            Plan::Plain(b"y".to_vec()),
+        ]);
         cases.push(vec![Plan::Syntax(0, a), key(), Plan::Syntax(a, d.len())]);
         cases.push(vec![Plan::Syntax(0, d.len()), key(), rc4_settings()]);
         // Settings without a key.

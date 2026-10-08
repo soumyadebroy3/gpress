@@ -132,7 +132,6 @@ struct Tok {
     xref_state: u8, // 0 none, 1 after "xref", 2 in entries
     xref_next: i64,
     xref_left: i64,
-
 }
 
 /// Inside an opened Type 1 private part: the text, and the charstrings in it ("length RD " and that many
@@ -701,7 +700,13 @@ impl Model {
         let col = self.col;
         debug_assert_eq!(col, (pos - lo) % s);
         let first_row = pos - lo < s;
-        let w = if col >= bpp { at(bpp) } else if !first_row { at(s) } else { 0 };
+        let w = if col >= bpp {
+            at(bpp)
+        } else if !first_row {
+            at(s)
+        } else {
+            0
+        };
         let n = if !first_row { at(s) } else { w };
         let nw = if !first_row && col >= bpp { at(s + bpp) } else { n };
         let ne = if !first_row && col + bpp < s { at(s - bpp) } else { n };
@@ -900,7 +905,8 @@ impl Model {
                     self.tok.prev_op2 = self.tok.prev_op;
                     self.tok.prev_op = h;
                     self.tok.prev_operands = std::mem::take(&mut self.tok.operands);
-                    self.tok.prev_hashes = self.tok.prev_operands.iter().map(|v| v.iter().fold(7u32, |h, &x| hb(h, x))).collect();
+                    self.tok.prev_hashes =
+                        self.tok.prev_operands.iter().map(|v| v.iter().fold(7u32, |h, &x| hb(h, x))).collect();
                 }
             }
             if b == b'/' {
@@ -938,8 +944,13 @@ impl Model {
         let c1 = c4 & 0xff;
         let tokh = self.tok.tok_hash;
         let tl = self.tok.tok.len() as u32;
-        let nb = if self.kind == Kind::Image && self.geom.stride > 0 { self.image_neighbours() } else { (0, 0, 0, 0, 0) };
-        let ex = if self.kind == Kind::Image && self.geom.stride > 0 && self.geom.exact { self.exact_neighbours() } else { [0; 7] };
+        let nb =
+            if self.kind == Kind::Image && self.geom.stride > 0 { self.image_neighbours() } else { (0, 0, 0, 0, 0) };
+        let ex = if self.kind == Kind::Image && self.geom.stride > 0 && self.geom.exact {
+            self.exact_neighbours()
+        } else {
+            [0; 7]
+        };
         let hs = &mut self.hashes;
         match self.kind {
             Kind::Image if self.geom.stride > 0 && self.geom.exact => {
@@ -965,7 +976,11 @@ impl Model {
                 let depth = cs.depth.min(15);
                 let lead = if cs.phase == CS_POS2 || cs.phase == CS_NEG2 { cs.lead as u32 } else { 0 };
                 let st = ph | depth << 4 | cs.c1 << 8;
-                let same = if cs.depth < cs.nlast.min(8) { cs.last[cs.depth as usize].clamp(-4000, 4000) as u32 & 0xffff } else { 0x10000 };
+                let same = if cs.depth < cs.nlast.min(8) {
+                    cs.last[cs.depth as usize].clamp(-4000, 4000) as u32 & 0xffff
+                } else {
+                    0x10000
+                };
                 hs[0] = k ^ h2(41, st);
                 hs[1] = k ^ h2(42, h2(st, cs.c2));
                 hs[2] = k ^ h2(43, ph);
@@ -1006,7 +1021,11 @@ impl Model {
                         17..=32 => 6,
                         _ => 7,
                     };
-                    if d < 0 { m + 8 } else { m }
+                    if d < 0 {
+                        m + 8
+                    } else {
+                        m
+                    }
                 };
                 let ch = (col % bpp) as u32;
                 let rw = if col >= bpp { rat(bpp) } else { 0 };
@@ -1082,7 +1101,9 @@ mod tests {
         let mut s = 77u64;
         let mut m = Model::new(12);
         let mut n = Null;
-        for (stride, bpp, exact) in [(7usize, 1usize, false), (300, 3, false), (64, 1, true), (1, 1, false), (5, 2, false)] {
+        for (stride, bpp, exact) in
+            [(7usize, 1usize, false), (300, 3, false), (64, 1, true), (1, 1, false), (5, 2, false)]
+        {
             m.set_kind(Kind::Syntax, Geom::default(), 0);
             for &b in b"1 0 obj\n" {
                 m.code_byte(&mut n, Some(b));

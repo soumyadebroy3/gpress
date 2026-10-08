@@ -132,7 +132,16 @@ fn object_stream_headers_are_checked_before_anything_is_sized_by_them() {
     // /N far beyond what the data could hold (the review's 100,000,000,000 tried to reserve 1.6 TB), negative,
     // at the edges of 64 bits; /First past the data or negative: the object stream is refused (nothing is
     // reachable, the file is untouched), at once.
-    for (n, first) in [("100000000000", "real"), ("-1", "real"), ("9223372036854775807", "real"), ("4611686018427387904", "real"), ("-5", "real"), ("2", "999999"), ("2", "-7"), ("2", "9223372036854775807")] {
+    for (n, first) in [
+        ("100000000000", "real"),
+        ("-1", "real"),
+        ("9223372036854775807", "real"),
+        ("4611686018427387904", "real"),
+        ("-5", "real"),
+        ("2", "999999"),
+        ("2", "-7"),
+        ("2", "9223372036854775807"),
+    ] {
         let bad = with_object_stream(n, first);
         let why = untouched(&quick(&bad, &Options::effort(100)), &bad);
         assert!(why.contains("unreadable object"), "/N {n} /First {first}: {why}");
@@ -171,10 +180,12 @@ fn a_dangling_reference_keeps_its_number_free() {
     smaller(&r, &pdf);
     let out = xref::open(&r.data).unwrap();
     assert!(out.load(9).is_err(), "object 9 must stay missing");
-    let in_use: Vec<u32> = out.entries.iter().filter(|(_, e)| !matches!(e, xref::Entry::Free)).map(|(&n, _)| n).collect();
+    let in_use: Vec<u32> =
+        out.entries.iter().filter(|(_, e)| !matches!(e, xref::Entry::Free)).map(|(&n, _)| n).collect();
     assert!(in_use.iter().all(|&n| n <= 4 || n >= 10), "{in_use:?}");
     // A dangling reference far away counts like an object there: the file is left as it is.
-    objs[0].1 = b"<< /Type /Catalog /Pages 2 0 R /Outlines << /Type /Outlines /First 4000000000 0 R /Count 0 >> >>".to_vec();
+    objs[0].1 =
+        b"<< /Type /Catalog /Pages 2 0 R /Outlines << /Type /Outlines /First 4000000000 0 R /Count 0 >> >>".to_vec();
     let pdf = classic(&objs, "4000000001");
     assert_eq!(untouched(&quick(&pdf, &Options::effort(100)), &pdf), "object numbers far apart");
 }
@@ -231,7 +242,10 @@ fn with_free_rows(rows: u32) -> Vec<u8> {
     rec.extend_from_slice(&(x as u32).to_be_bytes());
     rec.resize(rows as usize * 5, 0);
     d.extend_from_slice(b"5 0 obj\n");
-    d.extend_from_slice(&stream(&format!("/Type /XRef /Size {rows} /W [1 4 0] /Root 1 0 R /Filter /FlateDecode"), &z(&rec)));
+    d.extend_from_slice(&stream(
+        &format!("/Type /XRef /Size {rows} /W [1 4 0] /Root 1 0 R /Filter /FlateDecode"),
+        &z(&rec),
+    ));
     d.extend_from_slice(format!("\nendobj\nstartxref\n{x}\n%%EOF\n").as_bytes());
     d
 }
@@ -274,7 +288,15 @@ fn an_image_width_that_wraps_around_is_refused() {
             match out.load(5).unwrap().1 {
                 Obj::Stream(s) => {
                     assert_eq!(s.dict.get(b"DecodeParms").is_some(), !parms.is_empty());
-                    assert_eq!(gpress::pdf::filters::decode_stage(&gpress::pdf::filters::chain(&s.dict).unwrap()[0], &s.data, 1 << 20).unwrap(), px);
+                    assert_eq!(
+                        gpress::pdf::filters::decode_stage(
+                            &gpress::pdf::filters::chain(&s.dict).unwrap()[0],
+                            &s.data,
+                            1 << 20
+                        )
+                        .unwrap(),
+                        px
+                    );
                 }
                 o => panic!("{o:?}"),
             }
@@ -289,7 +311,10 @@ fn predictor_rows_are_cut_to_the_data() {
     // so decoding it (the self-check undoes predictors) reserves nothing for the claim.
     let content = b"BT /F1 12 Tf 10 10 Td (hi) Tj ET\n".repeat(50);
     let mut objs = page_objects();
-    objs[3].1 = stream("/Filter /FlateDecode /DecodeParms << /Predictor 12 /Colors 32 /BitsPerComponent 16 /Columns 16777216 >>", &z(&content));
+    objs[3].1 = stream(
+        "/Filter /FlateDecode /DecodeParms << /Predictor 12 /Colors 32 /BitsPerComponent 16 /Columns 16777216 >>",
+        &z(&content),
+    );
     let pdf = classic(&objs, "5");
     let r = quick(&pdf, &Options::effort(100));
     assert!(matches!(r.outcome, Outcome::Smaller(_) | Outcome::Untouched(_)));
