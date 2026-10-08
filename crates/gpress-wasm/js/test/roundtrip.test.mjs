@@ -29,6 +29,23 @@ test("a damaged archive is refused, never a wrong file", () => {
   assert.throws(() => g.expand(other), (e) => e instanceof GpressError && e.code === GpressError.UNSUPPORTED_VERSION);
 });
 
+test("a /Length that wraps to an earlier endstream on 32 bits is not trusted", () => {
+  // In the 32-bit module start + length would wrap to the offset of the early "endstream" unless the sum
+  // is checked; the file must pack and restore exactly, like on 64 bits.
+  const enc = new TextEncoder();
+  const head = "%PDF-1.4\n% endstream before the data\n1 0 obj\n<< /Type /Catalog >>\nendobj\n";
+  const early = head.indexOf("endstream");
+  const payload = "BT /F1 12 Tf (not a zlib stream) Tj ET";
+  const guess = `2 0 obj\n<< /Length 4294967296 >>\nstream\n`;
+  const start = head.length + guess.length;
+  const length = 2 ** 32 - start + early;
+  const obj = `2 0 obj\n<< /Length ${length} >>\nstream\n`;
+  assert.equal(obj.length, guess.length);
+  const pdf = enc.encode(head + obj + payload + "\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
+  const c = g.compress(pdf);
+  assert.deepEqual(g.expand(c.data), pdf);
+});
+
 test("optimize returns untouched with a reason for non-PDF input", () => {
   const r = g.optimize(new TextEncoder().encode("hello"), { jbig2: false, jpegTables: false, objectsPerStream: 50 });
   assert.equal(r.outcome, "untouched");
