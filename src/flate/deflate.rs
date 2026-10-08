@@ -88,16 +88,24 @@ impl Options {
     }
 }
 
-/// What the encodes of one job share: a pool of threads, and the output for inputs already encoded with the
-/// same settings (identical streams are encoded once). Neither changes any output.
+/// What the encodes of one job share: a pool of threads, and (optionally) the output for inputs already
+/// encoded with the same settings, so that an input is encoded once. Neither changes any output.
 pub struct Shared {
     pub pool: Arc<Pool>,
-    memo: Memo<(u64, usize, [usize; 9]), Arc<Vec<u8>>>,
+    /// Kept as long as this `Shared` lives; None: nothing is remembered.
+    memo: Option<Memo<(u64, usize, [usize; 9]), Arc<Vec<u8>>>>,
 }
 
 impl Shared {
+    /// A new pool of `threads` threads, remembering every output.
     pub fn new(threads: usize) -> Arc<Shared> {
-        Arc::new(Shared { pool: Pool::new(threads), memo: Memo::new() })
+        Shared::with_pool(Pool::new(threads), true)
+    }
+
+    /// Encodes that use `pool`; with `remember`, every output is kept for later encodes of the same input
+    /// while this `Shared` lives (one per stream, say, so memory doesn't grow with the file).
+    pub fn with_pool(pool: Arc<Pool>, remember: bool) -> Arc<Shared> {
+        Arc::new(Shared { pool, memo: remember.then(Memo::new) })
     }
 }
 
@@ -146,16 +154,17 @@ pub fn deflate(data: &[u8], opt: &Options) -> Vec<u8> {
     w.finish()
 }
 
-/// Zlib-wrapped data, as PDF's FlateDecode expects. With `shared`, an input already encoded with the same
-/// settings is not encoded again: the earlier output is reused after checking that it decodes to this input.
+/// Zlib-wrapped data, as PDF's FlateDecode expects. With a remembering `shared`, an input already encoded with
+/// the same settings is not encoded again: the earlier output is reused after checking that it decodes to
+/// this input.
 pub fn deflate_zlib(data: &[u8], opt: &Options) -> Vec<u8> {
     let encode = || super::zlib::wrap(&deflate(data, opt), data);
-    match &opt.shared {
+    match opt.shared.as_ref().and_then(|sh| sh.memo.as_ref()) {
         None => encode(),
-        Some(sh) => {
+        Some(memo) => {
             let key = (par::hash64(data), data.len(), opt.fingerprint());
             let fits = |z: &Arc<Vec<u8>>| super::zlib::unwrap(z, data.len() + 1).map_or(false, |u| u.data == data && u.trailing == 0);
-            sh.memo.get(key, fits, || Arc::new(encode())).to_vec()
+            memo.get(key, fits, || Arc::new(encode())).to_vec()
         }
     }
 }

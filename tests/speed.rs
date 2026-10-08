@@ -184,3 +184,83 @@ fn pack_options_change_speed_never_the_restore() {
     // Effort 100 is the default.
     assert!(engine::pack::pack(&pdf).0 == packed[3]);
 }
+
+/// A PDF of the given objects (numbered from 1, object 1 the catalog), with a cross-reference table.
+fn pdf_of(objs: &[Vec<u8>]) -> Vec<u8> {
+    let mut pdf = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+        pdf.extend_from_slice(o);
+        pdf.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for off in offsets {
+        pdf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    pdf
+}
+
+fn stream_obj(dict: &str, data: &[u8]) -> Vec<u8> {
+    let mut o = format!("<< {dict} /Length {} >>\nstream\n", data.len()).into_bytes();
+    o.extend_from_slice(data);
+    o.extend_from_slice(b"\nendstream");
+    o
+}
+
+fn zlib1(data: &[u8]) -> Vec<u8> {
+    zlib_stream(data, Params { level: 1, window_bits: 15, mem_level: 8, filtered: false })
+}
+
+#[test]
+fn pack_codes_plainly_only_data_without_structure() {
+    // A 512 x 512 RGB gradient: every byte value equally often, as in compressed data, but smooth.
+    let (w, h) = (512usize, 512usize);
+    let px: Vec<u8> = (0..h).flat_map(|y| (0..w).flat_map(move |x| [(x / 2) as u8, (y / 2) as u8, ((x + y) / 4) as u8])).collect();
+    let pdf = pdf_of(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /XObject << /I0 5 0 R >> >> >>".to_vec(),
+        stream_obj("/Filter /FlateDecode", &zlib(b"q 512 0 0 512 50 100 cm /I0 Do Q")),
+        stream_obj(&format!("/Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode"), &zlib(&px)),
+    ]);
+    let (best, _) = pack_with(&pdf, &PackOptions { effort: 100, threads: 1 });
+    for effort in [0u8, 49] {
+        let (fast, st) = pack_with(&pdf, &PackOptions { effort, threads: 1 });
+        assert_eq!(unpack(&fast).unwrap(), pdf);
+        assert_eq!(st.flat_bytes, 0, "effort {effort}: {st:?}");
+        assert!(fast.len() <= best.len() + best.len() / 20, "effort {effort}: {} against {}", fast.len(), best.len());
+    }
+}
+
+#[test]
+fn a_short_image_is_kept_exactly() {
+    // Images whose data decodes to fewer samples than their size needs (none, and half the rows) next to a
+    // whole one and some text. Readers differ on short images, so those two must stay exactly as they are.
+    let image = "/Type /XObject /Subtype /Image /Width 100 /Height 100 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode";
+    let px: Vec<u8> = (0..100 * 100).map(|i| ((i % 100) * 2 + i / 100) as u8).collect();
+    let text: Vec<u8> = (0..300).flat_map(|i| format!("q 50 0 0 50 {} 10 cm /A Do Q BT (Line {i}) Tj ET\n", i % 500).into_bytes()).collect();
+    let pdf = pdf_of(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /XObject << /A 5 0 R /B 6 0 R /C 7 0 R >> >> >>".to_vec(),
+        stream_obj("/Filter /FlateDecode", &zlib1(&text)),
+        stream_obj(image, &zlib1(b"")),
+        stream_obj(image, &zlib1(&px[..5000])),
+        stream_obj(image, &zlib1(&px)),
+    ]);
+    let before = engine::pdf::xref::open(&pdf).unwrap();
+    for effort in [0u8, 100] {
+        let r = optimize(&pdf, &opts(effort, 2));
+        assert!(matches!(r.outcome, Outcome::Smaller(_)), "effort {effort}: {:?}", r.outcome);
+        let after = engine::pdf::xref::open(&r.data).unwrap();
+        for n in 4..=7u32 {
+            let (engine::pdf::object::Obj::Stream(a), engine::pdf::object::Obj::Stream(b)) = (before.load(n).unwrap().1, after.load(n).unwrap().1) else { panic!("stream {n}") };
+            let kept = a.data == b.data && a.dict.get(b"Filter") == b.dict.get(b"Filter");
+            assert_eq!(kept, n == 5 || n == 6, "effort {effort}, object {n}");
+        }
+    }
+}
