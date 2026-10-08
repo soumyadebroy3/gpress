@@ -209,12 +209,12 @@ fn segments(d: &[u8]) -> Vec<Seg> {
             continue;
         }
         let start = after + eol;
-        // Prefer /Length when it lands on endstream; otherwise search.
+        // Prefer /Length when it lands on endstream; otherwise search. The sum is checked: on a 32-bit
+        // target a crafted /Length would wrap and could land on an "endstream" before the data.
         let dict = dict_before(d, k);
         let mut end = None;
         if let Some(Obj::Int(l)) = dict.as_ref().and_then(|x| x.get(b"Length").cloned()) {
-            if l >= 0 {
-                let e = start + l as usize;
+            if let Some(e) = usize::try_from(l).ok().and_then(|l| start.checked_add(l)) {
                 if e <= d.len() {
                     let mut q = e;
                     while q < d.len() && matches!(d[q], b'\r' | b'\n' | b' ') {
@@ -1725,6 +1725,37 @@ mod tests {
         let (packed, st) = pack_with(&pdf, &PackOptions { threads: 1, ..PackOptions::default() });
         assert!(st.rebuilt == 1 && !st.fallback && !st.stored, "{st:?}");
         assert_eq!(unpack(&packed).unwrap(), pdf);
+    }
+
+    /// A /Length chosen so that `start + length` wraps to the offset of an earlier "endstream" on a 32-bit
+    /// target (the WebAssembly build): the sum is checked, so the stream's end comes from the search and
+    /// the file packs and restores on every target. (On 64 bits the sum does not wrap; the test keeps the
+    /// shape of the file so the build for 32 bits runs it too.)
+    #[test]
+    fn a_length_that_would_wrap_on_32_bits_is_not_trusted() {
+        let head = b"%PDF-1.4\n% endstream before the data\n1 0 obj\n<< /Type /Catalog >>\nendobj\n";
+        let early = head.windows(9).position(|w| w == b"endstream").unwrap();
+        let payload = b"BT /F1 12 Tf (not a zlib stream) Tj ET";
+        let mut d = Vec::new();
+        for length in [u32::MAX as i64 + 1, i64::MAX] {
+            d.clear();
+            d.extend_from_slice(head);
+            let obj = format!("2 0 obj\n<< /Length {} >>\nstream\n", length);
+            // The data starts at `start`; (start + length) mod 2^32 lands on the early "endstream" when
+            // the length is 2^32 - start + early.
+            let start = d.len() + obj.len();
+            let length = if length == i64::MAX { i64::MAX } else { (1i64 << 32) - start as i64 + early as i64 };
+            d.extend_from_slice(format!("2 0 obj\n<< /Length {length} >>\nstream\n").as_bytes());
+            assert_eq!(d.len(), start, "the dictionary's length is the same for both lengths tried");
+            d.extend_from_slice(payload);
+            d.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
+            let streams: Vec<(usize, usize)> =
+                segments(&d).iter().filter_map(|s| if let Seg::Stream(a, b) = *s { Some((a, b)) } else { None }).collect();
+            assert_eq!(streams, vec![(start, start + payload.len())], "length {length}");
+            let (packed, st) = pack_with(&d, &PackOptions { threads: 1, ..PackOptions::default() });
+            assert!(!st.fallback, "{st:?}");
+            assert_eq!(unpack(&packed).unwrap(), d);
+        }
     }
 
     #[test]
