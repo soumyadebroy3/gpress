@@ -357,7 +357,7 @@ NEW has not measured every file of BASE (an unfinished run compares only the fil
 
 ## Security (hostile input)
 
-Every number here comes from `bench/security.py` (run `security`, build speed-ca8fa92, 2026-10-08 05:00:43 UTC), engine at effort 0 with 1 thread, each command its own process measured by bench/measure.c (parent under 1 MB); address-space limit by prlimit. Time bounds apply to the child's CPU time. The machine was shared (load average 6.6 on 2 CPUs at the start), so wall times include waiting for a CPU. The bounds: a damaged archive is refused in under 5 s with a peak under 512 MiB; a hostile PDF returns (untouched, or smaller and proven by the engine's own self-check) or gives a clean error in under 30 s plus 5 s per MiB of input, with a peak under 512 MiB or 16 bytes per input byte, whichever is more; a run past 60 s of wall time (2x its bound when that is more) is a hang. The fuzzer runs with a hard 512 MiB address space.
+Every number here comes from `bench/security.py` (run `security`, build integration-8892b9e, 2026-10-08 16:54:23 UTC), engine at effort 0 with 1 thread, each command its own process measured by bench/measure.c (parent under 1 MB); address-space limit by prlimit. Time bounds apply to the child's CPU time. The bounds: a damaged archive is refused in under 5 s with a peak under 512 MiB; a hostile PDF returns (untouched, or smaller and proven by the engine's own self-check) or gives a clean error in under 30 s plus 5 s per MiB of input, with a peak under 512 MiB or 16 bytes per input byte, whichever is more; a run past 60 s of wall time (2x its bound when that is more) is a hang. The fuzzer runs with a hard 512 MiB address space.
 
 ### Damaged archives
 
@@ -365,7 +365,7 @@ Every number here comes from `bench/security.py` (run `security`, build speed-ca
 
 | Result | Cases | Slowest refusal | Peak memory |
 | --- | ---: | ---: | ---: |
-| Passed (1476 refused, 30 restored exactly) | 1506 | 0.90 s (2.25 s wall) | 167 MiB |
+| Passed (1476 refused, 30 restored exactly) | 1506 | 1.00 s (1.03 s wall) | 167 MiB |
 | Failed (wrong file, crash, hang or over bound) | 0 | | |
 
 | Damage | Passed | Failed |
@@ -391,22 +391,22 @@ Every number here comes from `bench/security.py` (run `security`, build speed-ca
 
 | File | What it is | Bytes | optimize | pack | Bound |
 | --- | --- | ---: | --- | --- | --- |
-| `nested_array.pdf` | array nested 100,000 deep | 200,344 | untouched (0.00 s, 4 MiB) | packed-exact (0.05 s, 17 MiB) | 31 s, 512 MiB |
-| `nested_dict.pdf` | dictionary nested 100,000 deep | 900,344 | untouched (0.00 s, 5 MiB) | packed-exact (0.11 s, 36 MiB) | 34 s, 512 MiB |
-| `length_overflow.pdf` | /Length 9,999,999,999 on a 3-byte stream | 426 | untouched (0.00 s, 3 MiB) | packed-exact (0.03 s, 14 MiB) | 30 s, 512 MiB |
+| `nested_array.pdf` | array nested 100,000 deep | 200,344 | untouched (0.00 s, 4 MiB) | packed-exact (0.06 s, 17 MiB) | 31 s, 512 MiB |
+| `nested_dict.pdf` | dictionary nested 100,000 deep | 900,344 | untouched (0.00 s, 5 MiB) | packed-exact (0.13 s, 36 MiB) | 34 s, 512 MiB |
+| `length_overflow.pdf` | /Length 9,999,999,999 on a 3-byte stream | 426 | untouched (0.00 s, 3 MiB) | packed-exact (0.04 s, 14 MiB) | 30 s, 512 MiB |
 | `huge_image.pdf` | image 100,000 x 100,000 with 64 bytes of data | 570 | smaller (0.01 s, 5 MiB) | packed-exact (0.04 s, 14 MiB) | 30 s, 512 MiB |
-| `flate_bomb.pdf` | Flate stream of 1019 KiB that decodes to 1024 MiB | 1,044,090 | untouched (0.37 s, 70 MiB) | **over-bound:mem 664MiB>512 (5.83 s, 663 MiB)** | 35 s, 512 MiB |
-| `flate_bomb_nested.pdf` | two-stage Flate (564 B) decoding to 256 MiB | 1,017 | untouched (0.36 s, 68 MiB) | packed-exact (0.05 s, 15 MiB) | 30 s, 512 MiB |
-| `lzw_bomb.pdf` | LZW stream of 5409 B that keeps repeating one byte | 5,847 | smaller (0.33 s, 31 MiB) | packed-exact (0.05 s, 14 MiB) | 30 s, 512 MiB |
-| `runlength_bomb.pdf` | RunLength stream of 2 MiB expanding 128x | 2,097,603 | smaller (0.13 s, 29 MiB) | packed-exact (0.23 s, 91 MiB) | 40 s, 512 MiB |
-| `bad_utf16_name.pdf` | invalid UTF-16 strings and #-escaped names | 492 | smaller (0.01 s, 4 MiB) | packed-exact (0.04 s, 14 MiB) | 30 s, 512 MiB |
-| `prev_loop.pdf` | /Prev pointing in a loop (classic tables) | 263 | untouched (0.00 s, 3 MiB) | packed-exact (0.03 s, 13 MiB) | 30 s, 512 MiB |
+| `flate_bomb.pdf` | Flate stream of 1019 KiB that decodes to 1024 MiB | 1,044,090 | untouched (0.44 s, 70 MiB) | packed-exact (0.97 s, 260 MiB) | 35 s, 512 MiB |
+| `flate_bomb_nested.pdf` | two-stage Flate (564 B) decoding to 256 MiB | 1,017 | untouched (0.44 s, 68 MiB) | packed-exact (0.05 s, 16 MiB) | 30 s, 512 MiB |
+| `lzw_bomb.pdf` | LZW stream of 5409 B that keeps repeating one byte | 5,847 | smaller (0.38 s, 32 MiB) | packed-exact (0.06 s, 14 MiB) | 30 s, 512 MiB |
+| `runlength_bomb.pdf` | RunLength stream of 2 MiB expanding 128x | 2,097,603 | smaller (0.13 s, 29 MiB) | packed-exact (0.27 s, 92 MiB) | 40 s, 512 MiB |
+| `bad_utf16_name.pdf` | invalid UTF-16 strings and #-escaped names | 492 | smaller (0.01 s, 5 MiB) | packed-exact (0.04 s, 14 MiB) | 30 s, 512 MiB |
+| `prev_loop.pdf` | /Prev pointing in a loop (classic tables) | 263 | untouched (0.00 s, 3 MiB) | packed-exact (0.04 s, 14 MiB) | 30 s, 512 MiB |
 | `xref_stream_loop.pdf` | xref stream whose /Prev is itself and /XRefStm points back | 223 | untouched (0.00 s, 3 MiB) | packed-exact (0.04 s, 14 MiB) | 30 s, 512 MiB |
-| `objstm_selfref.pdf` | xref stream saying an object lives inside object stream 2: itself | 165 | untouched (0.00 s, 4 MiB) | packed-exact (0.03 s, 14 MiB) | 30 s, 512 MiB |
-| `objstm_loop.pdf` | object stream that contains itself and /Extends itself | 401 | untouched (0.00 s, 3 MiB) | packed-exact (0.03 s, 14 MiB) | 30 s, 512 MiB |
-| `million_objects.pdf` | 1,000,000 tiny objects reachable from the catalog | 52,778,080 | smaller (20.50 s, 518 MiB) | packed-exact (98.37 s, 470 MiB) | 282 s, 805 MiB |
+| `objstm_selfref.pdf` | xref stream saying an object lives inside object stream 2: itself | 165 | untouched (0.00 s, 3 MiB) | packed-exact (0.04 s, 14 MiB) | 30 s, 512 MiB |
+| `objstm_loop.pdf` | object stream that contains itself and /Extends itself | 401 | untouched (0.00 s, 4 MiB) | packed-exact (0.04 s, 14 MiB) | 30 s, 512 MiB |
+| `million_objects.pdf` | 1,000,000 tiny objects reachable from the catalog | 52,778,080 | smaller (25.13 s, 523 MiB) | packed-exact (117.10 s, 470 MiB) | 282 s, 805 MiB |
 
-Passed 27 of 28 runs.
+Passed 28 of 28 runs.
 
 ### Mutation fuzzing
 
@@ -414,23 +414,23 @@ Mutated corpus files (38 seeds under 1.5 MB whose clean pack peaks under 256 MiB
 
 | Entry point | Seeds | Seconds | Iterations | Crashes | Allocation failures | Hangs | Wrong files | Panics |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| optimize | 38 | 600 | 6228 | 0 | 0 | 0 | 0 | 0 |
-| pack | 38 | 600 | 870 | 0 | 0 | 0 | 0 | 0 |
-| unpack | 12 | 600 | 1667 | 0 | 0 | 0 | 0 | 0 |
+| optimize | 38 | 120 | 2623 | 0 | 0 | 0 | 0 | 0 |
+| pack | 38 | 120 | 766 | 0 | 0 | 0 | 0 | 0 |
+| unpack | 12 | 120 | 752 | 0 | 0 | 0 | 0 | 0 |
 
 Seeds left out because their clean pack at effort 0 does not fit the limit with room to spare (a hit on the limit would then be legitimate work, not the mutation's doing); each is a memory finding in itself:
 
-- `ocrmypdf/tests__resources__enormous.pdf` (0.31 MB): the clean pack ended as oom-abort (370 MiB resident at that point, 3.42 s CPU)
-- `ocrmypdf/tests__resources__multipage.pdf` (1.12 MB): the clean pack ended as oom-abort (289 MiB resident at that point, 0.80 s CPU)
+- `ocrmypdf/tests__resources__enormous.pdf` (0.31 MB): the clean pack ended as oom-abort (370 MiB resident at that point, 4.33 s CPU)
+- `ocrmypdf/tests__resources__multipage.pdf` (1.12 MB): the clean pack ended as oom-abort (271 MiB resident at that point, 0.97 s CPU)
 
 ### Supply chain
 
 - `cargo audit`: 0 advisories.
-- Dependencies of the measured build (`--features existing`): 41; the engine's own code has none, these come with the optional existing libraries. Licences seen: (MIT OR Apache-2.0) AND Unicode-3.0, 0BSD OR MIT OR Apache-2.0, Apache-2.0, BSD-2-Clause, LGPL-3.0-or-later, MIT, MIT OR Apache-2.0, MIT OR Zlib OR Apache-2.0, MIT/Apache-2.0, Unlicense OR MIT, Zlib, Zlib OR Apache-2.0 OR MIT.
-- **FAIL: `cabac 0.15.0` is `LGPL-3.0-or-later`** (pulled in through preflate-rs). The rule allows only 0BSD, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause, BSD-3-Clause, ISC, MIT, MPL-2.0, Unicode-3.0, Unicode-DFS-2016, Zlib; GPL, AGPL and LGPL are not allowed.
+- Dependencies of the measured build (`--features existing`): 43; the engine's own code has none, these come with the optional existing libraries. Licences seen: (MIT OR Apache-2.0) AND Unicode-3.0, 0BSD OR MIT OR Apache-2.0, Apache-2.0, Apache-2.0 OR MIT, BSD-2-Clause, MIT, MIT OR Apache-2.0, MIT OR Zlib OR Apache-2.0, MIT/Apache-2.0, Unlicense OR MIT, Zlib, Zlib OR Apache-2.0 OR MIT.
+- Every dependency licence is on the allowed list.
 - `unsafe` in our own code: 2 blocks, each with a reason next to it.
-  - `src/flate/parse.rs:82` (reason given) `return unsafe { parse_avx2(data, a, b, m, c, alt, nice, sc, out) };`
-  - `src/flate/parse.rs:90` (reason given) `unsafe fn parse_avx2(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt: bool, nice: usize, sc: &mut ParseScra`
+  - `src/flate/parse.rs:85` (reason given) `return unsafe { parse_avx2(data, a, b, m, c, alt, nice, sc, out) };`
+  - `src/flate/parse.rs:94` (reason given) `unsafe fn parse_avx2(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt: bool, nice: usize, sc: &mut ParseScra`
 
 ### The suite tests itself
 
@@ -452,12 +452,19 @@ Skipped: no crates/gpress-c in this tree. The harness (`bench/gpress_harness.c`)
 
 ### Failures to fix
 
-Each input is saved under `bench/results/security/failures/` next to the engine's stderr (`*.stderr.txt`); the hostile PDFs are regenerated by `security.py pdfs`. The engine is not changed by this suite.
-
-- pdfs: `flate_bomb.pdf` through pack: over-bound:mem 664MiB>512, 5.83 s CPU, 663 MiB against 35 s / 512 MiB (`failures/pdfs/flate_bomb.pdf`)
-- supply: `cabac 0.15.0` is LGPL-3.0-or-later (via preflate-rs)
+None.
 
 ### Notes on the failures
+
+Run on build integration-8892b9e (preflate-rs gone, format version 7, the licence gate in): the two failures
+below are closed, with no change to the engine's bounds. `flate_bomb.pdf` through pack now ends as
+packed-exact in 1.0 s of CPU with a peak of 260 MiB (the failed inflate of the bomb stops at `max_stream`,
+256 MiB, and the stream is then stored as it is, which is what optimize already did); the spec's fallback, a
+decoded-bytes budget for pack, was therefore not added, since it would store some legitimate streams raw at
+low effort and make those archives larger. `cabac` left with preflate-rs, so `supply` reports 0 disallowed
+licences; `deny.toml` and `cargo deny check licenses advisories` keep it that way. What stays open from the
+observations below is in `docs/tasks/` (the model's tables sized by the declared length; the archive's four
+copies of every decoded byte, which also keeps the two large scans out of the fuzz seeds).
 
 Written after looking at each failure of the run on build speed-ca8fa92 (effort 0, 1 thread). The engine is not
 changed here; these are the exact causes, for whoever schedules the fixes, and two observations that passed
