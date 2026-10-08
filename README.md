@@ -18,7 +18,7 @@ tool, measured on public test PDFs against the best existing tools. Nothing here
 | JBIG2 | `src/fax/jbig2.rs` | MQ coder; generic-region encoder and decoder (T.88, template 0, nominal adaptive pixels, typical prediction); the embedded stream PDF reads. jbig2dec decodes our output exactly. |
 | Fax images, normal PDF | `src/fax/pdf.rs` | A CCITT image becomes JBIG2 when that is at least 5% smaller and nothing is uncertain: one CCITT filter with direct parameters, a DeviceGray image or a mask, the width and height the data holds, at most 2^30 pixels (width rounded up to 32; PDFium's JBIG2 decoder, which pdf.js also uses, shows nothing above 2^31), no byte alignment, EOLs where every reader expects them (no EndOfLine on Group 4 data; an EOL before every row once EndOfLine is set or the data starts with one, as Poppler and xpdf then look for them), every row written back bit for bit, end codes or 0 bits at the end, coding work of at most 2048 pixels per byte of data, and our JBIG2 decoder giving the same pixels. JBIG2Decode's output is the same bits as CCITTFaxDecode's (BlackIs1 handled), so Decode, ImageMask and masks keep their meaning. The self-check compares the two by decoded pixels. |
 | Encrypted PDFs | `src/pdf/crypt.rs`, `src/pack/sealed.rs` | The standard security handler with the empty user password (see below). RC4 and the key derivations are ours; AES, MD5 and SHA-2 come from RustCrypto. |
-| peyaji format | `src/pack/`, `src/cm/` | Any PDF, packed with our context-mixing model (bit-history states, mixers, SSE) with PDF-aware contexts: syntax, predicted object numbers and xref offsets, drawing instructions, image samples coded as residuals. Streams are recognised by their bytes (zlib, JPEG), not only by their dictionaries. Format version 6 (the first with Type 1 fonts, fax images and decrypted streams together; nothing earlier shipped, so earlier versions are refused): a long repeat is coded as one 16-bit-precision decision instead of eight model decisions (huge flat images, duplicates); palette and packed-pixel images are modelled by their exact neighbours; an image's row length is confirmed from its data length; a JPEG behind Flate goes through Lepton when that beats the Flate bytes. Restored byte for byte; every pack is restored and checked before it is returned (with a second thread, the restore decodes the bytes while the encoder writes them: the same code on the same bytes, in about half the time). A damaged .pyj file is refused with an error, never restored wrong: what a part restores is bounded by what is left of the declared length, and decoded data, corrections and Lepton data by 1032 bytes per byte of the file (what Flate can expand to), so the decoder's work and memory follow the length the header claims; decoding stops when the data runs out; a preflate part carries a checksum checked before the existing library sees it; and the file's checksum is checked at the end. The model's settings, the part kinds and how each is coded are constants of the format version. |
+| peyaji format | `src/pack/`, `src/cm/` | Any PDF, packed with our context-mixing model (bit-history states, mixers, SSE) with PDF-aware contexts: syntax, predicted object numbers and xref offsets, drawing instructions, image samples coded as residuals. Streams are recognised by their bytes (zlib, JPEG), not only by their dictionaries. Format version 6 (the first with Type 1 fonts, fax images and decrypted streams together; nothing earlier shipped, so earlier versions are refused): a long repeat is coded as one 16-bit-precision decision instead of eight model decisions (huge flat images, duplicates); palette and packed-pixel images are modelled by their exact neighbours; an image's row length is confirmed from its data length; a JPEG behind Flate goes through Lepton when that beats the Flate bytes. Restored byte for byte; every pack is restored and checked before it is returned (with a second thread, the restore decodes the bytes while the encoder writes them: the same code on the same bytes, in about half the time). A damaged .pyj file is refused with an error, never restored wrong: what a part restores is bounded by what is left of the declared length, and decoded data, corrections and Lepton data by 1032 bytes per byte of the file (what Flate can expand to), so the decoder's work and memory follow the length the header claims (`UnpackOptions::max_len` refuses a file declaring more than the caller can afford); decoding stops when the data runs out; a preflate part carries a checksum that stops random damage before the existing library sees it (a crafted file can carry a matching checksum, and preflate-rs has no bound of its own, so a build with the existing libraries is still open there); and the file's checksum is checked at the end. The model's settings, the part kinds and how each is coded are constants of the format version. |
 | Type 1 fonts | `src/pack/type1.rs`, `src/cm/model.rs` | Type 1 font programs (FontFile with /Length1 /Length2 /Length3, typical of TeX) lose both layers of encryption before coding: the eexec layer (binary, PFB, and hex when its lines are regular) and the charstring layer inside it (lenIV honoured). Both ciphers are reversible byte for byte and are put back on restore; a font that would not come back exactly is coded as it is. On restore, a layout that doesn't fit inside the font's length is refused before anything is decoded for it (all its lengths are worked out with checked arithmetic). The charstrings get their own model kind, which follows their tokens (numbers, commands, operands per command). |
 | Fax images, peyaji format | `src/fax/bilevel.rs`, `part.rs` | A CCITT stream is stored as its image, coded by a bilevel context-mixing model (templates up to four rows high, vertical runs, two mixers, two probability maps, 16-bit precision, typical prediction, a fast path for white areas), plus the encoder's choices; on restore our CCITT encoder writes the original bytes back. EncodedByteAlign data whose EOLs end on a byte boundary is read too. Streams under 64 bytes stay plain. The model's work is bounded by the file's size: up to any point of the file, the fax streams may take 2^24 plus 512 pixels per byte up to there. Streams past it are coded plainly, and a restore that would go past it is refused, so a restore's time is bounded by what it has restored, whatever length a damaged file claims. |
 | SHA-256 | `src/pack/sha256.rs` | For the restore check. |
@@ -72,21 +72,34 @@ Apache-2.0 requires shipping its licence and notices with the product.
 
 ## Options
 
-Everything the engine decides is set by plain fields; the only constants that aren't options are the ones that
-define the file formats (a decoder must agree with its encoder on those). Nothing is read from the
-environment except `PDFE_DEBUG`, which only prints timings.
+The public choices are plain fields, and nothing is read from the environment except `PDFE_DEBUG`, which only
+prints timings. Three kinds of constants stay in the code: the ones that define the file formats (a decoder
+must agree with its encoder on those: the model's settings, the part tags, the fax work budget); the ones
+readers set (JBIG2 images of at most 2^30 pixels, no EOL rules readers disagree on); and measured thresholds
+(JBIG2 only when 5% smaller, at most 2048 pixels of fax work per byte, at most 4096 JPEG segments, plain coding
+below effort 50, fax streams of at least 64 bytes, Flate in front of a JPEG only when it saves 1%, the second
+Flate pass only for JPEGs with poor tables, Lepton only when 10% smaller than the Flate bytes, the quick
+budget's 16 bytes per byte and 4 MiB, 4096 spare object numbers).
 
 - Normal PDF, `pdf::rewrite::Options`: `effort` 0 to 100 (`Options::effort(n)` sets the Flate settings to
   match; 0 is the fastest, 100 the smallest), `threads` (0: what the machine offers, at most 8; never changes
   the output), `max_stream` (largest decoded stream re-encoded, 64 MiB), `objstm_size` (objects per object
   stream, 200), `respect_conformance` (leave PDF/A, PDF/X, signed, certified and usage-rights files untouched;
-  the safe default), `flate_over_jpeg` (also try our Flate in front of a JPEG). The Flate settings themselves
-  (`flate::Options`: iterations, exact rounds, chain length, segment size, splitting, alternatives, the
-  multi-start limit, the nice length, polishing) are plain fields too.
-- peyaji format, `pack::PackOptions`: `effort` (below 50, data that looks compressed already is coded plainly),
-  `threads`, `decrypt` (store the streams of a file the empty password opens decrypted), `max_stream` (largest
-  decoded stream stored decoded, 256 MiB), `existing` (use preflate and Lepton when the build includes them).
-  The decoder needs none of these: every choice is stored in the file.
+  the safe default), `flate_over_jpeg` (also try our Flate in front of a JPEG), `jbig2` (CCITT fax images
+  become JBIG2), `jpeg_tables` (JPEGs get optimal Huffman tables), `rewrite_encrypted` (files the empty
+  password opens are rewritten with their encryption). The Flate settings themselves (`flate::Options`:
+  iterations, exact rounds, chain length, segment size, splitting, alternatives, the multi-start limit, the
+  nice length, polishing) are plain fields too.
+- peyaji format, `pack::PackOptions`: `effort` (below 50, data that looks compressed already is coded plainly;
+  Type 1 fonts are opened first and never coded plainly), `threads`, `decrypt` (store the streams of a file
+  the empty password opens decrypted), `max_stream` (largest decoded stream stored decoded, 256 MiB),
+  `existing` (use preflate and Lepton when the build includes them; the default is what the build has). The
+  decoder needs none of these: every choice is stored in the file. The one exception is the build itself: a
+  file with parts made by preflate or Lepton restores only with a build that has them (`unpack` says so).
+- Restoring, `pack::UnpackOptions`: `max_len`, the largest file restored (16 GiB, the format's limit). The
+  decoder's work and memory follow the length the header declares, which is the one bound a crafted file
+  can't escape, so a service that takes files from anyone sets this to what it can afford; a file declaring
+  more is refused before anything is decoded.
 
 ## Build and test
 
