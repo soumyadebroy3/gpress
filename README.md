@@ -230,11 +230,13 @@ own re-creation coder for those streams is a later roadmap item.
 ## The licence rule
 
 Our own code plus libraries under MIT, Apache-2.0, BSD, ISC, Zlib, Unicode or MPL-2.0 only; never GPL, AGPL
-or LGPL. `deny.toml` holds the rule and `cargo deny check licenses advisories` (installed with `cargo install
-cargo-deny --locked`) checks it for every feature and target, in CI and in `bench/security.py supply`, together
-with the RustSec advisories. A default build depends on `aes`, `md-5` and `sha2` (RustCrypto, MIT or
-Apache-2.0) and nothing else; `--features existing` adds `lepton_jpeg` and what it needs (MIT, Apache-2.0,
-Zlib, BSD-2-Clause, Unicode-3.0).
+or LGPL. `deny.toml` holds the rule and `cargo deny check` (installed with `cargo install cargo-deny
+--locked`) checks it for every feature and target, in CI and in `bench/security.py supply`, together with the
+RustSec advisories, version bans and the source of every crate; `cargo deny` skips crates marked `publish =
+false`, so `bench/check_dep_sources.py` (CI and `supply` too) refuses any dependency that is not from
+crates.io. A default build depends on `aes`, `md-5` and `sha2` (RustCrypto, MIT or Apache-2.0) and nothing
+else; `--features existing` adds `lepton_jpeg` and what it needs (MIT, Apache-2.0, Zlib, BSD-2-Clause,
+Unicode-3.0).
 
 ## Build and test
 
@@ -245,7 +247,7 @@ cargo test --release --workspace
 cargo test --release --workspace --features existing
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
-cargo deny check licenses advisories
+cargo deny check                                  # and python3 -I bench/check_dep_sources.py
 cargo build --release -p gpress-wasm --target wasm32-unknown-unknown   # needs: rustup target add wasm32-unknown-unknown
 cd crates/gpress-wasm/js && npm ci && npm run build && npm test        # the npm package into js/dist/
 cd fuzz && cargo +nightly fuzz run expand -- -max_total_time=600      # needs cargo-fuzz; also inflate, pdf_optimize

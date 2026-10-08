@@ -985,17 +985,32 @@ def mutate(data, rnd, edits):
 
 def supply(cfg, run):
     s = cfg['supply']
-    result = {'audit': run_audit(), 'licences': licences(s['features']), 'unsafe': unsafe_blocks(os.path.join(REPO, s['src']))}
+    result = {'audit': run_audit(), 'licences': licences(s['features']), 'unsafe': unsafe_blocks(os.path.join(REPO, s['src'])),
+              'sources': dep_sources()}
     with open(run.path('supply.json'), 'w') as f:
         json.dump(result, f, indent=1)
     bad_lic = [d for d in result['licences'] if not licence_ok(d['license'], set(s['allowed']))]
     uncommented = [u for u in result['unsafe'] if not u['comment']]
     adv = result['audit'].get('vulnerabilities', [])
-    fails = len(adv) + len(bad_lic) + len(uncommented) + (1 if 'error' in result['audit'] else 0)
+    bad_src = result['sources'].get('not_from_crates_io', [])
+    fails = len(adv) + len(bad_lic) + len(uncommented) + len(bad_src) + (1 if 'error' in result['audit'] else 0) + (1 if 'error' in result['sources'] else 0)
     say(f"supply: {len(adv)} advisories" + (f" (audit error: {result['audit']['error']})" if 'error' in result['audit'] else '') +
         f", {len(bad_lic)} disallowed licences" + (': ' + ', '.join(f"{d['name']} {d['version']} ({d['license']}, via {' > '.join(d['via'])})" for d in bad_lic) if bad_lic else '') +
-        f", {len(result['unsafe'])} unsafe blocks ({len(uncommented)} without a reason)")
+        f", {len(result['unsafe'])} unsafe blocks ({len(uncommented)} without a reason)" +
+        f", {len(bad_src)} dependencies not from crates.io" + (f" (source check error: {result['sources']['error']})" if 'error' in result['sources'] else ''))
     return fails
+
+
+def dep_sources():
+    """Every dependency must come from crates.io (bench/check_dep_sources.py): a path or git crate marked
+    `publish = false` would otherwise slip past cargo-deny's licence check."""
+    try:
+        sys.path.insert(0, HERE)
+        import check_dep_sources
+        bad = check_dep_sources.check(REPO)
+        return {'not_from_crates_io': [{'name': n, 'version': v, 'source': src} for n, v, src in bad]}
+    except (OSError, RuntimeError, ValueError, ImportError) as e:
+        return {'not_from_crates_io': [], 'error': str(e)[:300]}
 
 
 def run_audit():
@@ -1289,6 +1304,15 @@ def report(cfg, run):
                          f"{', '.join(sorted(allowed))}; GPL, AGPL and LGPL are not allowed.")
         else:
             L.append('- Every dependency licence is on the allowed list.')
+        srcs = sp.get('sources', {})
+        bad_src = srcs.get('not_from_crates_io', [])
+        if 'error' in srcs:
+            L.append(f"- The source of every dependency could not be checked ({srcs['error']}).")
+        elif bad_src:
+            L.append('- **FAIL: not from crates.io**: ' + ', '.join(f"`{d['name']} {d['version']}` ({d['source']})" for d in bad_src)
+                     + ' (a path or git crate marked `publish = false` escapes `cargo deny`; `bench/check_dep_sources.py`).')
+        else:
+            L.append('- Every dependency comes from crates.io (`bench/check_dep_sources.py`; `cargo deny` skips crates marked `publish = false`, so a path or git dependency could otherwise escape it).')
         L.append(f"- `unsafe` in our own code: {len(uns)} block{'s' if len(uns) != 1 else ''}, "
                  + ('each with a reason next to it.' if not uncommented else f"**{len(uncommented)} without a reason (FAIL)**."))
         for u in uns:

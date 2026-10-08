@@ -17,7 +17,7 @@ The rules every branch is held to, from the owner:
   budget.
 - No panics across the library boundary; bounded memory and time on hostile input.
 - Only our own code plus libraries under MIT, Apache-2.0, BSD, ISC, Zlib, Unicode or MPL-2.0 (never GPL,
-  AGPL or LGPL); `cargo deny check licenses advisories` passes. The plan's items need no new dependency.
+  AGPL or LGPL); `cargo deny check` and `bench/check_dep_sources.py` pass. The plan's items need no new dependency.
 - Everything configurable goes through options; nothing is read from the environment except the
   `PDFE_DEBUG` print switch.
 - Plain short English in code comments, documents and commit messages.

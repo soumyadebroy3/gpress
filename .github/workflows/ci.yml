@@ -38,8 +38,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-deny --locked
       # deny.toml: only the permissive licences on its allow list may appear anywhere in the dependency
-      # tree (every feature, every target); known advisories fail the job too.
-      - run: cargo deny check licenses advisories
+      # tree (every feature, every target); known advisories, wildcard versions and unknown registries or
+      # git sources fail the job too (all four checks).
+      - run: cargo deny check
+      # cargo-deny skips crates marked `publish = false` (deny.toml `private.ignore`, for our own crates),
+      # so a path or git dependency marked that way would escape it: every dependency must come from crates.io.
+      - run: python3 -I bench/check_dep_sources.py
 
   wasm:
     name: WebAssembly package
