@@ -98,3 +98,40 @@ In the plan's order of gain per unit of risk, pure changes first:
 | `format-tables.md` | D7, D8 | format change | smaller tables for small inputs; grouped decisions |
 
 Items the plan tried and rejected (A2) or that no longer apply (D6, preflate-rs is gone) have no brief.
+
+One more brief is not from the plan: `security-hardening.md` (S1 to S5: an unsafe gate, fuzzing at length,
+Miri, sanitizers, a weekly CI job), for the owner's third goal, best by security.
+
+## Cloud sessions, wave 1: five at once
+
+Each session is a Claude Code cloud session on this repository, started with the prompt in the table. The
+five own different parts of the code so their pull requests merge cleanly. A session that has two briefs does
+them in order on one branch, named after its first brief, each brief's work in its own commits, and opens one
+pull request.
+
+| Session | Prompt | Plan items | Owns |
+| --- | --- | --- | --- |
+| 1 | `ultracode: do the task in docs/tasks/flate-fixed-costs.md` | A1, A3, A4 | `src/flate/block.rs`, `huffman.rs`, the table set-up in `matcher.rs` |
+| 2 | `ultracode: do the task in docs/tasks/flate-inner-loops.md, then docs/tasks/pdf-memory.md on the same branch` | A6, A5, B3 | `src/flate/parse.rs`, the search loop and the lists in `matcher.rs` |
+| 3 | `ultracode: do the task in docs/tasks/model-loops.md, then docs/tasks/archive-memory.md on the same branch` | D1, D2, D4 | `src/cm/`, `src/pack/` |
+| 4 | `ultracode: do the task in docs/tasks/small-pure-gains.md, then docs/tasks/image-candidates-parallel.md on the same branch` | A7, A8, B2, D5, B1 | `src/flate/deflate.rs`, `zlibexact.rs`, `inflate.rs`, `src/pdf/`, `src/par.rs` |
+| 5 | `ultracode: do the task in docs/tasks/security-hardening.md` | S1 to S5 | `fuzz/`, `tests/`, `.github/workflows/`, `bench/gpress_harness.c`, `src/lib.rs` attributes |
+
+Rules while the five run at once:
+
+- Change only what your briefs own. When a change elsewhere can't be avoided, keep it minimal, give it its
+  own commit and name it in the pull request. Sessions 1 and 2 both touch `matcher.rs`: session 1 only the
+  table set-up (A4), session 2 only the search loop and the lists (A5, B3).
+- No new `unsafe` code anywhere (session 5 makes the build refuse it).
+- Measure the baseline on the same machine and build settings as the change; give `compare` the calibration
+  of both runs.
+- A pure brief that turns out to change any output byte stops and reports what changed instead of opening a
+  pull request.
+
+## Wave 2, after wave 1 is merged
+
+`predictor-sample.md` (C1: pure at a 4 MiB budget; a lower budget is the owner's decision),
+`flate-trades.md` (C3 to C5), `format-tables.md` (D7, D8, a format version), and the briefs written from
+`docs/best-of-best.md` once the comparison with pdfsizeopt, mutool, cpdf, precomp and paq8px is done: a fast
+setting that beats each competitor on size and time at once, and the files where a competitor is still
+smaller. The last session of the wave merges everything and makes the full 907-file run with every check.
