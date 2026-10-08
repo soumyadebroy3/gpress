@@ -9,9 +9,12 @@
 //! charstrings. CCITT fax streams are stored as their image (`crate::fax::part`). In a file the empty
 //! password opens, encrypted streams are stored decrypted (`sealed`).
 //!
-//! Layout: magic (4) | version (1) | original length (varint) | first 16 bytes of the SHA-256 of the original |
-//! coded data. Every part of the coded data starts with a tag byte (T_*); the model's settings, the kinds of
-//! parts and how each is coded are constants of the format version, so a pack restores the same anywhere.
+//! Layout: magic (4) | version (1) | original length (varint) | decoded bytes the parts claim in all (varint) |
+//! first 16 bytes of the SHA-256 of the original | coded data. Every part of the coded data starts with a tag
+//! byte (T_*); the model's settings, the kinds of parts and how each is coded are constants of the format
+//! version, so a pack restores the same anywhere. The two numbers in the header are what a restore costs: a
+//! decoder refuses a file declaring more than its caller allows before it decodes anything, and holds every
+//! part to them (see `UnpackOptions`).
 
 use crate::clock::{self, Deadline};
 use crate::cm::model::{Geom, Kind, Model};
@@ -22,10 +25,11 @@ use crate::pdf::object::{Dict, Obj};
 use crate::pdf::parse::Lexer;
 
 pub const MAGIC: &[u8; 4] = b"\x89GPZ";
-/// The format version this build writes and reads (plus 0 and 2, the fallback and stored forms). Version 7
-/// is version 6 (the first with Type 1 fonts, fax images and decrypted streams together) without the
-/// preflate part; nothing earlier shipped, so earlier versions are refused.
-pub const VERSION: u8 = 7;
+/// The format version this build writes and reads (plus 0 and 2, the fallback and stored forms). Version 8
+/// is version 7 (version 6, the first with Type 1 fonts, fax images and decrypted streams together, without
+/// the preflate part) with the decoded total in the header; the coded body is the same. Nothing earlier
+/// shipped, so earlier versions are refused.
+pub const VERSION: u8 = 8;
 const HASH_LEN: usize = 16;
 
 /// A typical PDF fragment both sides feed to the model first, so small files don't pay for a cold start.
@@ -115,22 +119,47 @@ fn plainly(x: &[u8], allowed: bool) -> bool {
     h.iter().all(|h| entropy(h) >= 7.9)
 }
 
-fn header(version: u8, input: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(32);
+/// The header: magic, version, the original length, the decoded bytes the parts claim in all (0 for the
+/// stored and fallback forms, which have no such parts), the hash.
+fn header(version: u8, input: &[u8], claimed: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(40);
     out.extend_from_slice(MAGIC);
     out.push(version);
-    let mut n = input.len() as u64;
+    push_varint(&mut out, input.len() as u64);
+    push_varint(&mut out, claimed);
+    out.extend_from_slice(&sha256(input)[..HASH_LEN]);
+    out
+}
+
+fn push_varint(out: &mut Vec<u8>, mut n: u64) {
     loop {
         let b = (n & 0x7f) as u8;
         n >>= 7;
         if n == 0 {
             out.push(b);
-            break;
+            return;
         }
         out.push(b | 0x80);
     }
-    out.extend_from_slice(&sha256(input)[..HASH_LEN]);
-    out
+}
+
+/// A base-128 number from `a` at `i`: the value and the index after it, or None when it runs out or is longer
+/// than a u64 allows.
+fn read_varint(a: &[u8], mut i: usize) -> Option<(u64, usize)> {
+    let mut n: u64 = 0;
+    let mut shift = 0;
+    loop {
+        let b = *a.get(i)?;
+        i += 1;
+        n |= ((b & 0x7f) as u64) << shift;
+        if b & 0x80 == 0 {
+            return Some((n, i));
+        }
+        shift += 7;
+        if shift > 56 {
+            return None;
+        }
+    }
 }
 
 mod pipe;
@@ -167,9 +196,12 @@ pub struct PackStats {
     pub decrypted_bytes: usize,
     /// CCITT fax streams coded as images (and written back bit for bit).
     pub fax: usize,
-    /// Encoder only: the deadline passed before the pack was done, so the file was stored as it is (see
-    /// `PackOptions::deadline`).
+    /// The deadline passed before the work was done: the encoder then stored the file as it is (see
+    /// `PackOptions::deadline`); the decoder gave up (see `UnpackOptions::deadline`; `damaged` is set too).
     pub timed_out: bool,
+    /// Encoder only: the decoded bytes the parts claim in all, what the header declares and what
+    /// `UnpackOptions::max_decoded` must cover on restore (at most `PackOptions::max_decoded`).
+    pub claimed: u64,
 }
 
 #[derive(Debug)]
@@ -467,7 +499,8 @@ struct Io<'m, C: Coder> {
     /// Encoder only: code compressed-looking data plainly (see `PackOptions`).
     plain: bool,
     /// Bytes the parts of this file may still claim beyond what they restore (decoded streams, Lepton data):
-    /// see `decode_budget`. A damaged file that claims more is refused where it does.
+    /// what the header declares, less what the parts so far claimed. A damaged file that claims more is
+    /// refused where it does, before anything is reserved for the claim.
     budget: u64,
     /// Encoder only: stop coding once this has passed (`timed_out` says so; the output is then dropped).
     deadline: Deadline,
@@ -481,21 +514,14 @@ const DEADLINE_STEP: usize = 1 << 16;
 const MAX_PART: usize = 1 << 31;
 /// Largest file the format restores: 16 GiB (a u64, so the limit is the same on 32-bit targets, where a
 /// file that doesn't fit in memory is refused by the header alone).
-const MAX_FILE: u64 = 1 << 34;
-/// Most bytes a Flate stream can decode to per byte of the stream (a 258-byte match in 2 bits), so the most
-/// the decoded parts of a file can add up to per byte of the file: an honest pack never claims more, and a
-/// damaged or crafted one can't make the decoder work, or reserve memory, beyond that.
-const MAX_EXPANSION: u64 = 1032;
+pub const MAX_FILE: u64 = 1 << 34;
+/// The decoded bytes the parts of one archive may claim in all unless the caller says otherwise, on both
+/// sides (`PackOptions::max_decoded`, `UnpackOptions::max_decoded`): enough for every file of the test set
+/// (the largest needs 232 MiB) with a little to spare.
+pub const DEFAULT_MAX_DECODED: u64 = 256 << 20;
 /// Memory reserved up front is capped; vectors grow with what is actually decoded.
 fn reserve(n: usize) -> usize {
     n.min(1 << 22)
-}
-
-/// The decoded bytes a file of `total_len` bytes may claim in all: `MAX_EXPANSION` per byte for decoded
-/// streams, one more for Lepton data (smaller than the JPEG it restores), plus a little for the headers of
-/// tiny files.
-fn decode_budget(total_len: usize) -> u64 {
-    (total_len as u64).saturating_mul(MAX_EXPANSION + 1).saturating_add(1 << 16)
 }
 
 impl<'m, C: Coder> Io<'m, C> {
@@ -586,9 +612,15 @@ pub struct PackOptions {
     /// smaller than the encrypted bytes, the pack without decryption is made too and the smaller kept.
     pub decrypt: bool,
     /// Largest decoded stream stored in its decoded form; a Flate stream that decodes to more is stored as
-    /// it is. (The decoder takes up to `MAX_PART` per part and `MAX_EXPANSION` bytes per byte of the file
-    /// in all, whatever this was.)
+    /// it is. (The decoder takes up to `MAX_PART` per part, whatever this was.)
     pub max_stream: usize,
+    /// The most decoded bytes the parts of one archive may claim in all (decoded streams, and Lepton data
+    /// for a JPEG inside one or stored as it is). In file order, a stream whose claim doesn't fit in what is
+    /// left is stored as it is; decided from sizes alone, so the output is the same on any machine. The
+    /// header declares the total, and a decoder refuses an archive declaring more than its own
+    /// `UnpackOptions::max_decoded`: an archive made with this budget restores wherever that budget is
+    /// allowed. The memory of a pack or a restore follows this and the file's length (see `README.md`).
+    pub max_decoded: u64,
     /// Try the existing library (Lepton, for JPEG streams) when the build includes it (`--features existing`).
     /// A file with parts it made restores only with such a build (`unpack` says so); the default is what the
     /// build has.
@@ -606,6 +638,7 @@ impl Default for PackOptions {
             threads: 0,
             decrypt: true,
             max_stream: 1 << 28,
+            max_decoded: DEFAULT_MAX_DECODED,
             existing: HAVE_EXISTING,
             deadline: Deadline::NONE,
         }
@@ -615,19 +648,26 @@ impl Default for PackOptions {
 /// Whether this build has the existing library (Lepton).
 const HAVE_EXISTING: bool = cfg!(feature = "existing");
 
-/// Choices of the decoder.
+/// Choices of the decoder: the two numbers in a file's header it may refuse, and a deadline. The decoder's
+/// work and memory follow the declared length and the declared decoded total (a damaged body can't claim
+/// beyond them), so a service that takes files from anyone sets both to what it can afford.
 #[derive(Clone, Debug)]
 pub struct UnpackOptions {
     /// Largest file restored, in bytes: a file whose header declares more is refused before anything is
-    /// decoded. The decoder's work and memory follow the declared length (it is the one bound a crafted
-    /// file can't escape), so a service that takes files from anyone sets this to what it can afford. At
-    /// most `MAX_FILE` either way.
+    /// decoded. At most `MAX_FILE` either way.
     pub max_len: u64,
+    /// Most decoded bytes the parts may claim in all: a file whose header declares more is refused before
+    /// anything is decoded, and every part is then held to what the header declared.
+    pub max_decoded: u64,
+    /// Stop when this passes (checked between parts and every 64 KiB of model work): the restore is then
+    /// given up with `PackStats::timed_out` set, never a wrong file. A restore that finishes gives the same
+    /// bytes with or without a deadline.
+    pub deadline: Deadline,
 }
 
 impl Default for UnpackOptions {
     fn default() -> Self {
-        UnpackOptions { max_len: MAX_FILE }
+        UnpackOptions { max_len: MAX_FILE, max_decoded: DEFAULT_MAX_DECODED, deadline: Deadline::NONE }
     }
 }
 
@@ -655,19 +695,38 @@ fn table_bits(n: usize) -> u32 {
     b
 }
 
-#[cfg_attr(not(feature = "existing"), allow(dead_code))]
+/// Where a stream's bytes come from: a range of the file, or bytes made on the way (a decrypted payload).
+enum Source {
+    File(usize, usize),
+    Bytes(Vec<u8>),
+}
+
+impl Source {
+    fn bytes<'a>(&'a self, d: Option<&'a [u8]>) -> Option<&'a [u8]> {
+        match self {
+            Source::File(a, b) => d.map(|d| &d[*a..*b]),
+            Source::Bytes(v) => Some(v.as_slice()),
+        }
+    }
+}
+
 enum Plan {
     Syntax(usize, usize),
     Raw(usize, usize),
+    /// A zlib stream stored decoded: the planner keeps its settings and the length of its decoded form,
+    /// `dlen`, and the stream is inflated again when its turn comes (a plan holds no decoded data, so the
+    /// planner's memory doesn't follow what the streams decode to). `tail`: the bytes after the zlib stream.
     /// `lep`: the decoded data is a JPEG, recompressed with Lepton (when that beats the Flate bytes).
     Rebuilt {
         params: zlibexact::Params,
-        data: Vec<u8>,
+        src: Source,
+        dlen: usize,
         tail: Vec<u8>,
         lep: Option<Vec<u8>>,
     },
     /// A JPEG recompressed with an existing library (Lepton), restored bit for bit.
     Lepton {
+        src: Source,
         data: Vec<u8>,
     },
     /// An encrypted stream's decrypted bytes that nothing rebuilds (coded like a raw stream).
@@ -703,7 +762,10 @@ fn plan(d: &[u8], opt: &PackOptions) -> Vec<Plan> {
         Seg::Syntax(a, b) => Plan::Syntax(a, b),
         // Out of time: the cheapest plan (the pass is given up anyway).
         Seg::Stream(a, b) if opt.deadline.passed() => Plan::Raw(a, b),
-        Seg::Stream(a, b) => stream_plan(&d[a..b], opt).or_else(|| fax(d, a, b, &objects)).unwrap_or(Plan::Raw(a, b)),
+        Seg::Stream(a, b) => match stream_plan(&d[a..b], opt) {
+            Some(found) => found.plan(Source::File(a, b)),
+            None => fax(d, a, b, &objects).unwrap_or(Plan::Raw(a, b)),
+        },
     });
     if std::env::var_os("PDFE_DEBUG").is_some() {
         eprintln!("pack: {} parts planned in {:?}", plans.len(), clock::since(t));
@@ -711,27 +773,113 @@ fn plan(d: &[u8], opt: &PackOptions) -> Vec<Plan> {
     plans
 }
 
+/// What `stream_plan` found for a stream's bytes, before it knows where they come from.
+enum Found {
+    Rebuilt { params: zlibexact::Params, dlen: usize, tail: Vec<u8>, lep: Option<Vec<u8>> },
+    Lepton(Vec<u8>),
+}
+
+impl Found {
+    fn plan(self, src: Source) -> Plan {
+        match self {
+            Found::Rebuilt { params, dlen, tail, lep } => Plan::Rebuilt { params, src, dlen, tail, lep },
+            Found::Lepton(data) => Plan::Lepton { src, data },
+        }
+    }
+}
+
 /// The plan for a stream's bytes, wherever they come from (as stored in the file, or an encrypted stream's
 /// bytes decrypted): a zlib rebuild or Lepton, or None when neither applies (the stream is then stored as it
 /// is). Every way of storing a stream's bytes other than as they are goes through here, so a decrypted
-/// stream gets the same choices as a plain one.
-fn stream_plan(raw: &[u8], opt: &PackOptions) -> Option<Plan> {
+/// stream gets the same choices as a plain one. The decoded data is dropped here: the stream is inflated
+/// again when it is coded.
+fn stream_plan(raw: &[u8], opt: &PackOptions) -> Option<Found> {
     if let Some((params, data, tail)) = rebuild_params(raw, opt.max_stream) {
         let lep = if opt.existing { nested_lepton(&data, raw.len()) } else { None };
-        return Some(Plan::Rebuilt { params, data, tail, lep });
+        return Some(Found::Rebuilt { params, dlen: data.len(), tail, lep });
     }
     if !opt.existing {
         return None;
     }
-    lepton(raw)
+    lepton_bytes(raw).map(Found::Lepton)
 }
 
 /// The plans of a file with the encoder's choices in `opt`: `plan`, with the encrypted streams of a file the
-/// empty password opens decrypted when `opt.decrypt` (see `sealed`).
-fn plans(d: &[u8], opt: &PackOptions) -> Vec<Plan> {
+/// empty password opens decrypted when `opt.decrypt` (see `sealed`), the fax streams within their work
+/// budget, and the decoded parts within `opt.max_decoded`. Returns the plans and the decoded bytes they
+/// claim in all, which the header declares.
+fn plans(d: &[u8], opt: &PackOptions) -> (Vec<Plan>, u64) {
     let p = plan(d, opt);
     let p = if opt.decrypt { sealed::crypt_plans(d, p, opt) } else { p };
-    fax_budget(p)
+    within_budget(fax_budget(p), opt.max_decoded)
+}
+
+/// What a plan's part claims beyond what it restores: the decoded bytes the decoder reserves and models
+/// (a decoded stream, and the Lepton data of the JPEG inside it or of a JPEG stored as it is). The same
+/// numbers `Io::part` takes from the budget.
+fn claim(p: &Plan) -> u64 {
+    match p {
+        Plan::Rebuilt { dlen, lep, .. } => *dlen as u64 + lep.as_ref().map_or(0, |l| l.len() as u64),
+        Plan::Lepton { data, .. } => data.len() as u64,
+        _ => 0,
+    }
+}
+
+/// Keeps the decoded parts of a file within `max_decoded` bytes in all: in file order, a part whose claim
+/// doesn't fit in what is left is stored as it is (a decrypted one as its decrypted bytes, like any stream
+/// nothing rebuilds). Decided from sizes alone. Returns the plans and what they claim.
+fn within_budget(mut plans: Vec<Plan>, max_decoded: u64) -> (Vec<Plan>, u64) {
+    let mut left = max_decoded;
+    let mut claimed = 0;
+    for p in plans.iter_mut() {
+        let c = claim(p);
+        if c == 0 {
+            continue;
+        }
+        if c <= left {
+            left -= c;
+            claimed += c;
+            continue;
+        }
+        let src = match p {
+            Plan::Rebuilt { src, .. } | Plan::Lepton { src, .. } => std::mem::replace(src, Source::File(0, 0)),
+            _ => continue,
+        };
+        *p = match src {
+            Source::File(a, b) => Plan::Raw(a, b),
+            Source::Bytes(v) => Plan::Plain(v),
+        };
+    }
+    (plans, claimed)
+}
+
+/// For the security suite only: an archive of `input` that declares `claim` decoded bytes and whose one
+/// decoded part claims them all (zeros, which code to almost nothing), after a part that restores the whole
+/// input. The decoder must refuse it: the decoded bytes are worked through and then found not to restore
+/// anything, so the cost of a crafted file is the cost of the budget the caller allowed, never more. `pack`
+/// never writes such a file.
+#[doc(hidden)]
+pub fn crafted_claim(input: &[u8], claim: u64) -> Vec<u8> {
+    let claim = usize::try_from(claim).unwrap_or(usize::MAX).min(MAX_PART);
+    let params = zlibexact::Params { level: 6, window_bits: 15, mem_level: 8, filtered: false };
+    let plans = vec![
+        Plan::Syntax(0, input.len()),
+        Plan::Rebuilt { params, src: Source::Bytes(zlib_of_zeros(claim)), dlen: claim, tail: Vec::new(), lep: None },
+    ];
+    let mut stats = PackStats::default();
+    let (_, enc) =
+        run(Encoder::new(), Some(input), Some(plans), input.len(), &PackOptions::default(), &mut stats, claim as u64);
+    let mut out = header(VERSION, input, claim as u64);
+    out.extend_from_slice(&enc.finish());
+    out
+}
+
+/// A zlib stream of `n` zeros (the planner's source for a crafted part).
+fn zlib_of_zeros(n: usize) -> Vec<u8> {
+    zlibexact::zlib_stream(
+        &vec![0u8; n],
+        zlibexact::Params { level: 6, window_bits: 15, mem_level: 8, filtered: false },
+    )
 }
 
 /// For measuring only: the file with every stream we can rebuild replaced by its decoded bytes (Type 1 fonts
@@ -747,7 +895,7 @@ pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
     }
     let mut out = Vec::with_capacity(d.len() * 2);
     let mut extra = 0;
-    for p in plans(d, &PackOptions::default()) {
+    for p in plans(d, &PackOptions::default()).0 {
         match p {
             Plan::Syntax(a, b) => out.extend_from_slice(&d[a..b]),
             Plan::Raw(a, b) => extra += put(&mut out, &d[a..b]),
@@ -755,15 +903,15 @@ pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
             // The key once; per stream its settings and initialization vector.
             Plan::CryptKey(k) => extra += 1 + k.len(),
             Plan::Crypt(_) => extra += 18,
-            Plan::Rebuilt { data, tail, lep, .. } => {
+            Plan::Rebuilt { src, dlen, tail, lep, .. } => {
                 match lep {
                     Some(l) => extra += l.len(),
-                    None => extra += put(&mut out, &data),
+                    None => extra += put(&mut out, &inflated(&src, Some(d), dlen).unwrap_or_default()),
                 }
                 out.extend_from_slice(&tail);
                 extra += 2;
             }
-            Plan::Lepton { data } => extra += data.len(),
+            Plan::Lepton { data, .. } => extra += data.len(),
             Plan::Fax { parsed, .. } => {
                 out.extend_from_slice(&crate::fax::part::packed(&parsed.image));
                 out.extend_from_slice(&parsed.layout.trailing);
@@ -779,11 +927,6 @@ fn lepton_features() -> lepton_jpeg::EnabledFeatures {
     let mut f = lepton_jpeg::EnabledFeatures::compat_lepton_vector_write();
     f.max_processor_threads = 1;
     f
-}
-
-#[cfg(feature = "existing")]
-fn lepton(raw: &[u8]) -> Option<Plan> {
-    lepton_bytes(raw).map(|data| Plan::Lepton { data })
 }
 
 /// Decoded Flate data that is a JPEG: Lepton, when its output is at least 10% smaller than the Flate bytes
@@ -824,11 +967,6 @@ fn unlepton(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 #[cfg(not(feature = "existing"))]
-fn lepton(_raw: &[u8]) -> Option<Plan> {
-    None
-}
-
-#[cfg(not(feature = "existing"))]
 fn lepton_bytes(_raw: &[u8]) -> Option<Vec<u8>> {
     None
 }
@@ -838,27 +976,19 @@ fn unlepton(_data: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-/// One pass of the format: encoding `d` (Some) or rebuilding it (None). The same code runs both ways so the
-/// model sees exactly the same sequence of events. `opt` only guides the encoder's choices, which are stored
-/// (among them whether encrypted streams are stored decrypted, see `sealed`).
-fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, opt: &PackOptions, stats: &mut PackStats) -> (Vec<u8>, C) {
-    let plans = d.map(|d| plans(d, opt));
-    run_plans(c, d, plans, total_len, opt, stats)
+/// The decoded form of a stream from its source, inflated again: exactly `dlen` bytes, or None (which
+/// can't happen for a stream the planner inflated once already).
+fn inflated(src: &Source, d: Option<&[u8]>, dlen: usize) -> Option<Vec<u8>> {
+    let u = zlib::unwrap(src.bytes(d)?, dlen).ok()?;
+    (u.data.len() == dlen).then_some(u.data)
 }
 
-fn run_plans<C: Coder>(
-    c: C,
-    d: Option<&[u8]>,
-    plans: Option<Vec<Plan>>,
-    total_len: usize,
-    opt: &PackOptions,
-    stats: &mut PackStats,
-) -> (Vec<u8>, C) {
-    run_within(c, d, plans, total_len, opt, stats, decode_budget(total_len))
-}
-
-/// `run_plans` with the decode budget given (tests write parts beyond it to see them refused).
-fn run_within<C: Coder>(
+/// One pass of the format: encoding `d` with its `plans` (Some) or rebuilding it (None). The same code runs
+/// both ways so the model sees exactly the same sequence of events. `opt` only guides the encoder's choices,
+/// which are stored (among them whether encrypted streams are stored decrypted, see `sealed`), and gives
+/// the deadline. `budget` is what the parts may claim in all: what the plans claim for the encoder, what the
+/// header declares for the decoder.
+fn run<C: Coder>(
     c: C,
     d: Option<&[u8]>,
     plans: Option<Vec<Plan>>,
@@ -954,12 +1084,18 @@ fn run_within<C: Coder>(
                 io.m.set_flat(false);
             }
             T_REBUILT => {
-                let (p_in, data_in, tail_in, lep_in) = match cur.flatten() {
-                    Some(Plan::Rebuilt { params, data, tail, lep }) => {
-                        (Some(*params), Some(data.as_slice()), Some(tail.as_slice()), Some(lep.as_deref()))
-                    }
+                // The encoder inflates the stream again here: the plan kept only its settings.
+                let (p_in, data, tail_in, lep_in) = match cur.flatten() {
+                    Some(Plan::Rebuilt { params, src, dlen, tail, lep }) => match inflated(src, d, *dlen) {
+                        Some(data) => (Some(*params), Some(data), Some(tail.as_slice()), Some(lep.as_deref())),
+                        None => {
+                            io.damaged = true;
+                            break;
+                        }
+                    },
                     _ => (None, None, None, None),
                 };
+                let data_in = data.as_deref();
                 let level = io.byte(p_in.map(|p| p.level));
                 let wb = io.byte(p_in.map(|p| p.window_bits));
                 let mem = io.byte(p_in.map(|p| p.mem_level));
@@ -991,7 +1127,7 @@ fn run_within<C: Coder>(
             }
             T_LEPTON => {
                 let src = match cur.flatten() {
-                    Some(Plan::Lepton { data }) => Some(data.as_slice()),
+                    Some(Plan::Lepton { data, .. }) => Some(data.as_slice()),
                     _ => None,
                 };
                 // Lepton's data is smaller than the JPEG it restores (see `lepton_bytes`), so never more than
@@ -1385,6 +1521,9 @@ fn pack_pass(input: &[u8], opt: &PackOptions) -> (Vec<u8>, PackStats) {
     let dbg = std::env::var_os("PDFE_DEBUG").is_some();
     let t = clock::now();
     let threads = if opt.threads == 0 { par::default_threads() } else { opt.threads };
+    let (plans, claimed) = plans(input, opt);
+    stats.claimed = claimed;
+    let mut plans = Some(plans);
     // Never hand over something we can't restore exactly. With a second thread the restore runs while the
     // encoder writes (the same `run`, on the same bytes, as `unpack`); with one, or when the system refuses
     // the thread, it follows.
@@ -1393,12 +1532,21 @@ fn pack_pass(input: &[u8], opt: &PackOptions) -> (Vec<u8>, PackStats) {
         std::thread::scope(|s| {
             let check = par::spawn(s, move || {
                 let mut st = PackStats::default();
-                let (back, _) = run(pipe::StreamDecoder::new(rx), None, input.len(), &PackOptions::default(), &mut st);
+                let (back, _) = run(
+                    pipe::StreamDecoder::new(rx),
+                    None,
+                    None,
+                    input.len(),
+                    &PackOptions::default(),
+                    &mut st,
+                    claimed,
+                );
                 !st.damaged && back == input
             })?;
-            let (copy, enc) = run(pipe::TeeEncoder::new(tx), Some(input), input.len(), opt, &mut stats);
+            let (copy, enc) =
+                run(pipe::TeeEncoder::new(tx), Some(input), plans.take(), input.len(), opt, &mut stats, claimed);
             debug_assert!(stats.timed_out || copy == input);
-            let mut out = header(VERSION, input);
+            let mut out = header(VERSION, input, claimed);
             out.extend_from_slice(&enc.finish());
             Some((out, check.join().unwrap_or(false)))
         })
@@ -1406,11 +1554,13 @@ fn pack_pass(input: &[u8], opt: &PackOptions) -> (Vec<u8>, PackStats) {
     let (out, restored) = match alongside.flatten() {
         Some(r) => r,
         None => {
-            let (copy, enc) = run(Encoder::new(), Some(input), input.len(), opt, &mut stats);
+            let (copy, enc) = run(Encoder::new(), Some(input), plans.take(), input.len(), opt, &mut stats, claimed);
             debug_assert!(stats.timed_out || copy == input);
-            let mut out = header(VERSION, input);
+            let mut out = header(VERSION, input, claimed);
             out.extend_from_slice(&enc.finish());
-            let restored = !stats.timed_out && matches!(unpack(&out), Ok(back) if back == input);
+            // The check accepts exactly what this pack declares, whatever the caller's budget was.
+            let check_opt = UnpackOptions { max_decoded: claimed, ..UnpackOptions::default() };
+            let restored = !stats.timed_out && matches!(unpack_with(&out, &check_opt), Ok(back) if back == input);
             (out, restored)
         }
     };
@@ -1439,7 +1589,7 @@ fn pack_pass(input: &[u8], opt: &PackOptions) -> (Vec<u8>, PackStats) {
 
 /// Version 2: the file as it is (when nothing makes it smaller).
 fn stored(input: &[u8]) -> Vec<u8> {
-    let mut out = header(2, input);
+    let mut out = header(2, input, 0);
     out.extend_from_slice(input);
     out
 }
@@ -1453,6 +1603,11 @@ pub enum UnpackError {
     UnknownVersion(u8),
     /// The header declares more than `UnpackOptions::max_len` bytes (nothing was decoded for it).
     TooLong { declared: u64, limit: u64 },
+    /// The header declares parts claiming more than `UnpackOptions::max_decoded` bytes in all (nothing was
+    /// decoded for it).
+    TooMuchDecoded { declared: u64, limit: u64 },
+    /// The deadline passed before the restore was done (nothing is returned; the file may well be fine).
+    TimedOut,
     /// Parts made with the existing library (Lepton), which this build doesn't have.
     NeedsExisting,
     /// Damaged: what is in the file doesn't restore it (the detail says where it was found out).
@@ -1469,6 +1624,10 @@ impl std::fmt::Display for UnpackError {
             UnpackError::TooLong { declared, limit } => {
                 write!(f, "the archive restores to {declared} bytes, more than the limit of {limit}")
             }
+            UnpackError::TooMuchDecoded { declared, limit } => {
+                write!(f, "the archive's parts claim {declared} decoded bytes, more than the limit of {limit}")
+            }
+            UnpackError::TimedOut => write!(f, "the deadline passed before the archive was restored"),
             UnpackError::NeedsExisting => write!(
                 f,
                 "this gpress archive has parts made with the existing library (Lepton); restoring it needs a build with it"
@@ -1486,8 +1645,9 @@ pub fn unpack(a: &[u8]) -> Result<Vec<u8>, UnpackError> {
     unpack_with(a, &UnpackOptions::default())
 }
 
-/// `unpack` with the decoder's choices in `opt`: a file whose header declares more than `opt.max_len` bytes
-/// is refused before anything is decoded or reserved for it.
+/// `unpack` with the decoder's choices in `opt`: a file whose header declares more than `opt.max_len` bytes,
+/// or parts claiming more than `opt.max_decoded` decoded bytes in all, is refused before anything is decoded
+/// or reserved for it.
 pub fn unpack_with(a: &[u8], opt: &UnpackOptions) -> Result<Vec<u8>, UnpackError> {
     use UnpackError::*;
     if a.len() < 6 || &a[..4] != MAGIC {
@@ -1497,26 +1657,16 @@ pub fn unpack_with(a: &[u8], opt: &UnpackOptions) -> Result<Vec<u8>, UnpackError
     if ver != VERSION && ver != 0 && ver != 2 {
         return Err(UnknownVersion(ver));
     }
-    let mut len: u64 = 0;
-    let mut i = 5;
-    let mut shift = 0;
-    loop {
-        let b = *a.get(i).ok_or(Damaged("truncated header"))?;
-        i += 1;
-        len |= ((b & 0x7f) as u64) << shift;
-        if b & 0x80 == 0 {
-            break;
-        }
-        shift += 7;
-        if shift > 56 {
-            return Err(Damaged("bad length"));
-        }
-    }
+    let (len, i) = read_varint(a, 5).ok_or(Damaged("bad length"))?;
+    let (claimed, i) = read_varint(a, i).ok_or(Damaged("bad decoded total"))?;
     if len > MAX_FILE {
         return Err(Damaged("impossible size"));
     }
     if len > opt.max_len {
         return Err(TooLong { declared: len, limit: opt.max_len });
+    }
+    if claimed > opt.max_decoded {
+        return Err(TooMuchDecoded { declared: claimed, limit: opt.max_decoded });
     }
     let len = usize::try_from(len).map_err(|_| Damaged("too large for this platform"))?;
     let want = a.get(i..i + HASH_LEN).ok_or(Damaged("truncated header"))?.to_vec();
@@ -1524,7 +1674,11 @@ pub fn unpack_with(a: &[u8], opt: &UnpackOptions) -> Result<Vec<u8>, UnpackError
     let out = match ver {
         VERSION => {
             let mut stats = PackStats::default();
-            let (out, _) = run(Decoder::new(body), None, len, &PackOptions::default(), &mut stats);
+            let dec_opt = PackOptions { deadline: opt.deadline, ..PackOptions::default() };
+            let (out, _) = run(Decoder::new(body), None, None, len, &dec_opt, &mut stats, claimed);
+            if stats.timed_out {
+                return Err(TimedOut);
+            }
             if stats.needs_existing {
                 return Err(NeedsExisting);
             }
@@ -1550,7 +1704,7 @@ fn fallback(input: &[u8]) -> Vec<u8> {
     for &b in input {
         model.code_byte(&mut e, Some(b));
     }
-    let mut out = header(0, input);
+    let mut out = header(0, input, 0);
     out.extend_from_slice(&e.finish());
     out
 }
@@ -1641,53 +1795,168 @@ mod tests {
         pdf
     }
 
-    /// A pack of the given parts as the encoder would write them, but with no limit on what they claim (the
-    /// encoder notices afterwards that the parts don't restore the file, and stops; the pack ends there).
-    fn pack_unbounded(d: &[u8], plans: Vec<Plan>) -> Vec<u8> {
+    /// A pack of the given parts as the encoder would write them, with the header declaring `declared`
+    /// decoded bytes whatever the parts claim (the encoder notices afterwards that the parts don't restore
+    /// the file, and stops; the pack ends there).
+    fn pack_declaring(d: &[u8], plans: Vec<Plan>, declared: u64) -> Vec<u8> {
         let mut stats = PackStats::default();
         let (_, enc) =
-            run_within(Encoder::new(), Some(d), Some(plans), d.len(), &PackOptions::default(), &mut stats, u64::MAX);
-        let mut out = header(VERSION, d);
+            run(Encoder::new(), Some(d), Some(plans), d.len(), &PackOptions::default(), &mut stats, u64::MAX);
+        let mut out = header(VERSION, d, declared);
         out.extend_from_slice(&enc.finish());
         out
     }
 
+    /// A zlib stream of `n` zeros as a stream's source, and its decoded length.
+    fn zeros_source(n: usize) -> (Source, usize) {
+        (Source::Bytes(zlib_of_zeros(n)), n)
+    }
+
     #[test]
-    fn parts_beyond_what_the_file_can_hold_are_refused_at_once() {
-        // A 100-byte file: its decoded parts may add up to about 170 KB (MAX_EXPANSION per byte and a little).
-        // A pack of it that claims a 4 MiB decoded stream (zeros, so it codes to almost nothing) is refused
-        // when the length is read, before any of it is decoded: in a few milliseconds and without reserving
-        // the memory. The same for Lepton data larger than what is left of the file.
+    fn parts_beyond_what_the_header_declares_are_refused_at_once() {
+        // A 100-byte file whose header declares 1000 decoded bytes. A pack of it that claims a 4 MiB decoded
+        // stream (zeros, so it codes to almost nothing) is refused when the length is read, before any of it is
+        // decoded: in a few milliseconds and without reserving the memory. The same for Lepton data, and for
+        // Lepton data larger than what is left of the file.
         let d =
             b"%PDF-1.4\n1 0 obj\n<< /Length 4 >>\nstream\nABCD\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
         let a = d.windows(4).position(|w| w == b"ABCD").unwrap();
-        assert!(decode_budget(d.len()) < 4 << 20);
         let params = Params { level: 6, window_bits: 15, mem_level: 8, filtered: false };
         let huge = vec![0u8; 4 << 20];
+        let (src, dlen) = zeros_source(4 << 20);
+        let (small_src, small_len) = (Source::Bytes(zlibexact::zlib_stream(&[0xFFu8; 2048], params)), 2048);
         let cases: Vec<Vec<Plan>> = vec![
             vec![
                 Plan::Syntax(0, a),
-                Plan::Rebuilt { params, data: huge.clone(), tail: Vec::new(), lep: None },
+                Plan::Rebuilt { params, src, dlen, tail: Vec::new(), lep: None },
                 Plan::Syntax(a + 4, d.len()),
             ],
-            vec![Plan::Syntax(0, a), Plan::Lepton { data: huge.clone() }, Plan::Syntax(a + 4, d.len())],
             vec![
                 Plan::Syntax(0, a),
-                Plan::Rebuilt { params, data: vec![0xFFu8; 2048], tail: Vec::new(), lep: Some(huge.clone()) },
+                Plan::Lepton { src: Source::File(a, a + 4), data: huge.clone() },
+                Plan::Syntax(a + 4, d.len()),
+            ],
+            vec![
+                Plan::Syntax(0, a),
+                Plan::Rebuilt { params, src: small_src, dlen: small_len, tail: Vec::new(), lep: Some(huge.clone()) },
                 Plan::Syntax(a + 4, d.len()),
             ],
         ];
         for (k, plans) in cases.into_iter().enumerate() {
-            let packed = pack_unbounded(d, plans);
+            let packed = pack_declaring(d, plans, 1000);
             assert!(packed.len() < 4096, "case {k}: {} bytes", packed.len());
             let t = std::time::Instant::now();
-            assert!(unpack(&packed).is_err(), "case {k}");
+            // The Lepton cases are refused as needing the existing library first in a build without it.
+            let err = unpack(&packed).unwrap_err();
+            assert!(
+                matches!(err, UnpackError::Damaged(_)) || (k > 0 && err == UnpackError::NeedsExisting),
+                "case {k}: {err}"
+            );
             assert!(t.elapsed().as_millis() < 500, "case {k} took {:?}", t.elapsed());
         }
-        // Honest parts of the same file are within the budget: nothing here is refused.
+        // Honest parts of the same file are within what the header declares: nothing here is refused.
         let (packed, st) = pack(d);
         assert!(!st.damaged && !st.fallback);
         assert_eq!(unpack(&packed).unwrap(), &d[..]);
+    }
+
+    #[test]
+    fn a_declared_total_over_the_limit_is_refused_before_decoding() {
+        // The header of a crafted file declares 4 MiB of decoded bytes over a part of that size. Under a limit
+        // below that, it is refused by the header alone, at once; at the limit the part is decoded and found
+        // not to restore the file (the cost of a crafted file is the budget the caller allowed, no more).
+        let d = b"%PDF-1.4\n1 0 obj\n<< /Length 4 >>\nstream\nABCD\nendstream\nendobj\n%%EOF\n";
+        let claim = 4u64 << 20;
+        let packed = crafted_claim(d, claim);
+        assert!(packed.len() < 4096, "{} bytes", packed.len());
+        let t = std::time::Instant::now();
+        let under = UnpackOptions { max_decoded: claim - 1, ..UnpackOptions::default() };
+        assert_eq!(
+            unpack_with(&packed, &under).unwrap_err(),
+            UnpackError::TooMuchDecoded { declared: claim, limit: claim - 1 }
+        );
+        assert!(t.elapsed().as_millis() < 50, "{:?}", t.elapsed());
+        let at = UnpackOptions { max_decoded: claim, ..UnpackOptions::default() };
+        assert_eq!(unpack_with(&packed, &at).unwrap_err(), UnpackError::Damaged("a part doesn't restore"));
+        // A header saying 0 over a body whose part claims 4 MiB: refused when the length is read.
+        let zero = pack_declaring(d, vec![Plan::Syntax(0, d.len())], 0);
+        assert_eq!(unpack(&zero).unwrap(), &d[..], "an honest file declaring 0 restores");
+        let (src, dlen) = zeros_source(4 << 20);
+        let params = Params { level: 6, window_bits: 15, mem_level: 8, filtered: false };
+        let lying = pack_declaring(
+            d,
+            vec![Plan::Syntax(0, d.len()), Plan::Rebuilt { params, src, dlen, tail: Vec::new(), lep: None }],
+            0,
+        );
+        assert_eq!(unpack(&lying).unwrap_err(), UnpackError::Damaged("a part doesn't restore"));
+    }
+
+    #[test]
+    fn the_budget_keeps_decoded_parts_within_it_in_file_order() {
+        // Three zlib streams of 300 KB, 200 KB and 100 KB of text (which the model codes far better decoded
+        // than as zlib bytes). With a budget of 450 KB the first and the third fit (the second does not and
+        // is stored as it is); the header declares 400 KB; the archive restores under a limit of 400 KB and
+        // is refused under one of 399 KB. With a budget of 0 every stream is stored as it is, which still
+        // restores exactly and is larger.
+        let params = Params { level: 9, window_bits: 15, mem_level: 9, filtered: false };
+        let text = |size: usize| -> Vec<u8> {
+            let mut t = Vec::with_capacity(size + 64);
+            for i in 0.. {
+                if t.len() >= size {
+                    break;
+                }
+                t.extend_from_slice(
+                    format!("BT /F1 {} Tf 72 {} Td (Line {i} of page {}) Tj ET\n", i % 7 + 8, i % 60 * 11, i / 60)
+                        .as_bytes(),
+                );
+            }
+            t.truncate(size);
+            t
+        };
+        let mut pdf = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n".to_vec();
+        for (n, size) in [(2, 300_000usize), (3, 200_000), (4, 100_000)] {
+            let z = zlib_stream(&text(size), params);
+            pdf.extend_from_slice(
+                format!("{n} 0 obj\n<< /Filter /FlateDecode /Length {} >>\nstream\n", z.len()).as_bytes(),
+            );
+            pdf.extend_from_slice(&z);
+            pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        }
+        pdf.extend_from_slice(b"trailer\n<< /Root 1 0 R >>\n%%EOF\n");
+        let with =
+            |max_decoded: u64| pack_with(&pdf, &PackOptions { threads: 1, max_decoded, ..PackOptions::default() });
+        let (all, st) = with(DEFAULT_MAX_DECODED);
+        assert!(st.rebuilt == 3 && st.claimed == 600_000 && !st.fallback && !st.stored, "{st:?}");
+        let (some, st) = with(450_000);
+        assert!(st.rebuilt == 2 && st.claimed == 400_000 && !st.fallback && !st.stored, "{st:?}");
+        let (none, st) = with(0);
+        assert!(st.rebuilt == 0 && st.claimed == 0 && !st.fallback, "{st:?}");
+        assert!(all.len() < some.len() && some.len() < none.len(), "{} {} {}", all.len(), some.len(), none.len());
+        let limit = |max_decoded: u64| UnpackOptions { max_decoded, ..UnpackOptions::default() };
+        assert_eq!(unpack_with(&some, &limit(400_000)).unwrap(), pdf);
+        assert_eq!(
+            unpack_with(&some, &limit(399_999)).unwrap_err(),
+            UnpackError::TooMuchDecoded { declared: 400_000, limit: 399_999 }
+        );
+        assert_eq!(unpack_with(&none, &limit(0)).unwrap(), pdf);
+        assert_eq!(unpack(&all).unwrap(), pdf);
+        // The same bytes with two threads (the check runs alongside the encoder).
+        let (two, _) = pack_with(&pdf, &PackOptions { threads: 2, max_decoded: 450_000, ..PackOptions::default() });
+        assert_eq!(two, some);
+    }
+
+    #[test]
+    fn a_deadline_stops_a_restore_without_a_wrong_file() {
+        let pdf = sample_pdf();
+        let (packed, _) = pack_with(&pdf, &PackOptions { threads: 1, ..PackOptions::default() });
+        let passed =
+            UnpackOptions { deadline: Deadline::after(std::time::Duration::from_nanos(1)), ..UnpackOptions::default() };
+        assert_eq!(unpack_with(&packed, &passed).unwrap_err(), UnpackError::TimedOut);
+        let ample = UnpackOptions {
+            deadline: Deadline::after(std::time::Duration::from_secs(600)),
+            ..UnpackOptions::default()
+        };
+        assert_eq!(unpack_with(&packed, &ample).unwrap(), pdf);
     }
 
     /// A build without the existing library meets a part it made: the error says what the file needs instead
@@ -1699,12 +1968,13 @@ mod tests {
             b"%PDF-1.4\n1 0 obj\n<< /Length 4 >>\nstream\nABCD\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
         let a = d.windows(4).position(|w| w == b"ABCD").unwrap();
         let params = Params { level: 6, window_bits: 15, mem_level: 8, filtered: false };
+        let small = Source::Bytes(zlibexact::zlib_stream(&[0xFFu8; 2048], params));
         let cases: Vec<Plan> = vec![
-            Plan::Lepton { data: vec![1, 2, 3, 4] },
-            Plan::Rebuilt { params, data: vec![0xFFu8; 2048], tail: Vec::new(), lep: Some(vec![5, 6, 7, 8]) },
+            Plan::Lepton { src: Source::File(a, a + 4), data: vec![1, 2, 3, 4] },
+            Plan::Rebuilt { params, src: small, dlen: 2048, tail: Vec::new(), lep: Some(vec![5, 6, 7, 8]) },
         ];
         for (k, part) in cases.into_iter().enumerate() {
-            let packed = pack_unbounded(d, vec![Plan::Syntax(0, a), part, Plan::Syntax(a + 4, d.len())]);
+            let packed = pack_declaring(d, vec![Plan::Syntax(0, a), part, Plan::Syntax(a + 4, d.len())], 4096);
             let err = unpack(&packed).unwrap_err();
             assert_eq!(err, UnpackError::NeedsExisting, "case {k}: {err}");
         }
@@ -1712,18 +1982,18 @@ mod tests {
     }
 
     #[test]
-    fn the_budget_fits_what_flate_can_hold() {
+    fn a_tiny_file_with_a_huge_stream_packs_through_its_decoded_form() {
         // 1 MiB of zeros in a zlib stream of about 1 KB: the decoded part is about 1000 times the file and
-        // fits the budget, so the file packs through its decoded form and restores.
+        // fits the default budget, so the file packs through its decoded form and restores.
         let zeros = vec![0u8; 1 << 20];
         let z = zlib_stream(&zeros, Params { level: 9, window_bits: 15, mem_level: 9, filtered: false });
         let mut pdf = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n".to_vec();
         pdf.extend_from_slice(format!("2 0 obj\n<< /Filter /FlateDecode /Length {} >>\nstream\n", z.len()).as_bytes());
         pdf.extend_from_slice(&z);
         pdf.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
-        assert!(z.len() < 2048 && pdf.len() as u64 * MAX_EXPANSION > zeros.len() as u64);
+        assert!(z.len() < 2048);
         let (packed, st) = pack_with(&pdf, &PackOptions { threads: 1, ..PackOptions::default() });
-        assert!(st.rebuilt == 1 && !st.fallback && !st.stored, "{st:?}");
+        assert!(st.rebuilt == 1 && st.claimed == 1 << 20 && !st.fallback && !st.stored, "{st:?}");
         assert_eq!(unpack(&packed).unwrap(), pdf);
     }
 
@@ -1749,8 +2019,10 @@ mod tests {
             assert_eq!(d.len(), start, "the dictionary's length is the same for both lengths tried");
             d.extend_from_slice(payload);
             d.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
-            let streams: Vec<(usize, usize)> =
-                segments(&d).iter().filter_map(|s| if let Seg::Stream(a, b) = *s { Some((a, b)) } else { None }).collect();
+            let streams: Vec<(usize, usize)> = segments(&d)
+                .iter()
+                .filter_map(|s| if let Seg::Stream(a, b) = *s { Some((a, b)) } else { None })
+                .collect();
             assert_eq!(streams, vec![(start, start + payload.len())], "length {length}");
             let (packed, st) = pack_with(&d, &PackOptions { threads: 1, ..PackOptions::default() });
             assert!(!st.fallback, "{st:?}");

@@ -6,7 +6,7 @@ tool. Two outputs, both verified before they are returned:
 - **Normal PDF** (`optimize`): a smaller PDF that any PDF reader opens, with every object's value preserved.
   On the public test set (907 files from the pdf.js, pypdf, OCRmyPDF and pikepdf test suites, 130 MB):
   16.0% smaller on the files it can safely touch, against 9.3% for qpdf on the same files.
-- **gpress archive** (`compress` / `expand`, format version 7, `.gpz`): any file, a PDF above all, restored
+- **gpress archive** (`compress` / `expand`, format version 8, `.gpz`): any file, a PDF above all, restored
   byte for byte. On the test set: 56.5% of the original size, against 76.3% for the best of xz, Brotli and
   Zstandard.
 
@@ -45,7 +45,8 @@ assert_eq!(original, pdf_bytes);
 
 Errors are a plain `Error` enum with a stable numeric code (1 input too large, 2 damaged archive,
 3 unsupported archive version, 4 internal, 5 invalid options, 6 time budget, 7 declared length over the
-limit, 8 needs the existing library) and a message without internal paths. The library never panics across
+limit, 8 needs the existing library, 9 declared decoded total over the limit) and a message without
+internal paths. The library never panics across
 its boundary: every call runs inside a panic guard, and a bug comes back as `Error::Internal`.
 `Optimized.outcome` says what happened (`Smaller` with a `Report`: objects, streams re-encoded and kept,
 object streams, JPEGs given new tables, fax images written as JBIG2, how the file is encrypted; or
@@ -100,7 +101,7 @@ need `'wasm-unsafe-eval'` in their Content Security Policy's `script-src`.
 cargo build --release [--features existing]
 target/release/gpress optimize in.pdf out.pdf [--effort N | --quick] [--threads N] [--time-budget MS] ...
 target/release/gpress pack in.pdf out.gpz
-target/release/gpress unpack out.gpz back.pdf [--max-len BYTES]
+target/release/gpress unpack out.gpz back.pdf [--max-len BYTES] [--max-decoded BYTES]
 ```
 
 Every option of the library is a flag (`gpress` without arguments lists them); the tool also carries the
@@ -119,7 +120,8 @@ with `Options::check` saying whether the engine accepts a set; nothing is read f
 | `max_input` | 1 GiB | Larger inputs are refused at once. |
 | `max_stream` | 64 MiB | Normal PDF: a stream that decodes to more is kept as it is. |
 | `max_stream_archive` | 256 MiB | Archive: a stream that decodes to more is stored as it is. |
-| `max_len` | 16 GiB | Expand: an archive declaring more is refused before anything is decoded or reserved. The decoder's work and memory follow the declared length, which is the one bound a crafted file can't escape, so a service that takes archives from anyone sets this to what it can afford. |
+| `max_decoded` | 256 MiB | Archive, both ways. Compress: the most decoded bytes the parts of one archive may claim in all; in file order, a stream whose decoded form (plus any Lepton data for it) does not fit in what is left is stored as it is, decided from sizes alone. The archive's header declares the total. Expand: an archive declaring more than this is refused before anything is decoded (`Error::DecodedTooLarge`), and while decoding every part is held to what the header declared, so a damaged body can claim no more. The test set's largest file needs 232 MiB (`enormous.pdf`, 310 KB). |
+| `max_len` | 1 GiB | Expand: an archive declaring more is refused before anything is decoded or reserved (`Error::DeclaredTooLarge`). The format's own limit is 16 GiB. |
 | `objects_per_stream` | 200 | Normal PDF: most objects per compressed object stream. |
 | `respect_conformance` | on | Normal PDF: leave PDF/A, PDF/X, signed, certified and usage-rights files untouched. Off, every object's value is still kept, but those guarantees are given up. |
 | `flate_over_jpeg` | on | Normal PDF: also try our Flate in front of a JPEG (never in front of JPEG 2000 or JBIG2, whose filter chain keeps its shape for readers such as pdf.js). |
@@ -128,7 +130,15 @@ with `Options::check` saying whether the engine accepts a set; nothing is read f
 | `rewrite_encrypted` | on | Normal PDF: files the empty user password opens are rewritten with their encryption kept exactly. Off, every encrypted file is left untouched. |
 | `decrypt` | on | Archive: the streams of such files are stored decrypted (so they get the zlib rebuild, Lepton and the model) and encrypted again on expand. |
 | `use_existing_libraries` | on | Use Lepton for JPEG streams in the archive when the build has it (`--features existing`). An archive with parts Lepton made expands only with such a build (the error says so). |
-| `time_budget` | none | Give up after this much wall time: `Error::TimeBudget` and no output, the input unchanged. Checked between streams, Flate segments and archive parts (every 64 KiB of model work), so it can be overshot by a little. A call that finishes in time gives the same bytes as one without a budget. |
+| `time_budget` | none | Give up after this much wall time: `Error::TimeBudget` and no output, the input unchanged. Checked between streams, Flate segments and archive parts (every 64 KiB of model work) in all three operations, so it can be overshot by a little (on expand by one part's zlib re-creation). A call that finishes in time gives the same bytes as one without a budget. |
+
+Memory while expanding follows these three: at most about `max_len` for the output, `max_len + max_decoded`
+for the model's history (one byte per byte it codes; the residual history of an image part lives only while
+that part is coded), twice the largest part (a decoded stream, at most `max_decoded` and 2 GiB) while it is
+decoded and its zlib stream re-created, and the model's tables (up to 164 MiB for files over 4 MiB). Compress
+holds the input, its copy, the same history and the same per-part buffers; the planner keeps no decoded data
+(a stream is inflated again when its turn comes), only each stream's zlib settings and Lepton data. The
+security suite runs every pack and unpack with `max_decoded` at 64 MiB and holds them to 512 MiB.
 
 Three kinds of constants stay in the code: the ones that define the file formats (a decoder must agree with
 its encoder on those: the model's settings, the part tags, the fax work budget); the ones readers set (JBIG2
@@ -158,7 +168,7 @@ carry.
 | JBIG2 | `src/fax/jbig2.rs` | MQ coder; generic-region encoder and decoder (T.88, template 0, nominal adaptive pixels, typical prediction); the embedded stream PDF reads. jbig2dec decodes our output exactly. |
 | Fax images, normal PDF | `src/fax/pdf.rs` | A CCITT image becomes JBIG2 when that is at least 5% smaller and nothing is uncertain: one CCITT filter with direct parameters, a DeviceGray image or a mask, the width and height the data holds, at most 2^30 pixels (width rounded up to 32; PDFium's JBIG2 decoder, which pdf.js also uses, shows nothing above 2^31), no byte alignment, EOLs where every reader expects them, every row written back bit for bit, end codes or 0 bits at the end, coding work of at most 2048 pixels per byte of data, and our JBIG2 decoder giving the same pixels. JBIG2Decode's output is the same bits as CCITTFaxDecode's (BlackIs1 handled), so Decode, ImageMask and masks keep their meaning. |
 | Encrypted PDFs | `src/pdf/crypt.rs`, `src/pack/sealed.rs` | The standard security handler with the empty user password (see below). RC4 and the key derivations are ours; AES, MD5 and SHA-2 come from RustCrypto. |
-| gpress archive | `src/pack/`, `src/cm/` | Any PDF, packed with our context-mixing model (bit-history states, mixers, SSE) with PDF-aware contexts: syntax, predicted object numbers and xref offsets, drawing instructions, image samples coded as residuals. Streams are recognised by their bytes (zlib, JPEG), not only by their dictionaries. Format version 7: a long repeat is coded as one 16-bit-precision decision instead of eight model decisions (huge flat images, duplicates); palette and packed-pixel images are modelled by their exact neighbours; an image's row length is confirmed from its data length; a JPEG behind Flate goes through Lepton when that beats the Flate bytes. Restored byte for byte; every archive is restored and checked before it is returned (with a second thread, the restore decodes the bytes while the encoder writes them). A damaged archive is refused with an error, never restored wrong: what a part restores is bounded by what is left of the declared length, and decoded data and Lepton data by 1032 bytes per byte of the file (what Flate can expand to), so the decoder's work and memory follow the length the header claims (`max_len` refuses a file declaring more than the caller can afford); decoding stops when the data runs out; and the file's checksum is checked at the end. The model's settings, the part kinds and how each is coded are constants of the format version; nothing earlier shipped, so versions before 7 are refused. |
+| gpress archive | `src/pack/`, `src/cm/` | Any PDF, packed with our context-mixing model (bit-history states, mixers, SSE) with PDF-aware contexts: syntax, predicted object numbers and xref offsets, drawing instructions, image samples coded as residuals. Streams are recognised by their bytes (zlib, JPEG), not only by their dictionaries. Format version 8: a long repeat is coded as one 16-bit-precision decision instead of eight model decisions (huge flat images, duplicates); palette and packed-pixel images are modelled by their exact neighbours; an image's row length is confirmed from its data length; a JPEG behind Flate goes through Lepton when that beats the Flate bytes. Restored byte for byte; every archive is restored and checked before it is returned (with a second thread, the restore decodes the bytes while the encoder writes them). A damaged archive is refused with an error, never restored wrong: the header declares the restored length and the decoded bytes the parts claim in all (`max_len` and `max_decoded` refuse a file declaring more than the caller can afford, before anything is decoded); what a part restores is bounded by what is left of the declared length and what it claims by what is left of the declared decoded total, so the decoder's work and memory follow the two numbers the caller allowed, not what a damaged body says; decoding stops when the data runs out; and the file's checksum is checked at the end. The model's settings, the part kinds and how each is coded are constants of the format version; nothing earlier shipped, so versions before 8 are refused. |
 | Type 1 fonts | `src/pack/type1.rs`, `src/cm/model.rs` | Type 1 font programs (FontFile with /Length1 /Length2 /Length3, typical of TeX) lose both layers of encryption before coding: the eexec layer (binary, PFB, and hex when its lines are regular) and the charstring layer inside it (lenIV honoured). Both ciphers are reversible byte for byte and are put back on restore; a font that would not come back exactly is coded as it is. On restore, a layout that doesn't fit inside the font's length is refused before anything is decoded for it. The charstrings get their own model kind, which follows their tokens. |
 | Fax images, archive | `src/fax/bilevel.rs`, `part.rs` | A CCITT stream is stored as its image, coded by a bilevel context-mixing model (templates up to four rows high, vertical runs, two mixers, two probability maps, 16-bit precision, typical prediction, a fast path for white areas), plus the encoder's choices; on restore our CCITT encoder writes the original bytes back. Streams under 64 bytes stay plain. The model's work is bounded by the file's size (2^24 plus 512 pixels per byte up to any point of the file); streams past it are coded plainly, and a restore that would go past it is refused. |
 | SHA-256 | `src/pack/sha256.rs` | For the restore check. |
@@ -237,7 +247,7 @@ test suites, the C example against the shared library, the licence and advisory 
 and its tests, and a short fuzzing run of the three decoders. `tests/api.rs` proves that every option changes
 what the engine does; `tests/interaction.rs` runs every feature on one encrypted file (a JPEG, a fax image, a
 Type 1 font and a zlib stream) in both outputs; `tests/pack_format.rs` keeps an archive made by the first
-build of the format version (`tests/data/format-v7.*`), which must still restore and pack to the same bytes.
+build of the format version (`tests/data/format-v8.*`), which must still restore and pack to the same bytes.
 
 ## Layout
 
@@ -249,7 +259,7 @@ build of the format version (`tests/data/format-v7.*`), which must still restore
 | `src/jpeg/` | JPEG parsing and the optimal Huffman tables. |
 | `src/fax/` | CCITT and JBIG2 codecs, the fax steps of both outputs, the bilevel model. |
 | `src/cm/` | The context-mixing model and arithmetic coder. |
-| `src/pack/` | The gpress archive (format version 7), Type 1 fonts, encrypted streams, SHA-256. |
+| `src/pack/` | The gpress archive (format version 8), Type 1 fonts, encrypted streams, SHA-256. |
 | `src/par.rs` | The thread pool. |
 | `src/bin/gpress.rs` | The command-line tool. |
 | `crates/gpress-c/` | C API, header, example. |

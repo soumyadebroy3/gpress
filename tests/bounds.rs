@@ -330,10 +330,11 @@ fn the_decoder_refuses_a_declared_length_over_its_limit() {
     objs.push((5, stream("", &big)));
     let pdf = classic(&objs, "6");
     let (packed, _) = pack(&pdf);
-    let err = unpack_with(&packed, &UnpackOptions { max_len: 50_000 }).unwrap_err();
+    let limit = |max_len: u64| UnpackOptions { max_len, ..UnpackOptions::default() };
+    let err = unpack_with(&packed, &limit(50_000)).unwrap_err();
     assert_eq!(err, UnpackError::TooLong { declared: pdf.len() as u64, limit: 50_000 });
     assert!(err.to_string().contains("limit"), "{err}");
-    assert_eq!(unpack_with(&packed, &UnpackOptions { max_len: pdf.len() as u64 }).unwrap(), pdf);
+    assert_eq!(unpack_with(&packed, &limit(pdf.len() as u64)).unwrap(), pdf);
     assert_eq!(unpack(&packed).unwrap(), pdf);
     // A crafted header declaring 1 GiB over 16 KB of zeros (the review's file grew past 800 MB before failing):
     // refused at once under a limit, before anything is decoded.
@@ -349,14 +350,16 @@ fn the_decoder_refuses_a_declared_length_over_its_limit() {
         }
         crafted.push(b | 0x80);
     }
+    crafted.push(0); // the decoded total
     crafted.extend_from_slice(&[0u8; 16]);
     crafted.extend_from_slice(&[0u8; 16384]);
-    for limit in [1u64 << 20, (1 << 30) - 1] {
+    for max_len in [1u64 << 20, (1 << 30) - 1] {
         let t = Instant::now();
-        let err = unpack_with(&crafted, &UnpackOptions { max_len: limit }).unwrap_err();
-        assert_eq!(err, UnpackError::TooLong { declared: 1 << 30, limit });
+        let err = unpack_with(&crafted, &limit(max_len)).unwrap_err();
+        assert_eq!(err, UnpackError::TooLong { declared: 1 << 30, limit: max_len });
         assert!(t.elapsed().as_millis() < 50, "{:?}", t.elapsed());
     }
-    // The default limit is the format's own.
+    // The engine's default length limit is the format's own; the decoded total's is the shared default.
     assert_eq!(UnpackOptions::default().max_len, 1 << 34);
+    assert_eq!(UnpackOptions::default().max_decoded, gpress::pack::DEFAULT_MAX_DECODED);
 }

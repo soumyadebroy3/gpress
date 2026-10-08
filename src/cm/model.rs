@@ -228,7 +228,9 @@ fn num_class(v: i32) -> u32 {
 pub struct Model {
     tb: Tables,
     pub hist: Vec<u8>,
-    /// For images: the coded residual of each byte (actual minus prediction); 0 elsewhere.
+    /// For images: the coded residual of each byte (actual minus prediction) of the current segment only,
+    /// indexed from `seg_start` (a residual is never read across a segment boundary, so the vector is
+    /// cleared at every `set_kind` and the history's memory stays one byte per byte); 0 outside images.
     rhist: Vec<u8>,
     /// Prediction subtracted from the current byte before coding (images only).
     pred: u8,
@@ -369,6 +371,7 @@ impl Model {
         self.kind = kind;
         self.geom = geom;
         self.seg_start = self.hist.len();
+        self.rhist.clear();
         self.col = 0;
         self.seg_orig = orig_offset;
         self.exp.clear();
@@ -999,7 +1002,7 @@ impl Model {
                 let lo = self.seg_start;
                 let rat = |back: usize| -> u32 {
                     if pos >= back && pos - back >= lo {
-                        self.rhist[pos - back] as u32
+                        self.rhist[pos - back - lo] as u32
                     } else {
                         0
                     }

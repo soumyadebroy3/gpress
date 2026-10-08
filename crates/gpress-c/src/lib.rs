@@ -24,7 +24,9 @@ pub struct GpressOptions {
     pub max_stream: u64,
     /// Archive: largest decoded stream stored decoded (0 = 256 MiB).
     pub max_stream_archive: u64,
-    /// Expand: largest file restored; an archive declaring more is refused (0 = 16 GiB).
+    /// Archive, both ways: most decoded bytes the parts of one archive may claim in all (0 = 256 MiB).
+    pub max_decoded: u64,
+    /// Expand: largest file restored; an archive declaring more is refused (0 = 1 GiB).
     pub max_len: u64,
     /// Normal PDF: most objects per object stream (0 = 200).
     pub objects_per_stream: u32,
@@ -101,6 +103,9 @@ fn options_from(o: Option<&GpressOptions>) -> gpress::Options {
         opt.max_input = size(o.max_input, opt.max_input);
         opt.max_stream = size(o.max_stream, opt.max_stream);
         opt.max_stream_archive = size(o.max_stream_archive, opt.max_stream_archive);
+        if o.max_decoded > 0 {
+            opt.max_decoded = o.max_decoded;
+        }
         if o.max_len > 0 {
             opt.max_len = o.max_len;
         }
@@ -166,6 +171,7 @@ pub unsafe extern "C" fn gpress_options_default(out: *mut GpressOptions) {
         max_input: d.max_input as u64,
         max_stream: d.max_stream as u64,
         max_stream_archive: d.max_stream_archive as u64,
+        max_decoded: d.max_decoded,
         max_len: d.max_len,
         objects_per_stream: d.objects_per_stream as u32,
         time_budget_ms: 0,
@@ -294,7 +300,7 @@ mod tests {
         let mut o: GpressOptions = unsafe { std::mem::zeroed() };
         unsafe {
             gpress_options_default(&mut o);
-            assert_eq!((o.effort, o.jbig2, o.decrypt, o.max_len), (100, 1, 1, 1 << 34));
+            assert_eq!((o.effort, o.jbig2, o.decrypt, o.max_len, o.max_decoded), (100, 1, 1, 1 << 30, 256 << 20));
             let mut c = gpress_compress(input.as_ptr(), input.len(), &o);
             assert_eq!(c.code, 0);
             let archive = std::slice::from_raw_parts(c.output.data, c.output.len).to_vec();
@@ -326,6 +332,39 @@ mod tests {
             let mut r = gpress_expand(archive.as_ptr(), archive.len(), &small);
             assert_eq!(r.code, 7);
             gpress_result_free(&mut r);
+            // A declared decoded total over max_decoded: the same, with its own code. The archive of a
+            // stream of 160 KB of text claims 160 KB; with a budget of 1 byte on compress the stream is
+            // stored as it is, so that archive restores under the same budget (the wide one is refused).
+            let text: Vec<u8> = (0..4000)
+                .flat_map(|i| format!("BT /F1 12 Tf 72 {} Td (Line {i}) Tj ET\n", i % 60 * 11).into_bytes())
+                .collect();
+            let z = gpress::flate::zlibexact::zlib_stream(
+                &text,
+                gpress::flate::zlibexact::Params { level: 6, window_bits: 15, mem_level: 8, filtered: false },
+            );
+            let mut pdf =
+                format!("%PDF-1.4\n1 0 obj\n<< /Filter /FlateDecode /Length {} >>\nstream\n", z.len()).into_bytes();
+            pdf.extend_from_slice(&z);
+            pdf.extend_from_slice(b"\nendstream\nendobj\n%%EOF\n");
+            let mut wide = gpress_compress(pdf.as_ptr(), pdf.len(), &o);
+            assert_eq!(wide.code, 0);
+            let mut narrow = o;
+            narrow.max_decoded = 1;
+            let mut r = gpress_expand(wide.output.data, wide.output.len, &narrow);
+            assert_eq!(r.code, 9);
+            assert!(!r.message.is_null() && r.output.data.is_null());
+            gpress_result_free(&mut r);
+            let mut stored = gpress_compress(pdf.as_ptr(), pdf.len(), &narrow);
+            assert_eq!(stored.code, 0);
+            assert!(
+                std::slice::from_raw_parts(stored.output.data, stored.output.len)
+                    != std::slice::from_raw_parts(wide.output.data, wide.output.len)
+            );
+            let mut back = gpress_expand(stored.output.data, stored.output.len, &narrow);
+            assert!(back.code == 0 && std::slice::from_raw_parts(back.output.data, back.output.len) == &pdf[..]);
+            gpress_result_free(&mut wide);
+            gpress_result_free(&mut stored);
+            gpress_result_free(&mut back);
             // Double free is harmless.
             let mut z = empty_buffer();
             gpress_free(&mut z);

@@ -67,11 +67,14 @@ fn refuses_damaged_files() {
     for cut in (0..packed.len()).step_by(5) {
         cases.push(packed[..cut].to_vec());
     }
-    // Garbage after a valid header, and an impossible size in the header.
+    // Garbage after a valid header, an impossible size in the header, and a decoded total over the limit.
     cases.push([&packed[..25], &[0xA5; 3000][..]].concat());
     let mut huge = packed.clone();
     huge[5..10].copy_from_slice(&[0xff, 0xff, 0xff, 0xff, 0x7f]);
     cases.push(huge);
+    let mut claims = packed.clone();
+    claims[7..12].copy_from_slice(&[0xff, 0xff, 0xff, 0xff, 0x7f]);
+    cases.push(claims);
     for (k, c) in cases.iter().enumerate() {
         if let Ok(out) = unpack(c) {
             assert_eq!(out, pdf, "case {k}: a damaged file restored to something else");
@@ -79,15 +82,19 @@ fn refuses_damaged_files() {
     }
 }
 
-/// A PDF packed by the first build of the current format version (`tests/data/format-v7.*`: syntax, a content
-/// stream, an image, long repeats and noise). It must still restore, and packing it again must give the same
-/// bytes: the model is part of the format, so a faster model has to compute exactly the same thing.
+/// A PDF packed by the first build of the current format version (`tests/data/format-v8.*`: syntax, a content
+/// stream, an image, long repeats and noise; the same PDF and coded body as the version 7 fixture, with the
+/// decoded total in the header). It must still restore, and packing it again must give the same bytes: the
+/// model is part of the format, so a faster model has to compute exactly the same thing.
 #[test]
 fn stored_format_files_still_restore_and_pack_the_same() {
-    let pdf = include_bytes!("data/format-v7.pdf");
-    let gpz = include_bytes!("data/format-v7.gpz");
+    let pdf = include_bytes!("data/format-v8.pdf");
+    let gpz = include_bytes!("data/format-v8.gpz");
     assert_eq!(unpack(gpz).unwrap(), pdf);
     assert!(pack(pdf).0 == gpz);
+    assert_eq!(gpz[4], gpress::pack::VERSION);
+    // The header: magic, version, length (8791: two varint bytes), decoded total (54664: three bytes), hash.
+    assert_eq!(&gpz[5..10], &[0xd7, 0x44, 0x88, 0xab, 0x03]);
     // One bit changed is refused, not restored wrongly.
     let mut bad = gpz.to_vec();
     bad[gpz.len() / 2] ^= 8;

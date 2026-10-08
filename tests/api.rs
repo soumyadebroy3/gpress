@@ -121,6 +121,36 @@ fn max_len_refuses_a_declared_length_before_decoding() {
 }
 
 #[test]
+fn max_decoded_bounds_both_sides() {
+    // The mixed document's streams decode to about 70 KB in all. A budget below that stores some of
+    // them as they are (in file order; the archive is larger and still restores); the header declares the
+    // total, and expand refuses an archive declaring more than its own budget before decoding anything.
+    let pdf = plain_pdf();
+    let all = pack(&pdf, &base());
+    assert!(all.declared_decoded > 10_000 && all.declared_decoded <= Options::default().max_decoded, "{all:?}");
+    let some = pack(&pdf, &base().max_decoded(all.declared_decoded / 2));
+    assert!(
+        some.declared_decoded < all.declared_decoded && some.declared_decoded <= all.declared_decoded / 2,
+        "{some:?}"
+    );
+    assert!(some.streams_rebuilt < all.streams_rebuilt && some.data.len() > all.data.len());
+    let none = pack(&pdf, &base().max_decoded(0));
+    assert_eq!((none.declared_decoded, none.streams_rebuilt, none.streams_lepton), (0, 0, 0));
+    assert!(none.data.len() > some.data.len());
+    let e = expand(&all.data, &base().max_decoded(all.declared_decoded - 1)).unwrap_err();
+    assert_eq!(e, Error::DecodedTooLarge { declared: all.declared_decoded, limit: all.declared_decoded - 1 });
+    assert_eq!(e.code(), 9);
+    assert_eq!(expand(&all.data, &base().max_decoded(all.declared_decoded)).unwrap(), pdf);
+    assert_eq!(expand(&some.data, &base().max_decoded(some.declared_decoded)).unwrap(), pdf);
+    assert_eq!(expand(&none.data, &base().max_decoded(0)).unwrap(), pdf);
+    // The same bytes with two threads.
+    assert_eq!(compress(&pdf, &base().max_decoded(all.declared_decoded / 2).threads(2)).unwrap().data, some.data);
+    // The defaults: 256 MiB of decoded bytes, and a restored length no larger than the default input.
+    let d = Options::default();
+    assert_eq!((d.max_decoded, d.max_len, d.max_input as u64), (256 << 20, 1 << 30, 1 << 30));
+}
+
+#[test]
 fn objects_per_stream_sets_the_object_streams() {
     let pdf = plain_pdf();
     let many = optimize(&pdf, &base().objects_per_stream(1)).unwrap();
@@ -257,9 +287,11 @@ fn a_time_budget_stops_the_work_and_changes_no_output() {
     let ample = base().time_budget(Some(Duration::from_secs(600)));
     assert_eq!(optimize(&pdf, &ample).unwrap().data, optimize(&pdf, &base()).unwrap().data);
     assert_eq!(compress(&pdf, &ample).unwrap().data, compress(&pdf, &base()).unwrap().data);
-    // Expand has no budget to run out of: its work is bounded by the declared length.
+    // Expand too: a budget that has passed gives the error and no file, an ample one the same bytes.
     let c = compress(&pdf, &base()).unwrap();
-    assert_eq!(expand(&c.data, &tiny).unwrap(), pdf);
+    let e = expand(&c.data, &tiny).unwrap_err();
+    assert!(matches!(e, Error::TimeBudget(_)), "{e}");
+    assert_eq!(expand(&c.data, &ample).unwrap(), pdf);
     assert!(matches!(optimize(&pdf, &base().time_budget(Some(Duration::ZERO))), Err(Error::InvalidOptions(_))));
 }
 

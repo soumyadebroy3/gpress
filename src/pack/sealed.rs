@@ -86,8 +86,8 @@ fn decrypt(c: &crypt::Crypt, d: &[u8], a: usize, b: usize) -> Option<(Sealed, Di
 /// The plan for a decrypted payload that starts at byte `at` of the file: the same choices `plan` makes for
 /// a stream's bytes (`stream_plan`, then a fax part for CCITT data), or the bytes as they are.
 fn plan_bytes(raw: Vec<u8>, dict: Dict, at: usize, resolve: &dyn Fn(&Obj) -> Option<Obj>, opt: &PackOptions) -> Plan {
-    if let Some(p) = stream_plan(&raw, opt) {
-        return p;
+    if let Some(found) = stream_plan(&raw, opt) {
+        return found.plan(Source::Bytes(raw));
     }
     match fax_parse(&raw, dict, resolve) {
         Some(parsed) => Plan::Fax { parsed: Box::new(parsed), at, raw: None },
@@ -283,11 +283,12 @@ mod tests {
     }
 
     /// A pack of the given parts, coded as the encoder codes them (the encoder stops where the decoder would
-    /// refuse, so the pack ends there).
+    /// refuse, so the pack ends there); the header declares what the parts claim.
     fn pack_parts(d: &[u8], plans: Vec<Plan>) -> Vec<u8> {
         let mut stats = PackStats::default();
-        let (_, enc) = run_plans(Encoder::new(), Some(d), Some(plans), d.len(), &PackOptions::default(), &mut stats);
-        let mut out = header(VERSION, d);
+        let claimed = plans.iter().map(claim).sum();
+        let (_, enc) = run(Encoder::new(), Some(d), Some(plans), d.len(), &PackOptions::default(), &mut stats, claimed);
+        let mut out = header(VERSION, d, claimed);
         out.extend_from_slice(&enc.finish());
         out
     }
