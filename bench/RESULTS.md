@@ -89,6 +89,13 @@ The safety gate returns these files exactly as they were:
 
 ## 3. peyaji format (exact restore with our decoder)
 
+(The builds measured here, d85cd7a and ca8fa92, still had preflate-rs, which re-created Flate streams zlib
+had not written. It is gone from the current build with its LGPL dependency, and such streams are now stored
+as they are, so archives of files that have them come out larger than these rows: on ten files of the sample
+measured on the current build, 55.8% of the input became 75.1% at effort 0 and 72.2% at effort 50; files
+without such streams reproduce. Section 4 counts the share of such streams. The whole-set figure moves when
+the set is measured again on the current build.)
+
 `pdfe pack` on all 907 files, built with the existing libraries (`--features existing`). Every pack is
 restored and compared inside the engine before it is returned, again by the bench script with a separate
 `pdfe unpack`, and a third time with the final decoder: 907 of 907 restored byte for byte.

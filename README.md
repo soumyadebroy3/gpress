@@ -10,6 +10,13 @@ tool. Two outputs, both verified before they are returned:
   byte for byte. On the test set: 56.5% of the original size, against 76.3% for the best of xz, Brotli and
   Zstandard.
 
+These figures were measured on the earlier builds that still had preflate-rs (bench/RESULTS.md sections 2-3
+and 6-7, commits d85cd7a and ca8fa92). This build stores every Flate stream that zlib did not write as it is
+(preflate-rs went with its LGPL dependency; see "Existing library" below), so archives of files with such
+streams come out larger here (on ten files of the sample, 55.8% of the input became 75.1% at effort 0), and
+the archive figure for the whole set will move when the set is measured again on this build; the normal-PDF
+figure does not depend on preflate-rs.
+
 Every number, the test set and how every output was checked by tools we didn't write (qpdf, pikepdf,
 PDFium, Poppler, pdf.js, libjpeg, libtiff, jbig2dec) are in [bench/RESULTS.md](bench/RESULTS.md). The engine
 is our own code; the only outside code in a default build is RustCrypto's AES, MD5 and SHA-2 for encrypted
