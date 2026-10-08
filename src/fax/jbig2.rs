@@ -266,7 +266,6 @@ impl<'a> MqDecoder<'a> {
         *cx = next << 1 | mps as u8;
         d
     }
-
 }
 
 // ---------------------------------------------------------------- generic region, template 0
@@ -323,11 +322,7 @@ pub fn encode_generic(img: &Image, invert: bool) -> Vec<u8> {
     for y in 0..img.rows() {
         // Typical prediction: is the row the same as the row above? Above the first row the decoder sees 0
         // pixels, so there the question is whether the row is all 0 after the inversion.
-        let same = if y == 0 {
-            row_is_zero(img.row(0), w, invert)
-        } else {
-            img.row(y) == img.row(y - 1)
-        };
+        let same = if y == 0 { row_is_zero(img.row(0), w, invert) } else { img.row(y) == img.row(y - 1) };
         let sltp = (same as u32) ^ ltp;
         e.encode(&mut cx[TPGDON_CX], sltp);
         ltp = same as u32;
@@ -474,7 +469,12 @@ pub fn read_pdf_stream(s: &[u8], invert: bool, max_changes: usize) -> Option<Ima
     if 41 + len != s.len() || len < 26 {
         return None;
     }
-    if u32_at(41)? as usize != w || u32_at(45)? as usize != h || s.get(49..58)? != [0; 9] || s[58] != GENERIC_FLAGS || s.get(59..67)? != NOMINAL_AT {
+    if u32_at(41)? as usize != w
+        || u32_at(45)? as usize != h
+        || s.get(49..58)? != [0; 9]
+        || s[58] != GENERIC_FLAGS
+        || s.get(59..67)? != NOMINAL_AT
+    {
         return None;
     }
     if w == 0 || w > super::ccitt::MAX_COLUMNS || h > 1 << 20 {
@@ -499,7 +499,8 @@ mod tests {
         for skew in [1u64, 3, 20, 400] {
             let mut s = 99 + skew;
             let mut cx_e = [0u8; 64];
-            let bits: Vec<(usize, u32)> = (0..100_000).map(|_| ((rng(&mut s) % 64) as usize, rng(&mut s).is_multiple_of(skew) as u32)).collect();
+            let bits: Vec<(usize, u32)> =
+                (0..100_000).map(|_| ((rng(&mut s) % 64) as usize, rng(&mut s).is_multiple_of(skew) as u32)).collect();
             let mut e = MqEncoder::new();
             for &(c, b) in &bits {
                 e.encode(&mut cx_e[c], b);

@@ -49,7 +49,9 @@ fn type1_font(glyphs: usize) -> (Vec<u8>, usize, usize, usize) {
         private.extend_from_slice(&cs);
         private.extend_from_slice(b" ND\n");
     }
-    private.extend_from_slice(b"end\nend\nreadonly put\nnoaccess put\ndup/FontName get exch definefont pop\nmark currentfile closefile\n");
+    private.extend_from_slice(
+        b"end\nend\nreadonly put\nnoaccess put\ndup/FontName get exch definefont pop\nmark currentfile closefile\n",
+    );
     encrypt(&mut private, 55665);
     let clear = b"%!PS-AdobeFont-1.0: TestFont 001.000\n11 dict begin\n/FontName /TestFont def\n/PaintType 0 def\n/FontType 1 def\n/FontMatrix [0.001 0 0 0.001 0 0] readonly def\n/Encoding StandardEncoding def\n/FontBBox {0 -250 1000 750} readonly def\ncurrentdict end\ncurrentfile eexec\n".to_vec();
     let mut trailer = Vec::new();
@@ -121,7 +123,9 @@ fn objects() -> Vec<(u32, String, Option<Vec<u8>>)> {
     let fax = fax_data(&scan(FAX_W, FAX_H));
     let mut content = Vec::new();
     for i in 0..60 {
-        content.extend_from_slice(format!("BT /F1 12 Tf 72 {} Td (Line {i} of the mixed test page) Tj ET\n", 740 - i * 11).as_bytes());
+        content.extend_from_slice(
+            format!("BT /F1 12 Tf 72 {} Td (Line {i} of the mixed test page) Tj ET\n", 740 - i * 11).as_bytes(),
+        );
     }
     content.extend_from_slice(b"q 150 0 0 106 400 600 cm /Im1 Do Q\nq 300 0 0 200 60 60 cm /Im2 Do Q\n");
     vec![
@@ -175,7 +179,15 @@ fn encrypted_pdf(aes: bool) -> Vec<u8> {
         format!("<< /Filter /Standard /V 2 /R 3 /Length 128 /P {} /O <{}> /U <{}> >>", p as i32, hex(&o), hex(&u))
     };
     objs.push((10, enc.into_bytes()));
-    objs.push((11, format!("<< /Title <{}> /Producer <{}> >>", hex(&title), hex(&crypt::seal(&key, method, 11, 0, &iv(11), b"peyaji").unwrap())).into_bytes()));
+    objs.push((
+        11,
+        format!(
+            "<< /Title <{}> /Producer <{}> >>",
+            hex(&title),
+            hex(&crypt::seal(&key, method, 11, 0, &iv(11), b"peyaji").unwrap())
+        )
+        .into_bytes(),
+    ));
     let mut d = b"%PDF-1.6\n%\xE2\xE3\xCF\xD3\n".to_vec();
     let mut offs = Vec::new();
     for (n, body) in &objs {
@@ -189,7 +201,15 @@ fn encrypted_pdf(aes: bool) -> Vec<u8> {
     for o in &offs {
         d.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
     }
-    d.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R /Info 11 0 R /Encrypt 10 0 R /ID [<{}> <{}>] >>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1, hex(&id0), hex(&id0)).as_bytes());
+    d.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R /Info 11 0 R /Encrypt 10 0 R /ID [<{}> <{}>] >>\nstartxref\n{x}\n%%EOF\n",
+            objs.len() + 1,
+            hex(&id0),
+            hex(&id0)
+        )
+        .as_bytes(),
+    );
     d
 }
 
@@ -224,10 +244,13 @@ fn entropy(x: &[u8]) -> f64 {
     for &b in x {
         h[b as usize] += 1;
     }
-    h.iter().filter(|&&c| c > 0).map(|&c| {
-        let p = c as f64 / x.len() as f64;
-        -p * p.log2()
-    }).sum()
+    h.iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = c as f64 / x.len() as f64;
+            -p * p.log2()
+        })
+        .sum()
 }
 
 #[test]
@@ -250,7 +273,10 @@ fn the_document_opens_decrypted() {
         let c = doc.crypt.as_ref().unwrap().as_ref().unwrap();
         assert_eq!(c.describe(), if aes { "R4/AESV2" } else { "R3/RC4" });
         assert_eq!(stream(&doc, 7).data, JPEG, "the JPEG reads back decrypted");
-        assert_eq!(xref::decode_fully(&stream(&doc, 6).dict, &stream(&doc, 6).data, 1 << 20).unwrap(), type1_font(FONT_GLYPHS).0);
+        assert_eq!(
+            xref::decode_fully(&stream(&doc, 6).dict, &stream(&doc, 6).data, 1 << 20).unwrap(),
+            type1_font(FONT_GLYPHS).0
+        );
         match doc.load(11).unwrap().1 {
             Obj::Dict(d) => assert_eq!(d.get(b"Title"), Some(&Obj::Str(b"Mixed test".to_vec()))),
             o => panic!("{o:?}"),
@@ -288,7 +314,10 @@ fn normal_pdf_keeps_the_encryption_and_applies_every_step() {
         // The font program and the content: the same bytes behind our Flate.
         for n in [6, 9] {
             let (s0, s1) = (stream(&a, n), stream(&b, n));
-            assert_eq!(xref::decode_fully(&s0.dict, &s0.data, 1 << 20), xref::decode_fully(&s1.dict, &s1.data, 1 << 20));
+            assert_eq!(
+                xref::decode_fully(&s0.dict, &s0.data, 1 << 20),
+                xref::decode_fully(&s1.dict, &s1.data, 1 << 20)
+            );
             assert!(s1.data.len() <= s0.data.len());
         }
         // The same bytes with two threads, at every effort tried.
@@ -319,7 +348,12 @@ fn archive_stores_the_streams_decrypted_opened_and_coded() {
         assert!(qst.fax == 1 && qst.type1 == 1 && qst.decrypted >= 4, "{qst:?}");
         // Effort 0 codes compressed-looking data plainly, but opens the font first (it looks random only while
         // encrypted), so the pack is about as small.
-        assert!(quick.len() * 100 <= packed.len() * 105, "effort 0: {} bytes, effort 100: {}", quick.len(), packed.len());
+        assert!(
+            quick.len() * 100 <= packed.len() * 105,
+            "effort 0: {} bytes, effort 100: {}",
+            quick.len(),
+            packed.len()
+        );
         assert_eq!(unpack(&quick).unwrap(), pdf);
         // Without decryption the streams stay as stored, so neither the font nor the fax image is opened.
         let (plain, pst) = pack_with(&pdf, &PackOptions { decrypt: false, ..opt.clone() });

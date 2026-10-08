@@ -23,7 +23,9 @@ fn sample_pdf() -> Vec<u8> {
     let mut s = 0x1234_5678u64;
     let mut content = Vec::new();
     for i in 0..300 {
-        content.extend_from_slice(format!("BT /F1 12 Tf 72 {} Td (Line {i} of the page) Tj ET\n", 700 - (i % 60) * 11).as_bytes());
+        content.extend_from_slice(
+            format!("BT /F1 12 Tf 72 {} Td (Line {i} of the page) Tj ET\n", 700 - (i % 60) * 11).as_bytes(),
+        );
     }
     let font: Vec<u8> = (0..20_000u32).map(|i| (i * 7 % 251) as u8 ^ ((i / 100) as u8)).collect();
     let (w, h) = (300usize, 200usize);
@@ -80,7 +82,9 @@ fn sample_pdf() -> Vec<u8> {
     for off in offsets {
         pdf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
     }
-    pdf.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    pdf.extend_from_slice(
+        format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes(),
+    );
     pdf
 }
 
@@ -200,7 +204,9 @@ fn pdf_of(objs: &[Vec<u8>]) -> Vec<u8> {
     for off in offsets {
         pdf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
     }
-    pdf.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    pdf.extend_from_slice(
+        format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes(),
+    );
     pdf
 }
 
@@ -219,7 +225,8 @@ fn zlib1(data: &[u8]) -> Vec<u8> {
 fn pack_codes_plainly_only_data_without_structure() {
     // A 512 x 512 RGB gradient: every byte value equally often, as in compressed data, but smooth.
     let (w, h) = (512usize, 512usize);
-    let px: Vec<u8> = (0..h).flat_map(|y| (0..w).flat_map(move |x| [(x / 2) as u8, (y / 2) as u8, ((x + y) / 4) as u8])).collect();
+    let px: Vec<u8> =
+        (0..h).flat_map(|y| (0..w).flat_map(move |x| [(x / 2) as u8, (y / 2) as u8, ((x + y) / 4) as u8])).collect();
     let pdf = pdf_of(&[
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
@@ -242,7 +249,9 @@ fn a_short_image_is_kept_exactly() {
     // whole one and some text. Readers differ on short images, so those two must stay exactly as they are.
     let image = "/Type /XObject /Subtype /Image /Width 100 /Height 100 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode";
     let px: Vec<u8> = (0..100 * 100).map(|i| ((i % 100) * 2 + i / 100) as u8).collect();
-    let text: Vec<u8> = (0..300).flat_map(|i| format!("q 50 0 0 50 {} 10 cm /A Do Q BT (Line {i}) Tj ET\n", i % 500).into_bytes()).collect();
+    let text: Vec<u8> = (0..300)
+        .flat_map(|i| format!("q 50 0 0 50 {} 10 cm /A Do Q BT (Line {i}) Tj ET\n", i % 500).into_bytes())
+        .collect();
     let pdf = pdf_of(&[
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
@@ -258,7 +267,11 @@ fn a_short_image_is_kept_exactly() {
         assert!(matches!(r.outcome, Outcome::Smaller(_)), "effort {effort}: {:?}", r.outcome);
         let after = gpress::pdf::xref::open(&r.data).unwrap();
         for n in 4..=7u32 {
-            let (gpress::pdf::object::Obj::Stream(a), gpress::pdf::object::Obj::Stream(b)) = (before.load(n).unwrap().1, after.load(n).unwrap().1) else { panic!("stream {n}") };
+            let (gpress::pdf::object::Obj::Stream(a), gpress::pdf::object::Obj::Stream(b)) =
+                (before.load(n).unwrap().1, after.load(n).unwrap().1)
+            else {
+                panic!("stream {n}")
+            };
             let kept = a.data == b.data && a.dict.get(b"Filter") == b.dict.get(b"Filter");
             assert_eq!(kept, n == 5 || n == 6, "effort {effort}, object {n}");
         }
@@ -272,7 +285,9 @@ fn low_effort_work_follows_the_file_size() {
     // points, at least 4 MiB: 5.5 MB at effort 30), so it is kept exactly as it is; from effort 40 (11 MB) it
     // is re-encoded. The text is re-encoded at every effort.
     let image = "/Type /XObject /Subtype /Image /Width 3000 /Height 3000 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode";
-    let text: Vec<u8> = (0..300).flat_map(|i| format!("q 50 0 0 50 {} 10 cm /A Do Q BT (Line {i}) Tj ET\n", i % 500).into_bytes()).collect();
+    let text: Vec<u8> = (0..300)
+        .flat_map(|i| format!("q 50 0 0 50 {} 10 cm /A Do Q BT (Line {i}) Tj ET\n", i % 500).into_bytes())
+        .collect();
     let pdf = pdf_of(&[
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
@@ -287,7 +302,11 @@ fn low_effort_work_follows_the_file_size() {
         assert!(matches!(r.outcome, Outcome::Smaller(_)), "effort {effort}: {:?}", r.outcome);
         let after = gpress::pdf::xref::open(&r.data).unwrap();
         for (n, kept) in [(4u32, false), (5, image_kept)] {
-            let (gpress::pdf::object::Obj::Stream(a), gpress::pdf::object::Obj::Stream(b)) = (before.load(n).unwrap().1, after.load(n).unwrap().1) else { panic!("stream {n}") };
+            let (gpress::pdf::object::Obj::Stream(a), gpress::pdf::object::Obj::Stream(b)) =
+                (before.load(n).unwrap().1, after.load(n).unwrap().1)
+            else {
+                panic!("stream {n}")
+            };
             assert_eq!(a.data == b.data, kept, "effort {effort}, object {n}");
         }
     }

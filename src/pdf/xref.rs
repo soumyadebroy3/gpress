@@ -193,7 +193,13 @@ fn security(doc: &Doc) -> Result<Crypt, String> {
     };
     // Values given by reference (a /CF dictionary, say) are read as stored too, a few levels deep, each object
     // once and without strings, so readers can't disagree on whether they are encrypted.
-    fn resolve(o: &Obj, depth: usize, own: Option<u32>, parts: &mut Vec<(u32, u16, Obj)>, plain: &dyn Fn(u32, u16) -> Result<Obj, String>) -> Result<Obj, String> {
+    fn resolve(
+        o: &Obj,
+        depth: usize,
+        own: Option<u32>,
+        parts: &mut Vec<(u32, u16, Obj)>,
+        plain: &dyn Fn(u32, u16) -> Result<Obj, String>,
+    ) -> Result<Obj, String> {
         Ok(match o {
             &Obj::Ref(n, g) => {
                 if depth > 4 || own == Some(n) || parts.iter().any(|p| p.0 == n) {
@@ -206,8 +212,14 @@ fn security(doc: &Doc) -> Result<Crypt, String> {
                 parts.push((n, g, x.clone()));
                 resolve(&x, depth + 1, own, parts, plain)?
             }
-            Obj::Array(a) => Obj::Array(a.iter().map(|x| resolve(x, depth, own, parts, plain)).collect::<Result<_, _>>()?),
-            Obj::Dict(d) => Obj::Dict(Dict(d.0.iter().map(|(k, v)| Ok((k.clone(), resolve(v, depth, own, parts, plain)?))).collect::<Result<_, String>>()?)),
+            Obj::Array(a) => {
+                Obj::Array(a.iter().map(|x| resolve(x, depth, own, parts, plain)).collect::<Result<_, _>>()?)
+            }
+            Obj::Dict(d) => Obj::Dict(Dict(
+                d.0.iter()
+                    .map(|(k, v)| Ok((k.clone(), resolve(v, depth, own, parts, plain)?)))
+                    .collect::<Result<_, String>>()?,
+            )),
             x => x.clone(),
         })
     }
@@ -304,7 +316,8 @@ fn read_section(d: &[u8], off: usize, rows_left: &mut usize) -> Result<(Vec<(u32
     // Decoded only as far as the rows the file may have reach (see `row_limit`): a stream of more is
     // refused without holding it.
     let most = row_limit(d.len()).saturating_mul(rec).min(1 << 28);
-    let raw = decode_fully(&s.dict, &s.data, most).ok_or(LoadError::BadXref("xref stream undecodable or more rows than the file can hold"))?;
+    let raw = decode_fully(&s.dict, &s.data, most)
+        .ok_or(LoadError::BadXref("xref stream undecodable or more rows than the file can hold"))?;
     let field = |b: &[u8]| b.iter().fold(0u64, |a, &x| a << 8 | x as u64);
     let mut out = Vec::new();
     let mut p = 0;
@@ -369,7 +382,10 @@ fn read_table(d: &[u8], mut pos: usize, rows_left: &mut usize) -> Result<(Vec<(u
                 b'f' => Entry::Free,
                 _ => return Err(LoadError::BadXref("bad table entry type")),
             };
-            let num = start.checked_add(k).and_then(|n| u32::try_from(n).ok()).ok_or(LoadError::BadXref("object number beyond 32 bits"))?;
+            let num = start
+                .checked_add(k)
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or(LoadError::BadXref("object number beyond 32 bits"))?;
             out.push((num, e));
             p += 18;
             // Two end-of-line bytes in well-formed files; tolerate one.
@@ -422,7 +438,8 @@ impl<'a> Doc<'a> {
                 if off >= self.data.len() {
                     return Err(LoadError::BadObject(n, "offset past the end"));
                 }
-                let (pn, pg, o, _) = parse_indirect(self.data, off, &resolver).map_err(|e| LoadError::BadObject(n, e.msg))?;
+                let (pn, pg, o, _) =
+                    parse_indirect(self.data, off, &resolver).map_err(|e| LoadError::BadObject(n, e.msg))?;
                 if pn != n || pg != gen {
                     return Err(LoadError::BadObject(n, "object number at offset differs"));
                 }
@@ -441,13 +458,19 @@ impl<'a> Doc<'a> {
                         Obj::Stream(s) => s,
                         _ => return Err(LoadError::BadObject(sn, "object stream is not a stream")),
                     };
-                    let raw = decode_fully(&s.dict, &s.data, 1 << 28).ok_or(LoadError::BadObject(sn, "object stream undecodable"))?;
+                    let raw = decode_fully(&s.dict, &s.data, 1 << 28)
+                        .ok_or(LoadError::BadObject(sn, "object stream undecodable"))?;
                     let count = s.dict.get(b"N").and_then(|x| x.as_int()).ok_or(LoadError::BadObject(sn, "no /N"))?;
-                    let first = s.dict.get(b"First").and_then(|x| x.as_int()).ok_or(LoadError::BadObject(sn, "no /First"))?;
+                    let first =
+                        s.dict.get(b"First").and_then(|x| x.as_int()).ok_or(LoadError::BadObject(sn, "no /First"))?;
                     // Every header entry takes at least "n o " (two digits and two spaces, the last space
                     // optional), so /N beyond a quarter of the data, or /First past it, can only be wrong. Both
                     // are checked before anything is sized by them: the dictionary is not to be trusted.
-                    if count < 0 || count as u64 > (raw.len() as u64 + 1) / 4 || first < 0 || first as u64 > raw.len() as u64 {
+                    if count < 0
+                        || count as u64 > (raw.len() as u64 + 1) / 4
+                        || first < 0
+                        || first as u64 > raw.len() as u64
+                    {
                         return Err(LoadError::BadObject(sn, "bad /N or /First"));
                     }
                     let (count, first) = (count as usize, first as usize);
@@ -459,9 +482,11 @@ impl<'a> Doc<'a> {
                     let mut heads = Vec::new();
                     for _ in 0..count {
                         lx.skip_ws();
-                        let a = parse_uint(lx.regular_token()).ok_or(LoadError::BadObject(sn, "bad object stream header"))?;
+                        let a = parse_uint(lx.regular_token())
+                            .ok_or(LoadError::BadObject(sn, "bad object stream header"))?;
                         lx.skip_ws();
-                        let b = parse_uint(lx.regular_token()).ok_or(LoadError::BadObject(sn, "bad object stream header"))?;
+                        let b = parse_uint(lx.regular_token())
+                            .ok_or(LoadError::BadObject(sn, "bad object stream header"))?;
                         let a = u32::try_from(a).map_err(|_| LoadError::BadObject(sn, "bad object stream header"))?;
                         if heads.len() < keep {
                             heads.push((a, b));
@@ -475,7 +500,10 @@ impl<'a> Doc<'a> {
                 if num != n {
                     return Err(LoadError::BadObject(n, "object stream lists another number"));
                 }
-                let at = first.checked_add(off).filter(|&p| p <= raw.len()).ok_or(LoadError::BadObject(n, "offset past the object stream"))?;
+                let at = first
+                    .checked_add(off)
+                    .filter(|&p| p <= raw.len())
+                    .ok_or(LoadError::BadObject(n, "offset past the object stream"))?;
                 let mut lx = Lexer::new(raw, at);
                 let o = lx.parse_obj().map_err(|e| LoadError::BadObject(n, e.msg))?;
                 if lx.raw_cr {

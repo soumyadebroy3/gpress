@@ -32,7 +32,10 @@ fn main() {
             continue;
         }
         if a.starts_with("--") {
-            skip_next = matches!(a.as_str(), "--iter" | "--exact" | "--chain" | "--nice" | "--threads" | "--effort" | "--max-len");
+            skip_next = matches!(
+                a.as_str(),
+                "--iter" | "--exact" | "--chain" | "--nice" | "--threads" | "--effort" | "--max-len"
+            );
             continue;
         }
         pos.push(a);
@@ -448,7 +451,6 @@ fn read_pbm(d: &[u8]) -> Option<gpress::fax::ccitt::Image> {
     }
     Some(img)
 }
-
 
 fn describe(name: &str, in_len: usize, r: &gpress::pdf::rewrite::Optimized, secs: f64) -> String {
     use gpress::pdf::rewrite::Outcome;

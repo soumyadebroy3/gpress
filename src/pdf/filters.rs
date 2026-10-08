@@ -161,7 +161,13 @@ pub fn unpredict(st: &Stage, data: &[u8]) -> Result<Vec<u8>, FilterError> {
                 4 => {
                     let p = a as i16 + b as i16 - c as i16;
                     let (pa, pb, pc) = ((p - a as i16).abs(), (p - b as i16).abs(), (p - c as i16).abs());
-                    let pr = if pa <= pb && pa <= pc { a } else if pb <= pc { b } else { c };
+                    let pr = if pa <= pb && pa <= pc {
+                        a
+                    } else if pb <= pc {
+                        b
+                    } else {
+                        c
+                    };
                     cur[i].wrapping_add(pr)
                 }
                 _ => return Err(FilterError::Bad("unknown PNG filter type")),

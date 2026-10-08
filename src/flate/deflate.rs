@@ -43,11 +43,33 @@ pub struct Options {
 impl Options {
     /// Our strongest setting.
     pub fn max() -> Options {
-        Options { iterations: 8, exact_rounds: 4, max_chain: 8192, segment: 1 << 20, split: true, alternatives: true, multi_start_limit: 1 << 18, nice: 259, polish: true, shared: None }
+        Options {
+            iterations: 8,
+            exact_rounds: 4,
+            max_chain: 8192,
+            segment: 1 << 20,
+            split: true,
+            alternatives: true,
+            multi_start_limit: 1 << 18,
+            nice: 259,
+            polish: true,
+            shared: None,
+        }
     }
     /// Fast but still optimal-parsed.
     pub fn quick() -> Options {
-        Options { iterations: 2, exact_rounds: 1, max_chain: 128, segment: 1 << 20, split: true, alternatives: false, multi_start_limit: 0, nice: 64, polish: false, shared: None }
+        Options {
+            iterations: 2,
+            exact_rounds: 1,
+            max_chain: 128,
+            segment: 1 << 20,
+            split: true,
+            alternatives: false,
+            multi_start_limit: 0,
+            nice: 64,
+            polish: false,
+            shared: None,
+        }
     }
 
     /// Settings for an effort from 0 (`quick`) to 100 (`max`), in steps of 20. Measured on 92 sampled PDF
@@ -84,7 +106,17 @@ impl Options {
 
     /// The settings that decide the output (everything but `shared`).
     fn fingerprint(&self) -> [usize; 9] {
-        [self.iterations, self.exact_rounds, self.max_chain, self.segment, self.split as usize, self.alternatives as usize, self.multi_start_limit, self.nice, self.polish as usize]
+        [
+            self.iterations,
+            self.exact_rounds,
+            self.max_chain,
+            self.segment,
+            self.split as usize,
+            self.alternatives as usize,
+            self.multi_start_limit,
+            self.nice,
+            self.polish as usize,
+        ]
     }
 }
 
@@ -142,7 +174,15 @@ pub fn deflate(data: &[u8], opt: &Options) -> Vec<u8> {
             let t1 = t0.elapsed();
             let plans = optimize_segment(data, a, b, &m, opt);
             if dbg {
-                eprintln!("segment {}..{}: matches {:?} ({} steps), optimise {:?}, {} blocks", a, b, t1, m.steps.len(), t0.elapsed() - t1, plans.len());
+                eprintln!(
+                    "segment {}..{}: matches {:?} ({} steps), optimise {:?}, {} blocks",
+                    a,
+                    b,
+                    t1,
+                    m.steps.len(),
+                    t0.elapsed() - t1,
+                    plans.len()
+                );
             }
             plans
         });
@@ -166,7 +206,9 @@ pub fn deflate_zlib(data: &[u8], opt: &Options) -> Vec<u8> {
         None => encode(),
         Some(memo) => {
             let key = (par::hash64(data), data.len(), opt.fingerprint());
-            let fits = |z: &Arc<Vec<u8>>| super::zlib::unwrap(z, data.len() + 1).is_ok_and(|u| u.data == data && u.trailing == 0);
+            let fits = |z: &Arc<Vec<u8>>| {
+                super::zlib::unwrap(z, data.len() + 1).is_ok_and(|u| u.data == data && u.trailing == 0)
+            };
             memo.get(key, fits, || Arc::new(encode())).to_vec()
         }
     }
@@ -307,7 +349,8 @@ fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &m
                 }
                 c += step;
                 let right = Hist::diff(&total, &left);
-                let v = estimate_dynamic_bits(&left).min(fixed_bits(&left)) + estimate_dynamic_bits(&right).min(fixed_bits(&right));
+                let v = estimate_dynamic_bits(&left).min(fixed_bits(&left))
+                    + estimate_dynamic_bits(&right).min(fixed_bits(&right));
                 if v < best.0 {
                     best = (v, c);
                 }
@@ -343,7 +386,15 @@ fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &m
 }
 
 /// Entropy-priced rounds: price symbols by how often the current parse uses them, re-parse, repeat.
-fn refine(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options, start: Vec<Sym>, sc: &mut ParseScratch) -> Vec<Sym> {
+fn refine(
+    data: &[u8],
+    a: usize,
+    b: usize,
+    m: &Matches,
+    opt: &Options,
+    start: Vec<Sym>,
+    sc: &mut ParseScratch,
+) -> Vec<Sym> {
     let mut best_bits = price(&Hist::of(&start), b - a);
     let mut best = start;
     let mut stats = Hist::of(&best);
@@ -391,7 +442,15 @@ fn blend(new: &Hist, old: &Hist, salt: u64) -> Hist {
 }
 
 /// Exact-priced rounds: price symbols by the code lengths the block would really use.
-fn exact(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options, start: Vec<Sym>, sc: &mut ParseScratch) -> Vec<Sym> {
+fn exact(
+    data: &[u8],
+    a: usize,
+    b: usize,
+    m: &Matches,
+    opt: &Options,
+    start: Vec<Sym>,
+    sc: &mut ParseScratch,
+) -> Vec<Sym> {
     let mut best_bits = price(&Hist::of(&start), b - a);
     let mut best = start;
     let mut cur = Vec::with_capacity(best.len());
@@ -490,7 +549,8 @@ fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>) -> Vec<Plan> {
         let mut bestv = u64::MAX;
         while c <= hi {
             let right = Hist::diff(&total, &left);
-            let v = estimate_dynamic_bits(&left).min(fixed_bits(&left)) + estimate_dynamic_bits(&right).min(fixed_bits(&right));
+            let v = estimate_dynamic_bits(&left).min(fixed_bits(&left))
+                + estimate_dynamic_bits(&right).min(fixed_bits(&right));
             if v < bestv {
                 bestv = v;
                 bestc = c;

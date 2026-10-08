@@ -28,7 +28,8 @@ impl Pool {
     }
 
     fn take(&self) -> bool {
-        !self.refused.load(Ordering::Relaxed) && self.free.fetch_update(Ordering::AcqRel, Ordering::Acquire, |f| f.checked_sub(1)).is_ok()
+        !self.refused.load(Ordering::Relaxed)
+            && self.free.fetch_update(Ordering::AcqRel, Ordering::Acquire, |f| f.checked_sub(1)).is_ok()
     }
 
     fn give(&self) {
@@ -61,7 +62,10 @@ pub fn default_threads() -> usize {
 
 /// Starts `f` on a new thread of scope `s`. None when the system refuses one (thread or process limits);
 /// the caller then does the work itself.
-pub fn spawn<'scope, T: Send + 'scope>(s: &'scope Scope<'scope, '_>, f: impl FnOnce() -> T + Send + 'scope) -> Option<ScopedJoinHandle<'scope, T>> {
+pub fn spawn<'scope, T: Send + 'scope>(
+    s: &'scope Scope<'scope, '_>,
+    f: impl FnOnce() -> T + Send + 'scope,
+) -> Option<ScopedJoinHandle<'scope, T>> {
     #[cfg(test)]
     if tests::refuse_spawn() {
         return None;
@@ -129,7 +133,10 @@ pub fn map<R: Send>(pool: Option<&Pool>, n: usize, order: Option<&[usize]>, f: i
             run(k);
         }
     });
-    results.into_iter().map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()).expect("every piece is done")).collect()
+    results
+        .into_iter()
+        .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()).expect("every piece is done"))
+        .collect()
 }
 
 // ---------------------------------------------------------------- identical inputs done once
@@ -355,11 +362,15 @@ pub(crate) mod tests {
         let calls = AtomicUsize::new(0);
         let pool = Pool::new(4);
         let got = map(Some(&pool), 40, None, |i| {
-            memo.get((i % 4) as u32, |_| true, || {
-                calls.fetch_add(1, Ordering::SeqCst);
-                std::thread::sleep(std::time::Duration::from_millis(2));
-                (i % 4) as u64 * 100
-            })
+            memo.get(
+                (i % 4) as u32,
+                |_| true,
+                || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    (i % 4) as u64 * 100
+                },
+            )
         });
         assert_eq!(got, (0..40).map(|i| (i % 4) as u64 * 100).collect::<Vec<_>>());
         assert_eq!(calls.load(Ordering::SeqCst), 4);
@@ -370,7 +381,8 @@ pub(crate) mod tests {
     #[test]
     fn memo_survives_a_panicking_computation() {
         let memo: Memo<u32, u32> = Memo::new();
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| memo.get(1, |_| true, || panic!("test panic"))));
+        let r =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| memo.get(1, |_| true, || panic!("test panic"))));
         assert!(r.is_err());
         assert_eq!(memo.get(1, |_| true, || 9), 9);
     }

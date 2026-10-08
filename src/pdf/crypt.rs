@@ -179,8 +179,8 @@ pub enum Method {
 
 /// The padding string of algorithm 2 (also the whole padded empty password).
 const PAD: [u8; 32] = [
-    0x28, 0xBF, 0x4E, 0x5E, 0x4E, 0x75, 0x8A, 0x41, 0x64, 0x00, 0x4E, 0x56, 0xFF, 0xFA, 0x01, 0x08, 0x2E, 0x2E, 0x00, 0xB6,
-    0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53, 0x69, 0x7A,
+    0x28, 0xBF, 0x4E, 0x5E, 0x4E, 0x75, 0x8A, 0x41, 0x64, 0x00, 0x4E, 0x56, 0xFF, 0xFA, 0x01, 0x08, 0x2E, 0x2E, 0x00,
+    0xB6, 0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53, 0x69, 0x7A,
 ];
 
 /// Algorithm 2: the file key from the empty user password (revisions 2 to 4), `n` bytes.
@@ -266,7 +266,14 @@ pub fn object_key(file_key: &[u8], m: Method, num: u32, gen: u16) -> Vec<u8> {
 }
 
 /// Encrypts one string or stream of object `num gen`. AES uses the given initialization vector.
-pub fn seal(file_key: &[u8], m: Method, num: u32, gen: u16, iv: &[u8; 16], data: &[u8]) -> Result<Vec<u8>, &'static str> {
+pub fn seal(
+    file_key: &[u8],
+    m: Method,
+    num: u32,
+    gen: u16,
+    iv: &[u8; 16],
+    data: &[u8],
+) -> Result<Vec<u8>, &'static str> {
     match m {
         Method::Identity => Ok(data.to_vec()),
         Method::Rc4 => Ok(rc4(&object_key(file_key, m, num, gen), data)),
@@ -420,7 +427,9 @@ impl Crypt {
             (1, 2) | (1, 3) if length_is(length, &[40]) => (5, Method::Rc4, Method::Rc4),
             // Readers disagree on a missing /Length here, and on revision 2 with a key longer than 40 bits.
             (2, 2) | (2, 3) => match length {
-                Some(&Obj::Int(l)) if (40..=128).contains(&l) && l % 8 == 0 && (r == 3 || l == 40) => ((l / 8) as usize, Method::Rc4, Method::Rc4),
+                Some(&Obj::Int(l)) if (40..=128).contains(&l) && l % 8 == 0 && (r == 3 || l == 40) => {
+                    ((l / 8) as usize, Method::Rc4, Method::Rc4)
+                }
                 _ => return Err("bad /Length".into()),
             },
             (4, 4) if length_is(length, &[128]) => {
@@ -616,7 +625,8 @@ fn map_strings(o: &mut Obj, f: &mut StringMap) -> Result<(), &'static str> {
 
 /// Whether `o` holds a signature dictionary (/Type /Sig, or a /ByteRange), a stream's dictionary included.
 fn is_signature(o: &Obj) -> bool {
-    let dict = |d: &Dict| d.name(b"Type") == Some(b"Sig") || d.has(b"ByteRange") || d.0.iter().any(|(_, v)| is_signature(v));
+    let dict =
+        |d: &Dict| d.name(b"Type") == Some(b"Sig") || d.has(b"ByteRange") || d.0.iter().any(|(_, v)| is_signature(v));
     match o {
         Obj::Array(a) => a.iter().any(is_signature),
         Obj::Dict(d) => dict(d),
@@ -655,7 +665,10 @@ mod tests {
         let cases = [
             ("0102030405", "b2396305f03dc027ccc3524a0a1118a8 6982944f18fc82d589c403a47a0d0919"),
             ("0102030405060708090a0b0c0d0e0f10", "9ac7cc9a609d1ef7b2932899cde41b97 5248c4959014126a6e8a84f11d1a9e1c"),
-            ("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20", "eaa6bd25880bf93d3f5d1e4ca2611d91 cfa45c9f7e714b54bdfa80027cb14380"),
+            (
+                "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+                "eaa6bd25880bf93d3f5d1e4ca2611d91 cfa45c9f7e714b54bdfa80027cb14380",
+            ),
         ];
         for (key, stream) in cases {
             assert_eq!(rc4(&hex(key), &[0u8; 32]), hex(stream), "key {key}");
@@ -730,7 +743,10 @@ mod tests {
         let o = hex("c92422687facee686e373f10b5c7d04738053152f7e2ee30e11c69ec442576ab");
         let k = key_r4(2, 5, &o, p, &id0, true);
         assert_eq!(to_hex(&k), "2111f192e0");
-        assert_eq!(to_hex(&user_value_r4(2, &k, &id0)), "adb43c8d5c0a904ecd6878928abf0a1ef65fa75e1632b2134005fa3b1d844c68");
+        assert_eq!(
+            to_hex(&user_value_r4(2, &k, &id0)),
+            "adb43c8d5c0a904ecd6878928abf0a1ef65fa75e1632b2134005fa3b1d844c68"
+        );
         // Revision 3, RC4-128: 50 more MD5 rounds; the first 16 bytes of /U are algorithm 5.
         let o = hex("566fa873ee33c797cd3b904fdadf814afa34df9a38f6ed41b984e2c6da2aa6f5");
         let k = key_r4(3, 16, &o, p, &id0, true);
@@ -782,7 +798,11 @@ mod tests {
         let good = [
             ("<< /CF << /StdCF << /CFM /AESV2 /Length 16 >> >> /StmF /StdCF /StrF /StdCF >>", 4, Method::Aes128),
             ("<< /Length 128 /CF << /StdCF << /CFM /V2 >> >> /StmF /StdCF /StrF /StdCF >>", 4, Method::Rc4),
-            ("<< /CF << /F << /CFM /AESV2 /Length 128 /AuthEvent /DocOpen >> >> /StmF /F /StrF /F /EFF /F >>", 4, Method::Aes128),
+            (
+                "<< /CF << /F << /CFM /AESV2 /Length 128 /AuthEvent /DocOpen >> >> /StmF /F /StrF /F /EFF /F >>",
+                4,
+                Method::Aes128,
+            ),
             ("<< /CF << /StdCF << /CFM /AESV3 /Length 32 >> >> /StmF /StdCF /StrF /StdCF >>", 5, Method::Aes256),
             ("<< /Length 256 /CF << /StdCF << /CFM /AESV3 >> >> /StmF /StdCF /StrF /StdCF >>", 5, Method::Aes256),
             ("<< /CF << >> /StmF /Identity /StrF /Identity >>", 4, Method::Identity),
@@ -820,7 +840,10 @@ mod tests {
         assert_eq!(to_hex(&md5(&[b"a", b"bc"])), "900150983cd24fb0d6963f7d28e17f72");
         assert_eq!(to_hex(&md5(&[b"message digest"])), "f96b697d7cb7938d525a2f31aaf161d0");
         assert_eq!(to_hex(&sha256(&[b"abc"])), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-        assert_eq!(to_hex(&sha384(b"abc")), "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7");
+        assert_eq!(
+            to_hex(&sha384(b"abc")),
+            "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7"
+        );
         assert_eq!(
             to_hex(&sha512(b"abc")),
             "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"

@@ -63,7 +63,9 @@ fn pdf(image_dict: &str, data: &[u8]) -> Vec<u8> {
     obj(&mut out, b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
     obj(&mut out, b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
     obj(&mut out, b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>\nendobj\n");
-    let mut img = format!("4 0 obj\n<< /Type /XObject /Subtype /Image {image_dict} /Length {} >>\nstream\n", data.len()).into_bytes();
+    let mut img =
+        format!("4 0 obj\n<< /Type /XObject /Subtype /Image {image_dict} /Length {} >>\nstream\n", data.len())
+            .into_bytes();
     img.extend_from_slice(data);
     img.extend_from_slice(b"\nendstream\nendobj\n");
     obj(&mut out, &img);
@@ -114,7 +116,11 @@ fn inverted(img: &Image) -> Image {
     let mut out = Image::new(img.width);
     for r in 0..img.rows() {
         let row = img.row(r);
-        let ch: Vec<u32> = if row.first() == Some(&0) { row[1..].to_vec() } else { std::iter::once(0).chain(row.iter().copied()).collect() };
+        let ch: Vec<u32> = if row.first() == Some(&0) {
+            row[1..].to_vec()
+        } else {
+            std::iter::once(0).chain(row.iter().copied()).collect()
+        };
         out.push_row(&ch);
     }
     out
@@ -155,7 +161,9 @@ fn normal_pdf_gets_jbig2_with_the_same_filter_output() {
 fn anything_uncertain_stays_ccitt() {
     let img = page(600, 400);
     let g4 = ccitt::encode(&img, &layout(&img, Scheme::G4, false));
-    let dict = |h: usize, parms: &str| format!("/Width 600 /Height {h} /BitsPerComponent 1 /ColorSpace /DeviceGray /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 600 {parms} >>");
+    let dict = |h: usize, parms: &str| {
+        format!("/Width 600 /Height {h} /BitsPerComponent 1 /ColorSpace /DeviceGray /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 600 {parms} >>")
+    };
     // Zero bytes in the middle: the rows after them can't be decoded. (A single flipped bit is not always
     // damage: it can turn one valid code into another, a different image every reader decodes the same way.)
     let mut damaged = g4.clone();
@@ -176,7 +184,14 @@ fn anything_uncertain_stays_ccitt() {
         let r = optimize(&d, &opt);
         let out = r.data;
         let s = image_stream(&out);
-        let f = format!("{:?}", gpress::pdf::filters::chain(&s.dict).unwrap().iter().map(|st| String::from_utf8_lossy(&st.name).to_string()).collect::<Vec<_>>());
+        let f = format!(
+            "{:?}",
+            gpress::pdf::filters::chain(&s.dict)
+                .unwrap()
+                .iter()
+                .map(|st| String::from_utf8_lossy(&st.name).to_string())
+                .collect::<Vec<_>>()
+        );
         assert!(!f.contains("JBIG2"), "{what}: {f}");
         assert!(f.contains("CCITTFaxDecode"), "{what}: {f}");
     }
@@ -184,7 +199,8 @@ fn anything_uncertain_stays_ccitt() {
     let small = page(40, 20);
     let opt = Options { flate: gpress::flate::Options::quick(), ..Default::default() };
     let out = optimize(&fax_pdf(&small, Scheme::G4, "/ColorSpace /DeviceGray", ""), &opt).data;
-    let names: Vec<Vec<u8>> = gpress::pdf::filters::chain(&image_stream(&out).dict).unwrap().into_iter().map(|st| st.name).collect();
+    let names: Vec<Vec<u8>> =
+        gpress::pdf::filters::chain(&image_stream(&out).dict).unwrap().into_iter().map(|st| st.name).collect();
     assert!(names.contains(&b"CCITTFaxDecode".to_vec()) && !names.contains(&b"JBIG2Decode".to_vec()));
 }
 
@@ -204,21 +220,45 @@ fn what_readers_see_differently_stays_ccitt() {
     let with = |scheme: Scheme, first_eol_only: bool, parms: &str| {
         let mut lay = layout(&img, scheme, false);
         lay.gaps[0].eol = first_eol_only;
-        let k = if scheme == Scheme::G31D { 0 } else if scheme == Scheme::G32D { 2 } else { -1 };
+        let k = if scheme == Scheme::G31D {
+            0
+        } else if scheme == Scheme::G32D {
+            2
+        } else {
+            -1
+        };
         pdf(&format!("/Width 600 /Height 400 /BitsPerComponent 1 {gray} /Filter /CCITTFaxDecode /DecodeParms << /K {k} /Columns 600 {parms} >>"), &ccitt::encode(&img, &lay))
     };
     let cases = [
-        ("Group 4 data with EndOfLine", with(Scheme::G4, false, "/EndOfLine true"), "kept: EndOfLine set for Group 4 data"),
-        ("K 0, an EOL before the first row only", with(Scheme::G31D, true, ""), "kept: a row without EOL after EndOfLine or a leading EOL"),
-        ("K 2, an EOL before the first row only", with(Scheme::G32D, true, ""), "kept: a row without EOL after EndOfLine or a leading EOL"),
-        ("K 0, EndOfLine but no EOLs", with(Scheme::G31D, false, "/EndOfLine true"), "kept: a row without EOL after EndOfLine or a leading EOL"),
+        (
+            "Group 4 data with EndOfLine",
+            with(Scheme::G4, false, "/EndOfLine true"),
+            "kept: EndOfLine set for Group 4 data",
+        ),
+        (
+            "K 0, an EOL before the first row only",
+            with(Scheme::G31D, true, ""),
+            "kept: a row without EOL after EndOfLine or a leading EOL",
+        ),
+        (
+            "K 2, an EOL before the first row only",
+            with(Scheme::G32D, true, ""),
+            "kept: a row without EOL after EndOfLine or a leading EOL",
+        ),
+        (
+            "K 0, EndOfLine but no EOLs",
+            with(Scheme::G31D, false, "/EndOfLine true"),
+            "kept: a row without EOL after EndOfLine or a leading EOL",
+        ),
     ];
     for (what, d, why) in &cases {
         assert_eq!(explain(d), *why, "{what}");
         assert!(stays_ccitt(d), "{what}");
     }
     // The same data without the EOL before the first row, or without EndOfLine, is clear to every reader.
-    for (scheme, parms) in [(Scheme::G4, ""), (Scheme::G31D, ""), (Scheme::G32D, ""), (Scheme::G31D, "/EndOfLine false")] {
+    for (scheme, parms) in
+        [(Scheme::G4, ""), (Scheme::G31D, ""), (Scheme::G32D, ""), (Scheme::G31D, "/EndOfLine false")]
+    {
         assert!(explain(&with(scheme, false, parms)).starts_with("JBIG2"), "{scheme:?} {parms}");
     }
 
@@ -320,7 +360,9 @@ fn fix_xref(d: &[u8]) -> Vec<u8> {
     for o in &offs {
         out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
     }
-    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", offs.len() + 1).as_bytes());
+    out.extend_from_slice(
+        format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", offs.len() + 1).as_bytes(),
+    );
     out
 }
 
@@ -342,7 +384,9 @@ fn pdf_images(images: &[(String, Vec<u8>)]) -> Vec<u8> {
     obj(&mut out, b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
     obj(&mut out, format!("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300] /Resources << /XObject << {xobjects}>> >> /Contents {} 0 R >>\nendobj\n", 4 + n).as_bytes());
     for (i, (dict, data)) in images.iter().enumerate() {
-        let mut s = format!("{} 0 obj\n<< /Type /XObject /Subtype /Image {dict} /Length {} >>\nstream\n", 4 + i, data.len()).into_bytes();
+        let mut s =
+            format!("{} 0 obj\n<< /Type /XObject /Subtype /Image {dict} /Length {} >>\nstream\n", 4 + i, data.len())
+                .into_bytes();
         s.extend_from_slice(data);
         s.extend_from_slice(b"\nendstream\nendobj\n");
         obj(&mut out, &s);

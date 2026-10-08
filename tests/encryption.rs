@@ -75,7 +75,19 @@ fn values(doc: &Doc) -> BTreeMap<u32, Obj> {
     let mut out = BTreeMap::new();
     let mut todo = Vec::new();
     for (k, v) in &doc.trailer.0 {
-        if !matches!(k.as_slice(), b"Prev" | b"XRefStm" | b"Size" | b"Encrypt" | b"Index" | b"W" | b"Type" | b"Filter" | b"DecodeParms" | b"Length") {
+        if !matches!(
+            k.as_slice(),
+            b"Prev"
+                | b"XRefStm"
+                | b"Size"
+                | b"Encrypt"
+                | b"Index"
+                | b"W"
+                | b"Type"
+                | b"Filter"
+                | b"DecodeParms"
+                | b"Length"
+        ) {
             v.refs(&mut todo);
         }
     }
@@ -88,7 +100,13 @@ fn values(doc: &Doc) -> BTreeMap<u32, Obj> {
         let o = match o {
             Obj::Stream(s) => {
                 let data = decode_fully(&s.dict, &s.data, 1 << 24).unwrap();
-                let d = Dict(s.dict.0.into_iter().filter(|(k, _)| !matches!(k.as_slice(), b"Length" | b"Filter" | b"DecodeParms")).collect());
+                let d = Dict(
+                    s.dict
+                        .0
+                        .into_iter()
+                        .filter(|(k, _)| !matches!(k.as_slice(), b"Length" | b"Filter" | b"DecodeParms"))
+                        .collect(),
+                );
                 let o = Obj::Array(vec![Obj::Dict(d), Obj::Str(data)]);
                 o.refs(&mut refs);
                 o
@@ -186,7 +204,11 @@ fn files_that_need_a_password_or_that_readers_disagree_on_are_left_untouched() {
         ("no key length anywhere (V4)", file("v4_aes_no_length"), "key length given nowhere"),
         (
             "no key length anywhere (V5)",
-            replaced(edited(r6, "/Filter /Standard /Length 256 /O", "/Filter /Standard             /O"), "/AESV3 /Length 32 >>", "/AESV3            >>"),
+            replaced(
+                edited(r6, "/Filter /Standard /Length 256 /O", "/Filter /Standard             /O"),
+                "/AESV3 /Length 32 >>",
+                "/AESV3            >>",
+            ),
             "key length given nowhere",
         ),
         ("a changed /U", one_digit_changed(r4, "/U <"), "needs a password"),
@@ -212,7 +234,10 @@ fn files_that_need_a_password_or_that_readers_disagree_on_are_left_untouched() {
         assert_eq!(unpack(&packed).unwrap(), input, "{what}");
     }
     // The key length may be given in either place.
-    for (from, to) in [("/Filter /Standard /Length 256 /O", "/Filter /Standard             /O"), ("/AESV3 /Length 32 >>", "/AESV3            >>")] {
+    for (from, to) in [
+        ("/Filter /Standard /Length 256 /O", "/Filter /Standard             /O"),
+        ("/AESV3 /Length 32 >>", "/AESV3            >>"),
+    ] {
         let input = edited(r6, from, to);
         assert!(matches!(optimize(&input, &opts()).outcome, Outcome::Smaller(_)), "{from}");
     }
@@ -261,7 +286,9 @@ fn unencrypted_files_with_a_raw_carriage_return_in_a_string_are_left_untouched()
     // Readers disagree on the value (qpdf reads a line feed; pdf.js, PDFium and Poppler keep the carriage
     // return), so a rewrite would change it for some of them. An escaped line end is fine.
     let base = file("base");
-    for (title, untouched) in [(&b"(Encrypted\rtest)"[..], true), (b"(Encrypted\\\ntst)", false), (b"(Encrypted test)", false)] {
+    for (title, untouched) in
+        [(&b"(Encrypted\rtest)"[..], true), (b"(Encrypted\\\ntst)", false), (b"(Encrypted test)", false)]
+    {
         let mut d = base.clone();
         let i = find(&d, b"(Encrypted test)").unwrap();
         assert_eq!(title.len(), 16);

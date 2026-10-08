@@ -56,10 +56,12 @@ fn peak_during(f: impl FnOnce()) -> usize {
 /// A page with `k` different photo-like RGB images (a gradient plus noise, so Flate shrinks them only a
 /// little), stored with zlib level 1.
 fn pdf_with_images(k: usize, w: usize, h: usize) -> Vec<u8> {
-    let mut objs: Vec<Vec<u8>> = vec![b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(), b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()];
+    let mut objs: Vec<Vec<u8>> =
+        vec![b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(), b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()];
     let names: String = (0..k).map(|i| format!("/I{i} {} 0 R ", 5 + i)).collect();
     objs.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /XObject << {names}>> >> >>").into_bytes());
-    let content: String = (0..k).map(|i| format!("q 50 0 0 50 {} {} cm /I{i} Do Q\n", i * 55 % 550, i * 60 % 700)).collect();
+    let content: String =
+        (0..k).map(|i| format!("q 50 0 0 50 {} {} cm /I{i} Do Q\n", i * 55 % 550, i * 60 % 700)).collect();
     let stream = |dict: &str, data: &[u8]| -> Vec<u8> {
         let mut o = format!("<< {dict} /Length {} >>\nstream\n", data.len()).into_bytes();
         o.extend_from_slice(data);
@@ -96,7 +98,9 @@ fn pdf_with_images(k: usize, w: usize, h: usize) -> Vec<u8> {
     for off in offsets {
         pdf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
     }
-    pdf.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    pdf.extend_from_slice(
+        format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes(),
+    );
     pdf
 }
 
@@ -122,7 +126,10 @@ fn memory_follows_the_file_not_every_encode() {
             // (about 2 times its stored size, measured). Remembering every encode of every image took 5 to 7.
             let extra = p_many.saturating_sub(p_few) / 8;
             eprintln!("effort {effort}, {threads} threads: peak {p_few} for 3 images, {p_many} for 11: {extra} per image of {per_image} bytes");
-            assert!(extra <= 4 * per_image, "effort {effort}, {threads} threads: {extra} bytes per image of {per_image}");
+            assert!(
+                extra <= 4 * per_image,
+                "effort {effort}, {threads} threads: {extra} bytes per image of {per_image}"
+            );
         }
     }
 }

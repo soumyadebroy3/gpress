@@ -354,18 +354,16 @@ pub const RAW_CR: &str = "a literal string holds a raw carriage return (readers 
 /// Parses "n g obj ... endobj" at `pos`. For streams, `length` resolves the /Length value (which may be an
 /// indirect reference). Returns (number, generation, object, end position). An object whose literal strings
 /// hold an unescaped carriage return is an error (see `Lexer::raw_cr`).
-pub fn parse_indirect(
-    d: &[u8],
-    pos: usize,
-    length: &dyn Fn(&Obj) -> Option<usize>,
-) -> PResult<(u32, u16, Obj, usize)> {
+pub fn parse_indirect(d: &[u8], pos: usize, length: &dyn Fn(&Obj) -> Option<usize>) -> PResult<(u32, u16, Obj, usize)> {
     let mut lx = Lexer::new(d, pos);
     lx.skip_ws();
     let n = lx.regular_token();
-    let n: u32 = std::str::from_utf8(n).ok().and_then(|s| s.parse().ok()).ok_or(ParseError { pos, msg: "bad object number" })?;
+    let n: u32 =
+        std::str::from_utf8(n).ok().and_then(|s| s.parse().ok()).ok_or(ParseError { pos, msg: "bad object number" })?;
     lx.skip_ws();
     let g = lx.regular_token();
-    let g: u16 = std::str::from_utf8(g).ok().and_then(|s| s.parse().ok()).ok_or(ParseError { pos, msg: "bad generation" })?;
+    let g: u16 =
+        std::str::from_utf8(g).ok().and_then(|s| s.parse().ok()).ok_or(ParseError { pos, msg: "bad generation" })?;
     if !lx.expect_keyword(b"obj") {
         return Err(ParseError { pos: lx.pos, msg: "missing obj" });
     }
@@ -390,7 +388,10 @@ pub fn parse_indirect(
         }
         let len_obj = dict.get(b"Length").ok_or(ParseError { pos: p, msg: "stream without Length" })?;
         let len = length(len_obj).ok_or(ParseError { pos: p, msg: "unusable stream Length" })?;
-        let end = p.checked_add(len).filter(|&e| e <= d.len()).ok_or(ParseError { pos: p, msg: "stream runs past the end" })?;
+        let end = p
+            .checked_add(len)
+            .filter(|&e| e <= d.len())
+            .ok_or(ParseError { pos: p, msg: "stream runs past the end" })?;
         let data = d[p..end].to_vec();
         let mut lx2 = Lexer::new(d, end);
         if !lx2.expect_keyword(b"endstream") {

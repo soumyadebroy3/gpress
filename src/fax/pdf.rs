@@ -227,5 +227,6 @@ pub fn same_image(a: &Stream, b: &Stream, resolve: Resolve) -> bool {
         Ok(x) => x,
         Err(_) => return false,
     };
-    affordable(&parsed.image, a.data.len()) && jbig2::read_pdf_stream(&b.data, p.black_is_1, parsed.image.changes.len()).as_ref() == Some(&parsed.image)
+    affordable(&parsed.image, a.data.len())
+        && jbig2::read_pdf_stream(&b.data, p.black_is_1, parsed.image.changes.len()).as_ref() == Some(&parsed.image)
 }

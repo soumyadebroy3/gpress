@@ -29,7 +29,9 @@ fn pdf(objs: &[Vec<u8>]) -> Vec<u8> {
     for off in offs {
         d.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
     }
-    d.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes());
+    d.extend_from_slice(
+        format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes(),
+    );
     d
 }
 
@@ -77,7 +79,10 @@ fn conformance_is_respected_unless_told_otherwise() {
             match before.load(n) {
                 Ok((_, Obj::Stream(s))) => {
                     let s2 = load_stream(&out, n);
-                    assert_eq!(xref::decode_fully(&s.dict, &s.data, 1 << 20), xref::decode_fully(&s2.dict, &s2.data, 1 << 20));
+                    assert_eq!(
+                        xref::decode_fully(&s.dict, &s.data, 1 << 20),
+                        xref::decode_fully(&s2.dict, &s2.data, 1 << 20)
+                    );
                 }
                 Ok((_, o)) => assert_eq!(out.load(n).unwrap().1, o),
                 Err(_) => {}
@@ -107,7 +112,12 @@ fn flate_goes_in_front_of_a_jpeg_only_when_asked() {
     assert!(matches!(with.outcome, Outcome::Smaller(_)) && matches!(without.outcome, Outcome::Smaller(_)));
     assert!(with.data.len() < without.data.len());
     let s = load_stream(&xref::open(&with.data).unwrap(), 5);
-    assert_eq!(s.dict.get(b"Filter"), Some(&Obj::Array(vec![Obj::Name(b"FlateDecode".to_vec()), Obj::Name(b"DCTDecode".to_vec())])), "{:?}", s.dict);
+    assert_eq!(
+        s.dict.get(b"Filter"),
+        Some(&Obj::Array(vec![Obj::Name(b"FlateDecode".to_vec()), Obj::Name(b"DCTDecode".to_vec())])),
+        "{:?}",
+        s.dict
+    );
     let s = load_stream(&xref::open(&without.data).unwrap(), 5);
     assert_eq!(s.dict.get(b"Filter"), Some(&Obj::Name(b"DCTDecode".to_vec())), "{:?}", s.dict);
     assert!(s.data.len() < jpeg.len() && s.data.starts_with(&[0xFF, 0xD8]));

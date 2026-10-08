@@ -333,7 +333,15 @@ fn dp_tokens(seq: &[u8], cost: &[u64; 19]) -> Vec<(u8, u8)> {
         zrun[i] = if seq[i] == 0 { zrun[i + 1] + 1 } else { 0 };
     }
     for i in (1..n).rev() {
-        vrun[i] = if seq[i] == seq[i - 1] { if i + 1 < n && seq[i + 1] == seq[i] { vrun[i + 1] + 1 } else { 1 } } else { 0 };
+        vrun[i] = if seq[i] == seq[i - 1] {
+            if i + 1 < n && seq[i + 1] == seq[i] {
+                vrun[i + 1] + 1
+            } else {
+                1
+            }
+        } else {
+            0
+        };
     }
     // Symbol 18 (11 to 138 zeros, one price) reaches position t only from t - 138 ..= t - 11, so it is
     // settled before any other symbol can reach t (they come from t - 10 or later). Its best start is the
@@ -423,7 +431,6 @@ fn header_bits(cl: &[u8; 19], tokens: &[(u8, u8)]) -> (usize, u64) {
     }
     (hclen, bits)
 }
-
 
 /// The cheapest header we can find for these code lengths.
 pub fn best_header(ll: &[u8], d: &[u8]) -> Header {
@@ -584,7 +591,15 @@ mod tests {
             zrun[i] = if seq[i] == 0 { zrun[i + 1] + 1 } else { 0 };
         }
         for i in (1..n).rev() {
-            vrun[i] = if seq[i] == seq[i - 1] { if i + 1 < n && seq[i + 1] == seq[i] { vrun[i + 1] + 1 } else { 1 } } else { 0 };
+            vrun[i] = if seq[i] == seq[i - 1] {
+                if i + 1 < n && seq[i + 1] == seq[i] {
+                    vrun[i + 1] + 1
+                } else {
+                    1
+                }
+            } else {
+                0
+            };
         }
         for i in 0..n {
             let b = best[i];

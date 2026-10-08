@@ -502,7 +502,15 @@ pub(super) fn expanded<'a>(prev: &[u8], data: &'a [u8]) -> (Cow<'a, [u8]>, usize
 
 /// Codes a Type 1 font program of `n` bytes (`src` when encoding) and appends it to `out`: opened when it
 /// closes back to exactly the same bytes, as it is (model set to `plain`) otherwise. Both sides run this.
-pub(super) fn code<C: Coder>(io: &mut Io<C>, src: Option<&[u8]>, n: usize, dict: Option<&Dict>, plain: Kind, out: &mut Vec<u8>, stats: &mut PackStats) {
+pub(super) fn code<C: Coder>(
+    io: &mut Io<C>,
+    src: Option<&[u8]>,
+    n: usize,
+    dict: Option<&Dict>,
+    plain: Kind,
+    out: &mut Vec<u8>,
+    stats: &mut PackStats,
+) {
     let (h1, h2) = hints(dict, n);
     let opened = src.map(|f| opened(f, h1, h2));
     let lay = opened.as_ref().and_then(|o| o.as_ref()).map(|(l, _)| *l);
@@ -532,7 +540,9 @@ pub(super) fn code<C: Coder>(io: &mut Io<C>, src: Option<&[u8]>, n: usize, dict:
     let t_len = n - end + start + count;
     let t_in = opened.as_ref().and_then(|o| o.as_ref()).map(|(_, t)| t.as_slice());
     let mut t = Vec::with_capacity(reserve(t_len));
-    for (kind, a, b) in [(Kind::Font, 0, start), (Kind::Charstring, start, start + count), (Kind::Font, start + count, t_len)] {
+    for (kind, a, b) in
+        [(Kind::Font, 0, start), (Kind::Charstring, start, start + count), (Kind::Font, start + count, t_len)]
+    {
         io.m.set_kind(kind, Geom::default(), 0);
         io.bytes(t_in.map(|x| &x[a..b]), b - a, &mut t);
         if io.damaged {
@@ -551,7 +561,14 @@ pub(super) fn code<C: Coder>(io: &mut Io<C>, src: Option<&[u8]>, n: usize, dict:
 /// The layout of an opened font (`l` when encoding): start and count as differences from the hints, then the
 /// hex form's line layout. None if a field can't be what it stands for; `code` checks the layout against the
 /// font's length.
-fn code_layout<C: Coder>(io: &mut Io<C>, l: Option<&Layout>, hex: bool, n: usize, h1: usize, h2: usize) -> Option<Layout> {
+fn code_layout<C: Coder>(
+    io: &mut Io<C>,
+    l: Option<&Layout>,
+    hex: bool,
+    n: usize,
+    h1: usize,
+    h2: usize,
+) -> Option<Layout> {
     let start = delta(io, l.map(|l| l.start), h1);
     let count = delta(io, l.map(|l| l.n), h2);
     let hex = if hex {
@@ -671,7 +688,11 @@ mod tests {
             p_enc.extend_from_slice(&en);
             text(&format!(" {nd}\n"), &mut p_plain, &mut p_enc);
         }
-        text("end\nend\nreadonly put\nnoaccess put\ndup/FontName get exch definefont pop\nmark currentfile closefile\n", &mut p_plain, &mut p_enc);
+        text(
+            "end\nend\nreadonly put\nnoaccess put\ndup/FontName get exch definefont pop\nmark currentfile closefile\n",
+            &mut p_plain,
+            &mut p_enc,
+        );
         let mut cipher = p_enc;
         encrypt(&mut cipher, EEXEC);
         let mut trailer = Vec::new();
@@ -695,7 +716,9 @@ mod tests {
 
     #[test]
     fn opens_binary_eexec_and_charstrings() {
-        for (len_iv, rd) in [(None, "RD"), (Some(4), "-|"), (Some(0), "RD"), (Some(1), "RD"), (Some(3), "-|"), (Some(-1), "RD")] {
+        for (len_iv, rd) in
+            [(None, "RD"), (Some(4), "-|"), (Some(0), "RD"), (Some(1), "RD"), (Some(3), "-|"), (Some(-1), "RD")]
+        {
             let (f, t, l1, l2) = font(len_iv, rd, 40);
             let l = check_opens(&f, &t, l1, l2);
             assert_eq!(l, Layout { start: l1, n: l2, hex: None }, "{len_iv:?} {rd}");
@@ -739,8 +762,12 @@ mod tests {
         let (f, t, l1, l2) = font(None, "RD", 10);
         let seg = |kind: u8, n: usize| [&[0x80, kind][..], &(n as u32).to_le_bytes()].concat();
         let trailer = f[l1 + l2..].to_vec();
-        let pfb = [&seg(1, l1)[..], &f[..l1], &seg(2, l2), &f[l1..l1 + l2], &seg(1, trailer.len()), &trailer, &[0x80, 3]].concat();
-        let want = [&seg(1, l1)[..], &t[..l1], &seg(2, l2), &t[l1..l1 + l2], &seg(1, trailer.len()), &trailer, &[0x80, 3]].concat();
+        let pfb =
+            [&seg(1, l1)[..], &f[..l1], &seg(2, l2), &f[l1..l1 + l2], &seg(1, trailer.len()), &trailer, &[0x80, 3]]
+                .concat();
+        let want =
+            [&seg(1, l1)[..], &t[..l1], &seg(2, l2), &t[l1..l1 + l2], &seg(1, trailer.len()), &trailer, &[0x80, 3]]
+                .concat();
         let l = check_opens(&pfb, &want, l1, l2);
         assert_eq!(l.start, 6 + l1 + 6);
     }
@@ -783,7 +810,8 @@ mod tests {
         let mut mixed = hex.clone();
         let k = mixed.iter().rposition(|c| (b'A'..=b'F').contains(c)).unwrap();
         mixed[k] = mixed[k].to_ascii_lowercase();
-        let spaced: Vec<u8> = hex.iter().enumerate().flat_map(|(i, &c)| if i % 9 == 8 { vec![c, b' '] } else { vec![c] }).collect();
+        let spaced: Vec<u8> =
+            hex.iter().enumerate().flat_map(|(i, &c)| if i % 9 == 8 { vec![c, b' '] } else { vec![c] }).collect();
         for bad in [moved, mixed, spaced] {
             let hf = [&f[..l1], &bad[..], trailer].concat();
             assert_eq!(unhex(&bad, cipher.len()).as_deref(), Some(cipher), "same digits");
@@ -798,7 +826,8 @@ mod tests {
     fn layouts_that_dont_fit_are_refused() {
         let (f, t, l1, l2) = font(None, "RD", 8);
         let l = Layout { start: l1, n: l2, hex: None };
-        for bad in [Layout { start: f.len(), n: 1, ..l }, Layout { n: f.len(), ..l }, Layout { start: usize::MAX, ..l }] {
+        for bad in [Layout { start: f.len(), n: 1, ..l }, Layout { n: f.len(), ..l }, Layout { start: usize::MAX, ..l }]
+        {
             assert!(open(&f, &bad).is_none());
             assert!(close(&t, &bad).is_none());
         }
@@ -807,7 +836,12 @@ mod tests {
         // Hex text lengths too large for a usize have no length (they used to wrap around to a few bytes:
         // 2 and 0 for the first two on 64 bits).
         let one_digit = |eol, last_eol| Some(Hex { upper: true, line: 1, eol, last_eol });
-        for (n, h) in [(usize::MAX / 6 + 1, one_digit(2, true)), (usize::MAX / 4 + 1, one_digit(0, true)), (usize::MAX / 2, hex.hex), (usize::MAX, one_digit(0, false))] {
+        for (n, h) in [
+            (usize::MAX / 6 + 1, one_digit(2, true)),
+            (usize::MAX / 4 + 1, one_digit(0, true)),
+            (usize::MAX / 2, hex.hex),
+            (usize::MAX, one_digit(0, false)),
+        ] {
             let huge = Layout { start: 0, n, hex: h };
             assert_eq!(huge.text_len(), None, "{huge:?}");
             assert!(open(&f, &huge).is_none());
@@ -861,7 +895,13 @@ mod tests {
     /// and how many decisions it decoded.
     fn read_font(data: &[u8], n: usize) -> (Vec<u8>, bool, u64) {
         let mut m = Model::new(14);
-        let mut io = Io { m: &mut m, c: Counted { c: Decoder::new(data), decisions: 0 }, damaged: false, plain: false, budget: u64::MAX };
+        let mut io = Io {
+            m: &mut m,
+            c: Counted { c: Decoder::new(data), decisions: 0 },
+            damaged: false,
+            plain: false,
+            budget: u64::MAX,
+        };
         let (mut out, mut stats) = (Vec::new(), PackStats::default());
         code(&mut io, None, n, None, Kind::Font, &mut out, &mut stats);
         (out, io.damaged, io.c.decisions)
@@ -877,7 +917,11 @@ mod tests {
         let n = f.len();
         // The writer above writes what `code` writes: the real layout restores the font.
         let real = Layout { start: l1, n: l2, hex: None };
-        let data = write_opened(&real, n, &[(Kind::Font, &t[..l1]), (Kind::Charstring, &t[l1..l1 + l2]), (Kind::Font, &t[l1 + l2..])]);
+        let data = write_opened(
+            &real,
+            n,
+            &[(Kind::Font, &t[..l1]), (Kind::Charstring, &t[l1..l1 + l2]), (Kind::Font, &t[l1 + l2..])],
+        );
         assert_eq!(read_font(&data, n).0, f);
         // Each layout is followed by 256 KiB of zeros where the private part would be: read as one, they take
         // over 250,000 decisions.

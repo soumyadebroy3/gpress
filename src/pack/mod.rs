@@ -75,10 +75,13 @@ fn looks_compressed(x: &[u8], allowed: bool) -> bool {
 /// Bits per symbol of a histogram.
 fn entropy(h: &[u64; 256]) -> f64 {
     let n = h.iter().sum::<u64>() as f64;
-    h.iter().filter(|&&c| c > 0).map(|&c| {
-        let p = c as f64 / n;
-        -p * p.log2()
-    }).sum()
+    h.iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = c as f64 / n;
+            -p * p.log2()
+        })
+        .sum()
 }
 
 /// Plain coding below `PLAIN_BELOW` (see `PackOptions`): for data that looks compressed and whose differences
@@ -624,9 +627,16 @@ enum Plan {
     Syntax(usize, usize),
     Raw(usize, usize),
     /// `lep`: the decoded data is a JPEG, recompressed with Lepton (when that beats the Flate bytes).
-    Rebuilt { params: zlibexact::Params, data: Vec<u8>, tail: Vec<u8>, lep: Option<Vec<u8>> },
+    Rebuilt {
+        params: zlibexact::Params,
+        data: Vec<u8>,
+        tail: Vec<u8>,
+        lep: Option<Vec<u8>>,
+    },
     /// A JPEG recompressed with an existing library (Lepton), restored bit for bit.
-    Lepton { data: Vec<u8> },
+    Lepton {
+        data: Vec<u8>,
+    },
     /// An encrypted stream's decrypted bytes that nothing rebuilds (coded like a raw stream).
     Plain(Vec<u8>),
     /// The file key of an encrypted file, before its first encrypted stream.
@@ -636,7 +646,11 @@ enum Plan {
     /// A CCITT fax stream: the image and every choice of its encoder (see `crate::fax::part`), the byte of the
     /// file its data starts at (the work budget counts from there), and where its bytes are when they are
     /// stored as they are (None: an encrypted stream's decrypted bytes, see `sealed`).
-    Fax { parsed: Box<crate::fax::ccitt::Parsed>, at: usize, raw: Option<(usize, usize)> },
+    Fax {
+        parsed: Box<crate::fax::ccitt::Parsed>,
+        at: usize,
+        raw: Option<(usize, usize)>,
+    },
 }
 
 /// What to do with each part of the file. The streams are looked at in parallel (the biggest first); the
@@ -797,12 +811,27 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, opt: &PackOptions, st
     run_plans(c, d, plans, total_len, opt, stats)
 }
 
-fn run_plans<C: Coder>(c: C, d: Option<&[u8]>, plans: Option<Vec<Plan>>, total_len: usize, opt: &PackOptions, stats: &mut PackStats) -> (Vec<u8>, C) {
+fn run_plans<C: Coder>(
+    c: C,
+    d: Option<&[u8]>,
+    plans: Option<Vec<Plan>>,
+    total_len: usize,
+    opt: &PackOptions,
+    stats: &mut PackStats,
+) -> (Vec<u8>, C) {
     run_within(c, d, plans, total_len, opt, stats, decode_budget(total_len))
 }
 
 /// `run_plans` with the decode budget given (tests write parts beyond it to see them refused).
-fn run_within<C: Coder>(c: C, d: Option<&[u8]>, plans: Option<Vec<Plan>>, total_len: usize, opt: &PackOptions, stats: &mut PackStats, budget: u64) -> (Vec<u8>, C) {
+fn run_within<C: Coder>(
+    c: C,
+    d: Option<&[u8]>,
+    plans: Option<Vec<Plan>>,
+    total_len: usize,
+    opt: &PackOptions,
+    stats: &mut PackStats,
+    budget: u64,
+) -> (Vec<u8>, C) {
     let mut model = primed(table_bits(total_len));
     let mut io = Io { m: &mut model, c, damaged: false, plain: opt.effort < PLAIN_BELOW, budget };
     let mut out: Vec<u8> = Vec::with_capacity(reserve(total_len));
@@ -883,7 +912,9 @@ fn run_within<C: Coder>(c: C, d: Option<&[u8]>, plans: Option<Vec<Plan>>, total_
             }
             T_REBUILT => {
                 let (p_in, data_in, tail_in, lep_in) = match cur.flatten() {
-                    Some(Plan::Rebuilt { params, data, tail, lep }) => (Some(*params), Some(data.as_slice()), Some(tail.as_slice()), Some(lep.as_deref())),
+                    Some(Plan::Rebuilt { params, data, tail, lep }) => {
+                        (Some(*params), Some(data.as_slice()), Some(tail.as_slice()), Some(lep.as_deref()))
+                    }
                     _ => (None, None, None, None),
                 };
                 let level = io.byte(p_in.map(|p| p.level));
@@ -990,7 +1021,11 @@ fn run_within<C: Coder>(c: C, d: Option<&[u8]>, plans: Option<Vec<Plan>>, total_
         if tag != T_CRYPT {
             if let Some((s, mark)) = sealing.take() {
                 let plain = out.split_off(mark);
-                match crypt_key.as_deref().filter(|_| !plain.is_empty()).and_then(|k| sealed::seal_payload(&s, k, &plain)) {
+                match crypt_key
+                    .as_deref()
+                    .filter(|_| !plain.is_empty())
+                    .and_then(|k| sealed::seal_payload(&s, k, &plain))
+                {
                     Some(z) => {
                         stats.decrypted += 1;
                         stats.decrypted_bytes += z.len();
@@ -1034,7 +1069,13 @@ fn lepton_part<C: Coder>(io: &mut Io<C>, src: Option<&[u8]>, n: usize, lep: &mut
 
 /// Codes a decoded stream payload (shared by the rebuilt kinds): its length, then the data with the model
 /// set for what it is; image rows lose their PNG predictor bytes on the way.
-fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, lep_in: Option<Option<&[u8]>>, out: &[u8], stats: &mut PackStats) -> Vec<u8> {
+fn payload<C: Coder>(
+    io: &mut Io<C>,
+    data_in: Option<&[u8]>,
+    lep_in: Option<Option<&[u8]>>,
+    out: &[u8],
+    stats: &mut PackStats,
+) -> Vec<u8> {
     let dlen = io.part(data_in.map(|x| x.len() as u64), MAX_PART);
     // A JPEG behind Flate (as normal-PDF output writes them): Lepton for the JPEG inside.
     if io.byte(lep_in.map(|l| l.is_some() as u8)) == 1 {
@@ -1151,7 +1192,11 @@ fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, lep_in: Option<Opti
 /// stream's bytes decide, not its dictionary: a /Filter given by reference, for example, still counts.
 /// Whatever is tried here is checked by rebuilding it exactly (and every pack is restored and compared).
 fn zlib_header(raw: &[u8]) -> bool {
-    raw.len() >= 8 && raw[0] & 0x0f == 8 && raw[0] >> 4 <= 7 && ((raw[0] as u16) << 8 | raw[1] as u16).is_multiple_of(31) && raw[1] & 0x20 == 0
+    raw.len() >= 8
+        && raw[0] & 0x0f == 8
+        && raw[0] >> 4 <= 7
+        && ((raw[0] as u16) << 8 | raw[1] as u16).is_multiple_of(31)
+        && raw[1] & 0x20 == 0
 }
 
 /// Where each object "n g obj" of a file starts its value (the last definition wins), found by its bytes:
@@ -1216,7 +1261,11 @@ fn file_resolver<'a>(d: &'a [u8], objects: &'a ObjIndex) -> impl Fn(&Obj) -> Opt
 /// None when it can't be stored that way. Parameters given by reference (/DecodeParms 13 0 R, /K 7 0 R) go
 /// through `resolve`; whatever it finds is only a guess to try, since the result is checked by writing the
 /// stream again. Shared by streams stored as they are and by decrypted ones (`sealed`).
-pub(super) fn fax_parse(raw: &[u8], mut dict: Dict, resolve: &dyn Fn(&Obj) -> Option<Obj>) -> Option<crate::fax::ccitt::Parsed> {
+pub(super) fn fax_parse(
+    raw: &[u8],
+    mut dict: Dict,
+    resolve: &dyn Fn(&Obj) -> Option<Obj>,
+) -> Option<crate::fax::ccitt::Parsed> {
     use crate::fax::{ccitt::Scheme, part, pdf::FaxParams};
     if raw.len() < MIN_FAX {
         return None;
@@ -1448,17 +1497,36 @@ mod tests {
     fn plain_coding_only_for_data_without_structure() {
         let mut s = 7u64;
         let random: Vec<u8> = (0..100_000).map(|_| rng(&mut s) as u8).collect();
-        let text: Vec<u8> = (0..20_000u32).flat_map(|i| format!("BT /F1 {} Tf ({}) Tj ET\n", i % 17, i.wrapping_mul(7919)).into_bytes()).collect();
+        let text: Vec<u8> = (0..20_000u32)
+            .flat_map(|i| format!("BT /F1 {} Tf ({}) Tj ET\n", i % 17, i.wrapping_mul(7919)).into_bytes())
+            .collect();
         assert!(plainly(&random, true));
         assert!(!plainly(&random, false), "only when allowed");
         assert!(!plainly(&text, true));
         // Image samples whose byte values are evenly spread, but with neighbours that are alike: an RGB
         // gradient, a ramp, a noisy photo-like picture. Large data is judged on windows.
         let (w, h) = (512usize, 512usize);
-        let gradient: Vec<u8> = (0..h).flat_map(|y| (0..w).flat_map(move |x| [(x / 2) as u8, (y / 2) as u8, ((x + y) / 4) as u8])).collect();
+        let gradient: Vec<u8> = (0..h)
+            .flat_map(|y| (0..w).flat_map(move |x| [(x / 2) as u8, (y / 2) as u8, ((x + y) / 4) as u8]))
+            .collect();
         let ramp: Vec<u8> = (0..300_000u32).map(|i| i as u8).collect();
-        let photo: Vec<u8> = (0..w * h * 3).map(|i| ((i % (w * 3)) / 3 + i / (w * 3) + (rng(&mut s) % 81) as usize) as u8).collect();
-        let big = [random.as_slice(), &gradient, &random, &random, &random, &random, &random, &random, &random, &random, &random, &random].concat();
+        let photo: Vec<u8> =
+            (0..w * h * 3).map(|i| ((i % (w * 3)) / 3 + i / (w * 3) + (rng(&mut s) % 81) as usize) as u8).collect();
+        let big = [
+            random.as_slice(),
+            &gradient,
+            &random,
+            &random,
+            &random,
+            &random,
+            &random,
+            &random,
+            &random,
+            &random,
+            &random,
+            &random,
+        ]
+        .concat();
         for (name, x) in [("gradient", &gradient), ("ramp", &ramp), ("photo", &photo)] {
             assert!(looks_compressed(x, true), "{name}: its bytes alone look compressed");
             assert!(!plainly(x, true), "{name}");
@@ -1470,7 +1538,9 @@ mod tests {
     /// A small PDF with a content stream zlib wrote (rebuilt exactly) and an image.
     fn sample_pdf() -> Vec<u8> {
         let z = |d: &[u8]| zlib_stream(d, Params { level: 6, window_bits: 15, mem_level: 8, filtered: false });
-        let content: Vec<u8> = (0..300).flat_map(|i| format!("BT /F1 12 Tf 72 {} Td (Line {i}) Tj ET\n", 700 - i % 60 * 11).into_bytes()).collect();
+        let content: Vec<u8> = (0..300)
+            .flat_map(|i| format!("BT /F1 12 Tf 72 {} Td (Line {i}) Tj ET\n", 700 - i % 60 * 11).into_bytes())
+            .collect();
         let px: Vec<u8> = (0..200 * 100).map(|i| (i % 200 + i / 200) as u8).collect();
         let mut pdf = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n".to_vec();
         for (n, dict, data) in [(2, "/Filter /FlateDecode", z(&content)), (3, "/Subtype /Image /Width 200 /Height 100 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode", z(&px))] {
@@ -1486,7 +1556,8 @@ mod tests {
     /// encoder notices afterwards that the parts don't restore the file, and stops; the pack ends there).
     fn pack_unbounded(d: &[u8], plans: Vec<Plan>) -> Vec<u8> {
         let mut stats = PackStats::default();
-        let (_, enc) = run_within(Encoder::new(), Some(d), Some(plans), d.len(), &PackOptions::default(), &mut stats, u64::MAX);
+        let (_, enc) =
+            run_within(Encoder::new(), Some(d), Some(plans), d.len(), &PackOptions::default(), &mut stats, u64::MAX);
         let mut out = header(VERSION, d);
         out.extend_from_slice(&enc.finish());
         out
@@ -1498,15 +1569,24 @@ mod tests {
         // A pack of it that claims a 4 MiB decoded stream (zeros, so it codes to almost nothing) is refused
         // when the length is read, before any of it is decoded: in a few milliseconds and without reserving
         // the memory. The same for Lepton data larger than what is left of the file.
-        let d = b"%PDF-1.4\n1 0 obj\n<< /Length 4 >>\nstream\nABCD\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
+        let d =
+            b"%PDF-1.4\n1 0 obj\n<< /Length 4 >>\nstream\nABCD\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
         let a = d.windows(4).position(|w| w == b"ABCD").unwrap();
         assert!(decode_budget(d.len()) < 4 << 20);
         let params = Params { level: 6, window_bits: 15, mem_level: 8, filtered: false };
         let huge = vec![0u8; 4 << 20];
         let cases: Vec<Vec<Plan>> = vec![
-            vec![Plan::Syntax(0, a), Plan::Rebuilt { params, data: huge.clone(), tail: Vec::new(), lep: None }, Plan::Syntax(a + 4, d.len())],
+            vec![
+                Plan::Syntax(0, a),
+                Plan::Rebuilt { params, data: huge.clone(), tail: Vec::new(), lep: None },
+                Plan::Syntax(a + 4, d.len()),
+            ],
             vec![Plan::Syntax(0, a), Plan::Lepton { data: huge.clone() }, Plan::Syntax(a + 4, d.len())],
-            vec![Plan::Syntax(0, a), Plan::Rebuilt { params, data: vec![0xFFu8; 2048], tail: Vec::new(), lep: Some(huge.clone()) }, Plan::Syntax(a + 4, d.len())],
+            vec![
+                Plan::Syntax(0, a),
+                Plan::Rebuilt { params, data: vec![0xFFu8; 2048], tail: Vec::new(), lep: Some(huge.clone()) },
+                Plan::Syntax(a + 4, d.len()),
+            ],
         ];
         for (k, plans) in cases.into_iter().enumerate() {
             let packed = pack_unbounded(d, plans);
@@ -1526,7 +1606,8 @@ mod tests {
     #[cfg(not(feature = "existing"))]
     #[test]
     fn parts_made_with_the_existing_libraries_say_so() {
-        let d = b"%PDF-1.4\n1 0 obj\n<< /Length 4 >>\nstream\nABCD\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
+        let d =
+            b"%PDF-1.4\n1 0 obj\n<< /Length 4 >>\nstream\nABCD\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
         let a = d.windows(4).position(|w| w == b"ABCD").unwrap();
         let params = Params { level: 6, window_bits: 15, mem_level: 8, filtered: false };
         let cases: Vec<Plan> = vec![

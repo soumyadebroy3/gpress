@@ -53,7 +53,9 @@ fn type1_font(glyphs: usize, form: Form) -> (Vec<u8>, usize, usize, usize) {
         private.extend_from_slice(&cs);
         private.extend_from_slice(b" ND\n");
     }
-    private.extend_from_slice(b"end\nend\nreadonly put\nnoaccess put\ndup/FontName get exch definefont pop\nmark currentfile closefile\n");
+    private.extend_from_slice(
+        b"end\nend\nreadonly put\nnoaccess put\ndup/FontName get exch definefont pop\nmark currentfile closefile\n",
+    );
     encrypt(&mut private, 55665);
     let clear = b"%!PS-AdobeFont-1.0: TestFont 001.000\n11 dict begin\n/FontName /TestFont def\n/PaintType 0 def\n/FontType 1 def\n/FontMatrix [0.001 0 0 0.001 0 0] readonly def\n/Encoding StandardEncoding def\n/FontBBox {0 -250 1000 750} readonly def\ncurrentdict end\ncurrentfile eexec\n".to_vec();
     let encrypted = match form {
@@ -85,7 +87,10 @@ fn pdf_with_font(font: &(Vec<u8>, usize, usize, usize), flate: bool) -> Vec<u8> 
     let (program, l1, l2, l3) = font;
     let content = b"BT /F1 24 Tf 72 700 Td (Type 1 test) Tj ET\n";
     let (data, filter) = if flate {
-        (zlib_stream(program, Params { level: 9, window_bits: 15, mem_level: 8, filtered: false }), " /Filter /FlateDecode")
+        (
+            zlib_stream(program, Params { level: 9, window_bits: 15, mem_level: 8, filtered: false }),
+            " /Filter /FlateDecode",
+        )
     } else {
         (program.clone(), "")
     };
@@ -94,12 +99,17 @@ fn pdf_with_font(font: &(Vec<u8>, usize, usize, usize), flate: bool) -> Vec<u8> 
     d.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
     d.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
     d.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 6 0 R >>\nendobj\n");
-    d.extend_from_slice(b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /TestFont /FontDescriptor 5 0 R >>\nendobj\n");
+    d.extend_from_slice(
+        b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /TestFont /FontDescriptor 5 0 R >>\nendobj\n",
+    );
     d.extend_from_slice(b"5 0 obj\n<< /Type /FontDescriptor /FontName /TestFont /Flags 4 /FontBBox [0 -250 1000 750] /ItalicAngle 0 /Ascent 750 /Descent -250 /CapHeight 700 /StemV 69 /FontFile 7 0 R >>\nendobj\n");
     d.extend_from_slice(format!("6 0 obj\n<< /Length {} >>\nstream\n", content.len()).as_bytes());
     d.extend_from_slice(content);
     d.extend_from_slice(b"\nendstream\nendobj\n");
-    d.extend_from_slice(format!("7 0 obj\n<< /Length {} /Length1 {l1} /Length2 {l2} /Length3 {l3}{filter} >>\nstream\n", data.len()).as_bytes());
+    d.extend_from_slice(
+        format!("7 0 obj\n<< /Length {} /Length1 {l1} /Length2 {l2} /Length3 {l3}{filter} >>\nstream\n", data.len())
+            .as_bytes(),
+    );
     d.extend_from_slice(&data);
     d.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n");
     d
@@ -135,7 +145,12 @@ fn fonts_are_opened_at_every_effort() {
             let (quick, st) = pack_with(&pdf, &PackOptions { effort, threads: 1, ..PackOptions::default() });
             assert_eq!(st.type1, 1, "effort {effort}: {st:?}");
             assert_eq!(st.flat_bytes, 0, "effort {effort}: {st:?}");
-            assert!(quick.len() * 100 <= full.len() * 103, "effort {effort}: {} bytes, effort 100: {}", quick.len(), full.len());
+            assert!(
+                quick.len() * 100 <= full.len() * 103,
+                "effort {effort}: {} bytes, effort 100: {}",
+                quick.len(),
+                full.len()
+            );
             assert_eq!(unpack(&quick).unwrap(), pdf);
         }
     }
