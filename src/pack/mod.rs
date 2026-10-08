@@ -458,20 +458,46 @@ struct Io<'m, C: Coder> {
     damaged: bool,
     /// Encoder only: code compressed-looking data plainly (see `PackOptions`).
     plain: bool,
+    /// Bytes the parts of this file may still claim beyond what they restore (decoded streams, corrections,
+    /// Lepton data): see `decode_budget`. A damaged file that claims more is refused where it does.
+    budget: u64,
 }
 
 /// Largest single part a file may declare (decoded stream, corrections, Lepton data): 2 GiB.
 const MAX_PART: usize = 1 << 31;
-/// Largest file the format restores: 16 GiB.
-const MAX_FILE: usize = 1 << 34;
+/// Largest file the format restores: 16 GiB (a u64, so the limit is the same on 32-bit targets, where a
+/// file that doesn't fit in memory is refused by the header alone).
+const MAX_FILE: u64 = 1 << 34;
+/// Most bytes a Flate stream can decode to per byte of the stream (a 258-byte match in 2 bits), so the most
+/// the decoded parts of a file can add up to per byte of the file: an honest pack never claims more, and a
+/// damaged or crafted one can't make the decoder work, or reserve memory, beyond that.
+const MAX_EXPANSION: u64 = 1032;
 /// Memory reserved up front is capped; vectors grow with what is actually decoded.
 fn reserve(n: usize) -> usize {
     n.min(1 << 22)
 }
 
+/// The decoded bytes a file of `total_len` bytes may claim in all: `MAX_EXPANSION` per byte for decoded
+/// streams, one more each for Lepton data and corrections (each smaller than its stream), plus a little for
+/// the headers of tiny files.
+fn decode_budget(total_len: usize) -> u64 {
+    (total_len as u64).saturating_mul(MAX_EXPANSION + 2).saturating_add(1 << 16)
+}
+
 impl<'m, C: Coder> Io<'m, C> {
     fn byte(&mut self, b: Option<u8>) -> u8 {
         self.m.code_byte(&mut self.c, b)
+    }
+    /// The length of a part that isn't restored as it is (a decoded stream, corrections, Lepton data): at
+    /// most `max`, and within what the file may still claim.
+    fn part(&mut self, v: Option<u64>, max: usize) -> usize {
+        let n = self.length(v, max);
+        if n as u64 > self.budget {
+            self.damaged = true;
+            return 0;
+        }
+        self.budget -= n as u64;
+        n
     }
     fn varint(&mut self, v: Option<u64>) -> u64 {
         let mut out = 0u64;
@@ -531,11 +557,17 @@ pub struct PackOptions {
     /// to them (see `sealed`); they are encrypted again exactly on restore. When the pack isn't clearly
     /// smaller than the encrypted bytes, the pack without decryption is made too and the smaller kept.
     pub decrypt: bool,
+    /// Largest decoded stream stored in its decoded form; a Flate stream that decodes to more is stored as
+    /// it is. (The decoder takes up to `MAX_PART` per part and `MAX_EXPANSION` bytes per byte of the file
+    /// in all, whatever this was.)
+    pub max_stream: usize,
+    /// Try the existing libraries (preflate, Lepton) when the build includes them (`--features existing`).
+    pub existing: bool,
 }
 
 impl Default for PackOptions {
     fn default() -> Self {
-        PackOptions { effort: 100, threads: 0, decrypt: true }
+        PackOptions { effort: 100, threads: 0, decrypt: true, max_stream: 1 << 28, existing: true }
     }
 }
 
@@ -600,7 +632,7 @@ fn plan(d: &[u8], opt: &PackOptions) -> Vec<Plan> {
     let objects = ObjIndex::new();
     let plans = par::map(Some(&pool), segs.len(), Some(&order), |k| match segs[k] {
         Seg::Syntax(a, b) => Plan::Syntax(a, b),
-        Seg::Stream(a, b) => stream_plan(&d[a..b]).or_else(|| fax(d, a, b, &objects)).unwrap_or(Plan::Raw(a, b)),
+        Seg::Stream(a, b) => stream_plan(&d[a..b], opt).or_else(|| fax(d, a, b, &objects)).unwrap_or(Plan::Raw(a, b)),
     });
     if std::env::var_os("PDFE_DEBUG").is_some() {
         eprintln!("pack: {} parts planned in {:?}", plans.len(), t.elapsed());
@@ -612,19 +644,22 @@ fn plan(d: &[u8], opt: &PackOptions) -> Vec<Plan> {
 /// bytes decrypted): a zlib rebuild, preflate or Lepton, or None when none of them applies. Every way of
 /// storing a stream's bytes other than as they are goes through here, so a decrypted stream gets the same
 /// choices as a plain one.
-fn stream_plan(raw: &[u8]) -> Option<Plan> {
-    if let Some((params, data, tail)) = rebuild_params(raw) {
-        let lep = nested_lepton(&data, raw.len());
+fn stream_plan(raw: &[u8], opt: &PackOptions) -> Option<Plan> {
+    if let Some((params, data, tail)) = rebuild_params(raw, opt.max_stream) {
+        let lep = if opt.existing { nested_lepton(&data, raw.len()) } else { None };
         return Some(Plan::Rebuilt { params, data, tail, lep });
     }
-    preflated(raw).or_else(|| lepton(raw))
+    if !opt.existing {
+        return None;
+    }
+    preflated(raw, opt.max_stream).or_else(|| lepton(raw))
 }
 
 /// The plans of a file with the encoder's choices in `opt`: `plan`, with the encrypted streams of a file the
 /// empty password opens decrypted when `opt.decrypt` (see `sealed`).
 fn plans(d: &[u8], opt: &PackOptions) -> Vec<Plan> {
     let p = plan(d, opt);
-    let p = if opt.decrypt { sealed::crypt_plans(d, p) } else { p };
+    let p = if opt.decrypt { sealed::crypt_plans(d, p, opt) } else { p };
     fax_budget(p)
 }
 
@@ -678,7 +713,7 @@ pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
 }
 
 #[cfg(feature = "existing")]
-fn preflated(raw: &[u8]) -> Option<Plan> {
+fn preflated(raw: &[u8], max_stream: usize) -> Option<Plan> {
     if !zlib_header(raw) {
         return None;
     }
@@ -693,6 +728,9 @@ fn preflated(raw: &[u8]) -> Option<Plan> {
     }
     let (res, plain) = r.ok()?;
     let used = 2 + res.compressed_size;
+    if plain.text().len() > max_stream {
+        return None;
+    }
     let data = plain.text().to_vec();
     // Worth it only if the corrections are small next to what decoding gains.
     if res.corrections.len() > raw.len() / 3 {
@@ -710,7 +748,7 @@ fn preflated(raw: &[u8]) -> Option<Plan> {
 }
 
 #[cfg(not(feature = "existing"))]
-fn preflated(_raw: &[u8]) -> Option<Plan> {
+fn preflated(_raw: &[u8], _max_stream: usize) -> Option<Plan> {
     None
 }
 
@@ -778,6 +816,20 @@ fn unlepton(_data: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+/// Bytes of the checksum stored with a preflate part.
+const PREFLATE_SUM_LEN: usize = 4;
+
+/// The checksum of a preflate part's corrections and decoded data (the first bytes of their SHA-256).
+fn preflate_checksum(corrections: &[u8], data: &[u8]) -> [u8; PREFLATE_SUM_LEN] {
+    let mut all = Vec::with_capacity(corrections.len() + data.len());
+    all.extend_from_slice(corrections);
+    all.extend_from_slice(data);
+    let h = sha256(&all);
+    let mut out = [0u8; PREFLATE_SUM_LEN];
+    out.copy_from_slice(&h[..PREFLATE_SUM_LEN]);
+    out
+}
+
 #[cfg(feature = "existing")]
 fn recreate(data: &[u8], corrections: &[u8]) -> Option<Vec<u8>> {
     std::panic::catch_unwind(|| preflate_rs::recreate_whole_deflate_stream(data, corrections).ok()).ok()?
@@ -797,8 +849,13 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, opt: &PackOptions, st
 }
 
 fn run_plans<C: Coder>(c: C, d: Option<&[u8]>, plans: Option<Vec<Plan>>, total_len: usize, opt: &PackOptions, stats: &mut PackStats) -> (Vec<u8>, C) {
+    run_within(c, d, plans, total_len, opt, stats, decode_budget(total_len))
+}
+
+/// `run_plans` with the decode budget given (tests write parts beyond it to see them refused).
+fn run_within<C: Coder>(c: C, d: Option<&[u8]>, plans: Option<Vec<Plan>>, total_len: usize, opt: &PackOptions, stats: &mut PackStats, budget: u64) -> (Vec<u8>, C) {
     let mut model = primed(table_bits(total_len));
-    let mut io = Io { m: &mut model, c, damaged: false, plain: opt.effort < PLAIN_BELOW };
+    let mut io = Io { m: &mut model, c, damaged: false, plain: opt.effort < PLAIN_BELOW, budget };
     let mut out: Vec<u8> = Vec::with_capacity(reserve(total_len));
     // Encrypted files: the file key, and the settings of the stream whose decrypted payload comes next with
     // where that payload starts in `out`.
@@ -910,7 +967,9 @@ fn run_plans<C: Coder>(c: C, d: Option<&[u8]>, plans: Option<Vec<Plan>>, total_l
                 };
                 let h0 = io.byte(cur_p.map(|p| p.0[0]));
                 let h1 = io.byte(cur_p.map(|p| p.0[1]));
-                let clen = io.length(cur_p.map(|p| p.1.len() as u64), MAX_PART);
+                // The corrections are at most a third of the stream (see `preflated`), so never more than
+                // what is left of the file.
+                let clen = io.part(cur_p.map(|p| p.1.len() as u64), left);
                 io.m.set_kind(Kind::Data, Geom::default(), 0);
                 let mut corrections = Vec::with_capacity(reserve(clen));
                 io.bytes(cur_p.map(|p| p.1), clen, &mut corrections);
@@ -919,13 +978,20 @@ fn run_plans<C: Coder>(c: C, d: Option<&[u8]>, plans: Option<Vec<Plan>>, total_l
                 let rlen = io.length(cur_p.map(|p| p.4.len() as u64), left);
                 let mut rest = Vec::with_capacity(reserve(rlen));
                 io.bytes(cur_p.map(|p| p.4), rlen, &mut rest);
+                // A checksum of the corrections and the decoded data, checked before they go to the existing
+                // library: it isn't ours, and damaged corrections can keep it busy without end.
+                let sum_in = cur_p.map(|p| preflate_checksum(p.1, p.2));
+                let mut sum = Vec::with_capacity(PREFLATE_SUM_LEN);
+                io.bytes(sum_in.as_ref().map(|x| &x[..]), PREFLATE_SUM_LEN, &mut sum);
                 let decoded = payload(&mut io, cur_p.map(|p| p.2), cur_p.map(|p| p.5), &out, stats);
-                if io.damaged {
+                if io.damaged || sum[..] != preflate_checksum(&corrections, &decoded)[..] {
+                    io.damaged = true;
                     break;
                 }
+                // The stream must fit in what is left of the file, with its header and trailer.
                 let z = match recreate(&decoded, &corrections) {
-                    Some(z) => z,
-                    None => {
+                    Some(z) if z.len() <= left.saturating_sub(2 + rest.len() + if adler_ok { 4 } else { 0 }) => z,
+                    _ => {
                         io.damaged = true;
                         break;
                     }
@@ -945,7 +1011,9 @@ fn run_plans<C: Coder>(c: C, d: Option<&[u8]>, plans: Option<Vec<Plan>>, total_l
                     Some(Plan::Lepton { data }) => Some(data.as_slice()),
                     _ => None,
                 };
-                let n = io.length(src.map(|x| x.len() as u64), MAX_PART);
+                // Lepton's data is smaller than the JPEG it restores (see `lepton_bytes`), so never more than
+                // what is left of the file.
+                let n = io.part(src.map(|x| x.len() as u64), left);
                 let mut lep = Vec::with_capacity(reserve(n));
                 lepton_part(&mut io, src, n, &mut lep, stats);
                 if io.damaged {
@@ -1058,11 +1126,11 @@ fn lepton_part<C: Coder>(io: &mut Io<C>, src: Option<&[u8]>, n: usize, lep: &mut
 /// Codes a decoded stream payload (shared by the rebuilt kinds): its length, then the data with the model
 /// set for what it is; image rows lose their PNG predictor bytes on the way.
 fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, lep_in: Option<Option<&[u8]>>, out: &[u8], stats: &mut PackStats) -> Vec<u8> {
-    let dlen = io.length(data_in.map(|x| x.len() as u64), MAX_PART);
+    let dlen = io.part(data_in.map(|x| x.len() as u64), MAX_PART);
     // A JPEG behind Flate (as normal-PDF output writes them): Lepton for the JPEG inside.
     if io.byte(lep_in.map(|l| l.is_some() as u8)) == 1 {
         let src = lep_in.flatten();
-        let n = io.length(src.map(|x| x.len() as u64), MAX_PART);
+        let n = io.part(src.map(|x| x.len() as u64), MAX_PART);
         let mut lep = Vec::with_capacity(reserve(n));
         lepton_part(io, src, n, &mut lep, stats);
         stats.leptons += 1;
@@ -1273,11 +1341,11 @@ fn fax_budget(mut plans: Vec<Plan>) -> Vec<Plan> {
 }
 
 /// For a Flate payload that zlib made: (parameters, decoded data, bytes after the zlib stream).
-fn rebuild_params(raw: &[u8]) -> Option<(zlibexact::Params, Vec<u8>, Vec<u8>)> {
+fn rebuild_params(raw: &[u8], max_stream: usize) -> Option<(zlibexact::Params, Vec<u8>, Vec<u8>)> {
     if !zlib_header(raw) {
         return None;
     }
-    let u = zlib::unwrap(raw, 1 << 28).ok()?;
+    let u = zlib::unwrap(raw, max_stream).ok()?;
     let used = raw.len() - u.trailing;
     let p = zlibexact::find_params(&u.data, &raw[..used])?;
     Some((p, u.data, raw[used..].to_vec()))
@@ -1382,10 +1450,10 @@ pub fn unpack(a: &[u8]) -> Result<Vec<u8>, String> {
             return Err("bad length".into());
         }
     }
-    if len > MAX_FILE as u64 {
+    if len > MAX_FILE {
         return Err("damaged peyaji file (impossible size)".into());
     }
-    let len = len as usize;
+    let len = usize::try_from(len).map_err(|_| "file too large for this platform")?;
     let want = a.get(i..i + HASH_LEN).ok_or("truncated header")?.to_vec();
     let body = &a[i + HASH_LEN..];
     let out = match ver {
@@ -1483,6 +1551,62 @@ mod tests {
         }
         pdf.extend_from_slice(b"trailer\n<< /Root 1 0 R >>\n%%EOF\n");
         pdf
+    }
+
+    /// A pack of the given parts as the encoder would write them, but with no limit on what they claim (the
+    /// encoder notices afterwards that the parts don't restore the file, and stops; the pack ends there).
+    fn pack_unbounded(d: &[u8], plans: Vec<Plan>) -> Vec<u8> {
+        let mut stats = PackStats::default();
+        let (_, enc) = run_within(Encoder::new(), Some(d), Some(plans), d.len(), &PackOptions::default(), &mut stats, u64::MAX);
+        let mut out = header(VERSION, d);
+        out.extend_from_slice(&enc.finish());
+        out
+    }
+
+    #[test]
+    fn parts_beyond_what_the_file_can_hold_are_refused_at_once() {
+        // A 100-byte file: its decoded parts may add up to about 170 KB (MAX_EXPANSION per byte and a little).
+        // A pack of it that claims a 4 MiB decoded stream (zeros, so it codes to almost nothing) is refused
+        // when the length is read, before any of it is decoded: in a few milliseconds and without reserving
+        // the memory. The same for Lepton data or corrections larger than what is left of the file.
+        let d = b"%PDF-1.4\n1 0 obj\n<< /Length 4 >>\nstream\nABCD\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
+        let a = d.windows(4).position(|w| w == b"ABCD").unwrap();
+        assert!(decode_budget(d.len()) < 4 << 20);
+        let params = Params { level: 6, window_bits: 15, mem_level: 8, filtered: false };
+        let huge = vec![0u8; 4 << 20];
+        let cases: Vec<Vec<Plan>> = vec![
+            vec![Plan::Syntax(0, a), Plan::Rebuilt { params, data: huge.clone(), tail: Vec::new(), lep: None }, Plan::Syntax(a + 4, d.len())],
+            vec![Plan::Syntax(0, a), Plan::Lepton { data: huge.clone() }, Plan::Syntax(a + 4, d.len())],
+            vec![Plan::Syntax(0, a), Plan::Rebuilt { params, data: vec![0xFFu8; 2048], tail: Vec::new(), lep: Some(huge.clone()) }, Plan::Syntax(a + 4, d.len())],
+            vec![Plan::Syntax(0, a), Plan::Preflated { header: [0x78, 0x9c], corrections: huge.clone(), data: vec![1u8; 16], adler_ok: false, rest: Vec::new(), lep: None }, Plan::Syntax(a + 4, d.len())],
+        ];
+        for (k, plans) in cases.into_iter().enumerate() {
+            let packed = pack_unbounded(d, plans);
+            assert!(packed.len() < 4096, "case {k}: {} bytes", packed.len());
+            let t = std::time::Instant::now();
+            assert!(unpack(&packed).is_err(), "case {k}");
+            assert!(t.elapsed().as_millis() < 500, "case {k} took {:?}", t.elapsed());
+        }
+        // Honest parts of the same file are within the budget: nothing here is refused.
+        let (packed, st) = pack(d);
+        assert!(!st.damaged && !st.fallback);
+        assert_eq!(unpack(&packed).unwrap(), &d[..]);
+    }
+
+    #[test]
+    fn the_budget_fits_what_flate_can_hold() {
+        // 1 MiB of zeros in a zlib stream of about 1 KB: the decoded part is about 1000 times the file and
+        // fits the budget, so the file packs through its decoded form and restores.
+        let zeros = vec![0u8; 1 << 20];
+        let z = zlib_stream(&zeros, Params { level: 9, window_bits: 15, mem_level: 9, filtered: false });
+        let mut pdf = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n".to_vec();
+        pdf.extend_from_slice(format!("2 0 obj\n<< /Filter /FlateDecode /Length {} >>\nstream\n", z.len()).as_bytes());
+        pdf.extend_from_slice(&z);
+        pdf.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
+        assert!(z.len() < 2048 && pdf.len() as u64 * MAX_EXPANSION > zeros.len() as u64);
+        let (packed, st) = pack_with(&pdf, &PackOptions { threads: 1, ..PackOptions::default() });
+        assert!(st.rebuilt == 1 && !st.fallback && !st.stored, "{st:?}");
+        assert_eq!(unpack(&packed).unwrap(), pdf);
     }
 
     #[test]

@@ -844,7 +844,7 @@ mod tests {
     /// its model kind. The real encoder only writes layouts it found in the font.
     fn write_opened(l: &Layout, n: usize, parts: &[(Kind, &[u8])]) -> Vec<u8> {
         let mut m = Model::new(14);
-        let mut io = Io { m: &mut m, c: Encoder::new(), damaged: false, plain: false };
+        let mut io = Io { m: &mut m, c: Encoder::new(), damaged: false, plain: false, budget: u64::MAX };
         io.m.set_kind(Kind::Meta, Geom::default(), 0);
         io.byte(Some(if l.hex.is_some() { HEX } else { BINARY }));
         code_layout(&mut io, Some(l), l.hex.is_some(), n, 0, 0);
@@ -861,7 +861,7 @@ mod tests {
     /// and how many decisions it decoded.
     fn read_font(data: &[u8], n: usize) -> (Vec<u8>, bool, u64) {
         let mut m = Model::new(14);
-        let mut io = Io { m: &mut m, c: Counted { c: Decoder::new(data), decisions: 0 }, damaged: false, plain: false };
+        let mut io = Io { m: &mut m, c: Counted { c: Decoder::new(data), decisions: 0 }, damaged: false, plain: false, budget: u64::MAX };
         let (mut out, mut stats) = (Vec::new(), PackStats::default());
         code(&mut io, None, n, None, Kind::Font, &mut out, &mut stats);
         (out, io.damaged, io.c.decisions)

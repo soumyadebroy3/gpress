@@ -26,7 +26,7 @@ pub(super) struct Sealed {
 /// For files the empty password opens: every raw stream that decrypts, and encrypts back to exactly its stored
 /// bytes, becomes its settings followed by a plan for its decrypted payload; the file key comes first. Other
 /// files keep their plans unchanged (so they encode exactly as before).
-pub(super) fn crypt_plans(d: &[u8], plans: Vec<Plan>) -> Vec<Plan> {
+pub(super) fn crypt_plans(d: &[u8], plans: Vec<Plan>, opt: &PackOptions) -> Vec<Plan> {
     if find(d, b"/Encrypt", 0).is_none() {
         return plans;
     }
@@ -49,7 +49,7 @@ pub(super) fn crypt_plans(d: &[u8], plans: Vec<Plan>) -> Vec<Plan> {
                     key_sent = true;
                 }
                 out.push(Plan::Crypt(s));
-                out.push(plan_bytes(plain, dict, a, &file_resolver(d, &objects)));
+                out.push(plan_bytes(plain, dict, a, &file_resolver(d, &objects), opt));
                 continue;
             }
         }
@@ -85,8 +85,8 @@ fn decrypt(c: &crypt::Crypt, d: &[u8], a: usize, b: usize) -> Option<(Sealed, Di
 
 /// The plan for a decrypted payload that starts at byte `at` of the file: the same choices `plan` makes for
 /// a stream's bytes (`stream_plan`, then a fax part for CCITT data), or the bytes as they are.
-fn plan_bytes(raw: Vec<u8>, dict: Dict, at: usize, resolve: &dyn Fn(&Obj) -> Option<Obj>) -> Plan {
-    if let Some(p) = stream_plan(&raw) {
+fn plan_bytes(raw: Vec<u8>, dict: Dict, at: usize, resolve: &dyn Fn(&Obj) -> Option<Obj>, opt: &PackOptions) -> Plan {
+    if let Some(p) = stream_plan(&raw, opt) {
         return p;
     }
     match fax_parse(&raw, dict, resolve) {

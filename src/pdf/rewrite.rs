@@ -31,11 +31,17 @@ pub struct Options {
     pub effort: u8,
     /// Threads to use (0: what the machine offers, at most 8). Never changes the output.
     pub threads: usize,
+    /// Leave files that claim a conformance or carry a signature untouched: PDF/A, PDF/X, signed, certified,
+    /// usage rights (the safe default). With `false` every object's value is still kept, but those
+    /// guarantees are given up (a rewritten signed file no longer verifies).
+    pub respect_conformance: bool,
+    /// Also try our Flate in front of a JPEG image (never in front of JPEG 2000 or JBIG2).
+    pub flate_over_jpeg: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { flate: flate::Options::max(), objstm_size: 200, max_stream: 64 << 20, effort: 100, threads: 0 }
+        Options { flate: flate::Options::max(), objstm_size: 200, max_stream: 64 << 20, effort: 100, threads: 0, respect_conformance: true, flate_over_jpeg: true }
     }
 }
 
@@ -130,8 +136,9 @@ fn walk<'o>(o: &'o Obj, f: &mut dyn FnMut(&'o Obj)) {
     }
 }
 
-/// Reasons to leave a file exactly as it is.
-fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>) -> Result<(), String> {
+/// Reasons to leave a file exactly as it is. With `conformance` false, a claimed conformance (PDF/A, PDF/X), a
+/// signature, certification or usage rights don't count.
+fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, conformance: bool) -> Result<(), String> {
     match &doc.crypt {
         Some(Err(why)) => return Err(format!("encrypted: {why}")),
         Some(Ok(c)) => encrypted_gate(c, objs)?,
@@ -170,6 +177,9 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>) -> Result<(), String> {
         if contains(doc.data, pat.as_bytes()) {
             return Err("an object in the file is missing from its cross-reference data".into());
         }
+    }
+    if !conformance {
+        return Ok(());
     }
     let mut why: Option<String> = None;
     for (_, (_, o)) in objs.iter() {
@@ -306,20 +316,22 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
     // one.
     let shape_matters = rest.iter().any(|st| matches!(st.name.as_slice(), b"JPXDecode" | b"JBIG2Decode"));
     // Our Flate in front of whatever image codec follows. Putting a filter in front of a codec that had
-    // none (a JPEG, say) is done only when it saves at least 1% (over the optimised JPEG, when there is one).
-    // A JPEG goes into Flate in its optimised form. Only when Flate shrinks that by a tenth or more (very
-    // regular data) and the original is at least a tenth larger (poor tables) does the original get a turn
-    // too: its own byte patterns can suit Flate better then (2 of the 284 test JPEGs, 1.8 KB). Trying it for
-    // every JPEG would double the Flate time.
+    // none (a JPEG, say) is done only when it saves at least 1% (over the optimised JPEG, when there is one),
+    // and in front of a JPEG only when `flate_over_jpeg` asks for it. A JPEG goes into Flate in its optimised
+    // form. Only when Flate shrinks that by a tenth or more (very regular data) and the original is at least
+    // a tenth larger (poor tables) does the original get a turn too: its own byte patterns can suit Flate
+    // better then (2 of the 284 test JPEGs, 1.8 KB). Trying it for every JPEG would double the Flate time,
+    // so that second pass belongs to effort 100 alone.
     let adds_layer = k == 0 && !rest.is_empty();
-    if !(adds_layer && shape_matters) {
+    let over_jpeg = adds_layer && rest.iter().any(|st| st.name == b"DCTDecode");
+    if !(adds_layer && shape_matters) && !(over_jpeg && !opt.flate_over_jpeg) {
         let bare_len = best_len;
         let mut with_flate = vec![Stage { name: b"FlateDecode".to_vec(), parms: carried.clone() }];
         with_flate.extend_from_slice(rest);
         let mut d = s.dict.clone();
         set_chain(&mut d, &with_flate);
         let z = flate::deflate_zlib(jpeg.as_ref().unwrap_or(&data), &opt.flate);
-        let again = jpeg.as_ref().map_or(false, |j| z.len() * 10 <= j.len() * 9 && j.len() * 10 <= data.len() * 9);
+        let again = opt.effort >= 100 && jpeg.as_ref().map_or(false, |j| z.len() * 10 <= j.len() * 9 && j.len() * 10 <= data.len() * 9);
         for z in std::iter::once(z).chain(again.then(|| flate::deflate_zlib(&data, &opt.flate))) {
             let limit = if adds_layer { best_len.min(bare_len - bare_len / 100) } else { best_len };
             if z.len() < limit {
@@ -604,7 +616,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     }
     let crypt = doc.crypt.as_ref().and_then(|c| c.as_ref().ok());
     let objs = load_reachable(&doc)?;
-    gate(&doc, &objs)?;
+    gate(&doc, &objs, opt.respect_conformance)?;
     let mut stats = Stats { objects: objs.len(), dropped_unreachable: doc.entries.values().filter(|e| !matches!(e, Entry::Free)).count().saturating_sub(objs.len()), ..Default::default() };
     stats.encryption = crypt.map(|c| c.describe()).unwrap_or_default();
 
