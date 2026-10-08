@@ -74,7 +74,11 @@ fn empty_buffer() -> GpressBuffer {
     GpressBuffer { data: ptr::null_mut(), len: 0, cap: 0 }
 }
 
+/// A buffer for C. An empty output is a null pointer with length 0, never a dangling one.
 fn buffer_from(mut v: Vec<u8>) -> GpressBuffer {
+    if v.is_empty() {
+        return empty_buffer();
+    }
     v.shrink_to_fit();
     let b = GpressBuffer { data: v.as_mut_ptr(), len: v.len(), cap: v.capacity() };
     std::mem::forget(v);
@@ -261,14 +265,22 @@ pub unsafe extern "C" fn gpress_free(buf: *mut GpressBuffer) {
     *b = empty_buffer();
 }
 
-/// Frees a message from a result. Safe on null.
+/// Frees a message from a result, given the address of the field: the message is freed and the field set
+/// to null, so freeing it again, or freeing the whole result afterwards, does nothing. Safe on null and on a
+/// field that is already null.
 ///
 /// # Safety
-/// `msg` must be null or a message returned by this library and not freed before.
+/// `msg` must be null or point to a field holding null or a message returned by this library.
 #[no_mangle]
-pub unsafe extern "C" fn gpress_free_message(msg: *mut c_char) {
-    if !msg.is_null() {
-        drop(CString::from_raw(msg));
+pub unsafe extern "C" fn gpress_free_message(msg: *mut *mut c_char) {
+    if msg.is_null() {
+        return;
+    }
+    let m = ptr::replace(msg, ptr::null_mut());
+    if !m.is_null() {
+        // SAFETY: a non-null field holds a pointer `message` made with CString::into_raw, and the field is
+        // nulled above, so it is freed once.
+        drop(CString::from_raw(m));
     }
 }
 
@@ -283,8 +295,7 @@ pub unsafe extern "C" fn gpress_result_free(res: *mut GpressResult) {
     }
     let r = &mut *res;
     gpress_free(&mut r.output);
-    gpress_free_message(r.message);
-    r.message = ptr::null_mut();
+    gpress_free_message(&mut r.message);
     r.code = 0;
     r.outcome = 0;
 }
@@ -315,10 +326,27 @@ mod tests {
             assert_eq!(bad.code, 2);
             assert!(!bad.message.is_null());
             gpress_result_free(&mut bad);
-            // Null with length: refused, not read.
-            let r = gpress_expand(ptr::null(), 10, ptr::null());
+            // Null with length: refused, not read. The message freed by its address, then again, then with
+            // the whole result: the field is nulled by the first free, so nothing is freed twice.
+            let mut r = gpress_expand(ptr::null(), 10, ptr::null());
             assert_eq!(r.code, BAD_ARGUMENT);
-            gpress_free_message(r.message);
+            assert!(!r.message.is_null());
+            gpress_free_message(&mut r.message);
+            assert!(r.message.is_null());
+            gpress_free_message(&mut r.message);
+            gpress_result_free(&mut r);
+            gpress_free_message(ptr::null_mut());
+            // An empty output (an archive of nothing restores nothing; a non-PDF of no bytes is untouched):
+            // a null pointer with length 0, never a dangling one, and freeing it does nothing.
+            let mut c0 = gpress_compress(ptr::null(), 0, &o);
+            assert_eq!(c0.code, 0);
+            let mut e0 = gpress_expand(c0.output.data, c0.output.len, &o);
+            assert!(e0.code == 0 && e0.output.data.is_null() && e0.output.len == 0);
+            let mut p0 = gpress_optimize(ptr::null(), 0, &o);
+            assert!(p0.code == 0 && p0.output.data.is_null() && p0.output.len == 0);
+            gpress_result_free(&mut c0);
+            gpress_result_free(&mut e0);
+            gpress_result_free(&mut p0);
             // Options the engine refuses: the library's code and message, nothing allocated for output.
             let mut too_many = o;
             too_many.threads = 65;
