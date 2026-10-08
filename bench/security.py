@@ -233,6 +233,8 @@ def classify(r, cfg, time_bound, mem_bound):
         return 'crash:' + name, True
     if r['rc'] == 101:
         return 'panic', True  # an uncaught Rust panic reached the top of the process
+    if r['rc'] == 4:
+        return 'panic-caught', True  # the library's guard held (Error::Internal, exit 4), but a panic is a bug
     if r['rc'] == 127:
         return 'exec-failed', True
     over = []
@@ -277,12 +279,10 @@ class Tool:
         return [self.path, name, inp, out, '--effort', self.effort, '--threads', self.threads]
 
     def special(self, r):
-        """A verdict the tool's own exit codes carry, or None."""
-        if self.kind == 'charness':
-            if r['rc'] == 4:
-                return 'panic-caught', True  # the library's guard held, but a panic is a bug
-            if r['rc'] == 5:
-                return 'NOT-EXACT', True
+        """A verdict the tool's own exit codes carry, or None. Both tools exit 4 for a panic the library's guard
+        caught (`classify` counts it); the harness also exits 5 when a round trip restored different bytes."""
+        if self.kind == 'charness' and r['rc'] == 5:
+            return 'NOT-EXACT', True
         return None
 
 
@@ -870,8 +870,8 @@ def fuzz(cfg, run, seconds=None, fresh=False):
                 bad, key = 'oom_abort', 'oom_aborts'
             elif r['signal']:
                 bad, key = 'crash_' + signal.Signals(r['signal']).name, 'crashes'
-            elif r['rc'] == 101:
-                bad, key = 'panic', 'panics'
+            elif r['rc'] in (101, 4):
+                bad, key = ('panic' if r['rc'] == 101 else 'panic_caught'), 'panics'
             elif op == 'unpack' and r['rc'] == 0 and orig_path and not same_bytes(outp, open(orig_path, 'rb').read()):
                 bad, key = 'wrong_file', 'wrong_files'
             if bad:
@@ -1043,6 +1043,11 @@ def selfcheck(cfg, run):
     r = spawn([fake, 'unpack', 'x', outp], timeout=cfg['hang'], as_limit=ceiling)
     v, fail = classify(r, cfg, cfg['archive']['time'], cfg['archive']['mem_mib'] * MIB)
     record('crash', fail and v.startswith('crash:'), True, v)
+    # A panic the library's guard caught: the tool exits 4 (its code for Error::Internal), a bug, not a refusal.
+    fake = fake_engine(run, 'caught', 'sys.stderr.write("gpress: internal error: x\\n"); sys.exit(4)')
+    r = spawn([fake, 'unpack', 'x', outp], timeout=cfg['hang'], as_limit=ceiling)
+    v, fail = archive_verdict(cfg, tool, r, orig, outp)
+    record('panic-caught', fail and v == 'panic-caught', True, v)
     # A hang (a short timeout keeps the check quick).
     fake = fake_engine(run, 'hang', 'import time; time.sleep(999)')
     r = spawn([fake, 'unpack', 'x', outp], timeout=2.0, as_limit=ceiling)
@@ -1183,9 +1188,9 @@ def report(cfg, run):
               f"Mutated corpus files ({len(kept)} seeds under {fz['max_seed_bytes'] / 1e6:.1f} MB whose clean pack peaks under "
               f"{fz['mem_mib'] * fz['seed_mem_fraction']:.0f} MiB; 1 to {fz['edits']} random edits each: bit flips, byte "
               f"changes, cuts, inserts, copied chunks, runs) through each entry point, one process at a time, with a hard "
-              f"{fz['mem_mib']} MiB address space and {cfg['hang']:.0f} s. A crash, an allocation failure, a hang, an uncaught "
-              f"panic or (unpack) a wrong file is a failure, and the input is saved under `failures/fuzz/` with the "
-              f"engine's stderr.", '',
+              f"{fz['mem_mib']} MiB address space and {cfg['hang']:.0f} s. A crash, an allocation failure, a hang, a panic "
+              f"(uncaught, exit 101, or caught by the library's guard, exit 4: a bug either way) or (unpack) a wrong file is a "
+              f"failure, and the input is saved under `failures/fuzz/` with the engine's stderr.", '',
               '| Entry point | Seeds | Seconds | Iterations | Crashes | Allocation failures | Hangs | Wrong files | Panics |',
               '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
         for r in fzr:

@@ -17,14 +17,27 @@
 //! repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info, fax-decode, fax-encode, fax-scan,
 //! fax-model, jbig2-encode. `--iter`, `--exact`, `--chain`, `--nice`, `--nosplit`, `--noalt`, `--nomulti`
 //! and `--nopolish` fine-tune the Flate settings of the deflate tools below the effort.
+//!
+//! Exit status: 0 done; a library error exits with its code (1 input too large, 2 not an archive or damaged,
+//! 3 archive version, 4 internal error (a caught panic: a bug), 5 invalid options, 6 time budget, 7 declared
+//! length over the limit, 8 needs the existing library); 2 for a usage or file error.
 
 use gpress::flate::{self, Options};
 use std::io::{BufRead, Write};
 use std::time::{Duration, Instant};
 
+/// A usage or file error: exit 2.
 fn die(msg: &str) -> ! {
     eprintln!("gpress: {msg}");
     std::process::exit(2);
+}
+
+/// A library error: its message and its stable code as the exit status (1 too large, 2 damaged, 3 version,
+/// 4 internal, 5 options, 6 time budget, 7 declared length, 8 needs the existing library). 4 is a caught
+/// panic, a bug, and the security suite counts it as one rather than as a refusal.
+fn fail(e: &gpress::Error) -> ! {
+    eprintln!("gpress: {e}");
+    std::process::exit(e.code());
 }
 
 const USAGE: &str = "\
@@ -108,7 +121,7 @@ fn main() {
     lib.rewrite_encrypted = !flag("--keep-encrypted");
     lib.decrypt = !flag("--no-decrypt");
     lib.use_existing_libraries = !flag("--no-existing");
-    lib.check().unwrap_or_else(|e| die(&e.to_string()));
+    lib.check().unwrap_or_else(|e| fail(&e));
     let threads = lib.threads;
     // The Flate settings of the measuring tools: the effort's, fine-tuned by the flags below it.
     let mut opt = Options::effort(effort);
@@ -192,7 +205,7 @@ fn main() {
             let (i, o) = (pos.get(1).unwrap_or_else(|| die("need IN")), pos.get(2).unwrap_or_else(|| die("need OUT")));
             let data = std::fs::read(i).unwrap_or_else(|e| die(&format!("{i}: {e}")));
             let t = Instant::now();
-            let r = gpress::optimize(&data, &lib).unwrap_or_else(|e| die(&e.to_string()));
+            let r = gpress::optimize(&data, &lib).unwrap_or_else(|e| fail(&e));
             std::fs::write(o, &r.data).unwrap_or_else(|e| die(&format!("{o}: {e}")));
             println!("{}", describe(i, data.len(), &r, t.elapsed().as_secs_f64()));
         }
@@ -256,14 +269,14 @@ fn main() {
             let (i, o) = (pos.get(1).unwrap_or_else(|| die("need IN")), pos.get(2).unwrap_or_else(|| die("need OUT")));
             let data = std::fs::read(i).unwrap_or_else(|e| die(&format!("{i}: {e}")));
             let t = Instant::now();
-            let c = gpress::compress(&data, &lib).unwrap_or_else(|e| die(&e.to_string()));
+            let c = gpress::compress(&data, &lib).unwrap_or_else(|e| fail(&e));
             std::fs::write(o, &c.data).unwrap_or_else(|e| die(&format!("{o}: {e}")));
             println!("{}", describe_archive(i, data.len(), &c, t.elapsed().as_secs_f64()));
         }
         Some("unpack") => {
             let (i, o) = (pos.get(1).unwrap_or_else(|| die("need IN")), pos.get(2).unwrap_or_else(|| die("need OUT")));
             let data = std::fs::read(i).unwrap_or_else(|e| die(&format!("{i}: {e}")));
-            let out = gpress::expand(&data, &lib).unwrap_or_else(|e| die(&e.to_string()));
+            let out = gpress::expand(&data, &lib).unwrap_or_else(|e| fail(&e));
             std::fs::write(o, &out).unwrap_or_else(|e| die(&format!("{o}: {e}")));
         }
         Some("expand") => {
