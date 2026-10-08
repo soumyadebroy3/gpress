@@ -272,12 +272,20 @@ pub(crate) mod tests {
         let want: Vec<usize> = (0..60).map(|i| (0..5).map(|j| i * 10 + j).sum()).collect();
         for allowed in [0usize, 1, 2] {
             let _refuse = RefuseSpawns::after(allowed);
+            // Flat work: only this thread asks for helpers, and with three slots and fewer threads allowed one
+            // of its asks is refused for certain, whatever the timing.
             let pool = Pool::new(4);
-            let got = map(Some(&pool), 60, None, |i| map(Some(&pool), 5, None, |j| i * 10 + j).iter().sum::<usize>());
+            let got = map(Some(&pool), 60, None, |i| (0..5).map(|j| i * 10 + j).sum::<usize>());
             assert_eq!(got, want, "{allowed} threads allowed");
             // Every slot is back; the refusal stops further tries for the job.
             assert_eq!(pool.free.load(Ordering::SeqCst), 3);
             assert!(pool.refused.load(Ordering::SeqCst), "{allowed} threads allowed");
+            // Nested work: the helpers ask for threads too (the hook counts this thread's asks only), so
+            // whether a refusal gets recorded depends on timing; the results and the slots don't.
+            let pool = Pool::new(4);
+            let got = map(Some(&pool), 60, None, |i| map(Some(&pool), 5, None, |j| i * 10 + j).iter().sum::<usize>());
+            assert_eq!(got, want, "{allowed} threads allowed, nested");
+            assert_eq!(pool.free.load(Ordering::SeqCst), 3);
         }
         // The same through the scope: a refused spawn returns None, and the scope still ends.
         let _refuse = RefuseSpawns::after(0);
