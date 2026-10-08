@@ -325,8 +325,8 @@ fn repredict(s: &Stream, data: &[u8], carried: Option<&Dict>, opt: &Options, res
     // The candidates are ranked by their size with the quick settings plus the size of their stream
     // dictionary (the predictor parameters take room too), and only the best one gets the full encode. Below
     // effort 100 the data is a sample of rows across the image, so the dictionary counts in proportion. The
-    // first of equal sizes wins.
-    let quick = flate::Options { shared: opt.flate.shared.clone(), ..flate::Options::quick() };
+    // first of equal sizes wins. Only their sizes count, so their outputs are not remembered.
+    let quick = flate::Options { shared: opt.flate.shared.as_ref().map(|sh| flate::deflate::Shared::with_pool(sh.pool.clone(), false)), ..flate::Options::quick() };
     let nrows = px.len() / row;
     let rows = predictor_sample(nrows, row, opt.effort);
     let sampled = rows.as_ref().map_or(nrows, |r| r.iter().map(|&(a, b)| b - a).sum());
@@ -397,6 +397,18 @@ fn predictor_sample(nrows: usize, row: usize, effort: u8) -> Option<Vec<(usize, 
         out.push((start, (start + per).min(nrows)));
     }
     Some(out)
+}
+
+/// An image with fewer samples (general filters decoded, predictors undone) than its width, height and
+/// colours need. Readers differ on such images (one pads them, another leaves them out), and other filters
+/// can change what a reader does, so they are kept exactly as they are. Unknown: not known to be short.
+fn short_image(s: &Stream, resolve: &dyn Fn(&Obj) -> Option<Obj>) -> bool {
+    let Some(g) = images::geometry(&s.dict, resolve) else { return false };
+    let Some(h) = s.dict.get(b"Height").and_then(|x| x.as_int()) else { return false };
+    match content_of(s) {
+        Some((px, rest)) => rest.is_empty() && (px.len() as u128) < g.row() as u128 * h.max(0) as u128,
+        None => false,
+    }
 }
 
 /// For each stream, the index of the first stream with the same dictionary and data (itself when there is
@@ -504,10 +516,11 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     gate(&doc, &objs)?;
     let mut stats = Stats { objects: objs.len(), dropped_unreachable: doc.entries.values().filter(|e| !matches!(e, Entry::Free)).count().saturating_sub(objs.len()), ..Default::default() };
 
-    // One pool of threads, and one memory of encoded inputs, for everything this file needs.
-    let shared = flate::deflate::Shared::new(if opt.threads == 0 { par::default_threads() } else { opt.threads });
-    let pool = Some(&*shared.pool);
-    let opt = &Options { flate: flate::Options { shared: Some(shared.clone()), ..opt.flate.clone() }, ..opt.clone() };
+    // One pool of threads for everything this file needs. Each stream gets its own memory of encoded inputs
+    // (its plain samples are often encoded twice), gone with the stream, so memory doesn't grow with the file.
+    let workers = par::Pool::new(if opt.threads == 0 { par::default_threads() } else { opt.threads });
+    let pool = Some(&*workers);
+    let opt = &Options { flate: flate::Options { shared: Some(flate::deflate::Shared::with_pool(workers.clone(), false)), ..opt.flate.clone() }, ..opt.clone() };
 
     // Streams are re-encoded first, in parallel (the biggest first, identical streams once); the results are
     // used in object order below, so the output doesn't depend on the number of threads.
@@ -517,7 +530,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     let mut order: Vec<usize> = (0..unique.len()).collect();
     order.sort_by_key(|&u| (std::cmp::Reverse(streams[unique[u]].1.data.len()), u));
     let dbg = std::env::var_os("PDFE_DEBUG").is_some();
-    let encoded = par::map(pool, unique.len(), Some(&order), |u| {
+    let mut encoded = par::map(pool, unique.len(), Some(&order), |u| {
         let (n, s) = streams[unique[u]];
         let resolve = |o: &Obj| -> Option<Obj> {
             match o {
@@ -526,10 +539,14 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
             }
         };
         let t = std::time::Instant::now();
-        let r = reencode(s, &settings[u], &resolve);
+        let o = &settings[u];
+        let o = Options { flate: flate::Options { shared: Some(flate::deflate::Shared::with_pool(workers.clone(), true)), ..o.flate.clone() }, ..o.clone() };
+        let r = reencode(s, &o, &resolve);
+        let short = r.is_some() && short_image(s, &resolve);
+        let r = if short { None } else { r };
         if dbg {
             let new = r.as_ref().map_or(s.data.len(), |x| x.1.len());
-            eprintln!("stream {n}: {} -> {new} bytes, effort {}, {:?}", s.data.len(), settings[u].effort, t.elapsed());
+            eprintln!("stream {n}: {} -> {new} bytes, effort {}, {:?}{}", s.data.len(), settings[u].effort, t.elapsed(), if short { " (short image, kept)" } else { "" });
         }
         r
     });
@@ -537,6 +554,12 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         eprintln!("{} streams identical to an earlier one, encoded once", streams.len() - unique.len());
     }
     let slot: HashMap<usize, usize> = unique.iter().enumerate().map(|(u, &i)| (i, u)).collect();
+    // Each result is moved out at the last stream that uses it (identical streams share one), so it is not
+    // held twice.
+    let mut uses = vec![0usize; unique.len()];
+    for i in &same {
+        uses[slot[i]] += 1;
+    }
 
     // Every stream gets a direct /Length.
     let mut direct: BTreeMap<u32, (u16, Vec<u8>)> = BTreeMap::new(); // serialised indirect objects
@@ -547,10 +570,13 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
             Obj::Stream(s) => {
                 stats.streams += 1;
                 debug_assert_eq!(streams[si].0, n);
-                let (mut dict, data) = match &encoded[slot[&same[si]]] {
+                let u = slot[&same[si]];
+                uses[u] -= 1;
+                let result = if uses[u] == 0 { encoded[u].take() } else { encoded[u].clone() };
+                let (mut dict, data) = match result {
                     Some(x) => {
                         stats.streams_reencoded += 1;
-                        x.clone()
+                        x
                     }
                     None => {
                         stats.streams_kept += 1;
@@ -889,6 +915,50 @@ mod effort_tests {
                 let plain_total = total(&plain, &flate::deflate_zlib(&s.data, &opt.flate));
                 assert!(total(&d, &z) <= plain_total, "image {k}, effort {effort}: {} > {plain_total}", total(&d, &z));
                 assert_eq!(d.has(b"DecodeParms"), *predicted, "image {k}, effort {effort}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_refused_thread_is_no_loss() {
+        // A page with text and four different images, stored with quick settings (so there is work to do).
+        let mut objs: Vec<Vec<u8>> = vec![b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(), b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()];
+        objs.push(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /XObject << /A 5 0 R /B 6 0 R /C 7 0 R /D 8 0 R >> >> >>".to_vec());
+        let stream = |dict: &str, decoded: &[u8]| {
+            let data = flate::deflate_zlib(decoded, &flate::Options::quick());
+            let mut o = format!("<< {dict} /Filter /FlateDecode /Length {} >>\nstream\n", data.len()).into_bytes();
+            o.extend_from_slice(&data);
+            o.extend_from_slice(b"\nendstream");
+            o
+        };
+        let text: Vec<u8> = (0..400).flat_map(|i| format!("q {} 0 0 50 10 {} cm /A Do Q BT ({i}) Tj ET\n", 40 + i % 9, i % 700).into_bytes()).collect();
+        objs.push(stream("", &text));
+        for k in 0..4usize {
+            let px: Vec<u8> = (0..160 * 120).map(|i| ((i % 160) * (k + 1) / 2 + (i / 160) * (3 - k % 2)) as u8).collect();
+            objs.push(stream("/Type /XObject /Subtype /Image /Width 160 /Height 120 /ColorSpace /DeviceGray /BitsPerComponent 8", &px));
+        }
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, o) in objs.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+            pdf.extend_from_slice(o);
+            pdf.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+        for off in offsets {
+            pdf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+        for effort in [0u8, 100] {
+            let one = optimize(&pdf, &Options { threads: 1, ..Options::effort(effort) });
+            assert!(matches!(one.outcome, Outcome::Smaller(_)), "{:?}", one.outcome);
+            // The system gives no thread, one, or two of the three asked for.
+            for allowed in [0, 1, 2] {
+                let _refuse = par::tests::RefuseSpawns::after(allowed);
+                let r = optimize(&pdf, &Options { threads: 4, ..Options::effort(effort) });
+                assert!(r.data == one.data, "effort {effort}, {allowed} threads allowed");
             }
         }
     }

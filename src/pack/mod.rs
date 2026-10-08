@@ -60,12 +60,46 @@ fn looks_compressed(x: &[u8], allowed: bool) -> bool {
     for &b in x {
         h[b as usize] += 1;
     }
-    let n = x.len() as f64;
-    let bits: f64 = h.iter().filter(|&&c| c > 0).map(|&c| {
+    entropy(&h) >= 7.9
+}
+
+/// Bits per symbol of a histogram.
+fn entropy(h: &[u64; 256]) -> f64 {
+    let n = h.iter().sum::<u64>() as f64;
+    h.iter().filter(|&&c| c > 0).map(|&c| {
         let p = c as f64 / n;
         -p * p.log2()
-    }).sum();
-    bits >= 7.9
+    }).sum()
+}
+
+/// Plain coding below `PLAIN_BELOW` (see `PackOptions`): for data that looks compressed and whose differences
+/// between bytes 1 to 4 apart (neighbouring samples of 1 to 4 bytes) are evenly spread too, as in compressed
+/// data. Image samples, a gradient say, can have evenly spread bytes, but their differences show the structure
+/// the model finds (coded plainly, a 512 x 512 gradient took 400 times the room). Large data is judged on 16
+/// windows of 64 KiB spread over it.
+fn plainly(x: &[u8], allowed: bool) -> bool {
+    if !looks_compressed(x, allowed) {
+        return false;
+    }
+    const WINDOW: usize = 1 << 16;
+    const WINDOWS: usize = 16;
+    let mut h = [[0u64; 256]; 4];
+    let mut add = |w: &[u8]| {
+        for (i, &b) in w.iter().enumerate() {
+            for d in 1..=4.min(i) {
+                h[d - 1][b.wrapping_sub(w[i - d]) as usize] += 1;
+            }
+        }
+    };
+    if x.len() <= WINDOW * WINDOWS {
+        add(x);
+    } else {
+        for k in 0..WINDOWS {
+            let a = k * (x.len() - WINDOW) / (WINDOWS - 1);
+            add(&x[a..a + WINDOW]);
+        }
+    }
+    h.iter().all(|h| entropy(h) >= 7.9)
 }
 
 fn header(version: u8, input: &[u8]) -> Vec<u8> {
@@ -467,9 +501,10 @@ impl<'m, C: Coder> Io<'m, C> {
 /// file restores the same whatever they were.
 #[derive(Clone, Debug)]
 pub struct PackOptions {
-    /// How hard to try, 0 to 100. Below `PLAIN_BELOW`, data that looks compressed already is coded plainly:
-    /// on 3 MB of random bytes 17 times faster (0.8 s instead of 14 s) and no larger; up to about 1% larger
-    /// on compressed data the model still finds a little in.
+    /// How hard to try, 0 to 100. Below `PLAIN_BELOW`, data that looks compressed already (no structure in
+    /// its bytes or their differences, see `looks_compressed`) is coded plainly: on 3 MB of random bytes 17
+    /// times faster (0.8 s instead of 14 s) and no larger; up to about 1% larger on compressed data the model
+    /// still finds a little in.
     pub effort: u8,
     /// Threads for looking at the streams (0: what the machine offers, at most 8). Never changes the output.
     pub threads: usize,
@@ -727,7 +762,7 @@ fn run<C: Coder>(c: C, d: Option<&[u8]>, total_len: usize, opt: &PackOptions, st
                     io.m.set_kind(Kind::Syntax, Geom::default(), out.len() as u64);
                     stats.syntax_bytes += n;
                 } else {
-                    flat = io.byte(src.map(|x| looks_compressed(x, io.plain) as u8)) == 1;
+                    flat = io.byte(src.map(|x| plainly(x, io.plain) as u8)) == 1;
                     io.m.set_kind(Kind::Raw, Geom::default(), out.len() as u64);
                     stats.streams += 1;
                     stats.raw_stream_bytes += n;
@@ -944,7 +979,7 @@ fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, lep_in: Option<Opti
             }
         }
         // Decoded data can itself be compressed (a JPEG behind Flate, say).
-        let flat = io.byte(data_in.map(|x| (inf.png.is_none() && looks_compressed(x, io.plain)) as u8)) == 1;
+        let flat = io.byte(data_in.map(|x| (inf.png.is_none() && plainly(x, io.plain)) as u8)) == 1;
         io.m.set_kind(inf.kind, inf.geom, 0);
         io.m.set_flat(flat);
         io.bytes(data_in, dlen, &mut decoded);
@@ -986,28 +1021,33 @@ pub fn pack_with(input: &[u8], opt: &PackOptions) -> (Vec<u8>, PackStats) {
     let t = std::time::Instant::now();
     let threads = if opt.threads == 0 { par::default_threads() } else { opt.threads };
     // Never hand over something we can't restore exactly. With a second thread the restore runs while the
-    // encoder writes (the same `run`, on the same bytes, as `unpack`); with one, it follows.
-    let (out, restored) = if threads >= 2 {
+    // encoder writes (the same `run`, on the same bytes, as `unpack`); with one, or when the system refuses
+    // the thread, it follows.
+    let alongside = (threads >= 2).then(|| {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::scope(|s| {
-            let check = s.spawn(move || {
+            let check = par::spawn(s, move || {
                 let mut st = PackStats::default();
                 let (back, _) = run(pipe::StreamDecoder::new(rx), None, input.len(), &PackOptions::default(), &mut st);
                 !st.damaged && back == input
-            });
+            })?;
             let (copy, enc) = run(pipe::TeeEncoder::new(tx), Some(input), input.len(), opt, &mut stats);
             debug_assert_eq!(copy, input);
             let mut out = header(VERSION, input);
             out.extend_from_slice(&enc.finish());
-            (out, check.join().unwrap_or(false))
+            Some((out, check.join().unwrap_or(false)))
         })
-    } else {
-        let (copy, enc) = run(Encoder::new(), Some(input), input.len(), opt, &mut stats);
-        debug_assert_eq!(copy, input);
-        let mut out = header(VERSION, input);
-        out.extend_from_slice(&enc.finish());
-        let restored = matches!(unpack(&out), Ok(back) if back == input);
-        (out, restored)
+    });
+    let (out, restored) = match alongside.flatten() {
+        Some(r) => r,
+        None => {
+            let (copy, enc) = run(Encoder::new(), Some(input), input.len(), opt, &mut stats);
+            debug_assert_eq!(copy, input);
+            let mut out = header(VERSION, input);
+            out.extend_from_slice(&enc.finish());
+            let restored = matches!(unpack(&out), Ok(back) if back == input);
+            (out, restored)
+        }
     };
     if dbg {
         eprintln!("pack: planned, coded and restored in {:?} ({threads} threads)", t.elapsed());
@@ -1104,4 +1144,71 @@ fn fallback_decode(body: &[u8], len: usize) -> Option<Vec<u8>> {
         out.push(model.code_byte(&mut dcd, None));
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flate::zlibexact::{zlib_stream, Params};
+    use crate::par::tests::RefuseSpawns;
+
+    fn rng(s: &mut u64) -> u64 {
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
+        *s
+    }
+
+    #[test]
+    fn plain_coding_only_for_data_without_structure() {
+        let mut s = 7u64;
+        let random: Vec<u8> = (0..100_000).map(|_| rng(&mut s) as u8).collect();
+        let text: Vec<u8> = (0..20_000u32).flat_map(|i| format!("BT /F1 {} Tf ({}) Tj ET\n", i % 17, i.wrapping_mul(7919)).into_bytes()).collect();
+        assert!(plainly(&random, true));
+        assert!(!plainly(&random, false), "only when allowed");
+        assert!(!plainly(&text, true));
+        // Image samples whose byte values are evenly spread, but with neighbours that are alike: an RGB
+        // gradient, a ramp, a noisy photo-like picture. Large data is judged on windows.
+        let (w, h) = (512usize, 512usize);
+        let gradient: Vec<u8> = (0..h).flat_map(|y| (0..w).flat_map(move |x| [(x / 2) as u8, (y / 2) as u8, ((x + y) / 4) as u8])).collect();
+        let ramp: Vec<u8> = (0..300_000u32).map(|i| i as u8).collect();
+        let photo: Vec<u8> = (0..w * h * 3).map(|i| ((i % (w * 3)) / 3 + i / (w * 3) + (rng(&mut s) % 81) as usize) as u8).collect();
+        let big = [random.as_slice(), &gradient, &random, &random, &random, &random, &random, &random, &random, &random, &random, &random].concat();
+        for (name, x) in [("gradient", &gradient), ("ramp", &ramp), ("photo", &photo)] {
+            assert!(looks_compressed(x, true), "{name}: its bytes alone look compressed");
+            assert!(!plainly(x, true), "{name}");
+        }
+        assert!(big.len() > 16 << 16 && !plainly(&big, true));
+        assert!(plainly(&[random.as_slice(); 12].concat(), true));
+    }
+
+    /// A small PDF with a content stream zlib wrote (rebuilt exactly) and an image.
+    fn sample_pdf() -> Vec<u8> {
+        let z = |d: &[u8]| zlib_stream(d, Params { level: 6, window_bits: 15, mem_level: 8, filtered: false });
+        let content: Vec<u8> = (0..300).flat_map(|i| format!("BT /F1 12 Tf 72 {} Td (Line {i}) Tj ET\n", 700 - i % 60 * 11).into_bytes()).collect();
+        let px: Vec<u8> = (0..200 * 100).map(|i| (i % 200 + i / 200) as u8).collect();
+        let mut pdf = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n".to_vec();
+        for (n, dict, data) in [(2, "/Filter /FlateDecode", z(&content)), (3, "/Subtype /Image /Width 200 /Height 100 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode", z(&px))] {
+            pdf.extend_from_slice(format!("{n} 0 obj\n<< {dict} /Length {} >>\nstream\n", data.len()).as_bytes());
+            pdf.extend_from_slice(&data);
+            pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        }
+        pdf.extend_from_slice(b"trailer\n<< /Root 1 0 R >>\n%%EOF\n");
+        pdf
+    }
+
+    #[test]
+    fn a_refused_thread_is_no_loss() {
+        let pdf = sample_pdf();
+        let (one, st) = pack_with(&pdf, &PackOptions { effort: 100, threads: 1 });
+        assert!(st.rebuilt == 2 && !st.fallback && !st.stored, "{st:?}");
+        // No thread at all (the restore check runs after the encoder), or the check thread but no helper.
+        for allowed in [0, 1] {
+            let _refuse = RefuseSpawns::after(allowed);
+            let (two, st) = pack_with(&pdf, &PackOptions { effort: 100, threads: 4 });
+            assert!(two == one, "{allowed} threads allowed");
+            assert!(!st.fallback && !st.stored);
+        }
+        assert_eq!(unpack(&one).unwrap(), pdf);
+    }
 }
