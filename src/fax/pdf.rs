@@ -102,7 +102,7 @@ fn lone_fax(s: &Stream, resolve: Resolve) -> Result<(FaxParams, usize), &'static
         return Err("not a 1-bit DeviceGray image or a mask");
     }
     let p = FaxParams::from(stages[0].parms.as_ref()).ok_or("parameters not direct values")?;
-    let int = |k: &[u8]| d.get(k).and_then(|x| resolve(x)).and_then(|x| x.as_int());
+    let int = |k: &[u8]| d.get(k).and_then(resolve).and_then(|x| x.as_int());
     let w = int(b"Width").ok_or("no Width")?;
     let h = int(b"Height").ok_or("no Height")?;
     if w != p.columns as i64 {

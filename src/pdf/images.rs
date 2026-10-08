@@ -12,10 +12,10 @@ pub struct Geometry {
 
 impl Geometry {
     pub fn row(&self) -> usize {
-        (self.colors * self.bpc * self.columns + 7) / 8
+        (self.colors * self.bpc * self.columns).div_ceil(8)
     }
     pub fn bpp(&self) -> usize {
-        ((self.colors * self.bpc + 7) / 8).max(1)
+        (self.colors * self.bpc).div_ceil(8).max(1)
     }
 }
 
@@ -94,7 +94,7 @@ fn predict(t: u8, a: u8, b: u8, c: u8) -> u8 {
 
 /// PNG-predicted rows (type byte + row) back to samples; None unless the data is whole valid rows.
 pub fn png_unfilter(data: &[u8], row: usize, bpp: usize) -> Option<Vec<u8>> {
-    if row == 0 || data.len() % (row + 1) != 0 {
+    if row == 0 || !data.len().is_multiple_of(row + 1) {
         return None;
     }
     let rows = data.len() / (row + 1);

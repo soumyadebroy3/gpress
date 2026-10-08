@@ -37,7 +37,9 @@ fn coefficients(d: &[u8]) -> Option<Vec<Vec<[i32; 64]>>> {
         return None;
     }
     let mut tables: HashMap<u8, Table> = HashMap::new();
-    let (mut restart, mut frame): (usize, Option<(usize, usize, Vec<(u8, usize, usize)>)>) = (0, None);
+    // A frame: width, height and the components (id, horizontal and vertical sampling).
+    type Frame = (usize, usize, Vec<(u8, usize, usize)>);
+    let (mut restart, mut frame): (usize, Option<Frame>) = (0, None);
     let mut out = Vec::new();
     let mut pos = 2;
     loop {
@@ -78,11 +80,10 @@ fn coefficients(d: &[u8]) -> Option<Vec<Vec<[i32; 64]>>> {
                 let ns = body[0] as usize;
                 // Blocks of one MCU: (component, DC table, AC table).
                 let mut blocks = Vec::new();
-                let mcus;
-                if ns == 1 {
+                let mcus = if ns == 1 {
                     let c = comps.iter().position(|c| c.0 == body[1])?;
                     blocks.push((c, body[2] >> 4, 0x10 | body[2] & 15));
-                    mcus = (w * comps[c].1).div_ceil(8 * hmax) * (h * comps[c].2).div_ceil(8 * vmax);
+                    (w * comps[c].1).div_ceil(8 * hmax) * (h * comps[c].2).div_ceil(8 * vmax)
                 } else {
                     for i in 0..ns {
                         let c = comps.iter().position(|c| c.0 == body[1 + 2 * i])?;
@@ -90,8 +91,8 @@ fn coefficients(d: &[u8]) -> Option<Vec<Vec<[i32; 64]>>> {
                             blocks.push((c, body[2 + 2 * i] >> 4, 0x10 | body[2 + 2 * i] & 15));
                         }
                     }
-                    mcus = w.div_ceil(8 * hmax) * h.div_ceil(8 * vmax);
-                }
+                    w.div_ceil(8 * hmax) * h.div_ceil(8 * vmax)
+                };
                 // The coded bits, with stuffed bytes and restart markers taken out.
                 let mut bits: Vec<Vec<u8>> = vec![Vec::new()];
                 loop {

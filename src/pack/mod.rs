@@ -319,7 +319,7 @@ fn info(dict: Option<&Dict>, decoded_sample: Option<&[u8]>) -> Info {
             },
             _ => (1, false),
         };
-        let row = (w * comps * bpc + 7) / 8;
+        let row = (w * comps * bpc).div_ceil(8);
         let bpp = ((comps * bpc) / 8).max(1);
         inf.kind = Kind::Image;
         // Palette indices and packed pixels are symbols: modelled exactly, not as differences.
@@ -332,8 +332,8 @@ fn info(dict: Option<&Dict>, decoded_sample: Option<&[u8]>) -> Info {
                 let cols = int(p, b"Columns").unwrap_or(1).max(1) as usize;
                 let colors = int(p, b"Colors").unwrap_or(1).max(1) as usize;
                 let pbpc = int(p, b"BitsPerComponent").unwrap_or(8).max(1) as usize;
-                let prow = (cols * colors * pbpc + 7) / 8;
-                let pbpp = ((colors * pbpc + 7) / 8).max(1);
+                let prow = (cols * colors * pbpc).div_ceil(8);
+                let pbpp = (colors * pbpc).div_ceil(8).max(1);
                 inf.png = Some((prow, pbpp));
                 inf.geom = Geom { stride: prow, bpp: pbpp, exact: exact || pbpc < 8 };
                 inf.img = None;
@@ -397,7 +397,7 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 
 /// Filtered rows -> (filter types, pixels). None if the data isn't whole valid rows.
 fn unfilter(data: &[u8], row: usize, bpp: usize) -> Option<(Vec<u8>, Vec<u8>)> {
-    if row == 0 || data.len() % (row + 1) != 0 {
+    if row == 0 || !data.len().is_multiple_of(row + 1) {
         return None;
     }
     let rows = data.len() / (row + 1);
@@ -1205,7 +1205,7 @@ fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, lep_in: Option<Opti
             // The colour space can't always tell the number of components (an ICC profile's /N lives in another
             // object); the data length can. Both sides see the same length and dictionary.
             for c in [comps, 1, 3, 4, 2, 5, 6, 7, 8] {
-                let row = (w * c * bpc + 7) / 8;
+                let row = (w * c * bpc).div_ceil(8);
                 if row > 0 && h > 0 && row.checked_mul(h) == Some(dlen) {
                     inf.geom.stride = row;
                     inf.geom.bpp = ((c * bpc) / 8).max(1);
@@ -1235,7 +1235,7 @@ fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, lep_in: Option<Opti
 /// stream's bytes decide, not its dictionary: a /Filter given by reference, for example, still counts.
 /// Whatever is tried here is checked by rebuilding it exactly (and every pack is restored and compared).
 fn zlib_header(raw: &[u8]) -> bool {
-    raw.len() >= 8 && raw[0] & 0x0f == 8 && raw[0] >> 4 <= 7 && ((raw[0] as u16) << 8 | raw[1] as u16) % 31 == 0 && raw[1] & 0x20 == 0
+    raw.len() >= 8 && raw[0] & 0x0f == 8 && raw[0] >> 4 <= 7 && ((raw[0] as u16) << 8 | raw[1] as u16).is_multiple_of(31) && raw[1] & 0x20 == 0
 }
 
 /// Where each object "n g obj" of a file starts its value (the last definition wins), found by its bytes:

@@ -163,7 +163,7 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, conformance: bool) -> Resul
     // A reference to an object missing from the cross-reference data is null — unless the object is
     // physically in the file, where some readers find it anyway.
     let mut dangling = Vec::new();
-    for (_, (_, o)) in objs.iter() {
+    for (_, o) in objs.values() {
         let mut r = Vec::new();
         match o {
             // A stream's /Length is replaced by a direct number, so its target doesn't matter.
@@ -182,7 +182,7 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, conformance: bool) -> Resul
         return Ok(());
     }
     let mut why: Option<String> = None;
-    for (_, (_, o)) in objs.iter() {
+    for (_, o) in objs.values() {
         walk(o, &mut |x| {
             if let Some(d) = x.as_dict() {
                 if d.name(b"Type") == Some(b"Sig") || d.has(b"ByteRange") {
@@ -273,7 +273,7 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
     }
     // Predictor parameters may only sit on the last general stage (they stay with the data).
     for st in &stages[..k.saturating_sub(1)] {
-        if st.parms.as_ref().map_or(false, |p| p.has(b"Predictor")) {
+        if st.parms.as_ref().is_some_and(|p| p.has(b"Predictor")) {
             return None;
         }
     }
@@ -331,7 +331,7 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
         let mut d = s.dict.clone();
         set_chain(&mut d, &with_flate);
         let z = flate::deflate_zlib(jpeg.as_ref().unwrap_or(&data), &opt.flate);
-        let again = opt.effort >= 100 && jpeg.as_ref().map_or(false, |j| z.len() * 10 <= j.len() * 9 && j.len() * 10 <= data.len() * 9);
+        let again = opt.effort >= 100 && jpeg.as_ref().is_some_and(|j| z.len() * 10 <= j.len() * 9 && j.len() * 10 <= data.len() * 9);
         for z in std::iter::once(z).chain(again.then(|| flate::deflate_zlib(&data, &opt.flate))) {
             let limit = if adds_layer { best_len.min(bare_len - bare_len / 100) } else { best_len };
             if z.len() < limit {
@@ -437,7 +437,7 @@ fn repredict(s: &Stream, data: &[u8], carried: Option<&Dict>, opt: &Options, res
         };
         // (data for all rows + dictionary) x sampled rows, in whole numbers.
         let score = data_len as u64 * nrows as u64 + dict_len(&parms) as u64 * sampled as u64;
-        if best.as_ref().map_or(true, |b| score < b.0) {
+        if best.as_ref().is_none_or(|b| score < b.0) {
             best = Some((score, parms, bytes));
         }
     }
@@ -473,7 +473,7 @@ fn predictor_sample(nrows: usize, row: usize, effort: u8) -> Option<Vec<(usize, 
     let mut out: Vec<(usize, usize)> = Vec::with_capacity(BANDS);
     for k in 0..BANDS {
         let start = k * nrows / BANDS;
-        if out.last().map_or(false, |&(_, end)| start < end) {
+        if out.last().is_some_and(|&(_, end)| start < end) {
             continue;
         }
         out.push((start, (start + per).min(nrows)));
@@ -645,7 +645,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         let t = std::time::Instant::now();
         // XMP stays as it is for tools that read it straight from the file, unless it is encrypted. (Whether
         // it is depends on the dictionary alone, so identical streams agree.)
-        let xmp = s.dict.name(b"Type") == Some(b"Metadata") && crypt.map_or(false, |c| c.stream_method(n, &s.dict).map_or(false, |m| m != Method::Identity));
+        let xmp = s.dict.name(b"Type") == Some(b"Metadata") && crypt.is_some_and(|c| c.stream_method(n, &s.dict).is_ok_and(|m| m != Method::Identity));
         let r = settings[u].as_ref().and_then(|o| {
             let o = Options { flate: flate::Options { shared: Some(flate::deflate::Shared::with_pool(workers.clone(), true)), ..o.flate.clone() }, ..o.clone() };
             if xmp {

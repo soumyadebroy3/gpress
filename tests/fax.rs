@@ -24,10 +24,10 @@ fn page(w: usize, h: usize) -> Image {
         while x + 9 < w {
             if rng() % 6 != 0 {
                 let (bw, bh) = (3 + (rng() % 5) as usize, 6 + (rng() % 6) as usize);
-                for yy in y..y + bh {
-                    for xx in x..x + bw {
+                for row in px.iter_mut().skip(y).take(bh) {
+                    for p in row.iter_mut().skip(x).take(bw) {
                         if rng() % 9 != 0 {
-                            px[yy][xx] = 1;
+                            *p = 1;
                         }
                     }
                 }
@@ -291,7 +291,7 @@ fn fax_work_is_bounded_by_the_data() {
     let per_byte = engine::fax::part::budget(1) - engine::fax::part::budget(0);
     let pad = (3 * cost / per_byte) as usize;
     let mut big = d.clone();
-    big.splice(9..9, std::iter::repeat_n(b'%', pad).chain([b'\n']));
+    big.splice(9..9, std::iter::repeat_n(b'%', pad).chain(*b"\n"));
     let big = fix_xref(&big);
     let (packed, stats) = pack(&big);
     assert_eq!(stats.fax, 3, "{stats:?}");
@@ -464,10 +464,9 @@ fn peyaji_refuses_damaged_fax_parts() {
         s ^= s << 17;
         let mut b = packed.clone();
         let i = 25 + (s as usize) % (b.len() - 25);
-        b[i] ^= 1 << (s >> 32) % 8;
-        match unpack(&b) {
-            Ok(out) => assert_eq!(out, d, "a damaged file restored to something else"),
-            Err(_) => {}
+        b[i] ^= 1 << ((s >> 32) % 8);
+        if let Ok(out) = unpack(&b) {
+            assert_eq!(out, d, "a damaged file restored to something else");
         }
     }
     for cut in (0..packed.len()).step_by(7) {

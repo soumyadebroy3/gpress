@@ -67,12 +67,15 @@ pub struct ParseScratch {
 /// Cheapest parse of `data[a..b]` (positions inside the range covered by `m`). Matches are cut at `b`.
 /// With `alt`, every length may use any candidate distance long enough (the cheapest); without it, each
 /// length uses the smallest distance that reaches it.
+// The parse takes its inputs apart on purpose: the same signature is built twice, once for AVX2.
+#[allow(clippy::too_many_arguments)]
 pub fn optimal(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt: bool, sc: &mut ParseScratch, out: &mut Vec<Sym>) {
     optimal_nice(data, a, b, m, c, alt, MAX_MATCH + 1, sc, out)
 }
 
 /// As `optimal`, but a match of at least `nice` bytes is taken as soon as it is found (the positions it
 /// covers are not tried as starting points): much faster on repetitive data, slightly less thorough.
+#[allow(clippy::too_many_arguments)]
 pub fn optimal_nice(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt: bool, nice: usize, sc: &mut ParseScratch, out: &mut Vec<Sym>) {
     // The same code built for AVX2 where the processor has it (wider vectors, the same arithmetic).
     #[cfg(target_arch = "x86_64")]
@@ -87,11 +90,13 @@ pub fn optimal_nice(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
 unsafe fn parse_avx2(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt: bool, nice: usize, sc: &mut ParseScratch, out: &mut Vec<Sym>) {
     parse(data, a, b, m, c, alt, nice, sc, out)
 }
 
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn parse(data: &[u8], a: usize, b: usize, m: &Matches, c: &Costs, alt: bool, nice: usize, sc: &mut ParseScratch, out: &mut Vec<Sym>) {
     let n = b - a;
     sc.cost.clear();
@@ -245,7 +250,7 @@ pub fn greedy(data: &[u8], a: usize, b: usize, m: &Matches, out: &mut Vec<Sym>) 
         if maxl >= MIN_MATCH {
             for &(ml, d) in m.chain_at(i) {
                 let l = (ml as usize).min(maxl);
-                if l >= MIN_MATCH && best.map_or(true, |(bl, _)| l > bl) {
+                if l >= MIN_MATCH && best.is_none_or(|(bl, _)| l > bl) {
                     best = Some((l, d as usize));
                 }
             }

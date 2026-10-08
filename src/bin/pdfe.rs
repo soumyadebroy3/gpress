@@ -321,7 +321,7 @@ fn main() {
             let doc = engine::pdf::xref::open(&data).unwrap_or_else(|e| die(&format!("unreadable: {e:?}")));
             for &n in doc.entries.keys() {
                 if let Ok((_, engine::pdf::object::Obj::Stream(s))) = doc.load(n) {
-                    let fax = engine::pdf::filters::chain(&s.dict).map_or(false, |c| c.iter().any(|st| st.name == b"CCITTFaxDecode"));
+                    let fax = engine::pdf::filters::chain(&s.dict).is_some_and(|c| c.iter().any(|st| st.name == b"CCITTFaxDecode"));
                     if fax {
                         let resolve = |o: &engine::pdf::object::Obj| match o {
                             engine::pdf::object::Obj::Ref(r, _) => doc.load(*r).ok().map(|x| x.1),
@@ -416,7 +416,7 @@ fn read_pbm(d: &[u8]) -> Option<engine::fax::ccitt::Image> {
     let w: usize = fields[1].parse().ok()?;
     let h: usize = fields[2].parse().ok()?;
     let body = d.get(i + 1..)?;
-    let stride = (w + 7) / 8;
+    let stride = w.div_ceil(8);
     if body.len() < stride * h || w == 0 {
         return None;
     }

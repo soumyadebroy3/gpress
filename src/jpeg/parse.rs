@@ -256,7 +256,7 @@ fn read_scan_header(b: &[u8], f: &Frame) -> Result<Vec<(usize, u8, u8)>, Fail> {
     for c in b[1..1 + 2 * n].chunks(2) {
         let i = f.comps.iter().position(|x| x.id == c[0]).ok_or("scan names an unknown component")?;
         // Components in frame order, each once (as the standard requires).
-        if comps.last().map_or(false, |l| l.0 >= i) {
+        if comps.last().is_some_and(|l| l.0 >= i) {
             return Err("scan components out of order");
         }
         let (td, ta) = (c[1] >> 4, c[1] & 15);

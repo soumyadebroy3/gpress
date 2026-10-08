@@ -667,7 +667,7 @@ pub fn parse(data: &[u8], scheme: Scheme, columns: usize, byte_align: bool, limi
     let p = r.pos;
     let pad_bits = ((8 - (p & 7)) & 7) as u32;
     let pad = if pad_bits > 0 { r.peek(pad_bits) as u8 } else { 0 };
-    let trailing = data[(p + 7) / 8..].to_vec();
+    let trailing = data[p.div_ceil(8)..].to_vec();
     Some(Parsed { image, layout: Layout { scheme, rule, gaps, end, pad, trailing }, stop, why })
 }
 
@@ -751,9 +751,9 @@ mod tests {
                     for x in 0..w {
                         let r = rng(&mut s);
                         // Mostly keep the pixel above; sometimes flip; runs of black.
-                        if r % 7 == 0 {
+                        if r.is_multiple_of(7) {
                             px[x] ^= 1;
-                        } else if r % 13 == 0 && x + 5 < w {
+                        } else if r.is_multiple_of(13) && x + 5 < w {
                             px[x..x + 5].fill(1);
                         }
                     }

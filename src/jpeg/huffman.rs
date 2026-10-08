@@ -268,7 +268,7 @@ mod tests {
             let n = 1 + (rng(&mut s) % 256) as usize;
             let mut freq = [0u64; 256];
             for f in freq.iter_mut().take(n) {
-                if rng(&mut s) % 3 != 0 {
+                if !rng(&mut s).is_multiple_of(3) {
                     *f = 1 + rng(&mut s) % (1 + round as u64 * 37);
                 }
             }
@@ -317,7 +317,7 @@ mod tests {
             let mut best = u64::MAX;
             for code in 0..(16u32 * 16 * 16 * 16) {
                 let l = [code & 15, code >> 4 & 15, code >> 8 & 15, code >> 12 & 15];
-                if l.iter().any(|&x| x == 0) {
+                if l.contains(&0) {
                     continue;
                 }
                 let kraft: u64 = l.iter().map(|&x| 1u64 << (16 - x)).sum();

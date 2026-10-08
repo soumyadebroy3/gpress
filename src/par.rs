@@ -83,7 +83,7 @@ impl Drop for Slot<'_> {
 /// calling thread does everything. Every free thread joins at the start; later, a pool slot released by
 /// another part of the job is picked up at the next piece.
 pub fn map<R: Send>(pool: Option<&Pool>, n: usize, order: Option<&[usize]>, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
-    debug_assert!(order.map_or(true, |o| o.len() == n));
+    debug_assert!(order.is_none_or(|o| o.len() == n));
     let at = |k: usize| order.map_or(k, |o| o[k]);
     // One thread (as in a browser build): plain sequential work, no thread machinery at all.
     let pool = match pool {

@@ -57,7 +57,7 @@ pub fn unwrap(input: &[u8], limit: usize) -> Result<Unwrapped, ZlibError> {
     if cmf >> 4 > 7 {
         return Err(ZlibError::Header("window too large"));
     }
-    if ((cmf as u16) << 8 | flg as u16) % 31 != 0 {
+    if !((cmf as u16) << 8 | flg as u16).is_multiple_of(31) {
         return Err(ZlibError::Header("bad header check"));
     }
     if flg & 0x20 != 0 {

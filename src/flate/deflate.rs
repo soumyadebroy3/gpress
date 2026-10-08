@@ -93,8 +93,11 @@ impl Options {
 pub struct Shared {
     pub pool: Arc<Pool>,
     /// Kept as long as this `Shared` lives; None: nothing is remembered.
-    memo: Option<Memo<(u64, usize, [usize; 9]), Arc<Vec<u8>>>>,
+    memo: Option<Memo<MemoKey, Arc<Vec<u8>>>>,
 }
+
+/// What an encoded input is remembered by: the hash and length of the data and the settings that matter.
+type MemoKey = (u64, usize, [usize; 9]);
 
 impl Shared {
     /// A new pool of `threads` threads, remembering every output.
@@ -163,7 +166,7 @@ pub fn deflate_zlib(data: &[u8], opt: &Options) -> Vec<u8> {
         None => encode(),
         Some(memo) => {
             let key = (par::hash64(data), data.len(), opt.fingerprint());
-            let fits = |z: &Arc<Vec<u8>>| super::zlib::unwrap(z, data.len() + 1).map_or(false, |u| u.data == data && u.trailing == 0);
+            let fits = |z: &Arc<Vec<u8>>| super::zlib::unwrap(z, data.len() + 1).is_ok_and(|u| u.data == data && u.trailing == 0);
             memo.get(key, fits, || Arc::new(encode())).to_vec()
         }
     }
@@ -398,7 +401,7 @@ fn exact(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options, start: Vec
         let maxlen = *code.ll.iter().max().unwrap_or(&15) as f32;
         let mut improved = false;
         for (missing, alt) in [(maxlen + 1.0, false), (maxlen + 4.0, false), (maxlen + 1.0, opt.alternatives)] {
-            if alt == false && missing > maxlen + 1.0 && opt.alternatives {
+            if !alt && missing > maxlen + 1.0 && opt.alternatives {
                 // keep the variety small when alternatives are tried
             }
             cur.clear();

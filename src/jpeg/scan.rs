@@ -247,7 +247,7 @@ impl<'a> Tokens<'a> {
                 }
                 return Ok(0);
             }
-            if self.restart > 0 && self.mcu % self.restart == 0 {
+            if self.restart > 0 && self.mcu.is_multiple_of(self.restart) {
                 let m = self.rst;
                 self.rst = (m + 1) & 7;
                 self.bits.end_of_interval()?;
@@ -267,7 +267,7 @@ impl<'a> Tokens<'a> {
             if self.blk == self.blocks.len() {
                 // The end of the scan or of an interval is for the next call.
                 let next = self.mcu + 1;
-                if count >= BATCH_BLOCKS || next == self.mcus || (self.restart > 0 && next % self.restart == 0) {
+                if count >= BATCH_BLOCKS || next == self.mcus || (self.restart > 0 && next.is_multiple_of(self.restart)) {
                     return Ok(n);
                 }
                 self.blk = 0;

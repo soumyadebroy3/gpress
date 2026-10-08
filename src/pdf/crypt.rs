@@ -61,7 +61,9 @@ fn sha512(data: &[u8]) -> Vec<u8> {
     Sha512::digest(data).to_vec()
 }
 
-/// The AES block cipher with a 128- or 256-bit key.
+/// The AES block cipher with a 128- or 256-bit key (the 256-bit schedule is the larger variant; one is made
+/// per file, so the size doesn't matter).
+#[allow(clippy::large_enum_variant)]
 enum Aes {
     A128(aes::Aes128),
     A256(aes::Aes256),
@@ -95,7 +97,7 @@ impl Aes {
 
 /// CBC encryption without padding; `data` is whole 16-byte blocks.
 fn cbc_encrypt(c: &Aes, iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
-    debug_assert!(data.len() % 16 == 0);
+    debug_assert!(data.len().is_multiple_of(16));
     let mut out = Vec::with_capacity(data.len());
     let mut prev = *iv;
     for chunk in data.chunks_exact(16) {
@@ -112,7 +114,7 @@ fn cbc_encrypt(c: &Aes, iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
 
 /// CBC decryption without padding; `data` is whole 16-byte blocks.
 fn cbc_decrypt(c: &Aes, iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
-    debug_assert!(data.len() % 16 == 0);
+    debug_assert!(data.len().is_multiple_of(16));
     let mut out = Vec::with_capacity(data.len());
     let mut prev = *iv;
     for chunk in data.chunks_exact(16) {
@@ -146,7 +148,7 @@ pub fn aes_seal(key: &[u8], iv: &[u8; 16], data: &[u8]) -> Result<Vec<u8>, &'sta
 /// The reverse of `aes_seal`, strictly: whole blocks after the vector, at least one, and valid padding.
 pub fn aes_open(key: &[u8], data: &[u8]) -> Result<Vec<u8>, &'static str> {
     let c = Aes::new(key).ok_or("bad AES key length")?;
-    if data.len() < 32 || data.len() % 16 != 0 {
+    if data.len() < 32 || !data.len().is_multiple_of(16) {
         return Err("AES data is not whole blocks");
     }
     let mut iv = [0u8; 16];
@@ -585,8 +587,11 @@ impl Crypt {
     }
 }
 
+/// Encrypts or decrypts one string.
+type StringMap<'a> = dyn FnMut(&[u8]) -> Result<Vec<u8>, &'static str> + 'a;
+
 /// Applies `f` to every string inside `o` (a stream's dictionary included), in a fixed order.
-fn map_strings(o: &mut Obj, f: &mut dyn FnMut(&[u8]) -> Result<Vec<u8>, &'static str>) -> Result<(), &'static str> {
+fn map_strings(o: &mut Obj, f: &mut StringMap) -> Result<(), &'static str> {
     match o {
         Obj::Str(s) => *s = f(s)?,
         Obj::Array(a) => {

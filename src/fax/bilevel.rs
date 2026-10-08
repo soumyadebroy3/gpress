@@ -215,7 +215,7 @@ impl Bilevel {
             let bit;
             if big == 0 {
                 // A white neighbourhood: one counter, chosen by what is a little farther away.
-                let f = ((a1 & 0x7) != 0) as usize | (((a2 & 0x1F) | (a3 & 0x3F)) != 0) as usize * 2 | (c0 >> 7) as usize * 4;
+                let f = ((a1 & 0x7) != 0) as usize | ((((a2 & 0x1F) | (a3 & 0x3F)) != 0) as usize * 2) | ((c0 >> 7) as usize * 4);
                 let ct = &mut self.fast[f];
                 bit = c.code16(px_in, ct.p16());
                 ct.update(bit, LIMIT);
@@ -289,7 +289,7 @@ impl Bilevel {
                 let a = self.apm2[base2 + near] as i32;
                 self.apm2[base2 + near] = (a + ((target - a) >> APM_SHIFT)) as u16;
             }
-            if bit as u32 == (c0 & 1) {
+            if bit == (c0 & 1) {
                 run += 1;
             } else {
                 run = 0;

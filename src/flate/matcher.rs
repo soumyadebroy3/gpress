@@ -268,7 +268,7 @@ mod validity {
                 let mut prev = (0u16, 0u16);
                 for &(l, d) in m.at(i) {
                     let (l, d) = (l as usize, d as usize);
-                    assert!(d >= 1 && d <= WINDOW && d <= i, "pos {i}: dist {d}");
+                    assert!((1..=WINDOW).contains(&d) && d <= i, "pos {i}: dist {d}");
                     assert!(i + l <= to, "pos {i}: len {l} past end");
                     assert!(l > prev.0 as usize && (d > prev.1 as usize), "pos {i}: steps not increasing {:?}", m.at(i));
                     assert_eq!(&data[i - d..i - d + l], &data[i..i + l], "pos {i}: len {l} dist {d}");
