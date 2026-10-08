@@ -6,8 +6,15 @@
 //! an operation, reads the output through `gpress_out_ptr()` / `gpress_out_len()` (the module keeps one
 //! result at a time), then frees both with `gpress_free_input` / `gpress_clear_out`. Operations return
 //! 0 on success or a gpress error code; `gpress_message_*` give the text (also the "untouched because"
-//! reason). The module never traps: every entry point runs inside a panic guard, and the engine reads no
-//! clock here (so there is no time budget: the host bounds the work by running it in a worker).
+//! reason). The engine reads no clock here (so there is no time budget: the host bounds the work by
+//! running it in a worker).
+//!
+//! Panics: `wasm32-unknown-unknown` builds with `panic = "abort"`, so there is no unwinding and the panic
+//! guards here and in the library catch nothing. A bug in the engine therefore traps the module
+//! (`WebAssembly.RuntimeError` in the host, like a failed memory growth) instead of returning code 4; the
+//! wrapper in `js/gpress.ts` turns the trap into a `GpressError` with that code and the instance must then
+//! be loaded again. The guards stay for the native build of this crate (the tests) and for a host that
+//! builds it with unwinding.
 //!
 //! Sizes are 32-bit here: the host refuses inputs of 2 GiB and more before they reach the module, and the
 //! size options are given in MiB (0 = the library's default) and clamped to what the module can address.

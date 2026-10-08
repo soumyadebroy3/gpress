@@ -7,11 +7,13 @@
  *   const archive = g.compress(anyBytes);                       // the gpress archive (.gpz)
  *   const original = g.expand(archive.data);                    // Uint8Array, or throws GpressError
  *
- * The module is deterministic (the same bytes as the native library, on any machine) and never traps:
- * problems come back as GpressError with a stable numeric code. Work happens on the calling thread and
- * there is no clock inside the module (so no time budget); run it in a Web Worker to keep a page
- * responsive and to end it when it has taken too long. Inputs of 2 GiB and more are refused here, before
- * they reach the module's 32-bit memory.
+ * The module is deterministic (the same bytes as the native library, on any machine) and problems come
+ * back as GpressError with a stable numeric code. The module is built with panic = "abort", so a bug in
+ * the engine (or a failed memory growth) traps it instead of returning: the wrapper turns the trap into a
+ * GpressError with code INTERNAL (4), and the instance is then dead (every later call throws the same
+ * error): load a fresh one. Work happens on the calling thread and there is no clock inside the module
+ * (so no time budget); run it in a Web Worker to keep a page responsive and to end it when it has taken
+ * too long. Inputs of 2 GiB and more are refused here, before they reach the module's 32-bit memory.
  */
 
 export type Outcome = "smaller" | "untouched";
@@ -110,6 +112,9 @@ interface Packed {
 }
 
 export class Gpress {
+  /** Set once the module has trapped: its memory and state can no longer be trusted. */
+  private dead: GpressError | null = null;
+
   private constructor(private readonly ex: Exports) {}
 
   /** Loads the module from a fetch() Response, bytes, a compiled Module, or (in Node) a file path. */
@@ -173,14 +178,25 @@ export class Gpress {
   }
 
   private run(input: Uint8Array, call: (ptr: number, len: number) => number): GpressResult {
+    if (this.dead) throw this.dead;
     if (input.length > MAX_INPUT_BYTES) {
       throw new GpressError(GpressError.TOO_LARGE, `input is ${input.length} bytes, over the module's limit of ${MAX_INPUT_BYTES}`);
     }
     const ptr = this.ex.gpress_alloc(input.length);
     if (ptr === 0) throw new GpressError(GpressError.TOO_LARGE, "out of memory allocating the input buffer");
+    let trapped = false;
     try {
       new Uint8Array(this.ex.memory.buffer, ptr, input.length).set(input);
-      const code = call(ptr, input.length);
+      let code: number;
+      try {
+        code = call(ptr, input.length);
+      } catch (e) {
+        // A trap: a panic in the engine (the module is built with panic = "abort", so nothing catches
+        // it inside) or a failed memory growth. The instance is no longer usable.
+        trapped = true;
+        this.dead = new GpressError(GpressError.INTERNAL, `the module trapped (${e instanceof Error ? e.message : String(e)}); load it again`);
+        throw this.dead;
+      }
       const message = this.message();
       if (code !== 0) throw new GpressError(code, message || `gpress error ${code}`);
       // Copy out: the module reuses its result buffer on the next call.
@@ -188,8 +204,12 @@ export class Gpress {
       const outcome: Outcome = this.ex.gpress_outcome() === 2 ? "untouched" : "smaller";
       return message ? { data, outcome, reason: message } : { data, outcome };
     } finally {
-      this.ex.gpress_free_input(ptr, input.length);
-      this.ex.gpress_clear_out();
+      // After a trap the module is not called again (its state may be inconsistent); the input buffer is
+      // left with the dead instance.
+      if (!trapped) {
+        this.ex.gpress_free_input(ptr, input.length);
+        this.ex.gpress_clear_out();
+      }
     }
   }
 

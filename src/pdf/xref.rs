@@ -59,9 +59,13 @@ pub struct Doc<'a> {
     objstm_last: HashMap<u32, u32>,
 }
 
+/// The last place `pat` starts within the final `window` bytes of `d`; None when `d` is shorter than `pat`.
 fn find_last(d: &[u8], pat: &[u8], window: usize) -> Option<usize> {
+    if d.len() < pat.len() {
+        return None;
+    }
     let start = d.len().saturating_sub(window);
-    (start..=d.len().saturating_sub(pat.len())).rev().find(|&i| &d[i..i + pat.len()] == pat)
+    (start..=d.len() - pat.len()).rev().find(|&i| &d[i..i + pat.len()] == pat)
 }
 
 fn parse_uint(t: &[u8]) -> Option<usize> {
