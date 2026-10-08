@@ -20,7 +20,13 @@ with the original JPEG:
   the same bytes with the tables moved to just before the scan (libjpeg decodes both alike)
                                          -> must be flagged
 
-  PDFJS_MODULES=... [JPEGTRAN=...] check_the_checkers.py TEXT_PDF RLE_PDF JPEG_PDF WORKDIR
+With --fax FAX_PDF (a CCITT fax image on its first page), two more, both written by libtiff's Group 4
+encoder (through Pillow), not by us:
+
+  the fax image coded again, same pixels -> must pass (images are compared by pixels, not bytes)
+  one pixel of the fax image flipped     -> must be flagged
+
+  PDFJS_MODULES=... [JPEGTRAN=...] check_the_checkers.py TEXT_PDF RLE_PDF JPEG_PDF WORKDIR [--fax FAX_PDF]
 Run with python3 -I."""
 import hashlib, importlib.util, io, json, os, subprocess, sys
 
@@ -231,7 +237,31 @@ def one_image_pdfs(jpeg, other, w, h, work, name):
     return paths
 
 
-def make(text_pdf, rle_pdf, jpeg_pdf, work):
+def group4(im, black_is_1):
+    """A 1-bit PIL image (as pikepdf decodes a CCITT image: the filter's output bits) as one Group 4 strip,
+    coded by libtiff. Checked by decoding it again with pikepdf, so the polarity is right whatever the
+    TIFF photometric does."""
+    import tifffile
+    from PIL import Image, ImageOps
+    w, h = im.size
+    for inverted in (False, True):
+        src = ImageOps.invert(im.convert('L')).convert('1') if inverted else im
+        buf = io.BytesIO()
+        src.save(buf, 'TIFF', compression='group4', tiffinfo={278: h})
+        page = tifffile.TiffFile(io.BytesIO(buf.getvalue())).pages[0]
+        if len(page.dataoffsets) != 1:
+            raise SystemExit('libtiff wrote more than one strip')
+        data = buf.getvalue()[page.dataoffsets[0]:page.dataoffsets[0] + page.databytecounts[0]]
+        test = pikepdf.new()
+        parms = pikepdf.Dictionary(K=-1, Columns=w, Rows=h, BlackIs1=black_is_1)
+        st = pikepdf.Stream(test, data, Type=pikepdf.Name.XObject, Subtype=pikepdf.Name.Image, Width=w, Height=h,
+                            BitsPerComponent=1, ColorSpace=pikepdf.Name.DeviceGray, Filter=pikepdf.Name.CCITTFaxDecode, DecodeParms=parms)
+        if pikepdf.PdfImage(st).as_pil_image().tobytes() == im.tobytes():
+            return data, parms
+    raise SystemExit('could not code the fax image with libtiff')
+
+
+def make(text_pdf, rle_pdf, jpeg_pdf, work, fax_pdf=None):
     cases = []
     def save(p, name):
         # pikepdf gives a saved file a new second /ID; put the original one back (same length, in place), so
@@ -304,14 +334,34 @@ def make(text_pdf, rle_pdf, jpeg_pdf, work):
     cases.append(('one coefficient 1 larger, the same pixels in libjpeg', a, b, True))
     a, b = one_image_pdfs(*moved_tables(jpeg, thumb), 64, 64, work, 'moved-tables')
     cases.append(('a JPEG layout only pdf.js reads differently', a, b, True))
+    if fax_pdf:
+        for flip in (False, True):
+            with pikepdf.open(fax_pdf) as p:
+                for name, im in p.pages[0].Resources.XObject.items():
+                    if im.get('/Filter') == pikepdf.Name.CCITTFaxDecode:
+                        dp = im.get('/DecodeParms') or pikepdf.Dictionary()
+                        pil = pikepdf.PdfImage(im).as_pil_image()
+                        if flip:
+                            x, y = pil.size[0] // 2, pil.size[1] // 2
+                            pil.putpixel((x, y), 255 - pil.getpixel((x, y)))
+                        data, parms = group4(pil, bool(dp.get('/BlackIs1', False)))
+                        im.write(data, filter=pikepdf.Name.CCITTFaxDecode, decode_parms=parms)
+                        break
+                else:
+                    raise SystemExit('the fax PDF needs a CCITT image on its first page')
+                if flip:
+                    cases.append(('one pixel of the fax image', fax_pdf, save(p, 'fax-pixel.pdf'), True))
+                else:
+                    cases.append(('fax image coded again (same pixels)', fax_pdf, save(p, 'fax-same.pdf'), False))
     return cases
 
 
 def main():
     text_pdf, rle_pdf, jpeg_pdf, work = sys.argv[1:5]
+    fax_pdf = sys.argv[sys.argv.index('--fax') + 1] if '--fax' in sys.argv else None
     os.makedirs(work, exist_ok=True)
     ok = True
-    for what, orig, changed, should_flag in make(text_pdf, rle_pdf, jpeg_pdf, work):
+    for what, orig, changed, should_flag in make(text_pdf, rle_pdf, jpeg_pdf, work, fax_pdf):
         r = subprocess.run(['python3', '-I', os.path.join(HERE, 'verify_pdf.py'), orig, changed], capture_output=True, text=True)
         objects_renderers = json.loads(r.stdout.strip().splitlines()[-1])
         render = vr.compare(orig, changed)

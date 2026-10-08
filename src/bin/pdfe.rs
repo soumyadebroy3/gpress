@@ -285,9 +285,154 @@ fn main() {
                 }
             }
         }
-        _ => die("usage: pdfe deflate|inflate|batch|optimize|pdf-batch|repro|pack|unpack|pack-batch|jpeg|jpeg-batch ..."),
+        Some("fax-decode") => {
+            // pdfe fax-decode RAW K COLUMNS ALIGN(0|1) OUT.pbm: our CCITT decoder on raw fax data (for checking
+            // it against other decoders); prints rows, why it stopped, and whether the bytes come back exactly.
+            use engine::fax::ccitt;
+            let raw = std::fs::read(pos.get(1).unwrap_or_else(|| die("need RAW"))).unwrap_or_else(|e| die(&e.to_string()));
+            let k: i64 = pos.get(2).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need K"));
+            let cols: usize = pos.get(3).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need COLUMNS"));
+            let align = pos.get(4).map(|s| s.as_str()) == Some("1");
+            let o = pos.get(5).unwrap_or_else(|| die("need OUT"));
+            let p = ccitt::parse(&raw, ccitt::Scheme::from_k(k), cols, align, ccitt::Limits::default()).unwrap_or_else(|| die("bad parameters"));
+            let exact = ccitt::encode(&p.image, &p.layout) == raw;
+            std::fs::write(o, pbm(&p.image)).unwrap_or_else(|e| die(&e.to_string()));
+            println!("rows={} stop={:?} rule={:?} end_codes={} trailing={} exact={exact} why={:?}", p.image.rows(), p.stop, p.layout.rule, p.layout.end.len(), p.layout.trailing.len(), p.why);
+        }
+        Some("fax-encode") => {
+            // pdfe fax-encode IN.pbm K EOL(0|1) OUT.raw: our CCITT encoder (EOFB for K < 0, RTC otherwise).
+            use engine::fax::ccitt;
+            let data = std::fs::read(pos.get(1).unwrap_or_else(|| die("need IN.pbm"))).unwrap_or_else(|e| die(&e.to_string()));
+            let k: i64 = pos.get(2).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need K"));
+            let eol = pos.get(3).map(|s| s.as_str()) == Some("1");
+            let o = pos.get(4).unwrap_or_else(|| die("need OUT"));
+            let img = read_pbm(&data).unwrap_or_else(|| die("not a binary PBM"));
+            let scheme = ccitt::Scheme::from_k(k);
+            let gaps = (0..img.rows()).map(|r| ccitt::Gap { fill: 0, eol, tag: k > 0 && r as i64 % k == 0 }).collect();
+            let n_end = if k < 0 { 2 } else { 6 };
+            let end = vec![ccitt::Gap { fill: 0, eol: true, tag: k > 0 }; n_end];
+            let lay = ccitt::Layout { scheme, rule: ccitt::Rule::Standard, gaps, end, pad: 0, trailing: Vec::new() };
+            std::fs::write(o, ccitt::encode(&img, &lay)).unwrap_or_else(|e| die(&e.to_string()));
+        }
+        Some("fax-scan") => {
+            // pdfe fax-scan FILE.pdf: every CCITT image stream our reader finds, and what normal-PDF output does
+            // with it.
+            let data = std::fs::read(pos.get(1).unwrap_or_else(|| die("need FILE"))).unwrap_or_else(|e| die(&e.to_string()));
+            let doc = engine::pdf::xref::open(&data).unwrap_or_else(|e| die(&format!("unreadable: {e:?}")));
+            for &n in doc.entries.keys() {
+                if let Ok((_, engine::pdf::object::Obj::Stream(s))) = doc.load(n) {
+                    let fax = engine::pdf::filters::chain(&s.dict).map_or(false, |c| c.iter().any(|st| st.name == b"CCITTFaxDecode"));
+                    if fax {
+                        let resolve = |o: &engine::pdf::object::Obj| match o {
+                            engine::pdf::object::Obj::Ref(r, _) => doc.load(*r).ok().map(|x| x.1),
+                            x => Some(x.clone()),
+                        };
+                        println!("{n}\t{}", engine::fax::pdf::explain(&s, &resolve));
+                    }
+                }
+            }
+        }
+        Some("fax-model") => {
+            // pdfe fax-model RAW K COLUMNS ALIGN(0|1): size of a raw fax stream as a peyaji fax part, with
+            // the time to code it and to restore it (checked).
+            use engine::fax::{ccitt, part};
+            let raw = std::fs::read(pos.get(1).unwrap_or_else(|| die("need RAW"))).unwrap_or_else(|e| die(&e.to_string()));
+            let k: i64 = pos.get(2).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need K"));
+            let cols: usize = pos.get(3).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need COLUMNS"));
+            let align = pos.get(4).map(|s| s.as_str()) == Some("1");
+            // Prepared as pack prepares it (the stream's byte alignment, or the other one if that reads more).
+            let p = part::prepare(&raw, ccitt::Scheme::from_k(k), cols, align).unwrap_or_else(|| die("not stored as a fax part"));
+            // The work budget as if the stream started a file (where it is smallest); the size is measured anyway.
+            let within = part::Work::default().admit(&p, 0);
+            let at = if within { 0 } else { usize::MAX / 4 };
+            let t = Instant::now();
+            let mut e = engine::cm::Encoder::new();
+            let back = part::code(&mut e, &mut part::FaxCoder::new(raw.len()), Some(&p), at, raw.len());
+            let z = e.finish();
+            let t1 = t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            let mut d = engine::cm::Decoder::new(&z);
+            let restored = part::code(&mut d, &mut part::FaxCoder::new(raw.len()), None, at, raw.len());
+            let t2 = t.elapsed().as_secs_f64();
+            println!(
+                "{} -> {} bytes ({} rows, {} trailing), coded in {t1:.2}s, restored in {t2:.2}s, exact: {}, within the work budget at the start of a file: {within}",
+                raw.len(),
+                z.len(),
+                p.image.rows(),
+                p.layout.trailing.len(),
+                back.as_deref() == Some(&raw[..]) && restored.as_deref() == Some(&raw[..])
+            );
+        }
+        Some("jbig2-encode") => {
+            // pdfe jbig2-encode IN.pbm OUT.jb2 [invert]: our JBIG2Decode stream (embedded form) of a PBM.
+            let data = std::fs::read(pos.get(1).unwrap_or_else(|| die("need IN.pbm"))).unwrap_or_else(|e| die(&e.to_string()));
+            let o = pos.get(2).unwrap_or_else(|| die("need OUT"));
+            let invert = pos.get(3).map(|s| s.as_str()) == Some("invert");
+            let img = read_pbm(&data).unwrap_or_else(|| die("not a binary PBM"));
+            let s = engine::fax::jbig2::pdf_stream(&img, invert);
+            let back = engine::fax::jbig2::read_pdf_stream(&s, invert, usize::MAX);
+            std::fs::write(o, &s).unwrap_or_else(|e| die(&e.to_string()));
+            println!("{} bytes, our decoder gives the image back: {}", s.len(), back.as_ref() == Some(&img));
+        }
+        _ => die("usage: pdfe deflate|inflate|batch|optimize|pdf-batch|repro|pack|unpack|pack-batch|jpeg|jpeg-batch|fax-decode|fax-encode|fax-scan|fax-model|jbig2-encode ..."),
     }
 }
+
+/// A binary PBM (1 is black) of a bilevel image.
+fn pbm(img: &engine::fax::ccitt::Image) -> Vec<u8> {
+    let w = img.width;
+    let mut out = format!("P4\n{} {}\n", w, img.rows()).into_bytes();
+    let mut px = vec![0u8; w];
+    for r in 0..img.rows() {
+        engine::fax::ccitt::expand_row(img.row(r), &mut px);
+        for chunk in px.chunks(8) {
+            let mut b = 0u8;
+            for (i, &p) in chunk.iter().enumerate() {
+                b |= p << (7 - i);
+            }
+            out.push(b);
+        }
+    }
+    out
+}
+
+fn read_pbm(d: &[u8]) -> Option<engine::fax::ccitt::Image> {
+    // "P4", width, height, one whitespace byte, then packed rows (no comments).
+    let mut fields = Vec::new();
+    let mut i = 0;
+    while fields.len() < 3 {
+        while i < d.len() && d[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let s = i;
+        while i < d.len() && !d[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        fields.push(std::str::from_utf8(&d[s..i]).ok()?.to_string());
+    }
+    if fields[0] != "P4" {
+        return None;
+    }
+    let w: usize = fields[1].parse().ok()?;
+    let h: usize = fields[2].parse().ok()?;
+    let body = d.get(i + 1..)?;
+    let stride = (w + 7) / 8;
+    if body.len() < stride * h || w == 0 {
+        return None;
+    }
+    let mut img = engine::fax::ccitt::Image::new(w);
+    let mut px = vec![0u8; w];
+    let mut ch = Vec::new();
+    for r in 0..h {
+        for x in 0..w {
+            px[x] = (body[r * stride + x / 8] >> (7 - x % 8)) & 1;
+        }
+        engine::fax::ccitt::row_changes(&px, &mut ch);
+        img.push_row(&ch);
+    }
+    Some(img)
+}
+
 
 fn pdf_options(f: &Options, effort: u8, threads: usize) -> engine::pdf::rewrite::Options {
     engine::pdf::rewrite::Options { flate: Options { shared: None, ..f.clone() }, effort, threads, ..Default::default() }

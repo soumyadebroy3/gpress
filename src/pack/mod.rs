@@ -153,6 +153,8 @@ pub struct PackStats {
     /// in the file (encrypted).
     pub decrypted: usize,
     pub decrypted_bytes: usize,
+    /// CCITT fax streams coded as images (and written back bit for bit).
+    pub fax: usize,
 }
 
 #[derive(Debug)]
@@ -539,6 +541,8 @@ const T_RAW: u8 = 1;
 const T_REBUILT: u8 = 2;
 const T_PREFLATED: u8 = 3;
 const T_LEPTON: u8 = 4;
+/// A CCITT fax stream coded as an image (see `crate::fax::part`).
+const T_FAX: u8 = 10;
 /// Encrypted files (see `sealed`): the file key, and an encrypted stream's settings before its payload.
 const T_CRYPT_KEY: u8 = 20;
 const T_CRYPT: u8 = 21;
@@ -569,6 +573,10 @@ enum Plan {
     CryptKey(Vec<u8>),
     /// An encrypted stream's settings; the next part is its decrypted payload.
     Crypt(sealed::Sealed),
+    /// A CCITT fax stream: the image and every choice of its encoder (see `crate::fax::part`), the byte of the
+    /// file its data starts at (the work budget counts from there), and where its bytes are when they are
+    /// stored as they are (None: an encrypted stream's decrypted bytes, see `sealed`).
+    Fax { parsed: Box<crate::fax::ccitt::Parsed>, at: usize, raw: Option<(usize, usize)> },
 }
 
 /// What to do with each part of the file. The streams are looked at in parallel (the biggest first); the
@@ -583,9 +591,10 @@ fn plan(d: &[u8], opt: &PackOptions) -> Vec<Plan> {
     };
     let mut order: Vec<usize> = (0..segs.len()).collect();
     order.sort_by_key(|&k| (std::cmp::Reverse(size(&segs[k])), k));
+    let objects = ObjIndex::new();
     let plans = par::map(Some(&pool), segs.len(), Some(&order), |k| match segs[k] {
         Seg::Syntax(a, b) => Plan::Syntax(a, b),
-        Seg::Stream(a, b) => stream_plan(&d[a..b]).unwrap_or(Plan::Raw(a, b)),
+        Seg::Stream(a, b) => stream_plan(&d[a..b]).or_else(|| fax(d, a, b, &objects)).unwrap_or(Plan::Raw(a, b)),
     });
     if std::env::var_os("PDFE_DEBUG").is_some() {
         eprintln!("pack: {} parts planned in {:?}", plans.len(), t.elapsed());
@@ -609,11 +618,8 @@ fn stream_plan(raw: &[u8]) -> Option<Plan> {
 /// empty password opens decrypted when `opt.decrypt` (see `sealed`).
 fn plans(d: &[u8], opt: &PackOptions) -> Vec<Plan> {
     let p = plan(d, opt);
-    if opt.decrypt {
-        sealed::crypt_plans(d, p)
-    } else {
-        p
-    }
+    let p = if opt.decrypt { sealed::crypt_plans(d, p) } else { p };
+    fax_budget(p)
 }
 
 /// For measuring only: the file with every stream we can rebuild replaced by its decoded bytes (Type 1 fonts
@@ -655,6 +661,11 @@ pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
                 extra += corrections.len();
             }
             Plan::Lepton { data } => extra += data.len(),
+            Plan::Fax { parsed, .. } => {
+                out.extend_from_slice(&crate::fax::part::packed(&parsed.image));
+                out.extend_from_slice(&parsed.layout.trailing);
+                extra += 8 + parsed.layout.end.len();
+            }
         }
     }
     (out, extra)
@@ -791,6 +802,8 @@ fn run_plans<C: Coder>(c: C, d: Option<&[u8]>, plans: Option<Vec<Plan>>, total_l
     // damaged or hostile file can't keep the decoder busy without progress: at most two such parts in a row.
     let mut idle = 0;
     let mut prev: Option<u8> = None;
+    // Made at the first fax stream; the fax streams of a file share what it learns.
+    let mut fax_coder: Option<crate::fax::part::FaxCoder> = None;
     let mut si = 0;
     loop {
         let cur = plans.as_ref().map(|p| p.get(si));
@@ -803,6 +816,7 @@ fn run_plans<C: Coder>(c: C, d: Option<&[u8]>, plans: Option<Vec<Plan>>, total_l
             Some(Plan::Lepton { .. }) => T_LEPTON,
             Some(Plan::CryptKey(..)) => T_CRYPT_KEY,
             Some(Plan::Crypt(..)) => T_CRYPT,
+            Some(Plan::Fax { .. }) => T_FAX,
         });
         if io.damaged || out.len() > total_len || io.c.exhausted() {
             io.damaged = true;
@@ -816,7 +830,7 @@ fn run_plans<C: Coder>(c: C, d: Option<&[u8]>, plans: Option<Vec<Plan>>, total_l
         let in_order = match tag {
             T_CRYPT_KEY => crypt_key.is_none() && prev == Some(T_SYNTAX),
             T_CRYPT => matches!(prev, Some(T_SYNTAX) | Some(T_CRYPT_KEY)),
-            T_RAW | T_REBUILT | T_PREFLATED | T_LEPTON => prev != Some(T_CRYPT_KEY),
+            T_RAW | T_REBUILT | T_PREFLATED | T_LEPTON | T_FAX => prev != Some(T_CRYPT_KEY),
             _ => sealing.is_none() && prev != Some(T_CRYPT_KEY),
         };
         if !in_order {
@@ -966,6 +980,22 @@ fn run_plans<C: Coder>(c: C, d: Option<&[u8]>, plans: Option<Vec<Plan>>, total_l
                         break;
                     }
                 }
+            }
+            T_FAX => {
+                let src = match cur.flatten() {
+                    Some(Plan::Fax { parsed, .. }) => Some(&**parsed),
+                    _ => None,
+                };
+                let fc = fax_coder.get_or_insert_with(|| crate::fax::part::FaxCoder::new(total_len));
+                match crate::fax::part::code(&mut io.c, fc, src, out.len(), left) {
+                    Some(bytes) => out.extend_from_slice(&bytes),
+                    None => {
+                        io.damaged = true;
+                        break;
+                    }
+                }
+                stats.streams += 1;
+                stats.fax += 1;
             }
             _ => {
                 io.damaged = true;
@@ -1132,6 +1162,108 @@ fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, lep_in: Option<Opti
 /// Whatever is tried here is checked by rebuilding it exactly (and every pack is restored and compared).
 fn zlib_header(raw: &[u8]) -> bool {
     raw.len() >= 8 && raw[0] & 0x0f == 8 && raw[0] >> 4 <= 7 && ((raw[0] as u16) << 8 | raw[1] as u16) % 31 == 0 && raw[1] & 0x20 == 0
+}
+
+/// Where each object "n g obj" of a file starts its value (the last definition wins), found by its bytes:
+/// for guesses that are checked afterwards. Built once per file, when first needed.
+type ObjIndex = std::sync::OnceLock<std::collections::HashMap<(u32, u16), usize>>;
+
+fn object_index(d: &[u8]) -> std::collections::HashMap<(u32, u16), usize> {
+    let mut out = std::collections::HashMap::new();
+    let mut from = 0;
+    while let Some(i) = find(d, b" obj", from) {
+        from = i + 4;
+        // Back over "g" and "n" (digits separated by one space).
+        let digits = |end: usize| -> usize {
+            let mut s = end;
+            while s > 0 && d[s - 1].is_ascii_digit() && end - s < 10 {
+                s -= 1;
+            }
+            s
+        };
+        let gs = digits(i);
+        if gs == i || gs == 0 || d[gs - 1] != b' ' {
+            continue;
+        }
+        let ns = digits(gs - 1);
+        if ns == gs - 1 || (ns > 0 && d[ns - 1].is_ascii_alphanumeric()) {
+            continue;
+        }
+        let num = |a: usize, b: usize| -> Option<u64> { std::str::from_utf8(&d[a..b]).ok()?.parse().ok() };
+        if let (Some(n), Some(g)) = (num(ns, gs - 1), num(gs, i)) {
+            if let (Ok(n), Ok(g)) = (u32::try_from(n), u16::try_from(g)) {
+                out.insert((n, g), i + 4);
+            }
+        }
+    }
+    out
+}
+
+/// Smallest CCITT stream coded as an image (measured on the test files: below this, plain coding wins).
+const MIN_FAX: usize = 64;
+
+/// A stream stored as it is in the file whose only filter is CCITTFaxDecode, when our CCITT decoder
+/// understands most of it: the image and the encoder's choices, checked to give the very same bytes back.
+fn fax(d: &[u8], a: usize, b: usize, objects: &ObjIndex) -> Option<Plan> {
+    let dict = dict_before(d, a.checked_sub(1)?)?;
+    let parsed = fax_parse(&d[a..b], dict, &file_resolver(d, objects))?;
+    Some(Plan::Fax { parsed: Box::new(parsed), at: a, raw: Some((a, b)) })
+}
+
+/// Follows a reference to an object of the file by its bytes ("n g obj"), for guesses that are checked
+/// afterwards. The index is built once per file, when first needed.
+fn file_resolver<'a>(d: &'a [u8], objects: &'a ObjIndex) -> impl Fn(&Obj) -> Option<Obj> + 'a {
+    move |o: &Obj| match o {
+        Obj::Ref(n, g) => {
+            let at = *objects.get_or_init(|| object_index(d)).get(&(*n, *g))?;
+            Lexer::new(d, at).parse_obj().ok()
+        }
+        x => Some(x.clone()),
+    }
+}
+
+/// The CCITT data `raw` of a stream with dictionary `dict`, parsed for a fax part (`crate::fax::part`), or
+/// None when it can't be stored that way. Parameters given by reference (/DecodeParms 13 0 R, /K 7 0 R) go
+/// through `resolve`; whatever it finds is only a guess to try, since the result is checked by writing the
+/// stream again. Shared by streams stored as they are and by decrypted ones (`sealed`).
+pub(super) fn fax_parse(raw: &[u8], mut dict: Dict, resolve: &dyn Fn(&Obj) -> Option<Obj>) -> Option<crate::fax::ccitt::Parsed> {
+    use crate::fax::{ccitt::Scheme, part, pdf::FaxParams};
+    if raw.len() < MIN_FAX {
+        return None;
+    }
+    if let Some(p) = dict.get(b"DecodeParms").cloned() {
+        let mut p = resolve(&p)?;
+        if let Obj::Dict(pd) = &mut p {
+            for (_, v) in pd.0.iter_mut() {
+                *v = resolve(v)?;
+            }
+        }
+        dict.set(b"DecodeParms", p);
+    }
+    let stages = crate::pdf::filters::chain(&dict)?;
+    if stages.len() != 1 || stages[0].name != b"CCITTFaxDecode" {
+        return None;
+    }
+    let fp = FaxParams::from(stages[0].parms.as_ref())?;
+    part::prepare(raw, Scheme::from_k(fp.k), fp.columns, fp.byte_align)
+}
+
+/// Keeps the fax streams of a file within the work budget the restore checks (`crate::fax::part::Work`), in
+/// file order; streams past it are coded plainly (a decrypted one as its CCITT bytes, which `prepare` has
+/// checked the image and layout give back exactly).
+fn fax_budget(mut plans: Vec<Plan>) -> Vec<Plan> {
+    let mut work = crate::fax::part::Work::default();
+    for p in plans.iter_mut() {
+        if let Plan::Fax { parsed, at, raw } = p {
+            if !work.admit(parsed, *at) {
+                *p = match raw {
+                    Some((a, b)) => Plan::Raw(*a, *b),
+                    None => Plan::Plain(crate::fax::ccitt::encode(&parsed.image, &parsed.layout)),
+                };
+            }
+        }
+    }
+    plans
 }
 
 /// For a Flate payload that zlib made: (parameters, decoded data, bytes after the zlib stream).
