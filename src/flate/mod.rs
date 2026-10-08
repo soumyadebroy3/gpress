@@ -50,20 +50,7 @@ mod tests {
 
     #[test]
     fn round_trips_with_our_decoder() {
-        for opt in [
-            Options::quick(),
-            Options {
-                iterations: 4,
-                exact_rounds: 3,
-                max_chain: 512,
-                segment: 50_000,
-                split: true,
-                alternatives: true,
-                multi_start_limit: 1 << 18,
-                nice: 259,
-                polish: true,
-            },
-        ] {
+        for opt in [Options::quick(), Options { iterations: 4, exact_rounds: 3, max_chain: 512, segment: 50_000, split: true, alternatives: true, multi_start_limit: 1 << 18, nice: 259, polish: true, shared: None }] {
             for d in samples() {
                 let z = deflate(&d, &opt);
                 let back = inflate(&z, 1 << 30).expect("decodes");
@@ -80,6 +67,35 @@ mod tests {
             let u = zlib::unwrap(&z, 1 << 30).expect("decodes");
             assert_eq!(u.data, d);
             assert_eq!(u.trailing, 0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod threads {
+    use super::*;
+
+    #[test]
+    fn segments_in_parallel_give_the_same_bytes() {
+        // Many small segments, so that several threads really share the work.
+        let mut s = 5u64;
+        let mut data = Vec::new();
+        for k in 0..400_000usize {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            data.push(if k % 3000 < 1800 { b"stream of text "[k % 15] } else { (s >> 7) as u8 % 7 });
+        }
+        for base in [Options::quick(), Options::effort(50)] {
+            let opt = Options { segment: 40_000, ..base };
+            let one = deflate_zlib(&data, &opt);
+            assert_eq!(zlib::unwrap(&one, data.len() + 1).unwrap().data, data);
+            for t in [2, 3, 8] {
+                let o = Options { shared: Some(deflate::Shared::new(t)), ..opt.clone() };
+                assert!(deflate_zlib(&data, &o) == one, "{t} threads");
+                // A second encode of the same input is remembered (and checked) rather than redone.
+                assert!(deflate_zlib(&data, &o) == one);
+            }
         }
     }
 }

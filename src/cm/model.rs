@@ -12,7 +12,12 @@ pub enum Kind {
     Font = 4,
     Data = 5,
     Raw = 6,
+    /// The private part of an opened Type 1 font: PostScript text with charstrings (binary strings).
+    Charstring = 7,
 }
+
+/// Number of kinds: per-kind tables are this many times larger.
+const KINDS: usize = 8;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Geom {
@@ -106,6 +111,9 @@ impl Table {
 struct Tok {
     in_tok: bool,
     tok: Vec<u8>,
+    /// Hash of `tok`, kept up to date as bytes are added (hashing the whole token at every byte would take
+    /// time growing with the square of its length).
+    tok_hash: u32,
 
     name_hash: u32,
     since_name: u32,
@@ -113,6 +121,8 @@ struct Tok {
     // content streams
     operands: Vec<Vec<u8>>,
     prev_operands: Vec<Vec<u8>>,
+    /// Hash of each of `prev_operands`, worked out once.
+    prev_hashes: Vec<u32>,
     prev_op: u32,
     prev_op2: u32,
     // syntax: object numbering
@@ -122,6 +132,98 @@ struct Tok {
     xref_state: u8, // 0 none, 1 after "xref", 2 in entries
     xref_next: i64,
     xref_left: i64,
+
+}
+
+/// Inside an opened Type 1 private part: the text, and the charstrings in it ("length RD " and that many
+/// bytes) whose tokens are followed, so the model knows what the next byte is.
+#[derive(Default, Clone)]
+struct Cs {
+    /// Text: the token being read and the two before it.
+    tok: Vec<u8>,
+    prev: [Vec<u8>; 2],
+    len_iv: i64,
+    /// Charstring bytes left (0: in the text), and read so far.
+    left: usize,
+    pos: usize,
+    /// What the next charstring byte is (CS_*), and the first byte of a longer number.
+    phase: u8,
+    lead: u8,
+    acc: i32,
+    /// Numbers since the last command, the last two numbers and commands, the name (or Subrs index) before
+    /// the charstring.
+    depth: u32,
+    n1: i32,
+    n2: i32,
+    c1: u32,
+    c2: u32,
+    name: u32,
+    /// The numbers given to the pending command so far, and to the last command.
+    ops: [i32; 8],
+    last: [i32; 8],
+    nlast: u32,
+}
+
+const CS_TOKEN: u8 = 0;
+const CS_POS2: u8 = 1;
+const CS_NEG2: u8 = 2;
+const CS_ESC: u8 = 3;
+const CS_RANDOM: u8 = 4;
+/// CS_INT..CS_INT + 3: the four bytes of a 32-bit number.
+const CS_INT: u8 = 5;
+
+impl Cs {
+    fn new() -> Cs {
+        Cs { len_iv: 4, ..Default::default() }
+    }
+    fn number(&mut self, v: i32) {
+        self.n2 = self.n1;
+        self.n1 = v;
+        if self.depth < 8 {
+            self.ops[self.depth as usize] = v;
+        }
+        self.depth += 1;
+        self.phase = CS_TOKEN;
+    }
+    fn command(&mut self, c: u32) {
+        self.c2 = self.c1;
+        self.c1 = c;
+        self.last = self.ops;
+        self.nlast = self.depth;
+        self.depth = 0;
+        self.phase = CS_TOKEN;
+    }
+}
+
+/// A decimal integer token (optional sign, at most 9 digits).
+fn int_token(t: &[u8]) -> Option<i64> {
+    let (neg, d) = match t.first() {
+        Some(b'-') => (true, &t[1..]),
+        Some(b'+') => (false, &t[1..]),
+        _ => (false, t),
+    };
+    if d.is_empty() || d.len() > 9 || !d.iter().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let v = d.iter().fold(0i64, |v, &c| v * 10 + (c - b'0') as i64);
+    Some(if neg { -v } else { v })
+}
+
+/// Kind of charstring command: curve, line, move, hint, other (and none).
+fn cmd_class(c: u32) -> usize {
+    match c {
+        8 | 30 | 31 => 1,
+        5..=7 => 2,
+        21 | 22 | 4 => 3,
+        1 | 3 | 33 | 34 => 4,
+        0 => 0,
+        _ => 5,
+    }
+}
+
+/// Sign and size class of a charstring number.
+fn num_class(v: i32) -> u32 {
+    (32 - v.unsigned_abs().leading_zeros()).min(15) | ((v < 0) as u32) << 4
 }
 
 pub struct Model {
@@ -134,6 +236,9 @@ pub struct Model {
     kind: Kind,
     geom: Geom,
     seg_start: usize,
+    /// Column of the next byte in an image row: (hist.len() - seg_start) % geom.stride, kept up to date byte
+    /// by byte (a division per byte is slow).
+    col: usize,
     /// Original-file offset of the current syntax segment's first byte.
     seg_orig: u64,
     c0: u32,
@@ -143,10 +248,11 @@ pub struct Model {
     c8: u32,
     word: u32,
     hashes: [u32; NCTX],
-    tables: Vec<Table>,
+    tables: [Table; NCTX],
     slot: [usize; NCTX],
     states: States,
-    smaps: Vec<Vec<Counter>>,
+    /// One map per kind and context, from bit-history state (always below 128) to probability.
+    smaps: Vec<[Counter; 128]>,
     // long matches
     mm_table: Vec<u32>,
     mm_ptr: usize,
@@ -164,6 +270,7 @@ pub struct Model {
     a2: Apm,
     pr: i32,
     tok: Tok,
+    cs: Cs,
     /// Original offsets of objects seen ("N G obj"), for predicting cross-reference tables.
     obj_offsets: std::collections::HashMap<i64, (u64, i64)>,
     limit: u32,
@@ -190,13 +297,13 @@ const MIXER_SHIFT: i32 = 12;
 /// the smallest on a random sample and on huge repetitive images).
 const LONG_MIN: usize = 128;
 const REP_LIMIT: u32 = 1023;
+/// Mixer weight sets for charstring bytes: at a token start 7 operand counts x 6 kinds of last command, plus 3
+/// other places (end of a number, escaped command, other), each x 8 bits x 3 match states.
+const CS_SEL: usize = 45 * 8 * 3;
 
 impl Model {
     pub fn new(table_bits: u32) -> Model {
-        let mut tables = Vec::with_capacity(NCTX);
-        for _ in 0..NCTX {
-            tables.push(Table::new(table_bits));
-        }
+        let tables = std::array::from_fn(|_| Table::new(table_bits));
         let mut m = Model {
             tb: Tables::new(),
             hist: Vec::new(),
@@ -205,6 +312,7 @@ impl Model {
             kind: Kind::Meta,
             geom: Geom::default(),
             seg_start: 0,
+            col: 0,
             seg_orig: 0,
             c0: 1,
             nib: 1,
@@ -227,15 +335,16 @@ impl Model {
             exp_hits: 0,
             exp_sm: StateMap::new(16 * 2 * 4, 1023),
             exp_miss: false,
-            mx: Mixer::new(NIN, 7 * 8 * 3, 6),
-            a1: Apm::new(256 * 7, 7),
+            mx: Mixer::new(NIN, KINDS * 8 * 3 + CS_SEL, 6),
+            a1: Apm::new(256 * KINDS, 7),
             a2: Apm::new(65536, 7),
             pr: 2048,
             tok: Tok::default(),
+            cs: Cs::new(),
             obj_offsets: std::collections::HashMap::new(),
             limit: STATE_LIMIT,
             mm_min: MATCH_MIN,
-            rep: vec![Counter::new(); 7 * 16 * 2 * 2],
+            rep: vec![Counter::new(); KINDS * 16 * 2 * 2],
             rep_last: 1,
             ctx_dirty: false,
             bypass_on: true,
@@ -243,10 +352,7 @@ impl Model {
             bypassed: 0,
         };
         m.mx.shift = MIXER_SHIFT;
-        let per_kind = 7;
-        m.smaps = (0..NCTX * per_kind)
-            .map(|_| (0..128).map(|st| Counter((m.states.init_p[st] as u32) << 20)).collect())
-            .collect();
+        m.smaps = vec![std::array::from_fn(|st| Counter((m.states.init_p[st] as u32) << 20)); NCTX * KINDS];
         m.contexts();
         m
     }
@@ -264,8 +370,10 @@ impl Model {
         self.kind = kind;
         self.geom = geom;
         self.seg_start = self.hist.len();
+        self.col = 0;
         self.seg_orig = orig_offset;
         self.exp.clear();
+        self.cs = Cs::new();
         let keep_obj = (self.tok.last_obj, self.tok.xref_state, self.tok.xref_next, self.tok.xref_left);
         self.tok = Tok::default();
         self.tok.last_obj = keep_obj.0;
@@ -327,11 +435,14 @@ impl Model {
     fn predict(&mut self) -> i32 {
         let node = self.nib as usize;
         let kb = self.kind as usize * NCTX;
+        let mut st = [0i32; NCTX];
         for i in 0..NCTX {
-            let state = self.tables[i].t[self.slot[i]][node] as usize;
+            // Nodes are 1..15 and states below 128: the masks change nothing but spare the bounds checks.
+            let state = self.tables[i].t[self.slot[i]][node & 15] as usize & 127;
             let p = self.smaps[kb + i][state].p12();
-            self.mx.add(if state == 0 { 0 } else { self.tb.stretch(p) });
+            st[i] = if state == 0 { 0 } else { self.tb.stretch(p) };
         }
+        self.mx.add_all(&st);
         // Long match.
         let mut mm_state = 0;
         let residual = self.pred_on();
@@ -357,7 +468,17 @@ impl Model {
             self.mx.add(0);
         }
         self.mx.add(256);
-        let sel = (self.kind as usize * 8 + self.bitpos as usize) * 3 + mm_state;
+        let sel = if self.kind == Kind::Charstring && self.cs.left > 0 {
+            let at = match self.cs.phase {
+                CS_TOKEN => (self.cs.depth as usize).min(6) * 6 + cmd_class(self.cs.c1),
+                CS_POS2 | CS_NEG2 => 42,
+                CS_ESC => 43,
+                _ => 44,
+            };
+            KINDS * 8 * 3 + (at * 8 + self.bitpos as usize) * 3 + mm_state
+        } else {
+            (self.kind as usize * 8 + self.bitpos as usize) * 3 + mm_state
+        };
         let pm = self.mx.mix(sel);
         let c1 = (self.c4 & 0xff) as usize;
         let p1 = self.a1.p(pm, self.c0 as usize + 256 * self.kind as usize, &self.tb);
@@ -370,10 +491,10 @@ impl Model {
         let node = self.nib as usize;
         let kb = self.kind as usize * NCTX;
         for i in 0..NCTX {
-            let v = &mut self.tables[i].t[self.slot[i]][node];
-            let state = *v as usize;
+            let v = &mut self.tables[i].t[self.slot[i]][node & 15];
+            let state = *v as usize & 127;
             self.smaps[kb + i][state].update(bit, self.limit);
-            *v = self.states.next[state][bit as usize];
+            *v = self.states.next[state][bit as usize & 1];
         }
         let residual = self.pred_on();
         if self.mm_len > 0 && !self.mm_miss {
@@ -418,6 +539,12 @@ impl Model {
 
     fn byte_done(&mut self, b: u8) {
         self.hist.push(b);
+        if self.geom.stride > 0 {
+            self.col += 1;
+            if self.col == self.geom.stride {
+                self.col = 0;
+            }
+        }
         self.c8 = (self.c8 << 8) | (self.c4 >> 24);
         self.c4 = (self.c4 << 8) | b as u32;
         if b.is_ascii_alphanumeric() {
@@ -472,7 +599,78 @@ impl Model {
         match self.kind {
             Kind::Syntax => self.syntax_byte(b),
             Kind::Content => self.content_byte(b),
+            Kind::Charstring => self.charstring_byte(b),
             _ => {}
+        }
+    }
+
+    /// Follows the text of a Type 1 private part to its charstrings, and the tokens inside them.
+    fn charstring_byte(&mut self, b: u8) {
+        let cs = &mut self.cs;
+        if cs.left > 0 {
+            cs.left -= 1;
+            cs.pos += 1;
+            match cs.phase {
+                CS_RANDOM => {
+                    if cs.pos as i64 >= cs.len_iv {
+                        cs.phase = CS_TOKEN;
+                    }
+                }
+                CS_TOKEN => match b {
+                    12 => cs.phase = CS_ESC,
+                    0..=31 => cs.command(b as u32),
+                    32..=246 => cs.number(b as i32 - 139),
+                    247..=254 => {
+                        cs.phase = if b < 251 { CS_POS2 } else { CS_NEG2 };
+                        cs.lead = b;
+                    }
+                    _ => {
+                        cs.phase = CS_INT;
+                        cs.acc = 0;
+                    }
+                },
+                CS_POS2 => cs.number((cs.lead as i32 - 247) * 256 + b as i32 + 108),
+                CS_NEG2 => cs.number(-(cs.lead as i32 - 251) * 256 - b as i32 - 108),
+                CS_ESC => cs.command(32 + b as u32),
+                _ => {
+                    cs.acc = cs.acc << 8 | b as i32;
+                    cs.phase += 1;
+                    if cs.phase == CS_INT + 4 {
+                        let v = cs.acc;
+                        cs.number(v);
+                    }
+                }
+            }
+            return;
+        }
+        let is_ws = matches!(b, 0 | 9 | 10 | 12 | 13 | 32);
+        if !is_ws && !matches!(b, b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%') {
+            // Only short tokens matter (RD, -|, /lenIV, numbers).
+            if cs.tok.len() < 32 {
+                cs.tok.push(b);
+            }
+            return;
+        }
+        if !cs.tok.is_empty() {
+            let t = std::mem::take(&mut cs.tok);
+            // "length RD " (or -|): the charstring starts after this one white-space byte.
+            if (t == b"RD" || t == b"-|") && is_ws {
+                if let Some(n) = int_token(&cs.prev[1]).filter(|&n| n > 0) {
+                    let name = cs.prev[0].iter().fold(0x811C_9DC5, |h, &x| hb(h, x));
+                    *cs = Cs { len_iv: cs.len_iv, left: n as usize, name, ..Cs::new() };
+                    cs.phase = if cs.len_iv > 0 { CS_RANDOM } else { CS_TOKEN };
+                    return;
+                }
+            }
+            if cs.prev[1] == b"/lenIV" {
+                if let Some(v) = int_token(&t) {
+                    cs.len_iv = v;
+                }
+            }
+            cs.prev[0] = std::mem::replace(&mut cs.prev[1], t);
+        }
+        if b == b'/' {
+            cs.tok.push(b);
         }
     }
 
@@ -500,15 +698,10 @@ impl Model {
                 0
             }
         };
-        let col = (pos - lo) % s;
+        let col = self.col;
+        debug_assert_eq!(col, (pos - lo) % s);
         let first_row = pos - lo < s;
-        let w = if col >= bpp {
-            at(bpp)
-        } else if !first_row {
-            at(s)
-        } else {
-            0
-        };
+        let w = if col >= bpp { at(bpp) } else if !first_row { at(s) } else { 0 };
         let n = if !first_row { at(s) } else { w };
         let nw = if !first_row && col >= bpp { at(s + bpp) } else { n };
         let ne = if !first_row && col + bpp < s { at(s - bpp) } else { n };
@@ -536,7 +729,8 @@ impl Model {
                 0
             }
         };
-        let col = (pos - lo) % s;
+        let col = self.col;
+        debug_assert_eq!(col, (pos - lo) % s);
         let up = pos - lo >= s;
         let w = if col >= bpp { at(bpp) } else { 0 };
         let ww = if col >= 2 * bpp { at(2 * bpp) } else { 0 };
@@ -547,9 +741,15 @@ impl Model {
         [(col % bpp) as u32, w, n, nw, ne, ww, nn]
     }
 
+    fn tok_push(&mut self, b: u8) {
+        self.tok.tok.push(b);
+        self.tok.tok_hash = hb(self.tok.tok_hash, b);
+    }
+
     fn token_end(&mut self) -> Option<Vec<u8>> {
         if self.tok.in_tok {
             self.tok.in_tok = false;
+            self.tok.tok_hash = 0;
             let t = std::mem::take(&mut self.tok.tok);
             Some(t)
         } else {
@@ -574,7 +774,7 @@ impl Model {
             }
             if b == b'/' {
                 self.tok.in_tok = true;
-                self.tok.tok.push(b);
+                self.tok_push(b);
             } else if b == b'(' {
                 self.tok.in_string = 1;
             }
@@ -583,7 +783,7 @@ impl Model {
             }
         } else {
             self.tok.in_tok = true;
-            self.tok.tok.push(b);
+            self.tok_push(b);
         }
         self.tok.since_name = (self.tok.since_name + 1).min(15);
     }
@@ -700,11 +900,12 @@ impl Model {
                     self.tok.prev_op2 = self.tok.prev_op;
                     self.tok.prev_op = h;
                     self.tok.prev_operands = std::mem::take(&mut self.tok.operands);
+                    self.tok.prev_hashes = self.tok.prev_operands.iter().map(|v| v.iter().fold(7u32, |h, &x| hb(h, x))).collect();
                 }
             }
             if b == b'/' {
                 self.tok.in_tok = true;
-                self.tok.tok.push(b);
+                self.tok_push(b);
             } else if b == b'(' {
                 self.tok.in_string = 1;
                 self.tok.operands.push(b"(".to_vec());
@@ -719,7 +920,7 @@ impl Model {
             }
         } else {
             self.tok.in_tok = true;
-            self.tok.tok.push(b);
+            self.tok_push(b);
         }
     }
 
@@ -735,15 +936,10 @@ impl Model {
         let k = (self.kind as u32 + 1) << 28;
         let c4 = self.c4;
         let c1 = c4 & 0xff;
-        let tokh = self.tok.tok.iter().fold(0u32, |h, &x| hb(h, x));
+        let tokh = self.tok.tok_hash;
         let tl = self.tok.tok.len() as u32;
-        let nb =
-            if self.kind == Kind::Image && self.geom.stride > 0 { self.image_neighbours() } else { (0, 0, 0, 0, 0) };
-        let ex = if self.kind == Kind::Image && self.geom.stride > 0 && self.geom.exact {
-            self.exact_neighbours()
-        } else {
-            [0; 7]
-        };
+        let nb = if self.kind == Kind::Image && self.geom.stride > 0 { self.image_neighbours() } else { (0, 0, 0, 0, 0) };
+        let ex = if self.kind == Kind::Image && self.geom.stride > 0 && self.geom.exact { self.exact_neighbours() } else { [0; 7] };
         let hs = &mut self.hashes;
         match self.kind {
             Kind::Image if self.geom.stride > 0 && self.geom.exact => {
@@ -760,6 +956,27 @@ impl Model {
                 hs[8] = k ^ h2(39, h2(wn, nw | ne << 8));
                 hs[9] = k ^ h2(40, h2(c4 & 0xffff, n));
             }
+            Kind::Charstring if self.cs.left > 0 => {
+                // A charstring byte: what it is (token start, end of a number, escaped command, random), the
+                // numbers since the last command, the last commands, the size of the last numbers, the number
+                // at the same place in the last command, and the glyph's name.
+                let cs = &self.cs;
+                let ph = cs.phase as u32;
+                let depth = cs.depth.min(15);
+                let lead = if cs.phase == CS_POS2 || cs.phase == CS_NEG2 { cs.lead as u32 } else { 0 };
+                let st = ph | depth << 4 | cs.c1 << 8;
+                let same = if cs.depth < cs.nlast.min(8) { cs.last[cs.depth as usize].clamp(-4000, 4000) as u32 & 0xffff } else { 0x10000 };
+                hs[0] = k ^ h2(41, st);
+                hs[1] = k ^ h2(42, h2(st, cs.c2));
+                hs[2] = k ^ h2(43, ph);
+                hs[3] = k ^ h2(44, h2(st | lead << 24, num_class(cs.n1)));
+                hs[4] = k ^ h2(45, ph | lead << 8 | depth << 16);
+                hs[5] = k ^ h2(46, h2(cs.name, st | lead << 24));
+                hs[6] = k ^ h2(47, ph | c1 << 8 | depth << 16);
+                hs[7] = k ^ h2(48, h2(st | lead << 24, num_class(cs.n1) | num_class(cs.n2) << 8));
+                hs[8] = k ^ h2(49, h2(st | lead << 24, same));
+                hs[9] = k ^ h2(50, h2(c4, ph));
+            }
             Kind::Image if self.geom.stride > 0 => {
                 let pos = self.hist.len();
                 let s = self.geom.stride;
@@ -772,7 +989,8 @@ impl Model {
                         0
                     }
                 };
-                let col = (pos - lo) % s;
+                let col = self.col;
+                debug_assert_eq!(col, (pos - lo) % s);
                 let first_row = pos - lo < s;
                 let (w, n, nw, ne, pred) = nb;
                 self.pred = pred as u8;
@@ -788,11 +1006,7 @@ impl Model {
                         17..=32 => 6,
                         _ => 7,
                     };
-                    if d < 0 {
-                        m + 8
-                    } else {
-                        m
-                    }
+                    if d < 0 { m + 8 } else { m }
                 };
                 let ch = (col % bpp) as u32;
                 let rw = if col >= bpp { rat(bpp) } else { 0 };
@@ -828,11 +1042,7 @@ impl Model {
                     }
                     Kind::Content => {
                         let idx = self.tok.operands.len() as u32;
-                        let col = self
-                            .tok
-                            .prev_operands
-                            .get(idx as usize)
-                            .map_or(0, |v| v.iter().fold(7u32, |h, &x| hb(h, x)));
+                        let col = self.tok.prev_hashes.get(idx as usize).copied().unwrap_or(0);
                         hs[6] = k ^ h2(21, h2(self.tok.prev_op, idx << 16 | tokh & 0xffff) ^ tl);
                         hs[7] = k ^ h2(22, h2(col, tl << 8 | c1));
                         hs[8] = k ^ h2(23, h2(self.tok.prev_op ^ self.tok.prev_op2.rotate_left(7), idx << 8 | c1));
@@ -850,6 +1060,69 @@ impl Model {
         for i in 0..NCTX {
             let h = h2(self.hashes[i], 1);
             self.slot[i] = self.tables[i].find(h);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Null;
+    impl Coder for Null {
+        fn code(&mut self, bit: Option<u32>, _p: i32) -> u32 {
+            bit.unwrap_or(0)
+        }
+    }
+
+    #[test]
+    fn the_image_column_follows_the_bytes() {
+        // Rows of noise and long repeats (coded by the one-decision shortcut), with switches of kind and row
+        // length in between.
+        let mut s = 77u64;
+        let mut m = Model::new(12);
+        let mut n = Null;
+        for (stride, bpp, exact) in [(7usize, 1usize, false), (300, 3, false), (64, 1, true), (1, 1, false), (5, 2, false)] {
+            m.set_kind(Kind::Syntax, Geom::default(), 0);
+            for &b in b"1 0 obj\n" {
+                m.code_byte(&mut n, Some(b));
+            }
+            m.set_kind(Kind::Image, Geom { stride, bpp, exact }, 0);
+            for k in 0..6000usize {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                let b = if k % 2000 < 1200 { (k % 3) as u8 } else { s as u8 };
+                m.code_byte(&mut n, Some(b));
+                assert_eq!(m.col, (m.hist.len() - m.seg_start) % stride, "row length {stride}, byte {k}");
+            }
+        }
+        assert!(m.bypassed > 0);
+    }
+
+    #[test]
+    fn token_hashes_follow_the_tokens() {
+        // Syntax and content with long numbers, names, strings and operands.
+        let mut text = Vec::new();
+        text.extend_from_slice(b"1 0 obj << /Pi 3.");
+        text.extend(std::iter::repeat_n(b'1', 5000));
+        text.extend_from_slice(b" /Name#20x (a (nested) string) >> endobj\n");
+        let mut content = Vec::new();
+        for i in 0..40 {
+            content.extend_from_slice(format!("{i} 0 {} Td (text) Tj ", "9".repeat(i * 50)).as_bytes());
+            content.extend_from_slice(b"/F1 12 Tf [<00ff> 3 <0102>] TJ q 1 0 0 1 0 0 cm Q\n");
+        }
+        let mut m = Model::new(12);
+        let mut n = Null;
+        let fold0 = |t: &[u8]| t.iter().fold(0u32, |h, &x| hb(h, x));
+        let fold7 = |t: &[u8]| t.iter().fold(7u32, |h, &x| hb(h, x));
+        for (kind, data) in [(Kind::Syntax, &text), (Kind::Content, &content), (Kind::Syntax, &text)] {
+            m.set_kind(kind, Geom::default(), 0);
+            for &b in data.iter() {
+                m.code_byte(&mut n, Some(b));
+                assert_eq!(m.tok.tok_hash, fold0(&m.tok.tok));
+                assert_eq!(m.tok.prev_hashes, m.tok.prev_operands.iter().map(|v| fold7(v)).collect::<Vec<u32>>());
+            }
         }
     }
 }

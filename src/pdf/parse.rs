@@ -14,6 +14,10 @@ pub type PResult<T> = Result<T, ParseError>;
 pub struct Lexer<'a> {
     pub d: &'a [u8],
     pub pos: usize,
+    /// A literal string held an unescaped carriage return. Readers disagree on its value (qpdf reads a line
+    /// feed, as the standard says; pdf.js, PDFium and Poppler keep the carriage return), so callers that
+    /// rewrite objects refuse it.
+    pub raw_cr: bool,
 }
 
 fn hexval(c: u8) -> Option<u8> {
@@ -55,7 +59,7 @@ pub fn number_kind(t: &[u8]) -> Option<bool> {
 
 impl<'a> Lexer<'a> {
     pub fn new(d: &'a [u8], pos: usize) -> Self {
-        Lexer { d, pos }
+        Lexer { d, pos, raw_cr: false }
     }
 
     fn err<T>(&self, msg: &'static str) -> PResult<T> {
@@ -272,6 +276,7 @@ impl<'a> Lexer<'a> {
                     out.push(c);
                 }
                 b'\r' => {
+                    self.raw_cr = true;
                     if self.peek() == Some(b'\n') {
                         self.pos += 1;
                     }
@@ -343,22 +348,31 @@ impl<'a> Lexer<'a> {
     }
 }
 
+/// Why an object with an unescaped carriage return in a literal string is refused.
+pub const RAW_CR: &str = "a literal string holds a raw carriage return (readers disagree on its value)";
+
 /// Parses "n g obj ... endobj" at `pos`. For streams, `length` resolves the /Length value (which may be an
-/// indirect reference). Returns (number, generation, object, end position).
-pub fn parse_indirect(d: &[u8], pos: usize, length: &dyn Fn(&Obj) -> Option<usize>) -> PResult<(u32, u16, Obj, usize)> {
+/// indirect reference). Returns (number, generation, object, end position). An object whose literal strings
+/// hold an unescaped carriage return is an error (see `Lexer::raw_cr`).
+pub fn parse_indirect(
+    d: &[u8],
+    pos: usize,
+    length: &dyn Fn(&Obj) -> Option<usize>,
+) -> PResult<(u32, u16, Obj, usize)> {
     let mut lx = Lexer::new(d, pos);
     lx.skip_ws();
     let n = lx.regular_token();
-    let n: u32 =
-        std::str::from_utf8(n).ok().and_then(|s| s.parse().ok()).ok_or(ParseError { pos, msg: "bad object number" })?;
+    let n: u32 = std::str::from_utf8(n).ok().and_then(|s| s.parse().ok()).ok_or(ParseError { pos, msg: "bad object number" })?;
     lx.skip_ws();
     let g = lx.regular_token();
-    let g: u16 =
-        std::str::from_utf8(g).ok().and_then(|s| s.parse().ok()).ok_or(ParseError { pos, msg: "bad generation" })?;
+    let g: u16 = std::str::from_utf8(g).ok().and_then(|s| s.parse().ok()).ok_or(ParseError { pos, msg: "bad generation" })?;
     if !lx.expect_keyword(b"obj") {
         return Err(ParseError { pos: lx.pos, msg: "missing obj" });
     }
     let o = lx.parse_obj()?;
+    if lx.raw_cr {
+        return Err(ParseError { pos, msg: RAW_CR });
+    }
     let after = lx.pos;
     if lx.expect_keyword(b"stream") {
         let dict = match o {
@@ -376,10 +390,7 @@ pub fn parse_indirect(d: &[u8], pos: usize, length: &dyn Fn(&Obj) -> Option<usiz
         }
         let len_obj = dict.get(b"Length").ok_or(ParseError { pos: p, msg: "stream without Length" })?;
         let len = length(len_obj).ok_or(ParseError { pos: p, msg: "unusable stream Length" })?;
-        let end = p
-            .checked_add(len)
-            .filter(|&e| e <= d.len())
-            .ok_or(ParseError { pos: p, msg: "stream runs past the end" })?;
+        let end = p.checked_add(len).filter(|&e| e <= d.len()).ok_or(ParseError { pos: p, msg: "stream runs past the end" })?;
         let data = d[p..end].to_vec();
         let mut lx2 = Lexer::new(d, end);
         if !lx2.expect_keyword(b"endstream") {
@@ -431,6 +442,29 @@ mod tests {
         for bad in ["<</A 1/A 2>>", "/A#4", "(abc", "<4G>", "[1 2", "<</A>>"] {
             assert!(Lexer::new(bad.as_bytes(), 0).parse_obj().is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn raw_carriage_returns_are_flagged() {
+        // An unescaped CR (alone or before LF) is flagged; escaped line ends and a raw LF are not.
+        for (s, flagged) in [
+            ("(a\rb)", true),
+            ("(a\r\nb)", true),
+            ("<< /T [(x) (a\\\r\rb)] >>", true),
+            ("(a\nb)", false),
+            ("(a\\\rb)", false),
+            ("(a\\\r\nb)", false),
+            ("(a\\rb)", false),
+            ("<0D0A>", false),
+        ] {
+            let mut lx = Lexer::new(s.as_bytes(), 0);
+            lx.parse_obj().unwrap();
+            assert_eq!(lx.raw_cr, flagged, "{s:?}");
+        }
+        let obj = |body: &str| format!("3 0 obj\n{body}\nendobj\n");
+        let len = |_: &Obj| None;
+        assert_eq!(parse_indirect(obj("<< /T (a\rb) >>").as_bytes(), 0, &len).unwrap_err().msg, RAW_CR);
+        assert!(parse_indirect(obj("<< /T (a\\\r\nb) >>").as_bytes(), 0, &len).is_ok());
     }
 
     #[test]

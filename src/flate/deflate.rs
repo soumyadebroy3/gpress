@@ -13,6 +13,9 @@ use super::lz::{Hist, Sym};
 use super::matcher::{find_matches, Matches};
 use super::parse::{greedy, optimal_nice, Costs, ParseScratch};
 use super::tables::*;
+use crate::par::{self, Memo, Pool};
+use std::collections::HashSet;
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -33,38 +36,90 @@ pub struct Options {
     pub nice: usize,
     /// Merge/split polishing of block boundaries.
     pub polish: bool,
+    /// Threads and earlier results shared by the encodes of one job. Never changes the output.
+    pub shared: Option<Arc<Shared>>,
 }
 
 impl Options {
     /// Our strongest setting.
     pub fn max() -> Options {
-        Options {
-            iterations: 8,
-            exact_rounds: 4,
-            max_chain: 8192,
-            segment: 1 << 20,
-            split: true,
-            alternatives: true,
-            multi_start_limit: 1 << 18,
-            nice: 259,
-            polish: true,
-        }
+        Options { iterations: 8, exact_rounds: 4, max_chain: 8192, segment: 1 << 20, split: true, alternatives: true, multi_start_limit: 1 << 18, nice: 259, polish: true, shared: None }
     }
     /// Fast but still optimal-parsed.
     pub fn quick() -> Options {
-        Options {
-            iterations: 2,
-            exact_rounds: 1,
-            max_chain: 128,
+        Options { iterations: 2, exact_rounds: 1, max_chain: 128, segment: 1 << 20, split: true, alternatives: false, multi_start_limit: 0, nice: 64, polish: false, shared: None }
+    }
+
+    /// Settings for an effort from 0 (`quick`) to 100 (`max`), in steps of 20. Measured on 92 sampled PDF
+    /// streams (3.4 MB) and on 6 large images (14.9 MB), against `max` (CPU time; bytes):
+    ///   0: 0.34x, 0.23x; +0.47%, +1.75%      20: 0.43x, 0.39x; +0.15%, +0.10%
+    ///  40: 0.47x, 0.45x; +0.13%, +0.09%      60: 0.77x, 0.71x; +0.03%, +0.00%      80: 0.93x, 0.90x; +0.01%, +0.00%
+    pub fn effort(effort: u8) -> Options {
+        let o = |iterations, exact_rounds, max_chain, alternatives, polish| Options {
+            iterations,
+            exact_rounds,
+            max_chain,
             segment: 1 << 20,
             split: true,
-            alternatives: false,
+            alternatives,
             multi_start_limit: 0,
-            nice: 64,
-            polish: false,
+            nice: 259,
+            polish,
+            shared: None,
+        };
+        match effort {
+            0..=19 => Options::quick(),
+            20..=39 => o(2, 1, 1024, false, false),
+            40..=59 => o(3, 1, 1024, false, false),
+            60..=79 => o(4, 2, 2048, true, true),
+            80..=99 => o(6, 3, 4096, true, true),
+            _ => Options::max(),
         }
     }
+
+    /// Whether two settings give the same output (`shared` never changes it).
+    pub fn same_output(&self, other: &Options) -> bool {
+        self.fingerprint() == other.fingerprint()
+    }
+
+    /// The settings that decide the output (everything but `shared`).
+    fn fingerprint(&self) -> [usize; 9] {
+        [self.iterations, self.exact_rounds, self.max_chain, self.segment, self.split as usize, self.alternatives as usize, self.multi_start_limit, self.nice, self.polish as usize]
+    }
 }
+
+/// What the encodes of one job share: a pool of threads, and (optionally) the output for inputs already
+/// encoded with the same settings, so that an input is encoded once. Neither changes any output.
+pub struct Shared {
+    pub pool: Arc<Pool>,
+    /// Kept as long as this `Shared` lives; None: nothing is remembered.
+    memo: Option<Memo<MemoKey, Arc<Vec<u8>>>>,
+}
+
+/// What an encoded input is remembered by: the hash and length of the data and the settings that matter.
+type MemoKey = (u64, usize, [usize; 9]);
+
+impl Shared {
+    /// A new pool of `threads` threads, remembering every output.
+    pub fn new(threads: usize) -> Arc<Shared> {
+        Shared::with_pool(Pool::new(threads), true)
+    }
+
+    /// Encodes that use `pool`; with `remember`, every output is kept for later encodes of the same input
+    /// while this `Shared` lives (one per stream, say, so memory doesn't grow with the file).
+    pub fn with_pool(pool: Arc<Pool>, remember: bool) -> Arc<Shared> {
+        Arc::new(Shared { pool, memo: remember.then(Memo::new) })
+    }
+}
+
+impl std::fmt::Debug for Shared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Shared({:?})", self.pool)
+    }
+}
+
+/// Segments optimised together before their blocks are written (bounds the memory held by finished plans).
+const SEGMENTS_AT_ONCE: usize = 8;
 
 /// Raw Deflate data for `data`.
 pub fn deflate(data: &[u8], opt: &Options) -> Vec<u8> {
@@ -73,37 +128,48 @@ pub fn deflate(data: &[u8], opt: &Options) -> Vec<u8> {
         write_fixed(&mut w, &[], true);
         return w.finish();
     }
-    let mut a = 0;
-    while a < data.len() {
-        let b = (a + opt.segment).min(data.len());
-        let t0 = std::time::Instant::now();
-        let m = find_matches(data, a, b, opt.max_chain, opt.alternatives);
-        let t1 = t0.elapsed();
-        let plans = optimize_segment(data, a, b, &m, opt);
-        if std::env::var_os("PDFE_DEBUG").is_some() {
-            eprintln!(
-                "segment {}..{}: matches {:?} ({} steps), optimise {:?}, {} blocks",
-                a,
-                b,
-                t1,
-                m.steps.len(),
-                t0.elapsed() - t1,
-                plans.len()
-            );
+    let seg = opt.segment.max(1);
+    let bounds: Vec<(usize, usize)> = (0..data.len()).step_by(seg).map(|a| (a, (a + seg).min(data.len()))).collect();
+    let dbg = std::env::var_os("PDFE_DEBUG").is_some();
+    let pool = opt.shared.as_ref().map(|s| &*s.pool);
+    // Segments are optimised independently (in parallel when threads are free) and written in order, so the
+    // output is the same whatever the number of threads.
+    for group in bounds.chunks(SEGMENTS_AT_ONCE) {
+        let plans = par::map(pool, group.len(), None, |k| {
+            let (a, b) = group[k];
+            let t0 = std::time::Instant::now();
+            let m = find_matches(data, a, b, opt.max_chain, opt.alternatives);
+            let t1 = t0.elapsed();
+            let plans = optimize_segment(data, a, b, &m, opt);
+            if dbg {
+                eprintln!("segment {}..{}: matches {:?} ({} steps), optimise {:?}, {} blocks", a, b, t1, m.steps.len(), t0.elapsed() - t1, plans.len());
+            }
+            plans
+        });
+        for (&(_, b), plans) in group.iter().zip(&plans) {
+            let n = plans.len();
+            for (k, p) in plans.iter().enumerate() {
+                let last = b == data.len() && k + 1 == n;
+                write_best(&mut w, data, p, last);
+            }
         }
-        let n = plans.len();
-        for (k, p) in plans.iter().enumerate() {
-            let last = b == data.len() && k + 1 == n;
-            write_best(&mut w, data, p, last);
-        }
-        a = b;
     }
     w.finish()
 }
 
-/// Zlib-wrapped data, as PDF's FlateDecode expects.
+/// Zlib-wrapped data, as PDF's FlateDecode expects. With a remembering `shared`, an input already encoded with
+/// the same settings is not encoded again: the earlier output is reused after checking that it decodes to
+/// this input.
 pub fn deflate_zlib(data: &[u8], opt: &Options) -> Vec<u8> {
-    super::zlib::wrap(&deflate(data, opt), data)
+    let encode = || super::zlib::wrap(&deflate(data, opt), data);
+    match opt.shared.as_ref().and_then(|sh| sh.memo.as_ref()) {
+        None => encode(),
+        Some(memo) => {
+            let key = (par::hash64(data), data.len(), opt.fingerprint());
+            let fits = |z: &Arc<Vec<u8>>| super::zlib::unwrap(z, data.len() + 1).is_ok_and(|u| u.data == data && u.trailing == 0);
+            memo.get(key, fits, || Arc::new(encode())).to_vec()
+        }
+    }
 }
 
 struct Plan {
@@ -182,11 +248,21 @@ fn plan_price(p: &Plan) -> u64 {
 }
 
 fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &mut ParseScratch) {
+    // A merge or split that was turned down is turned down again while its blocks are the same, so the
+    // second pass skips those (blocks get a new id whenever they change); the result is unchanged.
+    let mut ids: Vec<usize> = (0..plans.len()).collect();
+    let mut next_id = plans.len();
+    let mut no_merge: HashSet<(usize, usize)> = HashSet::new();
+    let mut no_split: HashSet<usize> = HashSet::new();
     for _pass in 0..2 {
         let mut changed = false;
         // Merges.
         let mut k = 0;
         while k + 1 < plans.len() {
+            if no_merge.contains(&(ids[k], ids[k + 1])) {
+                k += 1;
+                continue;
+            }
             let (pa, pb) = (&plans[k], &plans[k + 1]);
             let apart = plan_price(pa) + plan_price(pb);
             let mut joined: Vec<Sym> = Vec::with_capacity(pa.syms.len() + pb.syms.len());
@@ -200,10 +276,14 @@ fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &m
                 if price(&Hist::of(&better), b - a) < apart {
                     plans[k] = Plan { a, b, syms: better };
                     plans.remove(k + 1);
+                    ids[k] = next_id;
+                    ids.remove(k + 1);
+                    next_id += 1;
                     changed = true;
                     continue;
                 }
             }
+            no_merge.insert((ids[k], ids[k + 1]));
             k += 1;
         }
         // Splits: try the best single cut of each block.
@@ -211,7 +291,7 @@ fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &m
         while k < plans.len() {
             let p = &plans[k];
             let n = p.syms.len();
-            if n < 64 {
+            if n < 64 || no_split.contains(&ids[k]) {
                 k += 1;
                 continue;
             }
@@ -227,13 +307,13 @@ fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &m
                 }
                 c += step;
                 let right = Hist::diff(&total, &left);
-                let v = estimate_dynamic_bits(&left).min(fixed_bits(&left))
-                    + estimate_dynamic_bits(&right).min(fixed_bits(&right));
+                let v = estimate_dynamic_bits(&left).min(fixed_bits(&left)) + estimate_dynamic_bits(&right).min(fixed_bits(&right));
                 if v < best.0 {
                     best = (v, c);
                 }
             }
             if best.1 == 0 || best.0 + 6 >= whole {
+                no_split.insert(ids[k]);
                 k += 1;
                 continue;
             }
@@ -246,9 +326,13 @@ fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &m
             if split_price < whole {
                 plans[k] = Plan { a, b: mid, syms: l };
                 plans.insert(k + 1, Plan { a: mid, b, syms: r });
+                ids[k] = next_id;
+                ids.insert(k + 1, next_id + 1);
+                next_id += 2;
                 changed = true;
                 k += 2;
             } else {
+                no_split.insert(ids[k]);
                 k += 1;
             }
         }
@@ -259,15 +343,7 @@ fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &m
 }
 
 /// Entropy-priced rounds: price symbols by how often the current parse uses them, re-parse, repeat.
-fn refine(
-    data: &[u8],
-    a: usize,
-    b: usize,
-    m: &Matches,
-    opt: &Options,
-    start: Vec<Sym>,
-    sc: &mut ParseScratch,
-) -> Vec<Sym> {
+fn refine(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options, start: Vec<Sym>, sc: &mut ParseScratch) -> Vec<Sym> {
     let mut best_bits = price(&Hist::of(&start), b - a);
     let mut best = start;
     let mut stats = Hist::of(&best);
@@ -315,15 +391,7 @@ fn blend(new: &Hist, old: &Hist, salt: u64) -> Hist {
 }
 
 /// Exact-priced rounds: price symbols by the code lengths the block would really use.
-fn exact(
-    data: &[u8],
-    a: usize,
-    b: usize,
-    m: &Matches,
-    opt: &Options,
-    start: Vec<Sym>,
-    sc: &mut ParseScratch,
-) -> Vec<Sym> {
+fn exact(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options, start: Vec<Sym>, sc: &mut ParseScratch) -> Vec<Sym> {
     let mut best_bits = price(&Hist::of(&start), b - a);
     let mut best = start;
     let mut cur = Vec::with_capacity(best.len());
@@ -422,8 +490,7 @@ fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>) -> Vec<Plan> {
         let mut bestv = u64::MAX;
         while c <= hi {
             let right = Hist::diff(&total, &left);
-            let v = estimate_dynamic_bits(&left).min(fixed_bits(&left))
-                + estimate_dynamic_bits(&right).min(fixed_bits(&right));
+            let v = estimate_dynamic_bits(&left).min(fixed_bits(&left)) + estimate_dynamic_bits(&right).min(fixed_bits(&right));
             if v < bestv {
                 bestv = v;
                 bestc = c;

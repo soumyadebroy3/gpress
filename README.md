@@ -1,144 +1,197 @@
-# gpress
+# PDF engine
 
-Lossless PDF compression as a library. Two outputs, both verified before they are returned:
+Our own PDF compression engine, written in Rust. Phase 1 of the PDF compressor ("prove it"): a command-line
+tool, measured on public test PDFs against the best existing tools. Nothing here is part of the site yet.
 
-- **Normal PDF** (`optimize`): a smaller PDF that any PDF reader opens, with every object's value preserved.
-  On the public test set: 16.0% smaller on the files it can safely touch, against 9.3% for qpdf.
-- **gpress archive** (`compress` / `expand`): any file, a PDF above all, restored byte for byte.
-  On the public test set: 56.5% of the original size, against 76.3% for the best of xz, Brotli and
-  Zstandard.
+## What is ours
 
-The engine is our own: Flate encoder and decoder (smaller output than Zopfli, in less time), a bit-exact
-re-creation of zlib's output, a strict PDF reader and writer with a safety gate, and a context-mixing
-model with PDF-aware contexts. The numbers, the test set and how every output was checked by tools we
-didn't write (qpdf, pikepdf, PDFium, Poppler, pdf.js) are in [bench/RESULTS.md](bench/RESULTS.md).
+| Part | File | What it does |
+| --- | --- | --- |
+| Flate decoder | `src/flate/inflate.rs`, `zlib.rs` | Accepts exactly what zlib accepts; anything damaged is an error, never a silent repair. |
+| Flate encoder | `src/flate/deflate.rs`, `matcher.rs`, `parse.rs`, `block.rs`, `huffman.rs` | Binary-tree match finder (smallest distance for every length), shortest-path parsing priced first by symbol statistics and then by the exact code lengths, farther matches with cheaper distance codes, block boundaries by dynamic programming plus merge/split polishing, optimised block headers. The parse prices match lengths without branches, so it runs on vector instructions (AVX2 when the processor has it, chosen at run time; the same result either way). |
+| zlib rebuild | `src/flate/zlibexact.rs` | zlib's deflate re-created from its description, bit for bit, to rebuild streams zlib wrote. |
+| PDF reader | `src/pdf/parse.rs`, `xref.rs`, `filters.rs` | Strict parser: objects, xref tables and streams, object streams, LZW, ASCIIHex, ASCII85, RunLength, predictors. |
+| PDF writer | `src/pdf/rewrite.rs`, `images.rs` | Keeps every reachable object's value; re-encodes streams with our Flate; picks a better PNG predictor (or none) for images, counting the bytes its parameters take; gives JPEGs optimal Huffman tables; puts Flate in front of a JPEG only when that saves at least 1% (never in front of JPEG 2000 or JBIG2, whose filter chain keeps its shape for readers such as pdf.js); packs objects into compressed object streams grouped by type; writes a compressed xref stream; reads its own output back and compares before returning it (a changed JPEG must read back with the same coded symbols). An image with fewer samples than its size needs is kept exactly as it is (readers differ on such images). |
+| Safety gate | `src/pdf/rewrite.rs` (`gate`) | Encrypted files the empty password doesn't open, signed, certified, PDF/A, PDF/X, files with earlier revisions, files we can't read strictly (including a literal string with a raw carriage return, which qpdf reads as a line feed and pdf.js, PDFium and Poppler keep), objects beyond /Size, objects present but not indexed, object numbers far apart (beyond the cross-reference rows a file of that size may have: 16 per byte plus 65536, the bound the reader puts on a file's rows too, read as they are counted): returned untouched. Nothing a file claims (an object stream's /N, the trailer's /Size, an image's /Width, predictor parameters) sizes memory or work on its own; every count is checked against the data it describes, or the file's size, first. |
+| JPEG tables | `src/jpeg/` | Baseline and extended sequential JPEG (8-bit) written again with optimal Huffman tables, the same coefficients (like `jpegtran -optimize -copy all`): every scan is read to its coded symbols, which are written back with the best code of at most 16 bits that leaves the all-ones code word free (package-merge); of three orders of the symbols within a code length, the one with the fewest stuffed 0xFF bytes is kept. Every other byte stays (ICC and Adobe markers, comments, restart markers, bytes after the end); one table segment goes before each scan. The new file is read back and compared symbol by symbol before it is used. Progressive, arithmetic-coded, lossless, hierarchical, 12-bit, fractionally sampled (libjpeg can't decode those) and anything unusual or damaged is left as it is, and so are layouts readers could take differently once the tables move (fill bytes before a marker; every segment's contents must fill it exactly, as pdf.js reads tables by their contents), data bound to the file's bytes (multi-picture offsets, APP11 boxes such as content credentials), and files of more than 4096 segments. |
+| CCITT fax codec | `src/fax/ccitt.rs`, `tables.rs` | Decoder and encoder for T.4 (1-D, 2-D) and T.6 as CCITTFaxDecode uses them. The decoder records every choice of the original encoder (fill bits, EOLs, tag bits, end codes, padding, bytes after the end, and Adobe's way of choosing between pass and horizontal mode) and keeps a row only if writing it again gives the same bits. Checked against libtiff both ways and against libtiff and Poppler on all 183 fax streams of the test files. |
+| JBIG2 | `src/fax/jbig2.rs` | MQ coder; generic-region encoder and decoder (T.88, template 0, nominal adaptive pixels, typical prediction); the embedded stream PDF reads. jbig2dec decodes our output exactly. |
+| Fax images, normal PDF | `src/fax/pdf.rs` | A CCITT image becomes JBIG2 when that is at least 5% smaller and nothing is uncertain: one CCITT filter with direct parameters, a DeviceGray image or a mask, the width and height the data holds, at most 2^30 pixels (width rounded up to 32; PDFium's JBIG2 decoder, which pdf.js also uses, shows nothing above 2^31), no byte alignment, EOLs where every reader expects them (no EndOfLine on Group 4 data; an EOL before every row once EndOfLine is set or the data starts with one, as Poppler and xpdf then look for them), every row written back bit for bit, end codes or 0 bits at the end, coding work of at most 2048 pixels per byte of data, and our JBIG2 decoder giving the same pixels. JBIG2Decode's output is the same bits as CCITTFaxDecode's (BlackIs1 handled), so Decode, ImageMask and masks keep their meaning. The self-check compares the two by decoded pixels. |
+| Encrypted PDFs | `src/pdf/crypt.rs`, `src/pack/sealed.rs` | The standard security handler with the empty user password (see below). RC4 and the key derivations are ours; AES, MD5 and SHA-2 come from RustCrypto. |
+| peyaji format | `src/pack/`, `src/cm/` | Any PDF, packed with our context-mixing model (bit-history states, mixers, SSE) with PDF-aware contexts: syntax, predicted object numbers and xref offsets, drawing instructions, image samples coded as residuals. Streams are recognised by their bytes (zlib, JPEG), not only by their dictionaries. Format version 7 (version 6, the first with Type 1 fonts, fax images and decrypted streams together, without the preflate part; nothing earlier shipped, so earlier versions are refused): a long repeat is coded as one 16-bit-precision decision instead of eight model decisions (huge flat images, duplicates); palette and packed-pixel images are modelled by their exact neighbours; an image's row length is confirmed from its data length; a JPEG behind Flate goes through Lepton when that beats the Flate bytes. Restored byte for byte; every pack is restored and checked before it is returned (with a second thread, the restore decodes the bytes while the encoder writes them: the same code on the same bytes, in about half the time). A damaged .pyj file is refused with an error, never restored wrong: what a part restores is bounded by what is left of the declared length, and decoded data and Lepton data by 1032 bytes per byte of the file (what Flate can expand to), so the decoder's work and memory follow the length the header claims (`UnpackOptions::max_len` refuses a file declaring more than the caller can afford); decoding stops when the data runs out; and the file's checksum is checked at the end. The model's settings, the part kinds and how each is coded are constants of the format version. |
+| Type 1 fonts | `src/pack/type1.rs`, `src/cm/model.rs` | Type 1 font programs (FontFile with /Length1 /Length2 /Length3, typical of TeX) lose both layers of encryption before coding: the eexec layer (binary, PFB, and hex when its lines are regular) and the charstring layer inside it (lenIV honoured). Both ciphers are reversible byte for byte and are put back on restore; a font that would not come back exactly is coded as it is. On restore, a layout that doesn't fit inside the font's length is refused before anything is decoded for it (all its lengths are worked out with checked arithmetic). The charstrings get their own model kind, which follows their tokens (numbers, commands, operands per command). |
+| Fax images, peyaji format | `src/fax/bilevel.rs`, `part.rs` | A CCITT stream is stored as its image, coded by a bilevel context-mixing model (templates up to four rows high, vertical runs, two mixers, two probability maps, 16-bit precision, typical prediction, a fast path for white areas), plus the encoder's choices; on restore our CCITT encoder writes the original bytes back. EncodedByteAlign data whose EOLs end on a byte boundary is read too. Streams under 64 bytes stay plain. The model's work is bounded by the file's size: up to any point of the file, the fax streams may take 2^24 plus 512 pixels per byte up to there. Streams past it are coded plainly, and a restore that would go past it is refused, so a restore's time is bounded by what it has restored, whatever length a damaged file claims. |
+| SHA-256 | `src/pack/sha256.rs` | For the restore check. |
+| Threads and effort | `src/par.rs`, `Options::effort` in `src/flate/deflate.rs` and `src/pdf/rewrite.rs`, `PackOptions` in `src/pack/mod.rs` | Standard-library threads only: the segments of a stream, the streams of a PDF and the streams `pack` looks at are worked on in parallel and put together in their original order, so the output is the same for any thread count (one thread uses no thread machinery at all, as in a browser). A thread the system refuses (thread or process limits) is no loss: the calling thread does the work, and `pack` checks the restore after encoding instead of alongside. Identical streams are encoded once (a remembered result is checked against its input before it is used); encoded outputs are remembered for one stream at a time, so memory follows the file's size. `--effort` 0 to 100: 100 is the strongest setting; below, Flate works in steps of 20 (measured: effort 0 is 3 to 4 times faster than 100 and about 0.5% larger on typical streams), the streams that take the most room get the strongest step that fits a work budget proportional to the file's size, and image predictors are ranked on sampled rows. The quick settings have a budget too (16 decoded bytes per byte of the file at effort 0, twice as much every 10 points, at least 4 MiB): a stream beyond it is kept as it is, so the time follows the file's size even when streams decode to a hundred times their size. Effort 0 is the fastest setting, not the smallest: on a file whose images decode to many times its size it can be larger than effort 20 or 30, where those streams are re-encoded again (measured: 2400dpi 164,073 bytes at 0 to 20 and 132,565 from 30; issue12963 517,015 at 0 to 10 and 450,534 from 20). The JPEG tables and the JBIG2 conversion run at every effort (about 0.07 s per MB of JPEG); only the second Flate pass over a JPEG's original bytes (the poor-tables rule) waits for effort 100. In `pack`, already-compressed data (evenly spread bytes, and evenly spread differences between neighbouring bytes) is coded plainly below 50. Decided from sizes only, never from time. |
 
-Private while in development. The repository name, the crate, the C library and the npm package are all
-`gpress`.
+## Encrypted PDFs
 
-## Using it
+Both outputs handle files that open with the empty user password (anyone can read them) and use the standard
+security handler:
+/V 1, 2, 4, 5 and /R 2 to 6 (RC4, AES-128, AES-256), one crypt filter (/CFM /V2, /AESV2 or /AESV3, or /Identity)
+named by both /StmF and /StrF, and /EncryptMetadata false. The key comes from the empty password only
+(algorithms 2, 2.A and 2.B), and is confirmed by /U (algorithms 6 and 11) and, for AES-256, by /Perms (algorithm
+13).
 
-### Rust
+- Normal PDF: strings and streams are decrypted while reading, optimised as usual, and written with the same
+  encryption: the same /Encrypt dictionary (and the objects it refers to), /ID, file key and permissions. Each
+  string and stream is encrypted with its own object's key; object streams are encrypted as streams, the
+  cross-reference stream is not; AES initialization vectors are derived from the file key and the object, so
+  the output is the same on every run. Encrypted XMP metadata is compressed (no tool can read it from the file
+  anyway); metadata left unencrypted stays as it is. The self-check reads the output back, checks that it opens
+  with the same key and dictionary, and compares the decrypted objects.
+- Permissions (/P): the file keeps exactly the same encryption, permission bits and content, so the engine
+  proceeds whatever /P says.
+- peyaji format: each encrypted stream that encrypts back to exactly its stored bytes is stored decrypted (so it
+  gets the zlib rebuild, Lepton and the model) and encrypted again on restore. The pack carries the
+  file key once and, per stream, its method, object number and generation (usually "those of the `N G obj` just
+  before") and its AES initialization vector. When the pack isn't clearly smaller than the encrypted streams
+  alone, the pack without decryption is made too and the smaller kept. Unencrypted files carry no crypt
+  parts. The decoder refuses crypt parts out of place (a second key, settings not right
+  after the syntax before a stream, an empty payload) and more than two parts in a row that restore nothing.
+- Left untouched (normal PDF): files that need a password, other security handlers, signed files, streams
+  with their own /Crypt filter, and anything readers may take differently: a /CF entry named /Identity (qpdf
+  and pdf.js use it, PDFium and Poppler don't), /CFM /None or no /CFM (qpdf decrypts as AES, PDFium as RC4),
+  /StmF and /StrF missing or naming different filters, a /V 4 or 5 key length given nowhere (Poppler takes 40
+  bits), a /V 4 key that isn't 128 bits, /V 2 without /Length, /R 2 with more than 40 bits, /O or /U of unusual
+  length, a /P outside 32 bits, and literal strings with a raw carriage return (decrypted differently by
+  readers that keep it and readers that read a line feed). Everything else the gate refuses (PDF/A, earlier
+  revisions, ...) still applies.
+- peyaji format: files whose handler isn't opened as above are packed exactly as before. In the others, a
+  stream with its own /Crypt filter, or one that doesn't encrypt back to its stored bytes, is kept as stored;
+  strings are never changed, so signatures and raw carriage returns don't matter there.
 
-```toml
-[dependencies]
-gpress = { git = "https://github.com/soumyadebroy3/gpress" }
+## Existing library (optional, `--features existing`)
+
+The engine keeps whichever result is smaller after the checks, so an existing library can only help:
+
+- [lepton_jpeg](https://crates.io/crates/lepton_jpeg) (Apache-2.0, Microsoft): recompresses JPEG streams in the peyaji format and restores them bit for bit.
+
+Apache-2.0 requires shipping its licence and notices with the product. Flate streams that zlib didn't write
+(Adobe, cairo, Quartz) are stored as they are; preflate-rs did that job until its dependency `cabac` turned
+out to be LGPL, which the licence rule (below) doesn't allow, so it is gone and our own re-creation coder for
+those streams is a later roadmap item. The licence rule: our code plus libraries under MIT, Apache-2.0,
+BSD, ISC, Zlib, Unicode or MPL-2.0 only, never GPL, AGPL or LGPL. `deny.toml` holds the rule and `cargo
+deny check licenses advisories` (installed with `cargo install cargo-deny --locked`) checks it, for every
+feature and target, in CI (`.github/workflows/ci.yml`) and in `bench/security.py supply`.
+
+## Options
+
+The public choices are plain fields, and nothing is read from the environment except `PDFE_DEBUG`, which only
+prints timings. Three kinds of constants stay in the code: the ones that define the file formats (a decoder
+must agree with its encoder on those: the model's settings, the part tags, the fax work budget); the ones
+readers set (JBIG2 images of at most 2^30 pixels, no EOL rules readers disagree on); and measured thresholds
+(JBIG2 only when 5% smaller, at most 2048 pixels of fax work per byte, at most 4096 JPEG segments, plain coding
+below effort 50, fax streams of at least 64 bytes, Flate in front of a JPEG only when it saves 1%, the second
+Flate pass only for JPEGs with poor tables, Lepton only when 10% smaller than the Flate bytes, the quick
+budget's 16 bytes per byte and 4 MiB, 16 cross-reference rows per byte of the file plus 65536).
+
+- Normal PDF, `pdf::rewrite::Options`: `effort` 0 to 100 (`Options::effort(n)` sets the Flate settings to
+  match; 0 is the fastest, 100 the smallest), `threads` (0: what the machine offers, at most 8; never changes
+  the output), `max_stream` (largest decoded stream re-encoded, 64 MiB), `objstm_size` (objects per object
+  stream, 200), `respect_conformance` (leave PDF/A, PDF/X, signed, certified and usage-rights files untouched;
+  the safe default), `flate_over_jpeg` (also try our Flate in front of a JPEG), `jbig2` (CCITT fax images
+  become JBIG2), `jpeg_tables` (JPEGs get optimal Huffman tables), `rewrite_encrypted` (files the empty
+  password opens are rewritten with their encryption). The Flate settings themselves (`flate::Options`:
+  iterations, exact rounds, chain length, segment size, splitting, alternatives, the multi-start limit, the
+  nice length, polishing) are plain fields too.
+- peyaji format, `pack::PackOptions`: `effort` (below 50, data that looks compressed already is coded plainly;
+  Type 1 fonts are opened first and never coded plainly), `threads`, `decrypt` (store the streams of a file
+  the empty password opens decrypted), `max_stream` (largest decoded stream stored decoded, 256 MiB),
+  `existing` (use Lepton when the build includes it; the default is what the build has). The decoder needs
+  none of these: every choice is stored in the file. The one exception is the build itself: a file with parts
+  made by Lepton restores only with a build that has it (`unpack` says so).
+- Restoring, `pack::UnpackOptions`: `max_len`, the largest file restored (16 GiB, the format's limit). The
+  decoder's work and memory follow the length the header declares, which is the one bound a crafted file
+  can't escape, so a service that takes files from anyone sets this to what it can afford; a file declaring
+  more is refused before anything is decoded.
+
+## Build and test
+
+```
+cargo test --release
+cargo test --release --features existing
+cargo clippy --all-targets -- -D warnings
+cargo build --release --features existing
+target/release/pdfe optimize in.pdf out.pdf        # normal PDF, maximum effort (--effort 0..100, --quick = 0; --no-jbig2,
+                                                   # --no-jpeg-tables, --keep-encrypted, --ignore-conformance, --no-flate-over-jpeg)
+target/release/pdfe pack in.pdf out.pyj            # peyaji format (--effort 0..100, --no-decrypt)
+target/release/pdfe unpack out.pyj back.pdf        # exact original (--max-len N refuses a file declaring more)
+target/release/pdfe jpeg in.jpg out.jpg            # one JPEG with optimal Huffman tables (measuring)
 ```
 
-```rust
-use gpress::{Options, Outcome};
+`--threads N` sets the number of threads (default: what the machine offers, at most 8); it never changes the
+output. `PDFE_DEBUG=1` prints the time of every stream and Flate segment. `tests/interaction.rs` runs every
+feature on one encrypted file (a JPEG, a fax image, a Type 1 font and a zlib stream) in both outputs.
 
-let opt = Options::new().effort(80).threads(4);
+## Benchmarks (`bench/`)
 
-// A smaller PDF that any reader opens.
-let r = gpress::optimize(&pdf_bytes, &opt)?;
-match r.outcome {
-    Outcome::Smaller(report) => std::fs::write("out.pdf", &r.data)?,
-    Outcome::Untouched(why) => println!("left as it was: {why}"),
-}
+- `extract_streams.py`, `flate_bench.py`: every Flate stream of the test PDFs, our encoder against zlib-9,
+  libdeflate-12 and Zopfli; every output checked with zlib.
+- `benchmark.py`: the standard measurement, in one command. `time` and `space` measure every file one
+  process at a time (wall and CPU time, peak memory, bytes in and out, exactness): ours at each effort and
+  thread count, normal PDF and archive, against qpdf (normal PDF) and xz -9e, Brotli 11, Zstandard 19 with
+  long matching and expand + xz (archive), each as its own process. A normal-PDF output must open (page count
+  and every page's content decoded with pikepdf), an untouched file must be the input byte for byte, and a
+  sample of outputs goes through `verify_pdf.py`; every archive is restored with a separate `unpack` and
+  compared byte for byte. Rows go to `results/<run>/*.jsonl` as each file finishes, so a stopped run
+  continues where it was. `report` makes the tables (text, Markdown, and `time.tsv`, `memory.tsv`,
+  `size.tsv`, `files.tsv`); `compare BASE NEW` fails when a setting got more than 10% slower in total, a file
+  more than 2x slower, any output larger, or the peak memory more than 10% higher; `selftest` plants each of
+  those and checks they are caught. Time is measured as both wall time (what a user waits) and the process's
+  CPU time; the check uses CPU time (`--metric wall` to change), which moves far less than wall time when
+  the machine is shared, though not nothing: a neighbour that fills the cache slows memory-bound code (the
+  archive's model) in CPU time too. The report prints the machine's load next to every setting and `compare`
+  says when the two runs saw a different load; numbers that are to be compared come from a quiet machine.
+  The competitors need measuring only once: `--with RUN` lets `report` and `compare` take the settings a run
+  lacks from a stored one (`results/all907-speed-ca8fa92` has every competitor on all 907 files), so
+  measuring a new build is `time RUN --set all --who ours` and nothing more. `measure.c` is the small parent
+  process that runs each command (Linux gives a process the peak memory of the one that forked it, so a
+  Python parent would hide everything under 20 MB). File lists are in `sets/` (`all`, and `sample120`: the
+  20 slowest, the 20 largest and 80 random files, seed 11), relative to the corpus root (`CORPUS`); the
+  engine comes from `PDFE` (or `GPRESS`). This replaces the earlier `pdf_bench.py` and `pack_bench.py`; the
+  "qpdf + xz" baseline they had is gone for good (qpdf drops objects and revisions, so it was never
+  comparable).
+- `verify_pdf.py`: the independent check of one output: qpdf --check, pikepdf (object graph followed by
+  value, streams decoded; a JPEG whose bytes changed must have the same coefficients, `jpegtran -copy all`
+  writing the same bytes for both, and decode to the same pixels with
+  qpdf's libjpeg, Pillow and pdf.js's own JPEG decoder, `verify_jpeg_pdfjs.mjs`; the other image streams qpdf
+  can't decode, CCITT, JBIG2 and JPEG 2000, are compared by their decoded pixels with pikepdf's decoders,
+  libtiff, jbig2dec and OpenJPEG, then Poppler's when pikepdf can't decode one or disagrees, noted in the
+  output: libtiff wants an EOL before every Group 3 row, which PDF doesn't require) and PDFium (pixels and
+  text of every page, up to 30 pages). A changed JPEG needs `jpegtran` (PATH or `JPEGTRAN`) and pdf.js
+  (`PDFJS_MODULES`); without them it is reported, never passed. jbig2dec and jbig2enc (`apt install jbig2dec
+  jbig2`) are used only by the checks and benchmarks, never by the engine.
+- `verify_render.py`, `verify_pdfjs.mjs`: two more renderers on every output, Poppler and pdf.js (pixels and
+  text of every page, up to 30 pages; no new Poppler errors). pdf.js comes from npm (`pdfjs-dist`,
+  `@napi-rs/canvas`), installed outside this folder.
+- `verify_encryption.py`: an output keeps the original's encryption exactly (qpdf's own reading of the revision,
+  permissions, methods and file key, the /ID and the /Encrypt dictionary, compared with pikepdf and qpdf).
+- `check_the_checkers.py`: the checks must catch one small change (a character, a metadata value, the page
+  size, one bit of one pixel, one JPEG coefficient, a coefficient one larger that libjpeg's pixels don't show,
+  a JPEG layout only pdf.js reads differently) and pass an unchanged copy and a JPEG with other Huffman tables.
+  With `--fax FILE`: a fax image coded again by libtiff (same pixels) must pass, one flipped pixel must be
+  caught.
+- `jpeg_bench.py`: every JPEG in the test PDFs, ours against `jpegtran -optimize` (libjpeg-turbo) and mozjpeg;
+  every JPEG we change is checked with libjpeg-turbo (pixels, and coefficients through jpegtran) and Pillow.
+  A tool's output counts even when jpegtran warns about the input (exit status 2); the report also gives the
+  totals without those JPEGs.
+- `fax_bench.py`: files with fax images, both outputs before and after, and every fax stream against xz -9e
+  and jbig2enc's lossless generic coding.
+- `security.py`: part 3 of the same measurement, hostile input, pass or fail (`run` does everything;
+  `benchmark.py security ...` reaches it too). Twenty packs damaged every way (bit flips, cuts, garbage,
+  header fields, checksum) must be refused or restored exactly, never a wrong file; hostile PDFs (nesting
+  100,000 deep, loops in the xref chain and the object streams, Flate, LZW and RunLength bombs, a
+  100,000 x 100,000 image, a million objects, bad UTF-16) must come back untouched, smaller or with a clean
+  error inside a time and memory bound that grows with the input; mutation fuzzing of optimize, pack and
+  unpack for ten minutes each under a hard 512 MiB address space; `cargo audit`, the licence of every
+  dependency and every `unsafe` block with its reason; the same inputs through the C library
+  (`gpress_harness.c`) when `crates/gpress-c` is in the tree. `selfcheck` plants a wrong file, a crash, a
+  hang, a memory blow-up, a bad licence and a bare `unsafe` and checks that each is caught. Every failing
+  input is saved under `results/security/failures/` with the engine's stderr; `measure.c` runs each command
+  from a parent under 1 MB so the peak memory is the command's own.
+- `examples/type1_fonts.rs`: Type 1 font programs (one file each) opened as the peyaji format opens them,
+  written out for other compressors, and coded by our model as they are and opened
+  (`cargo run --release --example type1_fonts -- INDEX OUTDIR`).
 
-// The gpress archive, and the original back from it.
-let archive = gpress::compress(&pdf_bytes, &opt)?;
-let original = gpress::expand(&archive.data, &opt)?;
-assert_eq!(original, pdf_bytes);
-```
-
-`Options` holds everything a caller can tune: `effort` (0 quick to 100 maximum), `max_input`,
-`max_stream` (the largest decoded stream held in memory), `threads` (output never depends on it),
-`time_budget`, `respect_conformance` (leave PDF/A, PDF/X, signed and certified files untouched; the safe
-default), `flate_over_jpeg`, `use_existing_libraries`. Errors are a plain `Error` enum with a stable
-numeric code; the library never panics across its boundary (every call runs inside a panic guard and a
-bug comes back as `Error::Internal`).
-
-### C (and everything that binds to C)
-
-`crates/gpress-c` builds `libgpress_c` (shared and static) with the header
-[`include/gpress.h`](crates/gpress-c/include/gpress.h):
-
-```c
-gpress_options opt; gpress_options_default(&opt); opt.effort = 70;
-gpress_result r = gpress_optimize(pdf, pdf_len, &opt);
-if (r.code == GPRESS_OK) fwrite(r.output.data, 1, r.output.len, out);
-else fprintf(stderr, "%s\n", r.message);
-gpress_result_free(&r);
-```
-
-Every function is thread-safe, never aborts the process, never reads outside the buffers it is given, and
-every buffer it hands out is freed with `gpress_result_free` (or `gpress_free` / `gpress_free_message`).
-[`examples/roundtrip.c`](crates/gpress-c/examples/roundtrip.c) is a complete program.
-
-### JavaScript and TypeScript (browser and Node)
-
-`crates/gpress-wasm` is a plain WebAssembly module (no bindgen layer) with a typed wrapper in
-[`js/gpress.ts`](crates/gpress-wasm/js/gpress.ts):
-
-```ts
-import { Gpress } from "gpress";
-const g = await Gpress.load(fetch("/gpress.wasm"));
-const smaller = g.optimize(bytes, { effort: 70 });   // { data, outcome, reason? }
-const archive = g.compress(bytes);
-const original = g.expand(archive.data);             // throws GpressError on a damaged archive
-```
-
-The module is deterministic (the same bytes as the native library), single-threaded, and never traps. Run
-it in a Web Worker to keep a page responsive. Pages that load it need `'wasm-unsafe-eval'` in their
-Content Security Policy's `script-src`.
-
-### Command line
-
-```
-cargo build --release
-target/release/gpress optimize in.pdf out.pdf [--effort N | --quick]
-target/release/gpress pack in.pdf out.gpz
-target/release/gpress unpack out.gpz back.pdf
-```
-
-## Building
-
-```
-cargo build --release --workspace                 # core, C library, CLI (and the wasm crate as a native rlib)
-cargo build --release --features existing         # also preflate-rs and lepton_jpeg (Apache-2.0)
-cargo test --release --workspace
-cargo build --release -p gpress-wasm --target wasm32-unknown-unknown   # needs: rustup target add wasm32-unknown-unknown
-cd crates/gpress-wasm/js && npm ci && npm run build && npm test        # the npm package into js/dist/
-```
-
-CI (`.github/workflows/ci.yml`) runs formatting, clippy with warnings as errors, both test suites, the C
-example against the shared library, the WebAssembly package and its tests, and a short fuzzing run of the
-decoders (`fuzz/`, cargo-fuzz).
-
-## Layout
-
-| Path | What |
-| --- | --- |
-| `src/api.rs` | The public API: `Options`, `optimize`, `compress`, `expand`, `Error`. |
-| `src/flate/` | Our Flate decoder and encoder, and the bit-exact zlib re-creation. |
-| `src/pdf/` | PDF objects, strict parser, filters, images, the normal-PDF writer and its safety gate. |
-| `src/cm/` | The context-mixing model and arithmetic coder. |
-| `src/pack/` | The gpress archive format (version 4) and SHA-256. |
-| `src/bin/gpress.rs` | The command-line tool. |
-| `crates/gpress-c/` | C API, header, example. |
-| `crates/gpress-wasm/` | WebAssembly module and the TypeScript package. |
-| `fuzz/` | Fuzz targets for the archive decoder, the Flate decoder and the PDF path. |
-| `bench/` | Benchmarks against existing tools and the independent checks. |
-| `tests/` | Integration tests (zlib vectors, the archive format). |
-
-## Safety rules the code follows
-
-- **No data loss.** Every transformation is verified exactly before it is used; anything uncertain leaves
-  that stream or file untouched. A damaged archive is refused with an error, never restored wrongly.
-- **Untrusted input.** Lengths are bounded by `Options`, decoding stops when data runs out, allocations
-  are capped, and no code path panics across the library boundary.
-- **Deterministic.** Integer arithmetic only in the model; the format's constants are fixed in code and
-  never read from the environment; output is identical whatever the thread count.
-- **Licences.** Our code, plus optional Apache-2.0 libraries. Nothing GPL, AGPL or LGPL.
-
-## Existing libraries (optional, `--features existing`)
-
-- [preflate-rs](https://crates.io/crates/preflate-rs) (Apache-2.0, Microsoft): rebuilds Flate streams made by
-  encoders other than zlib, in the archive.
-- [lepton_jpeg](https://crates.io/crates/lepton_jpeg) (Apache-2.0, Microsoft): recompresses JPEG streams in the
-  archive and restores them bit for bit.
-
-The engine keeps whichever verified result is smaller, so these can only help. Apache-2.0 requires
-shipping its licence and notices with a product.
+Results: `bench/RESULTS.md`.

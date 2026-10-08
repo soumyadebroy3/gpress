@@ -12,6 +12,10 @@ pub struct Matches {
     /// Position `from + k` has steps `steps[start[k]..start[k + 1]]`.
     pub start: Vec<u32>,
     pub steps: Vec<(u16, u16)>,
+    /// With alternatives: the steps that are longer than every closer one (the smallest distance for each
+    /// length), in the same layout. Empty without alternatives, where every step is one of them.
+    chain_start: Vec<u32>,
+    chain: Vec<(u16, u16)>,
     /// Equal bytes starting at each position (itself included), cut at `to` and at 65535.
     pub same: Vec<u16>,
     pub from: usize,
@@ -19,12 +23,21 @@ pub struct Matches {
 }
 
 impl Matches {
-    #[inline]
+    #[inline(always)]
     pub fn at(&self, pos: usize) -> &[(u16, u16)] {
         let k = pos - self.from;
         &self.steps[self.start[k] as usize..self.start[k + 1] as usize]
     }
-    #[inline]
+    /// The steps longer than every closer one: for each length, the smallest distance that reaches it.
+    #[inline(always)]
+    pub fn chain_at(&self, pos: usize) -> &[(u16, u16)] {
+        if self.chain_start.is_empty() {
+            return self.at(pos);
+        }
+        let k = pos - self.from;
+        &self.chain[self.chain_start[k] as usize..self.chain_start[k + 1] as usize]
+    }
+    #[inline(always)]
     pub fn same_at(&self, pos: usize) -> usize {
         self.same[pos - self.from] as usize
     }
@@ -68,6 +81,7 @@ pub fn find_matches(data: &[u8], from: usize, to: usize, max_depth: usize, alter
     let n = to - from;
     let mut start = Vec::with_capacity(n + 1);
     let mut steps: Vec<(u16, u16)> = Vec::with_capacity(n * 2);
+    let (mut chain_start, mut chain) = if alternatives { (Vec::with_capacity(n + 1), Vec::with_capacity(n)) } else { (Vec::new(), Vec::new()) };
 
     let mut same = vec![0u16; to - hist];
     for i in (hist..to).rev() {
@@ -85,6 +99,9 @@ pub fn find_matches(data: &[u8], from: usize, to: usize, max_depth: usize, alter
         let searching = i >= from;
         if searching {
             start.push(steps.len() as u32);
+            if alternatives {
+                chain_start.push(chain.len() as u32);
+            }
         }
         let lim = (to - i).min(MAX_MATCH);
         if lim < MIN_MATCH {
@@ -123,6 +140,9 @@ pub fn find_matches(data: &[u8], from: usize, to: usize, max_depth: usize, alter
                     }
                     if len > best || (alternatives && len > bucket_best && kept < 24) {
                         steps.push((len as u16, dist as u16));
+                        if alternatives && len > best {
+                            chain.push((len as u16, dist as u16));
+                        }
                         kept += 1;
                         best = best.max(len);
                         bucket_best = len;
@@ -149,8 +169,11 @@ pub fn find_matches(data: &[u8], from: usize, to: usize, max_depth: usize, alter
         }
     }
     start.push(steps.len() as u32);
+    if alternatives {
+        chain_start.push(chain.len() as u32);
+    }
     let same_seg = same[from - hist..].to_vec();
-    Matches { start, steps, same: same_seg, from, to }
+    Matches { start, steps, chain_start, chain, same: same_seg, from, to }
 }
 
 #[cfg(test)]
@@ -203,7 +226,24 @@ mod tests {
             let m = find_matches(&data, from, to, usize::MAX, false);
             for i in from..to {
                 assert_eq!(m.at(i), &brute(&data, to, i)[..], "position {i}");
+                assert_eq!(m.chain_at(i), m.at(i), "position {i}");
             }
+        }
+    }
+
+    #[test]
+    fn chain_with_alternatives_is_the_smallest_distance_chain() {
+        for seed in [7u64, 99] {
+            let data = sample(seed, 7000);
+            let (from, to) = (1000, 6000);
+            let plain = find_matches(&data, from, to, 300, false);
+            let alt = find_matches(&data, from, to, 300, true);
+            let mut extra = 0;
+            for i in from..to {
+                assert_eq!(alt.chain_at(i), plain.at(i), "position {i}");
+                extra += alt.at(i).len() - plain.at(i).len();
+            }
+            assert!(extra > 0, "alternatives add steps");
         }
     }
 }
@@ -230,11 +270,7 @@ mod validity {
                     let (l, d) = (l as usize, d as usize);
                     assert!((1..=WINDOW).contains(&d) && d <= i, "pos {i}: dist {d}");
                     assert!(i + l <= to, "pos {i}: len {l} past end");
-                    assert!(
-                        l > prev.0 as usize && (d > prev.1 as usize),
-                        "pos {i}: steps not increasing {:?}",
-                        m.at(i)
-                    );
+                    assert!(l > prev.0 as usize && (d > prev.1 as usize), "pos {i}: steps not increasing {:?}", m.at(i));
                     assert_eq!(&data[i - d..i - d + l], &data[i..i + l], "pos {i}: len {l} dist {d}");
                     prev = (l as u16, d as u16);
                 }

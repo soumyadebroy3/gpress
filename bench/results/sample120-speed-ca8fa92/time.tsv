@@ -1,0 +1,16 @@
+setting	tool	mode	effort	threads	files	ok	bytes_in	wall_s	cpu_s	load1	median_s	p90_s	p99_s	slowest_s	slowest_file	mb_per_s	under_0.1s	under_1s	under_10s	exact	checked	verified	verify_failed	failed	unpack_wall_s
+ours-pdf-e0-t1	ours	pdf	0	1	120	120	78313418	204.574	156.018	3.57	0.0514	3.9888	11.8997	61.021	pypdf-samples/009-pdflatex-geotopo__GeoTopo.pdf	0.383	69	92	116	120	120	8	0	0	0.000
+ours-pdf-e0-t2	ours	pdf	0	2	120	120	78313418	228.037	153.596	4.20	0.0226	4.2192	14.2485	82.713	pypdf-samples/009-pdflatex-geotopo__GeoTopo.pdf	0.343	75	97	113	120	120	8	0	0	0.000
+ours-pdf-e50-t1	ours	pdf	50	1	120	120	78313418	297.728	274.385	2.32	0.0167	6.5777	33.6039	105.480	pypdf-samples/009-pdflatex-geotopo__GeoTopo.pdf	0.263	75	94	111	120	120	8	0	0	0.000
+ours-pdf-e50-t2	ours	pdf	50	2	120	120	78313418	274.526	282.606	2.92	0.0199	5.4449	25.0957	103.541	pypdf-samples/009-pdflatex-geotopo__GeoTopo.pdf	0.285	75	93	114	120	120	8	0	0	0.000
+ours-pdf-e100-t1	ours	pdf	100	1	120	120	78313418	1844.049	854.780	6.45	0.0912	27.1151	204.4414	590.209	pypdf-samples/009-pdflatex-geotopo__GeoTopo.pdf	0.042	62	82	96	120	120	8	0	0	0.000
+ours-pdf-e100-t2	ours	pdf	100	2	120	120	78313418	2481.838	901.794	4.17	0.0617	33.6772	290.6376	992.931	pypdf-samples/009-pdflatex-geotopo__GeoTopo.pdf	0.032	66	85	101	120	120	8	0	0	0.000
+qpdf-pdf	qpdf	pdf	None	None	120	118	78313418	30.699	15.030	5.35	0.0183	0.6100	2.8482	4.371	pdfjs/bug1978317.pdf	2.549	84	109	118	0	0	0	0	2	0.000
+ours-archive-e0-t1	ours	archive	0	1	120	120	78313418	410.138	341.676	3.00	0.1687	8.3051	40.5093	46.276	pypdf-samples/009-pdflatex-geotopo__GeoTopo.pdf	0.191	55	83	109	120	120	0	0	0	184.624
+ours-archive-e0-t2	ours	archive	0	2	120	120	78313418	323.903	357.031	2.38	0.1381	8.3573	34.3871	46.503	pypdf-samples/009-pdflatex-geotopo__GeoTopo.pdf	0.242	56	87	110	120	120	0	0	0	178.730
+ours-archive-e50-t1	ours	archive	50	1	120	120	78313418	694.423	378.692	5.95	0.5248	18.0838	49.8525	75.876	pdfjs/issue3188.pdf	0.113	12	72	100	120	120	0	0	0	337.363
+ours-archive-e50-t2	ours	archive	50	2	120	120	78313418	1062.499	414.659	6.06	0.4312	25.5737	110.0452	121.963	pdfjs/issue3188.pdf	0.074	27	74	94	120	120	0	0	0	469.296
+brotli-archive	brotli	archive	None	None	120	120	78313418	309.896	147.695	5.08	0.2317	7.9243	27.9395	50.882	pdfjs/issue3188.pdf	0.253	52	80	113	0	0	0	0	0	0.000
+expandxz-archive	expandxz	archive	None	None	120	120	78313418	405.790	196.341	4.65	0.1200	6.6330	60.2941	80.598	pdfjs/bug1978317.pdf	0.193	55	85	111	0	0	0	0	0	0.000
+xz-archive	xz	archive	None	None	120	120	78313418	55.135	27.510	4.88	0.0744	1.2551	3.9120	5.566	pdfjs/issue3188.pdf	1.420	62	103	120	0	0	0	0	0	0.000
+zstd-archive	zstd	archive	None	None	120	120	78313418	47.771	16.790	6.52	0.0258	1.1102	4.8630	5.311	pdfjs/issue3188.pdf	1.639	82	105	120	0	0	0	0	0	0.000

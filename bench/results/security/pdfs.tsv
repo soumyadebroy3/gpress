@@ -1,0 +1,29 @@
+file	op	result	verdict	wall_s	cpu_s	maxrss_mib	bytes_in	bytes_out	time_bound_s	mem_bound_mib	saved	what
+nested_array.pdf	optimize	PASS	untouched	0.00	0.00	4	200344	200344	31	512		array nested 100,000 deep
+nested_array.pdf	pack	PASS	packed-exact	0.06	0.06	17	200344	113	31	512		array nested 100,000 deep
+nested_dict.pdf	optimize	PASS	untouched	0.00	0.00	5	900344	900344	34	512		dictionary nested 100,000 deep
+nested_dict.pdf	pack	PASS	packed-exact	0.13	0.13	36	900344	150	34	512		dictionary nested 100,000 deep
+length_overflow.pdf	optimize	PASS	untouched	0.00	0.00	3	426	426	30	512		/Length 9,999,999,999 on a 3-byte stream
+length_overflow.pdf	pack	PASS	packed-exact	0.04	0.04	14	426	103	30	512		/Length 9,999,999,999 on a 3-byte stream
+huge_image.pdf	optimize	PASS	smaller	0.01	0.01	5	570	560	30	512		image 100,000 x 100,000 with 64 bytes of data
+huge_image.pdf	pack	PASS	packed-exact	0.04	0.04	14	570	124	30	512		image 100,000 x 100,000 with 64 bytes of data
+flate_bomb.pdf	optimize	PASS	untouched	0.45	0.44	70	1044090	1044090	35	512		Flate stream of 1019 KiB that decodes to 1024 MiB
+flate_bomb.pdf	pack	PASS	packed-exact	0.98	0.97	260	1044090	278	35	512		Flate stream of 1019 KiB that decodes to 1024 MiB
+flate_bomb_nested.pdf	optimize	PASS	untouched	0.44	0.44	68	1017	1017	30	512		two-stage Flate (564 B) decoding to 256 MiB
+flate_bomb_nested.pdf	pack	PASS	packed-exact	0.05	0.05	16	1017	245	30	512		two-stage Flate (564 B) decoding to 256 MiB
+lzw_bomb.pdf	optimize	PASS	smaller	0.38	0.38	32	5847	4122	30	512		LZW stream of 5409 B that keeps repeating one byte
+lzw_bomb.pdf	pack	PASS	packed-exact	0.06	0.06	14	5847	5058	30	512		LZW stream of 5409 B that keeps repeating one byte
+runlength_bomb.pdf	optimize	PASS	smaller	0.14	0.13	29	2097603	1498	40	512		RunLength stream of 2 MiB expanding 128x
+runlength_bomb.pdf	pack	PASS	packed-exact	0.27	0.27	92	2097603	231	40	512		RunLength stream of 2 MiB expanding 128x
+bad_utf16_name.pdf	optimize	PASS	smaller	0.01	0.01	5	492	438	30	512		invalid UTF-16 strings and #-escaped names
+bad_utf16_name.pdf	pack	PASS	packed-exact	0.04	0.04	14	492	151	30	512		invalid UTF-16 strings and #-escaped names
+prev_loop.pdf	optimize	PASS	untouched	0.00	0.00	3	263	263	30	512		/Prev pointing in a loop (classic tables)
+prev_loop.pdf	pack	PASS	packed-exact	0.04	0.04	14	263	70	30	512		/Prev pointing in a loop (classic tables)
+xref_stream_loop.pdf	optimize	PASS	untouched	0.00	0.00	3	223	223	30	512		xref stream whose /Prev is itself and /XRefStm points back
+xref_stream_loop.pdf	pack	PASS	packed-exact	0.04	0.04	14	223	101	30	512		xref stream whose /Prev is itself and /XRefStm points back
+objstm_selfref.pdf	optimize	PASS	untouched	0.00	0.00	3	165	165	30	512		xref stream saying an object lives inside object stream 2: itself
+objstm_selfref.pdf	pack	PASS	packed-exact	0.04	0.04	14	165	84	30	512		xref stream saying an object lives inside object stream 2: itself
+objstm_loop.pdf	optimize	PASS	untouched	0.00	0.00	4	401	401	30	512		object stream that contains itself and /Extends itself
+objstm_loop.pdf	pack	PASS	packed-exact	0.04	0.04	14	401	138	30	512		object stream that contains itself and /Extends itself
+million_objects.pdf	optimize	PASS	smaller	25.49	25.13	523	52778080	4499063	282	805		1,000,000 tiny objects reachable from the catalog
+million_objects.pdf	pack	PASS	packed-exact	118.89	117.10	470	52778080	1089978	282	805		1,000,000 tiny objects reachable from the catalog

@@ -1,0 +1,364 @@
+{
+ "runs": [
+  {
+   "mode": "run",
+   "date": "2026-10-08 05:00:43 UTC",
+   "build": "speed-ca8fa92",
+   "engine": "/home/claude/wt/target-bench-security/release/pdfe",
+   "engine_sha256": "d05aaabb970040e608009d402e727bebf560c367c33550be96bbc485c3ac026b",
+   "corpus": "/tmp/claude-0/-home-claude/b636d578-f2d3-5309-87d4-a4766d45bbac/scratchpad/corpus",
+   "cpus": 2,
+   "load_at_start": 6.63,
+   "kernel": "6.18.44-fc-v80",
+   "python": "3.13.16",
+   "measured_by": "bench/measure.c (parent under 1 MB); address-space limit by prlimit",
+   "tools": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "cargo-audit": "cargo-audit 0.22.2",
+    "cc": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+   },
+   "bounds": {
+    "archive": {
+     "packs": 20,
+     "max_seed_bytes": 3000000,
+     "time": 5.0,
+     "mem_mib": 512,
+     "flips": 12,
+     "flip_bits": [
+      0,
+      3,
+      7
+     ],
+     "cuts": 16,
+     "garbage": 3000,
+     "rng_seed": 12345
+    },
+    "pdf": {
+     "time": 30.0,
+     "time_per_mib": 5.0,
+     "mem_mib": 512,
+     "mem_per_byte": 16,
+     "nesting": 100000,
+     "bomb_mib": 1024,
+     "nested_bomb_mib": 256,
+     "image_side": 100000,
+     "objects": 1000000,
+     "runlength_mib": 2
+    },
+    "fuzz": {
+     "seconds": 600,
+     "mem_mib": 512,
+     "seeds": 40,
+     "max_seed_bytes": 1500000,
+     "archive_seeds": 12,
+     "seed_mem_fraction": 0.5,
+     "edits": 8,
+     "rng_seed": 12648430,
+     "pick_seed": 7
+    },
+    "hang": 60.0,
+    "time_metric": "cpu"
+   }
+  },
+  {
+   "mode": "selfcheck",
+   "date": "2026-10-08 05:46:52 UTC",
+   "build": "speed-ca8fa92",
+   "engine": "/home/claude/wt/target-bench-security/release/pdfe",
+   "engine_sha256": "d05aaabb970040e608009d402e727bebf560c367c33550be96bbc485c3ac026b",
+   "corpus": "/tmp/claude-0/-home-claude/b636d578-f2d3-5309-87d4-a4766d45bbac/scratchpad/corpus",
+   "cpus": 2,
+   "load_at_start": 5.3369140625,
+   "kernel": "6.18.44-fc-v80",
+   "python": "3.13.16",
+   "measured_by": "bench/measure.c (parent under 1 MB); address-space limit by prlimit",
+   "tools": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "cargo-audit": "cargo-audit 0.22.2",
+    "cc": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+   },
+   "bounds": {
+    "archive": {
+     "packs": 20,
+     "max_seed_bytes": 3000000,
+     "time": 5.0,
+     "mem_mib": 512,
+     "flips": 12,
+     "flip_bits": [
+      0,
+      3,
+      7
+     ],
+     "cuts": 16,
+     "garbage": 3000,
+     "rng_seed": 12345
+    },
+    "pdf": {
+     "time": 30.0,
+     "time_per_mib": 5.0,
+     "mem_mib": 512,
+     "mem_per_byte": 16,
+     "nesting": 100000,
+     "bomb_mib": 1024,
+     "nested_bomb_mib": 256,
+     "image_side": 100000,
+     "objects": 1000000,
+     "runlength_mib": 2
+    },
+    "fuzz": {
+     "seconds": 600,
+     "mem_mib": 512,
+     "seeds": 40,
+     "max_seed_bytes": 1500000,
+     "archive_seeds": 12,
+     "seed_mem_fraction": 0.5,
+     "edits": 8,
+     "rng_seed": 12648430,
+     "pick_seed": 7
+    },
+    "hang": 60.0,
+    "time_metric": "cpu"
+   }
+  },
+  {
+   "mode": "supply",
+   "date": "2026-10-08 16:46:36 UTC",
+   "build": "integration-8f55c78",
+   "engine": "/home/claude/wt/target-finish/release/pdfe",
+   "engine_sha256": "f8cd556aa6dc562e4b99f86c115ca49fba8ccd50b7c2ec0beee3e1e21e0ff4ea",
+   "corpus": "/tmp/claude-0/-home-claude/b636d578-f2d3-5309-87d4-a4766d45bbac/scratchpad/corpus",
+   "cpus": 2,
+   "load_at_start": 0.212890625,
+   "kernel": "6.18.44-fc-v80",
+   "python": "3.13.16",
+   "measured_by": "bench/measure.c (parent under 1 MB); address-space limit by prlimit",
+   "tools": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "cargo-audit": "cargo-audit 0.22.2",
+    "cc": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+   },
+   "bounds": {
+    "archive": {
+     "packs": 20,
+     "max_seed_bytes": 3000000,
+     "time": 5.0,
+     "mem_mib": 512,
+     "flips": 12,
+     "flip_bits": [
+      0,
+      3,
+      7
+     ],
+     "cuts": 16,
+     "garbage": 3000,
+     "rng_seed": 12345
+    },
+    "pdf": {
+     "time": 30.0,
+     "time_per_mib": 5.0,
+     "mem_mib": 512,
+     "mem_per_byte": 16,
+     "nesting": 100000,
+     "bomb_mib": 1024,
+     "nested_bomb_mib": 256,
+     "image_side": 100000,
+     "objects": 1000000,
+     "runlength_mib": 2
+    },
+    "fuzz": {
+     "seconds": 600,
+     "mem_mib": 512,
+     "seeds": 40,
+     "max_seed_bytes": 1500000,
+     "archive_seeds": 12,
+     "seed_mem_fraction": 0.5,
+     "edits": 8,
+     "rng_seed": 12648430,
+     "pick_seed": 7
+    },
+    "hang": 60.0,
+    "time_metric": "cpu"
+   }
+  },
+  {
+   "mode": "archives",
+   "date": "2026-10-08 16:48:43 UTC",
+   "build": "integration-8892b9e",
+   "engine": "/home/claude/wt/target-finish/release/pdfe",
+   "engine_sha256": "f8cd556aa6dc562e4b99f86c115ca49fba8ccd50b7c2ec0beee3e1e21e0ff4ea",
+   "corpus": "/tmp/claude-0/-home-claude/b636d578-f2d3-5309-87d4-a4766d45bbac/scratchpad/corpus",
+   "cpus": 2,
+   "load_at_start": 0.11767578125,
+   "kernel": "6.18.44-fc-v80",
+   "python": "3.13.16",
+   "measured_by": "bench/measure.c (parent under 1 MB); address-space limit by prlimit",
+   "tools": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "cargo-audit": "cargo-audit 0.22.2",
+    "cc": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+   },
+   "bounds": {
+    "archive": {
+     "packs": 20,
+     "max_seed_bytes": 3000000,
+     "time": 5.0,
+     "mem_mib": 512,
+     "flips": 12,
+     "flip_bits": [
+      0,
+      3,
+      7
+     ],
+     "cuts": 16,
+     "garbage": 3000,
+     "rng_seed": 12345
+    },
+    "pdf": {
+     "time": 30.0,
+     "time_per_mib": 5.0,
+     "mem_mib": 512,
+     "mem_per_byte": 16,
+     "nesting": 100000,
+     "bomb_mib": 1024,
+     "nested_bomb_mib": 256,
+     "image_side": 100000,
+     "objects": 1000000,
+     "runlength_mib": 2
+    },
+    "fuzz": {
+     "seconds": 600,
+     "mem_mib": 512,
+     "seeds": 40,
+     "max_seed_bytes": 1500000,
+     "archive_seeds": 12,
+     "seed_mem_fraction": 0.5,
+     "edits": 8,
+     "rng_seed": 12648430,
+     "pick_seed": 7
+    },
+    "hang": 60.0,
+    "time_metric": "cpu"
+   }
+  },
+  {
+   "mode": "pdfs",
+   "date": "2026-10-08 16:50:43 UTC",
+   "build": "integration-8892b9e",
+   "engine": "/home/claude/wt/target-finish/release/pdfe",
+   "engine_sha256": "f8cd556aa6dc562e4b99f86c115ca49fba8ccd50b7c2ec0beee3e1e21e0ff4ea",
+   "corpus": "/tmp/claude-0/-home-claude/b636d578-f2d3-5309-87d4-a4766d45bbac/scratchpad/corpus",
+   "cpus": 2,
+   "load_at_start": 1.00927734375,
+   "kernel": "6.18.44-fc-v80",
+   "python": "3.13.16",
+   "measured_by": "bench/measure.c (parent under 1 MB); address-space limit by prlimit",
+   "tools": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "cargo-audit": "cargo-audit 0.22.2",
+    "cc": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+   },
+   "bounds": {
+    "archive": {
+     "packs": 20,
+     "max_seed_bytes": 3000000,
+     "time": 5.0,
+     "mem_mib": 512,
+     "flips": 12,
+     "flip_bits": [
+      0,
+      3,
+      7
+     ],
+     "cuts": 16,
+     "garbage": 3000,
+     "rng_seed": 12345
+    },
+    "pdf": {
+     "time": 30.0,
+     "time_per_mib": 5.0,
+     "mem_mib": 512,
+     "mem_per_byte": 16,
+     "nesting": 100000,
+     "bomb_mib": 1024,
+     "nested_bomb_mib": 256,
+     "image_side": 100000,
+     "objects": 1000000,
+     "runlength_mib": 2
+    },
+    "fuzz": {
+     "seconds": 600,
+     "mem_mib": 512,
+     "seeds": 40,
+     "max_seed_bytes": 1500000,
+     "archive_seeds": 12,
+     "seed_mem_fraction": 0.5,
+     "edits": 8,
+     "rng_seed": 12648430,
+     "pick_seed": 7
+    },
+    "hang": 60.0,
+    "time_metric": "cpu"
+   }
+  },
+  {
+   "mode": "fuzz",
+   "date": "2026-10-08 16:54:23 UTC",
+   "build": "integration-8892b9e",
+   "engine": "/home/claude/wt/target-finish/release/pdfe",
+   "engine_sha256": "f8cd556aa6dc562e4b99f86c115ca49fba8ccd50b7c2ec0beee3e1e21e0ff4ea",
+   "corpus": "/tmp/claude-0/-home-claude/b636d578-f2d3-5309-87d4-a4766d45bbac/scratchpad/corpus",
+   "cpus": 2,
+   "load_at_start": 1.09716796875,
+   "kernel": "6.18.44-fc-v80",
+   "python": "3.13.16",
+   "measured_by": "bench/measure.c (parent under 1 MB); address-space limit by prlimit",
+   "tools": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "cargo-audit": "cargo-audit 0.22.2",
+    "cc": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+   },
+   "bounds": {
+    "archive": {
+     "packs": 20,
+     "max_seed_bytes": 3000000,
+     "time": 5.0,
+     "mem_mib": 512,
+     "flips": 12,
+     "flip_bits": [
+      0,
+      3,
+      7
+     ],
+     "cuts": 16,
+     "garbage": 3000,
+     "rng_seed": 12345
+    },
+    "pdf": {
+     "time": 30.0,
+     "time_per_mib": 5.0,
+     "mem_mib": 512,
+     "mem_per_byte": 16,
+     "nesting": 100000,
+     "bomb_mib": 1024,
+     "nested_bomb_mib": 256,
+     "image_side": 100000,
+     "objects": 1000000,
+     "runlength_mib": 2
+    },
+    "fuzz": {
+     "seconds": 120,
+     "mem_mib": 512,
+     "seeds": 40,
+     "max_seed_bytes": 1500000,
+     "archive_seeds": 12,
+     "seed_mem_fraction": 0.5,
+     "edits": 8,
+     "rng_seed": 12648430,
+     "pick_seed": 7
+    },
+    "hang": 60.0,
+    "time_metric": "cpu"
+   }
+  }
+ ]
+}
