@@ -181,10 +181,9 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, conformance: bool) -> Resul
         }
     }
     // The cross-reference stream written has a row for every number up to the highest one used, so a file
-    // whose numbering leaves far more numbers unused than it uses would cost rows out of all proportion to its
-    // size (the test files leave at most about as many unused as used). Such a file is left untouched.
-    let used = (objs.len() + enc.len()) as u64;
-    if max_used as u64 + 1 > 2 * used + SPARE_NUMBERS {
+    // whose numbers go beyond what its size allows for rows (the reader's bound on the rows a file may have)
+    // would cost rows out of all proportion to its size. Such a file is left untouched.
+    if max_used as u64 + 1 > xref::row_limit(doc.data.len()) as u64 {
         return Err("object numbers far apart".into());
     }
     // A reference to an object missing from the cross-reference data is null — unless the object is
@@ -237,10 +236,6 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, conformance: bool) -> Resul
         None => Ok(()),
     }
 }
-
-/// Unused object numbers below the highest one used that a file may have beyond its count of objects (see
-/// `gate`).
-const SPARE_NUMBERS: u64 = 4096;
 
 /// Encrypted files we rewrite: the encryption dictionary and the objects it refers to stay apart from the
 /// document (they are written as they are, unencrypted). Trailer strings need nothing: readers read the trailer

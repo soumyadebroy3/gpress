@@ -27,6 +27,18 @@ pub enum Entry {
 /// object starts.
 type ObjStm = (Vec<u8>, Vec<(u32, usize)>, usize);
 
+/// Cross-reference rows a file may have: `ROWS_PER_BYTE` per byte of the file plus `SPARE_ROWS`. A row takes
+/// at least a byte of cross-reference data (20 in a table), so honest files have far fewer rows than bytes,
+/// while a crafted stream can hold a thousand rows per byte (Flate), each costing the reader far more than a
+/// byte. The same bound holds the rows the writer makes (see `rewrite`), whatever numbers a file uses.
+pub const ROWS_PER_BYTE: usize = 16;
+pub const SPARE_ROWS: usize = 1 << 16;
+
+/// The most cross-reference rows a file of `len` bytes may have, read or written.
+pub fn row_limit(len: usize) -> usize {
+    len.saturating_mul(ROWS_PER_BYTE).saturating_add(SPARE_ROWS)
+}
+
 pub struct Doc<'a> {
     pub data: &'a [u8],
     pub version: (u8, u8),
@@ -42,6 +54,9 @@ pub struct Doc<'a> {
     /// then decrypted as objects load), or why it doesn't (objects then load as stored).
     pub crypt: Option<Result<Crypt, String>>,
     objstm_cache: RefCell<HashMap<u32, ObjStm>>,
+    /// For each object stream, the highest index the cross-reference data points at: its header is read
+    /// that far and no further, so a stream's /N can't size anything on its own.
+    objstm_last: HashMap<u32, u32>,
 }
 
 fn find_last(d: &[u8], pat: &[u8], window: usize) -> Option<usize> {
@@ -75,14 +90,16 @@ pub fn open(data: &[u8]) -> Result<Doc<'_>, LoadError> {
     let mut sections: Vec<(Vec<(u32, Entry)>, Dict)> = Vec::new();
     let mut seen = HashSet::new();
     let mut next = Some(off);
+    // Rows are counted against the file's size as they are read, before anything holds them.
+    let mut rows_left = row_limit(data.len());
     while let Some(off) = next {
         if !seen.insert(off) || sections.len() > 1000 {
             return Err(LoadError::BadXref("loop in /Prev"));
         }
-        let (mut entries, trailer) = read_section(data, off)?;
+        let (mut entries, trailer) = read_section(data, off, &mut rows_left)?;
         if let Some(Obj::Int(x)) = trailer.get(b"XRefStm") {
             // Hybrid file: the stream supplements the table; table entries win.
-            let (extra, _) = read_section(data, *x as usize)?;
+            let (extra, _) = read_section(data, *x as usize, &mut rows_left)?;
             let have: HashSet<u32> = entries.iter().map(|e| e.0).collect();
             entries.extend(extra.into_iter().filter(|e| !have.contains(&e.0)));
         }
@@ -112,6 +129,13 @@ pub fn open(data: &[u8]) -> Result<Doc<'_>, LoadError> {
             }
         }
     }
+    let mut objstm_last: HashMap<u32, u32> = HashMap::new();
+    for e in merged.values() {
+        if let &Entry::InStream(sn, idx) = e {
+            let last = objstm_last.entry(sn).or_insert(idx);
+            *last = (*last).max(idx);
+        }
+    }
     let trailer = sections[0].1.clone();
     if !trailer.has(b"Root") {
         return Err(LoadError::BadXref("trailer without /Root"));
@@ -126,6 +150,7 @@ pub fn open(data: &[u8]) -> Result<Doc<'_>, LoadError> {
         trailing,
         crypt: None,
         objstm_cache: RefCell::new(HashMap::new()),
+        objstm_last,
     };
     if doc.trailer.has(b"Encrypt") {
         doc.crypt = Some(security(&doc));
@@ -213,12 +238,21 @@ fn root_metadata(doc: &Doc) -> Result<Option<u32>, String> {
     }
 }
 
-fn read_section(d: &[u8], off: usize) -> Result<(Vec<(u32, Entry)>, Dict), LoadError> {
+/// A row of cross-reference data, counted against what the file may have (see `row_limit`).
+fn count_row(rows_left: &mut usize) -> Result<(), LoadError> {
+    if *rows_left == 0 {
+        return Err(LoadError::BadXref("more cross-reference rows than the file can hold"));
+    }
+    *rows_left -= 1;
+    Ok(())
+}
+
+fn read_section(d: &[u8], off: usize, rows_left: &mut usize) -> Result<(Vec<(u32, Entry)>, Dict), LoadError> {
     if off >= d.len() {
         return Err(LoadError::BadXref("offset past the end"));
     }
     if d[off..].starts_with(b"xref") {
-        return read_table(d, off + 4);
+        return read_table(d, off + 4, rows_left);
     }
     // An xref stream.
     let (_, _, o, _) = parse_indirect(d, off, &|l| match l {
@@ -233,7 +267,6 @@ fn read_section(d: &[u8], off: usize) -> Result<(Vec<(u32, Entry)>, Dict), LoadE
     if s.dict.name(b"Type") != Some(b"XRef") {
         return Err(LoadError::BadXref("stream is not /Type /XRef"));
     }
-    let raw = decode_fully(&s.dict, &s.data, 1 << 28).ok_or(LoadError::BadXref("xref stream undecodable"))?;
     let w: Vec<usize> = match s.dict.get(b"W") {
         Some(Obj::Array(a)) if a.len() == 3 => {
             let mut v = Vec::new();
@@ -268,6 +301,10 @@ fn read_section(d: &[u8], off: usize) -> Result<(Vec<(u32, Entry)>, Dict), LoadE
     if rec == 0 {
         return Err(LoadError::BadXref("empty /W"));
     }
+    // Decoded only as far as the rows the file may have reach (see `row_limit`): a stream of more is
+    // refused without holding it.
+    let most = row_limit(d.len()).saturating_mul(rec).min(1 << 28);
+    let raw = decode_fully(&s.dict, &s.data, most).ok_or(LoadError::BadXref("xref stream undecodable or more rows than the file can hold"))?;
     let field = |b: &[u8]| b.iter().fold(0u64, |a, &x| a << 8 | x as u64);
     let mut out = Vec::new();
     let mut p = 0;
@@ -276,6 +313,7 @@ fn read_section(d: &[u8], off: usize) -> Result<(Vec<(u32, Entry)>, Dict), LoadE
             if p + rec > raw.len() {
                 return Err(LoadError::BadXref("xref stream too short"));
             }
+            count_row(rows_left)?;
             let r = &raw[p..p + rec];
             p += rec;
             let t = if w[0] == 0 { 1 } else { field(&r[..w[0]]) };
@@ -293,7 +331,7 @@ fn read_section(d: &[u8], off: usize) -> Result<(Vec<(u32, Entry)>, Dict), LoadE
     Ok((out, s.dict))
 }
 
-fn read_table(d: &[u8], mut pos: usize) -> Result<(Vec<(u32, Entry)>, Dict), LoadError> {
+fn read_table(d: &[u8], mut pos: usize, rows_left: &mut usize) -> Result<(Vec<(u32, Entry)>, Dict), LoadError> {
     let mut out = Vec::new();
     loop {
         let mut lx = Lexer::new(d, pos);
@@ -320,6 +358,7 @@ fn read_table(d: &[u8], mut pos: usize) -> Result<(Vec<(u32, Entry)>, Dict), Loa
             if p + 18 > d.len() {
                 return Err(LoadError::BadXref("table past the end"));
             }
+            count_row(rows_left)?;
             let off = parse_uint(&d[p..p + 10]).ok_or(LoadError::BadXref("bad table entry"))?;
             let gen = parse_uint(&d[p + 11..p + 16]).ok_or(LoadError::BadXref("bad table entry"))?;
             if d[p + 10] != b' ' || d[p + 16] != b' ' {
@@ -412,8 +451,11 @@ impl<'a> Doc<'a> {
                         return Err(LoadError::BadObject(sn, "bad /N or /First"));
                     }
                     let (count, first) = (count as usize, first as usize);
+                    // Every pair of the header must parse, but only the ones the cross-reference data points
+                    // at are kept (the rows are bounded by the file's size, see `row_limit`): the memory
+                    // follows the rows, the time the data, and /N on its own sizes nothing.
+                    let keep = self.objstm_last.get(&sn).map_or(0, |&last| last as usize + 1);
                     let mut lx = Lexer::new(&raw, 0);
-                    // Grows with the pairs the data really holds, never with the count.
                     let mut heads = Vec::new();
                     for _ in 0..count {
                         lx.skip_ws();
@@ -421,7 +463,9 @@ impl<'a> Doc<'a> {
                         lx.skip_ws();
                         let b = parse_uint(lx.regular_token()).ok_or(LoadError::BadObject(sn, "bad object stream header"))?;
                         let a = u32::try_from(a).map_err(|_| LoadError::BadObject(sn, "bad object stream header"))?;
-                        heads.push((a, b));
+                        if heads.len() < keep {
+                            heads.push((a, b));
+                        }
                     }
                     self.objstm_cache.borrow_mut().insert(sn, (raw, heads, first));
                 }
