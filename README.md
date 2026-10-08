@@ -43,15 +43,28 @@ output. `PDFE_DEBUG=1` prints the time of every stream and Flate segment.
 
 - `extract_streams.py`, `flate_bench.py`: every Flate stream of the test PDFs, our encoder against zlib-9,
   libdeflate-12 and Zopfli; every output checked with zlib.
-- `pdf_bench.py`, `verify_pdf.py`: whole PDFs against qpdf; every output checked independently with qpdf
-  --check, pikepdf (object graph followed by value, streams decoded) and PDFium (pixels and text of every
-  page, up to 30 pages).
+- `benchmark.py`: the standard measurement, in one command. `time` and `space` measure every file one
+  process at a time (wall and CPU time, peak memory, bytes in and out, exactness): ours at each effort and
+  thread count, normal PDF and archive, against qpdf (normal PDF) and xz -9e, Brotli 11, Zstandard 19 with
+  long matching and expand + xz (archive), each as its own process. A normal-PDF output must open (page count
+  and every page's content decoded with pikepdf), an untouched file must be the input byte for byte, and a
+  sample of outputs goes through `verify_pdf.py`; every archive is restored with a separate `unpack` and
+  compared byte for byte. Rows go to `results/<run>/*.jsonl` as each file finishes, so a stopped run
+  continues where it was. `report` makes the tables (text, Markdown, and `time.tsv`, `memory.tsv`,
+  `size.tsv`, `files.tsv`); `compare BASE NEW` fails when a setting got more than 10% slower in total, a file
+  more than 2x slower, any output larger, or the peak memory more than 10% higher; `selftest` plants each of
+  those and checks they are caught. `measure.c` is the small parent process that runs each command (Linux
+  gives a process the peak memory of the one that forked it, so a Python parent would hide everything under
+  20 MB). File lists are in `sets/` (`all`, and `sample120`: the 20 slowest, the 20 largest and 80 random
+  files, seed 11), relative to the corpus root (`CORPUS`); the engine comes from `PDFE` (or `GPRESS`).
+  This replaces the earlier `pdf_bench.py` and `pack_bench.py`; the "qpdf + xz" baseline they had is gone
+  for good (qpdf drops objects and revisions, so it was never comparable).
+- `verify_pdf.py`: the independent check of one output: qpdf --check, pikepdf (object graph followed by
+  value, streams decoded) and PDFium (pixels and text of every page, up to 30 pages).
 - `verify_render.py`, `verify_pdfjs.mjs`: two more renderers on every output, Poppler and pdf.js (pixels and
   text of every page, up to 30 pages; no new Poppler errors). pdf.js comes from npm (`pdfjs-dist`,
   `@napi-rs/canvas`), installed outside this folder; the engine itself has no dependencies.
 - `check_the_checkers.py`: the checks must catch one small change (a character, a metadata value, the page
   size, one bit of one pixel) and pass an unchanged copy.
-- `pack_bench.py`: the peyaji format against xz, Brotli, Zstandard and inflate+xz; every file restored and
-  compared byte for byte.
 
 Results: `bench/RESULTS.md`.

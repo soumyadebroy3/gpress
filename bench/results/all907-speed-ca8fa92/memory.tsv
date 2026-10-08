@@ -1,0 +1,6 @@
+setting	tool	mode	effort	threads	median_kb	p90_kb	peak_kb	peak_file	peak_file_bytes	ratio_median	ratio_max	ratio_n	fit_fixed_mb	fit_bytes_per_byte
+qpdf-pdf	qpdf	pdf	None	None	8936	9529.6	309728	pdfjs/bug1978317.pdf	1535205	6.999	206.592	28	8.858	3.618
+brotli-archive	brotli	archive	None	None	3720	11211.999999999987	112448	pdfjs/issue3188.pdf	8125374	24.023	34.903	28	4.370	15.549
+expandxz-archive	expandxz	archive	None	None	20268	70755.2	691504	ocrmypdf/tests__resources__multipage.pdf	1120291	53.507	632.068	28	28.353	42.771
+xz-archive	xz	archive	None	None	26028	70053.6	139568	pdfjs/issue3188.pdf	8125374	46.856	71.409	28	29.738	23.789
+zstd-archive	zstd	archive	None	None	3100	8119.999999999998	102604	pdfjs/issue3188.pdf	8125374	25.319	35.820	28	3.456	18.105
