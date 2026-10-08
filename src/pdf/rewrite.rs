@@ -24,8 +24,9 @@ pub struct Options {
     /// How hard to try, 0 to 100. At 100 every stream gets `flate` and the full predictor search. Below,
     /// the streams that take the most room in the file come first and get `flate`, or a cheaper step of 20,
     /// while the work stays within a budget proportional to the file's size; the others get the quick
-    /// settings, and image predictors are chosen from a sample of rows (see `effort_plan`). Decided from sizes
-    /// only, never from time, so the output is repeatable.
+    /// settings, and image predictors are chosen from a sample of rows (see `effort_plan`). The quick settings
+    /// have a budget too (16 decoded bytes per byte of the file at effort 0, at least 4 MiB): a stream beyond
+    /// it is kept as it is. Decided from sizes only, never from time, so the output is repeatable.
     pub effort: u8,
     /// Threads to use (0: what the machine offers, at most 8). Never changes the output.
     pub threads: usize,
@@ -450,6 +451,14 @@ fn work_budget(effort: u8) -> f64 {
     2f64.powf((effort.max(1) - 1) as f64 / 10.0)
 }
 
+/// Decoded bytes the quick settings may work on below effort 100, per byte of input: 16 at effort 0, twice
+/// as much every 10 points, and at least 4 MiB in all (so small files are never cut short). A stream that
+/// doesn't fit in what is left is kept exactly as it is, which costs nothing and loses nothing: the time
+/// follows the file's size even when its streams decode to a hundred times their size.
+fn quick_budget(effort: u8, input_len: usize) -> f64 {
+    (input_len as f64 * 16.0 * 2f64.powf(effort as f64 / 10.0)).max((4u64 << 20) as f64)
+}
+
 /// CPU time of a decoded byte at an effort's Flate settings, against the quick settings (measured, see
 /// `flate::Options::effort`; large images).
 fn work_per_byte(effort: u8) -> f64 {
@@ -462,35 +471,42 @@ fn work_per_byte(effort: u8) -> f64 {
     }
 }
 
-/// The settings for each distinct stream (see `Options::effort`). At effort 100, `opt` for all of them. Below,
-/// the streams that take the most room in the file come first; each gets the strongest settings up to the
-/// effort (`opt` itself, or a lower step of 20) whose extra work fits in what is left of the budget, and
-/// otherwise the quick settings. Sizes decide, never time.
-fn effort_plan(streams: &[(u32, &Stream)], unique: &[usize], opt: &Options, input_len: usize, pool: Option<&par::Pool>) -> Vec<Options> {
+/// The settings for each distinct stream (see `Options::effort`), or None to keep it exactly as it is. At
+/// effort 100, `opt` for all of them. Below, the streams that take the most room in the file come first:
+/// each gets the quick settings while its decoded bytes fit in what is left of `quick_budget` (and is kept
+/// otherwise), then the strongest settings up to the effort (`opt` itself, or a lower step of 20) whose
+/// extra work fits in what is left of `work_budget`. Sizes decide, never time.
+fn effort_plan(streams: &[(u32, &Stream)], unique: &[usize], opt: &Options, input_len: usize, pool: Option<&par::Pool>) -> Vec<Option<Options>> {
     if opt.effort >= 100 {
-        return vec![opt.clone(); unique.len()];
+        return vec![Some(opt.clone()); unique.len()];
     }
     let at = |e: u8| Options { flate: flate::Options { shared: opt.flate.shared.clone(), ..flate::Options::effort(e) }, effort: e, ..opt.clone() };
     let quick = at(0);
-    if opt.flate.same_output(&quick.flate) && predictor_budget(opt.effort) == predictor_budget(0) {
-        return vec![quick; unique.len()];
-    }
-    // The settings that may be given, strongest first, with their extra work per decoded byte.
-    let mut steps = vec![(opt.clone(), work_per_byte(opt.effort) - 1.0)];
-    for e in (20..opt.effort / 20 * 20).step_by(20).rev() {
-        steps.push((at(e), work_per_byte(e) - 1.0));
+    // The settings that may be given above quick, strongest first, with their extra work per decoded byte.
+    let mut steps = Vec::new();
+    if !(opt.flate.same_output(&quick.flate) && predictor_budget(opt.effort) == predictor_budget(0)) {
+        steps.push((opt.clone(), work_per_byte(opt.effort) - 1.0));
+        for e in (20..opt.effort / 20 * 20).step_by(20).rev() {
+            steps.push((at(e), work_per_byte(e) - 1.0));
+        }
     }
     let sizes = par::map(pool, unique.len(), None, |u| decoded_len(streams[unique[u]].1, opt.max_stream));
     let mut order: Vec<usize> = (0..unique.len()).collect();
     order.sort_by_key(|&u| (std::cmp::Reverse(streams[unique[u]].1.data.len()), u));
+    let mut floor = quick_budget(opt.effort, input_len);
     let mut budget = input_len as f64 * work_budget(opt.effort);
-    let mut out = vec![quick; unique.len()];
+    let mut out = vec![None; unique.len()];
     for u in order {
+        if sizes[u] as f64 > floor {
+            continue;
+        }
+        floor -= sizes[u] as f64;
+        out[u] = Some(quick.clone());
         for (o, extra) in &steps {
             let w = sizes[u] as f64 * extra;
             if w <= budget {
                 budget -= w;
-                out[u] = o.clone();
+                out[u] = Some(o.clone());
                 break;
             }
         }
@@ -539,14 +555,16 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
             }
         };
         let t = std::time::Instant::now();
-        let o = &settings[u];
-        let o = Options { flate: flate::Options { shared: Some(flate::deflate::Shared::with_pool(workers.clone(), true)), ..o.flate.clone() }, ..o.clone() };
-        let r = reencode(s, &o, &resolve);
+        let r = settings[u].as_ref().and_then(|o| {
+            let o = Options { flate: flate::Options { shared: Some(flate::deflate::Shared::with_pool(workers.clone(), true)), ..o.flate.clone() }, ..o.clone() };
+            reencode(s, &o, &resolve)
+        });
         let short = r.is_some() && short_image(s, &resolve);
         let r = if short { None } else { r };
         if dbg {
             let new = r.as_ref().map_or(s.data.len(), |x| x.1.len());
-            eprintln!("stream {n}: {} -> {new} bytes, effort {}, {:?}{}", s.data.len(), settings[u].effort, t.elapsed(), if short { " (short image, kept)" } else { "" });
+            let how = settings[u].as_ref().map_or("kept, over the quick budget".to_string(), |o| format!("effort {}", o.effort));
+            eprintln!("stream {n}: {} -> {new} bytes, {how}, {:?}{}", s.data.len(), t.elapsed(), if short { " (short image, kept)" } else { "" });
         }
         r
     });
@@ -854,19 +872,20 @@ mod effort_tests {
         let streams: Vec<(u32, &Stream)> = vec![(1, &small), (2, &big)];
         let unique = vec![0, 1];
         let input_len = 50_000;
-        let plan = |e: u8| -> Vec<u8> { effort_plan(&streams, &unique, &Options::effort(e), input_len, None).iter().map(|o| o.effort).collect() };
-        assert_eq!(plan(100), vec![100, 100]);
-        assert_eq!(plan(0), vec![0, 0]);
+        let plan = |e: u8| -> Vec<Option<u8>> { effort_plan(&streams, &unique, &Options::effort(e), input_len, None).iter().map(|o| o.as_ref().map(|o| o.effort)).collect() };
+        assert_eq!(plan(100), vec![Some(100), Some(100)]);
+        // Both fit in the quick budget (at least 4 MiB of decoded bytes).
+        assert_eq!(plan(0), vec![Some(0), Some(0)]);
         // At 30 the budget (7.5 x 50 KB) is too small for the big one's 0.7 x 2 MB; the text fits.
-        assert_eq!(plan(30), vec![30, 0]);
+        assert_eq!(plan(30), vec![Some(30), Some(0)]);
         // At 50 (30 x 50 KB) the big one, taken first, gets the cheaper 20 step; the text still fits.
-        assert_eq!(plan(50), vec![50, 20]);
+        assert_eq!(plan(50), vec![Some(50), Some(20)]);
         // At 99 the budget (about 900 x 50 KB) takes both at full strength.
-        assert_eq!(plan(99), vec![99, 99]);
+        assert_eq!(plan(99), vec![Some(99), Some(99)]);
         // Settings follow the effort given to each stream.
         let o = effort_plan(&streams, &unique, &Options::effort(50), input_len, None);
-        assert!(o[1].flate.same_output(&flate::Options::effort(20)));
-        assert!(o[0].flate.same_output(&flate::Options::effort(50)));
+        assert!(o[1].as_ref().unwrap().flate.same_output(&flate::Options::effort(20)));
+        assert!(o[0].as_ref().unwrap().flate.same_output(&flate::Options::effort(50)));
     }
 
     #[test]
@@ -876,13 +895,44 @@ mod effort_tests {
         let data: Vec<u8> = (0..1_000_000u32).map(|i| if i % 1000 < 3 { 0 } else { 255 }).collect();
         let s = flate_stream(&data, &[]);
         let streams: Vec<(u32, &Stream)> = vec![(1, &s)];
-        let step = |input_len: usize| effort_plan(&streams, &[0], &Options::effort(60), input_len, None)[0].effort;
+        let step = |input_len: usize| effort_plan(&streams, &[0], &Options::effort(60), input_len, None)[0].as_ref().unwrap().effort;
         assert_eq!(step(40_000), 60);
         assert_eq!(step(20_000), 40);
         assert_eq!(step(15_000), 20);
         assert_eq!(step(5_000), 0);
         let o = effort_plan(&streams, &[0], &Options::effort(60), 15_000, None);
-        assert!(o[0].flate.same_output(&flate::Options::effort(20)));
+        assert!(o[0].as_ref().unwrap().flate.same_output(&flate::Options::effort(20)));
+    }
+
+    #[test]
+    fn a_stream_over_the_quick_budget_is_kept_as_it_is() {
+        // 8 MB of blank image in a 20 KB file: the quick budget is 16 times the file at effort 0, twice as
+        // much every 10 points, and at least 4 MiB. Another stream that takes more room in the file comes
+        // first and fits.
+        let blank = flate_stream(&vec![255u8; 8_000_000], &[]);
+        let mut r = 1u64;
+        let text: Vec<u8> = (0..200_000)
+            .map(|_| {
+                r ^= r << 13;
+                r ^= r >> 7;
+                r ^= r << 17;
+                (r % 64) as u8 + 32
+            })
+            .collect();
+        let other = flate_stream(&text, &[]);
+        assert!(other.data.len() > blank.data.len());
+        let streams: Vec<(u32, &Stream)> = vec![(1, &blank), (2, &other)];
+        let plan = |e: u8, input_len: usize| -> Vec<Option<u8>> { effort_plan(&streams, &[0, 1], &Options::effort(e), input_len, None).iter().map(|o| o.as_ref().map(|o| o.effort)).collect() };
+        for e in [0u8, 20, 40] {
+            let p = plan(e, 20_000);
+            assert!(p[0].is_none() && p[1].is_some(), "effort {e}: {p:?}");
+        }
+        // 20 KB x 16 x 2^5 = 10.2 MB at effort 50; effort 100 has no budget.
+        assert!(plan(50, 20_000).iter().all(|o| o.is_some()));
+        assert_eq!(plan(100, 20_000), vec![Some(100), Some(100)]);
+        // A bigger file pays for it at effort 0 (16 x 600 KB = 9.6 MB).
+        assert_eq!(plan(0, 600_000), vec![Some(0), Some(0)]);
+        assert!(quick_budget(0, 1000) >= (4 << 20) as f64 && quick_budget(10, 1 << 20) == 2.0 * quick_budget(0, 1 << 20));
     }
 
     #[test]

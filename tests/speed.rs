@@ -264,3 +264,31 @@ fn a_short_image_is_kept_exactly() {
         }
     }
 }
+
+#[test]
+fn low_effort_work_follows_the_file_size() {
+    // A 43 KB file with a blank 3000 x 3000 image (9 MB decoded) and some text. At low effort the image is
+    // beyond the quick budget (16 decoded bytes per byte of the file at effort 0, twice as much every 10
+    // points, at least 4 MiB: 5.5 MB at effort 30), so it is kept exactly as it is; from effort 40 (11 MB) it
+    // is re-encoded. The text is re-encoded at every effort.
+    let image = "/Type /XObject /Subtype /Image /Width 3000 /Height 3000 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode";
+    let text: Vec<u8> = (0..300).flat_map(|i| format!("q 50 0 0 50 {} 10 cm /A Do Q BT (Line {i}) Tj ET\n", i % 500).into_bytes()).collect();
+    let pdf = pdf_of(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /XObject << /A 5 0 R >> >> >>".to_vec(),
+        stream_obj("/Filter /FlateDecode", &zlib1(&text)),
+        stream_obj(image, &zlib1(&vec![255u8; 3000 * 3000])),
+    ]);
+    assert!((40_000..46_000).contains(&pdf.len()), "{}", pdf.len());
+    let before = engine::pdf::xref::open(&pdf).unwrap();
+    for (effort, image_kept) in [(0u8, true), (30, true), (40, false), (100, false)] {
+        let r = optimize(&pdf, &opts(effort, 2));
+        assert!(matches!(r.outcome, Outcome::Smaller(_)), "effort {effort}: {:?}", r.outcome);
+        let after = engine::pdf::xref::open(&r.data).unwrap();
+        for (n, kept) in [(4u32, false), (5, image_kept)] {
+            let (engine::pdf::object::Obj::Stream(a), engine::pdf::object::Obj::Stream(b)) = (before.load(n).unwrap().1, after.load(n).unwrap().1) else { panic!("stream {n}") };
+            assert_eq!(a.data == b.data, kept, "effort {effort}, object {n}");
+        }
+    }
+}
