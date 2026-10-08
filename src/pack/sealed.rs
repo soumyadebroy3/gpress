@@ -40,15 +40,16 @@ pub(super) fn crypt_plans(d: &[u8], plans: Vec<Plan>) -> Vec<Plan> {
     };
     let mut out = Vec::with_capacity(plans.len() + 8);
     let mut key_sent = false;
+    let objects = ObjIndex::new();
     for p in plans {
         if let Plan::Raw(a, b) = p {
-            if let Some((s, plain)) = decrypt(c, d, a, b) {
+            if let Some((s, dict, plain)) = decrypt(c, d, a, b) {
                 if !key_sent {
                     out.push(Plan::CryptKey(c.key.clone()));
                     key_sent = true;
                 }
                 out.push(Plan::Crypt(s));
-                out.push(plan_bytes(plain));
+                out.push(plan_bytes(plain, dict, a, &file_resolver(d, &objects)));
                 continue;
             }
         }
@@ -57,8 +58,9 @@ pub(super) fn crypt_plans(d: &[u8], plans: Vec<Plan>) -> Vec<Plan> {
     out
 }
 
-/// The stream payload `d[a..b]` decrypted, if it is encrypted and encrypting it again gives the same bytes.
-fn decrypt(c: &crypt::Crypt, d: &[u8], a: usize, b: usize) -> Option<(Sealed, Vec<u8>)> {
+/// The stream payload `d[a..b]` decrypted, with the stream's dictionary, if it is encrypted and encrypting it
+/// again gives the same bytes.
+fn decrypt(c: &crypt::Crypt, d: &[u8], a: usize, b: usize) -> Option<(Sealed, Dict, Vec<u8>)> {
     let (num, gen, dict) = stream_header(&d[..a])?;
     let method = c.stream_method(num, &dict).ok()?;
     if method == Method::Identity || c.is_own(num) {
@@ -78,13 +80,19 @@ fn decrypt(c: &crypt::Crypt, d: &[u8], a: usize, b: usize) -> Option<(Sealed, Ve
     if seal_payload(&s, &c.key, &plain)? != data {
         return None;
     }
-    Some((s, plain))
+    Some((s, dict, plain))
 }
 
-/// The plan for a decrypted payload: the same choices `plan` makes for a stream's bytes (`stream_plan`), or
-/// the bytes as they are.
-fn plan_bytes(raw: Vec<u8>) -> Plan {
-    stream_plan(&raw).unwrap_or(Plan::Plain(raw))
+/// The plan for a decrypted payload that starts at byte `at` of the file: the same choices `plan` makes for
+/// a stream's bytes (`stream_plan`, then a fax part for CCITT data), or the bytes as they are.
+fn plan_bytes(raw: Vec<u8>, dict: Dict, at: usize, resolve: &dyn Fn(&Obj) -> Option<Obj>) -> Plan {
+    if let Some(p) = stream_plan(&raw) {
+        return p;
+    }
+    match fax_parse(&raw, dict, resolve) {
+        Some(parsed) => Plan::Fax { parsed: Box::new(parsed), at, raw: None },
+        None => Plan::Plain(raw),
+    }
 }
 
 /// `N G obj <<dictionary>> stream` just before a stream's payload, which starts at the end of `d`: the object

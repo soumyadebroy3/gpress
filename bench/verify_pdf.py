@@ -7,7 +7,11 @@
      (DCTDecode) must be the same bytes, or else have the same coefficients and decode to the same pixels with
      every decoder here: libjpeg-turbo's jpegtran (coefficients: `jpegtran -copy all` must write the same
      bytes for both), qpdf's libjpeg and Pillow (pixels; their integer IDCT can round a small coefficient
-     change away, hence the coefficients), and pdf.js's own decoder (it parses the markers its own way);
+     change away, hence the coefficients), and pdf.js's own decoder (it parses the markers its own way).
+     Other image streams qpdf can't decode (CCITT fax, JBIG2, JPEG 2000) are compared by their decoded
+     pixels: pikepdf's decoders first (libtiff, jbig2dec, OpenJPEG), Poppler's (pdfimages) when pikepdf
+     can't decode one of them or sees a difference; the stream counts as the same only if one of them
+     decodes both to the same pixels, and the JSON says which ('image_notes' when Poppler decided);
   3. PDFium (pypdfium2): every page renders to the same pixels and gives the same text.
 
 A changed JPEG needs jpegtran (on the PATH, or JPEGTRAN=path) and pdf.js (PDFJS_MODULES=node_modules folder
@@ -15,7 +19,7 @@ with pdfjs-dist, as for verify_render.py); without them the file is reported as 
 
 Usage: verify_pdf.py ORIGINAL OUTPUT [--pages N]   -> prints one JSON line; exit status 0 if identical.
 Run with python3 -I (the files are untrusted)."""
-import hashlib, io, json, os, shutil, subprocess, sys, tempfile
+import hashlib, io, json, os, re, shutil, subprocess, sys, tempfile
 from decimal import Decimal
 
 import pikepdf
@@ -77,6 +81,11 @@ def filter_names(s):
     if isinstance(f, pikepdf.Array):
         return [str(x) for x in f]
     return []
+
+
+def is_dct(s):
+    names = filter_names(s)
+    return bool(names) and names[-1] in ('/DCTDecode', '/DCT')
 
 
 def jpeg_bytes(s):
@@ -206,7 +215,99 @@ def pdfjs_difference(pending, problems):
             problems.append(f"{path}: JPEG decodes differently in pdf.js ({r['detail']})"[:300])
 
 
-def graphs_same(a, b, problems, pending):
+# Images larger than this are left to Poppler (Pillow would hold a byte per pixel).
+PIKEPDF_MAX_PIXELS = 200_000_000
+
+
+class Pixels:
+    """Decoded pixels of the image streams of one file, by decoders we didn't write."""
+
+    def __init__(self, path):
+        self.path = path
+        self.poppler_files = None
+        self.tmp = None
+
+    def pikepdf(self, s):
+        try:
+            w, h = int(s.stream_dict.get('/Width', 0)), int(s.stream_dict.get('/Height', 0))
+            if w * h > PIKEPDF_MAX_PIXELS:
+                return None
+            from PIL import Image
+            Image.MAX_IMAGE_PIXELS = None
+            im = pikepdf.PdfImage(s).as_pil_image()
+            return (im.mode, im.size, hashlib.sha256(im.tobytes()).hexdigest())
+        except Exception:
+            return None
+
+    def poppler(self, objgen):
+        """Poppler's decoding (pdfimages, PBM/PGM/PPM, as written) of the image with this object number, if a
+        page draws it."""
+        if self.poppler_files is None:
+            self.poppler_files = {}
+            self.tmp = tempfile.TemporaryDirectory()
+            try:
+                lst = subprocess.run(['pdfimages', '-list', self.path], capture_output=True, text=True, timeout=600).stdout
+                subprocess.run(['pdfimages', self.path, os.path.join(self.tmp.name, 'i')], capture_output=True, timeout=600)
+            except subprocess.TimeoutExpired:
+                return None
+            names = sorted(os.listdir(self.tmp.name), key=lambda n: int(re.sub(r'\D', '', n) or 0))
+            rows = [l.split() for l in lst.splitlines()[2:] if l.strip()]
+            for row, name in zip(rows, names):
+                if len(row) > 11 and row[10].isdigit() and row[11].isdigit():
+                    self.poppler_files.setdefault((int(row[10]), int(row[11])), os.path.join(self.tmp.name, name))
+        f = self.poppler_files.get(tuple(objgen))
+        if f is None:
+            return None
+        return pnm_pixels(f)
+
+
+def pnm_pixels(path):
+    """Hash of the pixels of a PBM/PGM/PPM file (the padding bits that end a PBM row don't count)."""
+    d = open(path, 'rb').read()
+    fields, i = [], 0
+    while len(fields) < (3 if d[:2] == b'P4' else 4):
+        while i < len(d) and d[i:i + 1].isspace():
+            i += 1
+        if d[i:i + 1] == b'#':
+            while i < len(d) and d[i:i + 1] != b'\n':
+                i += 1
+            continue
+        j = i
+        while j < len(d) and not d[j:j + 1].isspace():
+            j += 1
+        fields.append(d[i:j])
+        i = j
+    body = d[i + 1:]
+    if fields[0] == b'P4':
+        w, h = int(fields[1]), int(fields[2])
+        stride = (w + 7) // 8
+        if w % 8:
+            mask = (0xFF << (8 - w % 8)) & 0xFF
+            b = bytearray(body[:stride * h])
+            for r in range(h):
+                b[r * stride + stride - 1] &= mask
+            body = bytes(b)
+        return 'P4 %d %d %s' % (w, h, hashlib.sha256(body[:stride * h]).hexdigest())
+    return b' '.join(fields).decode() + ' ' + hashlib.sha256(body).hexdigest()
+
+
+def is_image(s):
+    return s.stream_dict.get('/Subtype') == pikepdf.Name.Image
+
+
+def images_same(x, y, px, py, notes, path):
+    """Two image streams with the same pixels, by pikepdf's decoders or else Poppler's."""
+    a, b = px.pikepdf(x), py.pikepdf(y)
+    if a is not None and a == b:
+        return True
+    c, d = px.poppler(x.objgen), py.poppler(y.objgen)
+    if c is not None and c == d:
+        notes.append(f'{path}: pikepdf ' + ('could not decode' if a is None or b is None else 'decodes differently') + '; Poppler decodes both to the same pixels')
+        return True
+    return False
+
+
+def graphs_same(a, b, problems, pending, px, py, notes):
     """Walk both object graphs from the same starting points in step; references are followed (not compared
     by number), so objects a reader creates or renumbers on its own don't count as differences."""
     seen = set()
@@ -230,9 +331,16 @@ def graphs_same(a, b, problems, pending):
             ix, iy = items(x.stream_dict, SKIP_STREAM_KEYS), items(y.stream_dict, SKIP_STREAM_KEYS)
             if [k for k, _ in ix] != [k for k, _ in iy]:
                 problems.append(f'{path}: stream dictionary keys differ'); continue
-            why = stream_difference(x, y, pending, path)
-            if why:
-                problems.append(f'{path}: {why}'); continue
+            cx, cy = stream_content(x), stream_content(y)
+            undecodable = cx.startswith('undecodable') or cy.startswith('undecodable')
+            if undecodable and is_image(x) and is_image(y) and not (is_dct(x) or is_dct(y)):
+                # Image streams qpdf can't decode (CCITT fax, JBIG2, JPEG 2000): the same decoded pixels count.
+                if not images_same(x, y, px, py, notes, path):
+                    problems.append(f'{path}: image pixels differ'); continue
+            else:
+                why = stream_difference(x, y, pending, path)
+                if why:
+                    problems.append(f'{path}: {why}'); continue
             stack.extend((vx, vy, path + '/' + k.decode('latin-1')) for (k, vx), (_, vy) in zip(ix, iy))
         elif isinstance(x, pikepdf.Dictionary) or isinstance(y, pikepdf.Dictionary):
             if not (isinstance(x, pikepdf.Dictionary) and isinstance(y, pikepdf.Dictionary)):
@@ -251,8 +359,9 @@ def graphs_same(a, b, problems, pending):
     return count
 
 
-def objects_same(a_path, b_path):
+def objects_same(a_path, b_path, notes):
     problems = []
+    px, py = Pixels(a_path), Pixels(b_path)
     with pikepdf.open(a_path) as a, pikepdf.open(b_path) as b:
         ta = items(a.trailer, ('/Prev', '/XRefStm', '/Size', '/Type', '/W', '/Index', '/Filter', '/DecodeParms', '/Length', '/Encrypt'))
         tb = items(b.trailer, ('/Prev', '/XRefStm', '/Size', '/Type', '/W', '/Index', '/Filter', '/DecodeParms', '/Length', '/Encrypt'))
@@ -262,7 +371,7 @@ def objects_same(a_path, b_path):
         n = 0
         pending = []
         for (k, va), (_, vb) in zip(ta, tb):
-            n += graphs_same(va, vb, problems, pending)
+            n += graphs_same(va, vb, problems, pending, px, py, notes)
         pdfjs_difference(pending, problems)
         return problems, n, {'jpegs_changed': len(pending)}
 
@@ -312,10 +421,13 @@ def main():
     res['qpdf_check'] = chk.returncode  # 0 ok, 3 warnings, 2 errors
     res['qpdf_check_input'] = subprocess.run(['qpdf', '--check', a], capture_output=True, text=True).returncode
     try:
-        p, n, more = objects_same(a, b)
+        notes = []
+        p, n, more = objects_same(a, b, notes)
         res['objects'] = n
         res.update(more)
         res['object_problems'] = p
+        if notes:
+            res['image_notes'] = notes[:10]
     except Exception as e:
         res['object_problems'] = [f'pikepdf failed: {type(e).__name__}: {e}'[:200]]
     try:
