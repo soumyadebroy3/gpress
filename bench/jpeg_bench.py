@@ -20,7 +20,8 @@ import hashlib, io, os, re, subprocess, sys, time
 
 import pikepdf
 
-PDFE = os.environ.get('PDFE', '/home/claude/pdf-engine/target/release/pdfe')
+HERE = os.path.dirname(os.path.abspath(__file__))
+PDFE = os.environ.get('GPRESS') or os.environ.get('PDFE') or os.path.join(HERE, '..', 'target', 'release', 'gpress')
 JPEGTRAN = os.environ.get('JPEGTRAN', 'jpegtran')
 DJPEG = os.environ.get('DJPEG', 'djpeg')
 

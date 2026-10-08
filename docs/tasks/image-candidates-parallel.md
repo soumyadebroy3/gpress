@@ -9,6 +9,9 @@ Branch `opt-image-candidates-parallel`. Plan: `docs/optimisation-plan.md`; the r
     cargo test --release --workspace && cargo test --release --workspace --features existing
     bench/fetch_corpus.sh && export CORPUS=$PWD/bench/corpus      # 907 public PDFs, pinned in bench/sets/corpus.lock
     export GPRESS=$PWD/target/release/gpress
+    # plus the checking tools (qpdf, xz, brotli, zstd, a C compiler, pikepdf, pypdfium2, Pillow, libjpeg-turbo's
+    # jpegtran, pdf.js with PDFJS_MODULES): the install lines are in docs/tasks/README.md, step 2. benchmark.py
+    # warns about each missing one; a baseline made without them does not run the "no data loss" checks.
 
 The corpus comes from pdf.js `test/pdfs`, pypdf `sample-files`, OCRmyPDF `tests/resources` and pikepdf
 `tests/resources`, each at the commit named in `bench/sets/corpus.lock`; the script checks every sha256 and
@@ -53,7 +56,7 @@ All of these must hold:
 - with `--threads 2` on the sample (`time base2` / `time new2` with `--threads 2`, compared with `--metric wall`) the wall time of `pdfjs/tracemonkey.pdf` and `pdfjs/canvas.pdf` at effort 100 at least 1.3x lower, CPU time within the 10% `compare` allows, and `compare` of the one-thread runs identical;
 - `cargo test --release --workspace` with and without `--features existing`;
 - `cargo clippy --workspace --all-targets -- -D warnings` on both feature sets, and `cargo fmt --all --check`;
-- `python3 -I bench/security.py run --fuzz-seconds 120` with 0 failures.
+- `python3 -I bench/security.py run new-security --fuzz-seconds 120` with 0 failures.
 
 The owner's rules (`docs/tasks/README.md`) apply throughout: no data loss, no worse compression,
 deterministic output for any thread count, no panics, bounded memory and time, no new dependency, every

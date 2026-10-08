@@ -20,7 +20,7 @@ import lzma, os, shutil, subprocess, sys, tempfile, time
 
 import pikepdf
 
-PDFE = os.environ.get('PDFE', 'target/release/pdfe')
+PDFE = os.environ.get('GPRESS') or os.environ.get('PDFE') or 'target/release/gpress'
 BASE = os.environ['PDFE_BASE']
 
 

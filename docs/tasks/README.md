@@ -31,29 +31,45 @@ The rules every branch is held to, from the owner:
        cargo build --release --features existing
        cargo test --release --workspace && cargo test --release --workspace --features existing
 
-2. Get the corpus: 907 public PDFs (130 MB) from four public sources, pinned by commit in
+2. Install the tools the checks need. Without them a baseline still measures time and size, but the
+   "no data loss" checks behind `exact` silently don't run: without `jpegtran` every output with a changed
+   JPEG is reported as not identical, without pikepdf every normal-PDF row says `opens-check died`, without
+   a C compiler peak memory readings have a 20 MB floor, without xz there is no calibration. `benchmark.py
+   time` prints a warning for each missing tool and records them in the run's `meta.json`
+   (`missing_tools`), and `compare` repeats it; a baseline made without them is not an acceptance run.
+
+       sudo apt-get install -y qpdf xz-utils brotli zstd build-essential libjpeg-turbo-progs poppler-utils   # jpegtran, pdfimages
+       pip install pikepdf pypdfium2 Pillow
+       npm install pdfjs-dist && export PDFJS_MODULES=$PWD/node_modules                                     # pdf.js, node 20 or newer
+
+   (`jpegtran` must be libjpeg-turbo's; a copy elsewhere is named with `JPEGTRAN=path`.)
+
+3. Get the corpus: 907 public PDFs (130 MB) from four public sources, pinned by commit in
    `bench/sets/corpus.lock` with the sha256 of every file. `bench/fetch_corpus.sh` fetches them with curl
    (about two minutes, resumable; `--check` proves a copy has exactly those bytes) into `bench/corpus/`
-   (git-ignored), or the directory named by `$CORPUS`:
+   (git-ignored, and where the scripts look unless `$CORPUS` names another directory):
 
        bench/fetch_corpus.sh && export CORPUS=$PWD/bench/corpus
 
    Nothing in the corpus is ever executed; the benchmark scripts run under `python3 -I` and only read it.
 
-3. Measure the baseline before changing anything: the 120-file sample (`bench/sets/sample120.txt`: the 20
-   slowest files, the 20 largest and 80 at random, 60% of the set's bytes) at efforts 0, 50 and 100 with one
-   thread, normal PDF and archive. `time` calibrates the machine first (a fixed xz job, stored in
-   `meta.json`) so a later `compare` can tell a slower build from a slower machine.
+4. Measure the baseline before changing anything: the 120-file sample (`bench/sets/sample120.txt`: the 20
+   slowest files and the 20 largest, 34 files with 6 in both lists, then 86 at random; 60% of the set's
+   bytes) at efforts 0, 50 and 100 with one thread, normal PDF and archive. `time` calibrates the machine
+   first (a fixed xz job, stored in `meta.json`) so a later `compare` can tell a slower build from a slower
+   machine.
 
        export GPRESS=$PWD/target/release/gpress
        python3 -I bench/benchmark.py time base --set sample120 --who ours --efforts 0,50,100 --threads 1
 
    This takes about an hour on two CPUs (effort 100 on the slowest files is most of it). While working,
-   `--limit 20` or `--efforts 0` give a quick look; the acceptance run is the full sample.
+   `--limit 20` or `--efforts 0` give a quick look; the acceptance run is the full sample. The two parts of
+   the sample are sections of the list (`## slowest-and-largest`, `## random`): `--set sample120:random`
+   measures or compares the 86 random files alone, for the rules that name them.
 
-4. Make the change on a branch named after the brief (`opt-<name>`), with the tests the brief asks for.
+5. Make the change on a branch named after the brief (`opt-<name>`), with the tests the brief asks for.
 
-5. Build again, measure the change the same way (`... time new ...`), and compare:
+6. Build again, measure the change the same way (`... time new ...`), and compare:
 
        python3 -I bench/benchmark.py compare base new
 
@@ -62,23 +78,29 @@ The rules every branch is held to, from the owner:
    byte-identical. The acceptance rule of a brief says which of these must hold and what else (every
    output byte-identical for a pure change; a memory target; a time target).
 
-6. Before reporting, all of these pass:
+7. Before reporting, all of these pass:
 
        cargo test --release --workspace
        cargo test --release --workspace --features existing
        cargo clippy --workspace --all-targets -- -D warnings
        cargo clippy --workspace --all-targets --features existing -- -D warnings
        cargo fmt --all --check
-       python3 -I bench/security.py run --fuzz-seconds 120
+       cargo deny check
+       python3 -I bench/security.py run new-security --fuzz-seconds 120
 
-   The security suite's full fuzz run (600 s per entry point) is for the merge, not every iteration.
+   The security suite writes into the run it is given (`bench/results/new-security/`, git-ignored apart
+   from its small result files; it refuses to write into a stored run such as `bench/results/security/`
+   unless told `--overwrite`); `python3 -I bench/security.py report new-security` writes the run's Security
+   section into `bench/RESULTS.md`, which stays out of the pull request too (the stored section is the
+   owner's; `git checkout bench/RESULTS.md` puts it back). The full fuzz run (600 s per entry point) is for
+   the merge, not every iteration.
 
-7. Report: a pull request against `main` with the branch, carrying in its description the whole output of
+8. Report: a pull request against `main` with the branch, carrying in its description the whole output of
    `benchmark.py compare base new` (and of `--metric wall` when wall time is the point, as for threads),
    the `meta.json` calibration of both runs, the test, clippy and security lines, and for a trade the
    per-file size changes. The commit messages say what changed and why, in plain English. The run
-   directories (`bench/results/base`, `bench/results/new`) stay out of the pull request; the stored runs
-   under `bench/results/` are the owner's baselines.
+   directories (`bench/results/base`, `bench/results/new`, `bench/results/new-security`) stay out of the pull
+   request; the stored runs under `bench/results/` are the owner's baselines.
 
 ## The briefs
 

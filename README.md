@@ -310,8 +310,9 @@ build of the format version (`tests/data/format-v8.*`), which must still restore
   `--with RUN` takes the settings a run lacks from a stored one (`results/all907-speed-ca8fa92` has every
   competitor on all 907 files). `measure.c` is the small parent process that runs each command (Linux gives
   a process the peak memory of the one that forked it). File lists are in `sets/` (`all`, and `sample120`:
-  the 20 slowest, the 20 largest and 80 random files); the engine comes from `GPRESS` and the corpus from
-  `CORPUS`.
+  the 20 slowest and the 20 largest files, 34 with 6 in both lists, then 86 random ones, in two sections
+  `--set sample120:random` and `:slowest-and-largest` select); the engine comes from `GPRESS` and the
+  corpus from `CORPUS` (default `bench/corpus`, where `fetch_corpus.sh` puts it).
 - `fetch_corpus.sh`, `sets/corpus.lock`: the 907 test files from their four public sources, pinned by commit
   with the sha256 of every file; the script fetches a copy in about two minutes and `--check` proves a copy
   has exactly those bytes.
