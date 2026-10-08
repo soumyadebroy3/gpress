@@ -1,0 +1,35 @@
+name: CI
+on:
+  push:
+    branches: [main, integration]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --features existing -- -D warnings
+      - run: cargo test --release
+      - run: cargo test --release --features existing
+
+  licences:
+    name: Licence and advisory gate (cargo deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-deny --locked
+      # deny.toml: only the permissive licences on its allow list may appear anywhere in the dependency
+      # tree (every feature, every target); known advisories fail the job too.
+      - run: cargo deny check licenses advisories
