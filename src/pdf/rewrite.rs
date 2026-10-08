@@ -37,11 +37,31 @@ pub struct Options {
     pub respect_conformance: bool,
     /// Also try our Flate in front of a JPEG image (never in front of JPEG 2000 or JBIG2).
     pub flate_over_jpeg: bool,
+    /// Write a CCITT fax image as JBIG2 when that is clearly smaller (the same pixels; see `crate::fax::pdf`
+    /// for what else must hold). Off, every fax image keeps its CCITT bytes.
+    pub jbig2: bool,
+    /// Give JPEG images optimal Huffman tables (the same coefficients; see `crate::jpeg`). Off, every JPEG
+    /// keeps its bytes.
+    pub jpeg_tables: bool,
+    /// Rewrite files the empty user password opens, keeping their encryption (see `crate::pdf::crypt`). Off,
+    /// every encrypted file is left untouched.
+    pub rewrite_encrypted: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { flate: flate::Options::max(), objstm_size: 200, max_stream: 64 << 20, effort: 100, threads: 0, respect_conformance: true, flate_over_jpeg: true }
+        Options {
+            flate: flate::Options::max(),
+            objstm_size: 200,
+            max_stream: 64 << 20,
+            effort: 100,
+            threads: 0,
+            respect_conformance: true,
+            flate_over_jpeg: true,
+            jbig2: true,
+            jpeg_tables: true,
+            rewrite_encrypted: true,
+        }
     }
 }
 
@@ -271,8 +291,10 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
         return None; // XMP stays readable by other tools; external file streams are left alone
     }
     // A scanned black-and-white image: JBIG2 instead of CCITT fax when that is clearly smaller (same pixels).
-    if let Some(x) = crate::fax::pdf::jbig2_candidate(s, resolve) {
-        return Some(x);
+    if opt.jbig2 {
+        if let Some(x) = crate::fax::pdf::jbig2_candidate(s, resolve) {
+            return Some(x);
+        }
     }
     let stages = chain(&s.dict)?;
     let k = stages.iter().take_while(|st| is_general(&st.name)).count();
@@ -310,7 +332,7 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
     // A JPEG with optimal Huffman tables: the same coefficients in fewer bytes, read back and compared before
     // it is used (anything unusual is left as it is).
     let jpeg = match rest {
-        [st] if st.name == b"DCTDecode" && carried.is_none() && data.len() <= opt.max_stream => crate::jpeg::optimize(&data).ok(),
+        [st] if opt.jpeg_tables && st.name == b"DCTDecode" && carried.is_none() && data.len() <= opt.max_stream => crate::jpeg::optimize(&data).ok(),
         _ => None,
     };
     if let Some(j) = &jpeg {
@@ -624,6 +646,9 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     // written with the same encryption: same dictionary, /ID, file key and permissions.
     if let Some(Err(why)) = &doc.crypt {
         return Err(format!("encrypted: {why}"));
+    }
+    if doc.crypt.is_some() && !opt.rewrite_encrypted {
+        return Err("encrypted: left as it is (rewrite_encrypted is off)".into());
     }
     let crypt = doc.crypt.as_ref().and_then(|c| c.as_ref().ok());
     let objs = load_reachable(&doc)?;
