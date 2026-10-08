@@ -259,24 +259,46 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
     let rest = &stages[k..];
     let mut best: Option<(Dict, Vec<u8>)> = None;
     let mut best_len = s.data.len();
+    // A JPEG with optimal Huffman tables: the same coefficients in fewer bytes, read back and compared before
+    // it is used (anything unusual is left as it is).
+    let jpeg = match rest {
+        [st] if st.name == b"DCTDecode" && carried.is_none() && data.len() <= opt.max_stream => crate::jpeg::optimize(&data).ok(),
+        _ => None,
+    };
+    if let Some(j) = &jpeg {
+        if j.len() < best_len {
+            let mut d = s.dict.clone();
+            set_chain(&mut d, rest);
+            best_len = j.len();
+            best = Some((d, j.clone()));
+        }
+    }
     // Some readers decide how to read JPEG 2000 and JBIG2 images from the first filter's name (pdf.js reads
     // a JPEG 2000 image's colour and depth from the image data only when JPXDecode comes first). So for
     // those the chain keeps its shape: a lone codec stays alone, a codec behind general filters stays behind
     // one.
     let shape_matters = rest.iter().any(|st| matches!(st.name.as_slice(), b"JPXDecode" | b"JBIG2Decode"));
     // Our Flate in front of whatever image codec follows. Putting a filter in front of a codec that had
-    // none (a JPEG, say) is done only when it saves at least 1%.
+    // none (a JPEG, say) is done only when it saves at least 1% (over the optimised JPEG, when there is one).
+    // A JPEG goes into Flate in its optimised form. Only when Flate shrinks that by a tenth or more (very
+    // regular data) and the original is at least a tenth larger (poor tables) does the original get a turn
+    // too: its own byte patterns can suit Flate better then (2 of the 284 test JPEGs, 1.8 KB). Trying it for
+    // every JPEG would double the Flate time.
     let adds_layer = k == 0 && !rest.is_empty();
     if !(adds_layer && shape_matters) {
-        let z = flate::deflate_zlib(&data, &opt.flate);
+        let bare_len = best_len;
         let mut with_flate = vec![Stage { name: b"FlateDecode".to_vec(), parms: carried.clone() }];
         with_flate.extend_from_slice(rest);
         let mut d = s.dict.clone();
         set_chain(&mut d, &with_flate);
-        let limit = if adds_layer { best_len - best_len / 100 } else { best_len };
-        if z.len() < limit {
-            best_len = z.len();
-            best = Some((d, z));
+        let z = flate::deflate_zlib(jpeg.as_ref().unwrap_or(&data), &opt.flate);
+        let again = jpeg.as_ref().map_or(false, |j| z.len() * 10 <= j.len() * 9 && j.len() * 10 <= data.len() * 9);
+        for z in std::iter::once(z).chain(again.then(|| flate::deflate_zlib(&data, &opt.flate))) {
+            let limit = if adds_layer { best_len.min(bare_len - bare_len / 100) } else { best_len };
+            if z.len() < limit {
+                best_len = z.len();
+                best = Some((d.clone(), z));
+            }
         }
     }
     // No general filter at all (e.g. a JPEG that Flate can't shrink), only without predictor bytes.
@@ -778,6 +800,12 @@ fn content_of(s: &Stream) -> Option<(Vec<u8>, Vec<Stage>)> {
 }
 
 
+/// The same JPEG with other Huffman tables: the same DCT stage, every other byte the same, and the same coded
+/// symbols in every scan (so the same coefficients).
+fn same_jpeg(a: &(Vec<u8>, Vec<Stage>), b: &(Vec<u8>, Vec<Stage>)) -> bool {
+    a.1 == b.1 && matches!(a.1.as_slice(), [st] if st.name == b"DCTDecode") && crate::jpeg::equivalent(&a.0, &b.0)
+}
+
 fn same_except_encoding(a: &Dict, b: &Dict) -> bool {
     let strip = |d: &Dict| -> Vec<(Vec<u8>, Obj)> {
         d.0.iter().filter(|(k, _)| !matches!(k.as_slice(), b"Length" | b"Filter" | b"DecodeParms")).cloned().collect()
@@ -817,7 +845,7 @@ fn self_check(objs: &BTreeMap<u32, (u16, Obj)>, out: &[u8], trailer: &Dict) -> R
                 }
                 let c1 = content_of(s1).ok_or(format!("self-check: stream {n} undecodable"))?;
                 let c2 = content_of(s2).ok_or(format!("self-check: stream {n} undecodable in output"))?;
-                if c1 != c2 {
+                if c1 != c2 && !same_jpeg(&c1, &c2) {
                     return Err(format!("self-check: content of stream {n} differs"));
                 }
             }
