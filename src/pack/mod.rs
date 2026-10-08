@@ -581,6 +581,22 @@ impl Default for PackOptions {
 /// Whether this build has the existing libraries (preflate, Lepton).
 const HAVE_EXISTING: bool = cfg!(feature = "existing");
 
+/// Choices of the decoder.
+#[derive(Clone, Debug)]
+pub struct UnpackOptions {
+    /// Largest file restored, in bytes: a file whose header declares more is refused before anything is
+    /// decoded. The decoder's work and memory follow the declared length (it is the one bound a crafted
+    /// file can't escape), so a service that takes files from anyone sets this to what it can afford. At
+    /// most `MAX_FILE` either way.
+    pub max_len: u64,
+}
+
+impl Default for UnpackOptions {
+    fn default() -> Self {
+        UnpackOptions { max_len: MAX_FILE }
+    }
+}
+
 /// Below this effort, compressed-looking data is coded plainly.
 const PLAIN_BELOW: u8 = 50;
 
@@ -1453,8 +1469,15 @@ fn stored(input: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Restores the original file; checks its length and hash.
+/// Restores the original file; checks its length and hash. Takes any file up to `MAX_FILE`; `unpack_with`
+/// sets a smaller limit.
 pub fn unpack(a: &[u8]) -> Result<Vec<u8>, String> {
+    unpack_with(a, &UnpackOptions::default())
+}
+
+/// `unpack` with the decoder's choices in `opt`: a file whose header declares more than `opt.max_len` bytes
+/// is refused before anything is decoded or reserved for it.
+pub fn unpack_with(a: &[u8], opt: &UnpackOptions) -> Result<Vec<u8>, String> {
     if a.len() < 6 || &a[..4] != MAGIC {
         return Err("not a peyaji file".into());
     }
@@ -1476,6 +1499,9 @@ pub fn unpack(a: &[u8]) -> Result<Vec<u8>, String> {
     }
     if len > MAX_FILE {
         return Err("damaged peyaji file (impossible size)".into());
+    }
+    if len > opt.max_len {
+        return Err(format!("the file restores to {len} bytes, more than the limit of {}", opt.max_len));
     }
     let len = usize::try_from(len).map_err(|_| "file too large for this platform")?;
     let want = a.get(i..i + HASH_LEN).ok_or("truncated header")?.to_vec();
