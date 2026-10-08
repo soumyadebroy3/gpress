@@ -146,13 +146,18 @@ fn leaves_fonts_alone_when_they_cant_be_written_back() {
 }
 
 #[test]
-fn refuses_format_version_4() {
-    // Version 5 coded Type 1 fonts differently; nothing in version 4 was shipped, so its decoder is gone.
+fn refuses_earlier_format_versions() {
+    // Versions 4 and 5 coded Type 1 fonts and fax images differently (or not at all); nothing before 6 was
+    // shipped, so their decoders are gone.
     let pdf = pdf_with_font(&type1_font(10, Form::Binary), true);
-    let (mut packed, _) = pack(&pdf);
-    assert_eq!(packed[4], 5);
-    packed[4] = 4;
-    assert!(unpack(&packed).is_err());
+    let (packed, _) = pack(&pdf);
+    assert_eq!(packed[4], engine::pack::VERSION);
+    assert_eq!(engine::pack::VERSION, 6);
+    for v in [1u8, 3, 4, 5, 7] {
+        let mut bad = packed.clone();
+        bad[4] = v;
+        assert!(unpack(&bad).is_err(), "version {v}");
+    }
 }
 
 #[test]
