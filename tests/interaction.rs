@@ -107,12 +107,16 @@ fn fax_data(img: &Image) -> Vec<u8> {
 }
 
 const JPEG: &[u8] = include_bytes!("data/jpeg/base444.jpg");
+/// Enough glyphs (about 65 KB encrypted) for the font program to look like random bytes, as real fonts do:
+/// below effort 50 the pack would code such data plainly, were the font not opened first (checked by
+/// `the_font_looks_random`).
+const FONT_GLYPHS: usize = 700;
 const FAX_W: usize = 600;
 const FAX_H: usize = 400;
 
 /// The streams and dictionaries of the test document, unencrypted: (object number, dictionary, stream data).
 fn objects() -> Vec<(u32, String, Option<Vec<u8>>)> {
-    let (font, l1, l2, l3) = type1_font(120);
+    let (font, l1, l2, l3) = type1_font(FONT_GLYPHS);
     let z = |d: &[u8]| zlib_stream(d, Params { level: 6, window_bits: 15, mem_level: 8, filtered: false });
     let fax = fax_data(&scan(FAX_W, FAX_H));
     let mut content = Vec::new();
@@ -196,17 +200,42 @@ fn stream(doc: &xref::Doc, n: u32) -> engine::pdf::object::Stream {
     }
 }
 
-/// A DCT stream's JPEG bytes with any general filters in front of it (our Flate, say) undone.
-fn jpeg_bytes(s: &engine::pdf::object::Stream) -> Vec<u8> {
+/// A stream's bytes for the image codec `codec` (its last filter) with any general filters in front of it
+/// (our Flate, say) undone.
+fn codec_bytes(s: &engine::pdf::object::Stream, codec: &[u8]) -> Vec<u8> {
     use engine::pdf::filters::{chain, decode_stage, is_general};
     let stages = chain(&s.dict).unwrap();
     let k = stages.iter().take_while(|st| is_general(&st.name)).count();
-    assert!(stages[k..].len() == 1 && stages[k].name == b"DCTDecode", "{:?}", s.dict);
+    assert!(stages[k..].len() == 1 && stages[k].name == codec, "{:?}", s.dict);
     let mut data = s.data.clone();
     for st in &stages[..k] {
         data = decode_stage(st, &data, 1 << 20).unwrap();
     }
     data
+}
+
+fn jpeg_bytes(s: &engine::pdf::object::Stream) -> Vec<u8> {
+    codec_bytes(s, b"DCTDecode")
+}
+
+/// Bits per byte of `x`'s byte histogram (the pack's measure of compressed-looking data).
+fn entropy(x: &[u8]) -> f64 {
+    let mut h = [0u64; 256];
+    for &b in x {
+        h[b as usize] += 1;
+    }
+    h.iter().filter(|&&c| c > 0).map(|&c| {
+        let p = c as f64 / x.len() as f64;
+        -p * p.log2()
+    }).sum()
+}
+
+#[test]
+fn the_font_looks_random() {
+    // The pack codes data with 7.9 bits per byte or more plainly below effort 50 (see `PackOptions`), unless
+    // it is a font it opens first; the test font must be such data for the effort-0 checks to mean anything.
+    let (font, _, _, _) = type1_font(FONT_GLYPHS);
+    assert!(entropy(&font) >= 7.9, "{}", entropy(&font));
 }
 
 fn settings(effort: u8, threads: usize) -> Options {
@@ -221,7 +250,7 @@ fn the_document_opens_decrypted() {
         let c = doc.crypt.as_ref().unwrap().as_ref().unwrap();
         assert_eq!(c.describe(), if aes { "R4/AESV2" } else { "R3/RC4" });
         assert_eq!(stream(&doc, 7).data, JPEG, "the JPEG reads back decrypted");
-        assert_eq!(xref::decode_fully(&stream(&doc, 6).dict, &stream(&doc, 6).data, 1 << 20).unwrap(), type1_font(120).0);
+        assert_eq!(xref::decode_fully(&stream(&doc, 6).dict, &stream(&doc, 6).data, 1 << 20).unwrap(), type1_font(FONT_GLYPHS).0);
         match doc.load(11).unwrap().1 {
             Obj::Dict(d) => assert_eq!(d.get(b"Title"), Some(&Obj::Str(b"Mixed test".to_vec()))),
             o => panic!("{o:?}"),
@@ -239,7 +268,9 @@ fn normal_pdf_keeps_the_encryption_and_applies_every_step() {
             Outcome::Untouched(why) => panic!("untouched: {why}"),
         };
         assert_eq!(stats.encryption, if aes { "R4/AESV2" } else { "R3/RC4" });
-        assert!(r.data.len() < pdf.len() * 85 / 100, "{} -> {}", pdf.len(), r.data.len());
+        // The font program is encrypted bytes, which Flate can't shrink; the rest loses at least a quarter.
+        let rest = pdf.len() - type1_font(FONT_GLYPHS).0.len();
+        assert!(pdf.len() - r.data.len() > rest / 4, "{} -> {} (without the font: {rest})", pdf.len(), r.data.len());
         // The same encryption dictionary, /ID and key; the objects read back decrypted.
         let (a, b) = (xref::open(&pdf).unwrap(), xref::open(&r.data).unwrap());
         assert_eq!(a.crypt.as_ref().unwrap().as_ref().unwrap(), b.crypt.as_ref().unwrap().as_ref().unwrap());
@@ -286,6 +317,9 @@ fn peyaji_stores_the_streams_decrypted_opened_and_coded() {
         assert_eq!(two, packed, "two threads give the same bytes");
         let (quick, qst) = pack_with(&pdf, &PackOptions { effort: 0, ..opt.clone() });
         assert!(qst.fax == 1 && qst.type1 == 1 && qst.decrypted >= 4, "{qst:?}");
+        // Effort 0 codes compressed-looking data plainly, but opens the font first (it looks random only while
+        // encrypted), so the pack is about as small.
+        assert!(quick.len() * 100 <= packed.len() * 105, "effort 0: {} bytes, effort 100: {}", quick.len(), packed.len());
         assert_eq!(unpack(&quick).unwrap(), pdf);
         // Without decryption the streams stay as stored, so neither the font nor the fax image is opened.
         let (plain, pst) = pack_with(&pdf, &PackOptions { decrypt: false, ..opt.clone() });

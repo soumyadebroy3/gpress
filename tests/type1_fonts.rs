@@ -3,7 +3,7 @@
 
 use engine::flate::zlibexact::{zlib_stream, Params};
 use engine::pack::type1::encrypt;
-use engine::pack::{pack, unpack};
+use engine::pack::{pack, pack_with, unpack, PackOptions};
 
 fn next(seed: &mut u32) -> u32 {
     *seed ^= *seed << 13;
@@ -117,6 +117,27 @@ fn opens_type1_fonts_and_restores_them_exactly() {
         // Encrypted, the private part is random bytes (or digits for random bytes); opened, it is small.
         let encrypted = if form == Form::Binary { font.2 } else { font.2 / 2 };
         assert!(packed.len() * 2 < encrypted, "{flate}: {} -> {}", pdf.len(), packed.len());
+    }
+}
+
+#[test]
+fn fonts_are_opened_at_every_effort() {
+    // A font big enough that its encrypted part makes the whole program look like random bytes, as real
+    // fonts do (about 130 KB here). Below effort 50 such data is coded plainly, but a font is opened first:
+    // opened it is text and charstrings, so the pack is as small as at effort 100 (which codes nothing
+    // plainly). Before this rule, issue2462.pdf packed 3.3 times larger at effort 0 than at 100.
+    let font = type1_font(1500, Form::Binary);
+    for flate in [false, true] {
+        let pdf = pdf_with_font(&font, flate);
+        let (full, st100) = pack_with(&pdf, &PackOptions { effort: 100, threads: 1, ..PackOptions::default() });
+        assert_eq!(st100.type1, 1, "{st100:?}");
+        for effort in [0u8, 49] {
+            let (quick, st) = pack_with(&pdf, &PackOptions { effort, threads: 1, ..PackOptions::default() });
+            assert_eq!(st.type1, 1, "effort {effort}: {st:?}");
+            assert_eq!(st.flat_bytes, 0, "effort {effort}: {st:?}");
+            assert!(quick.len() * 100 <= full.len() * 103, "effort {effort}: {} bytes, effort 100: {}", quick.len(), full.len());
+            assert_eq!(unpack(&quick).unwrap(), pdf);
+        }
     }
 }
 

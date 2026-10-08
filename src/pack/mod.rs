@@ -549,7 +549,8 @@ pub struct PackOptions {
     /// How hard to try, 0 to 100. Below `PLAIN_BELOW`, data that looks compressed already (no structure in
     /// its bytes or their differences, see `looks_compressed`) is coded plainly: on 3 MB of random bytes 17
     /// times faster (0.8 s instead of 14 s) and no larger; up to about 1% larger on compressed data the model
-    /// still finds a little in.
+    /// still finds a little in. A Type 1 font program is never coded plainly: encrypted it looks random, but
+    /// opened (see `type1`) it is text and charstrings the model codes to a third or less.
     pub effort: u8,
     /// Threads for looking at the streams (0: what the machine offers, at most 8). Never changes the output.
     pub threads: usize,
@@ -910,12 +911,15 @@ fn run_within<C: Coder>(c: C, d: Option<&[u8]>, plans: Option<Vec<Plan>>, total_
                     _ => None,
                 };
                 let n = io.length(src.map(|x| x.len() as u64), left);
+                // A Type 1 font stored without a filter: opened, never coded plainly (encrypted it looks random,
+                // opened it is text; see `PackOptions::effort`). Both sides find it from the restored bytes.
+                let font = if tag == T_RAW { type1::raw_font_dict(&out) } else { None };
                 let mut flat = false;
                 if tag == T_SYNTAX {
                     io.m.set_kind(Kind::Syntax, Geom::default(), out.len() as u64);
                     stats.syntax_bytes += n;
                 } else {
-                    flat = io.byte(src.map(|x| plainly(x, io.plain) as u8)) == 1;
+                    flat = io.byte(src.map(|x| (font.is_none() && plainly(x, io.plain)) as u8)) == 1;
                     io.m.set_kind(Kind::Raw, Geom::default(), out.len() as u64);
                     stats.streams += 1;
                     stats.raw_stream_bytes += n;
@@ -924,11 +928,9 @@ fn run_within<C: Coder>(c: C, d: Option<&[u8]>, plans: Option<Vec<Plan>>, total_
                     }
                 }
                 io.m.set_flat(flat);
-                // A Type 1 font stored without a filter.
-                let font = if tag == T_RAW && !flat { type1::raw_font_dict(&out) } else { None };
-                match font {
-                    Some(dict) => type1::code(&mut io, src, n, Some(&dict), Kind::Raw, &mut out, stats),
-                    None => io.bytes(src, n, &mut out),
+                match (font, flat) {
+                    (Some(dict), false) => type1::code(&mut io, src, n, Some(&dict), Kind::Raw, &mut out, stats),
+                    _ => io.bytes(src, n, &mut out),
                 }
                 io.m.set_flat(false);
             }
@@ -1213,11 +1215,13 @@ fn payload<C: Coder>(io: &mut Io<C>, data_in: Option<&[u8]>, lep_in: Option<Opti
                 }
             }
         }
-        // Decoded data can itself be compressed (a JPEG behind Flate, say).
-        let flat = io.byte(data_in.map(|x| (inf.png.is_none() && plainly(x, io.plain)) as u8)) == 1;
+        // Decoded data can itself be compressed (a JPEG behind Flate, say); a Type 1 font program is opened
+        // instead, never coded plainly (see `PackOptions::effort`).
+        let font = type1::is_type1(dict.as_ref());
+        let flat = io.byte(data_in.map(|x| (inf.png.is_none() && !font && plainly(x, io.plain)) as u8)) == 1;
         io.m.set_kind(inf.kind, inf.geom, 0);
         io.m.set_flat(flat);
-        if !flat && type1::is_type1(dict.as_ref()) {
+        if font && !flat {
             type1::code(io, data_in, dlen, dict.as_ref(), inf.kind, &mut decoded, stats);
         } else {
             io.bytes(data_in, dlen, &mut decoded);
