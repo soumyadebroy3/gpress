@@ -1,5 +1,5 @@
 //! Encrypted streams in the peyaji format. In a file the empty password opens, each encrypted stream is stored
-//! decrypted, so the usual plan applies to it (zlib rebuild, preflate, Lepton, the model), and is encrypted
+//! decrypted, so the usual plan applies to it (zlib rebuild, Lepton, the model), and is encrypted
 //! again on restore. A stream is stored this way only when encrypting its decrypted bytes again gives exactly
 //! the stored bytes (RC4 always does; AES keeps the stream's initialization vector and needs standard padding).
 //!

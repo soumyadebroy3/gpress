@@ -21,10 +21,10 @@ use crate::pdf::object::{Dict, Obj};
 use crate::pdf::parse::Lexer;
 
 pub const MAGIC: &[u8; 4] = b"\x89PYJ";
-/// The format version this build writes and reads (plus 0 and 2, the fallback and stored forms). Version 6
-/// is the first with Type 1 fonts, fax images and decrypted streams together; nothing earlier shipped, so
-/// earlier versions are refused.
-pub const VERSION: u8 = 6;
+/// The format version this build writes and reads (plus 0 and 2, the fallback and stored forms). Version 7
+/// is version 6 (the first with Type 1 fonts, fax images and decrypted streams together) without the
+/// preflate part; nothing earlier shipped, so earlier versions are refused.
+pub const VERSION: u8 = 7;
 const HASH_LEN: usize = 16;
 
 /// A typical PDF fragment both sides feed to the model first, so small files don't pay for a cold start.
@@ -146,14 +146,13 @@ pub struct PackStats {
     pub unpredicted_images: usize,
     /// Type 1 fonts coded with their encryption removed.
     pub type1: usize,
-    pub preflated: usize,
     pub leptons: usize,
     pub fallback: bool,
     pub stored: bool,
     /// Restore only: the file is damaged (it can't be restored; nothing wrong is ever returned).
     pub damaged: bool,
-    /// Restore only: the file has parts made with the existing libraries (preflate, Lepton; see
-    /// `PackOptions::existing`) and this build has none, so it can't be restored here.
+    /// Restore only: the file has parts made with the existing library (Lepton; see `PackOptions::existing`)
+    /// and this build doesn't have it, so the file can't be restored here.
     pub needs_existing: bool,
     /// Bytes coded plainly (already compressed) and bytes coded by one long-repeat decision.
     pub flat_bytes: usize,
@@ -460,12 +459,12 @@ struct Io<'m, C: Coder> {
     damaged: bool,
     /// Encoder only: code compressed-looking data plainly (see `PackOptions`).
     plain: bool,
-    /// Bytes the parts of this file may still claim beyond what they restore (decoded streams, corrections,
-    /// Lepton data): see `decode_budget`. A damaged file that claims more is refused where it does.
+    /// Bytes the parts of this file may still claim beyond what they restore (decoded streams, Lepton data):
+    /// see `decode_budget`. A damaged file that claims more is refused where it does.
     budget: u64,
 }
 
-/// Largest single part a file may declare (decoded stream, corrections, Lepton data): 2 GiB.
+/// Largest single part a file may declare (decoded stream, Lepton data): 2 GiB.
 const MAX_PART: usize = 1 << 31;
 /// Largest file the format restores: 16 GiB (a u64, so the limit is the same on 32-bit targets, where a
 /// file that doesn't fit in memory is refused by the header alone).
@@ -480,18 +479,18 @@ fn reserve(n: usize) -> usize {
 }
 
 /// The decoded bytes a file of `total_len` bytes may claim in all: `MAX_EXPANSION` per byte for decoded
-/// streams, one more each for Lepton data and corrections (each smaller than its stream), plus a little for
-/// the headers of tiny files.
+/// streams, one more for Lepton data (smaller than the JPEG it restores), plus a little for the headers of
+/// tiny files.
 fn decode_budget(total_len: usize) -> u64 {
-    (total_len as u64).saturating_mul(MAX_EXPANSION + 2).saturating_add(1 << 16)
+    (total_len as u64).saturating_mul(MAX_EXPANSION + 1).saturating_add(1 << 16)
 }
 
 impl<'m, C: Coder> Io<'m, C> {
     fn byte(&mut self, b: Option<u8>) -> u8 {
         self.m.code_byte(&mut self.c, b)
     }
-    /// The length of a part that isn't restored as it is (a decoded stream, corrections, Lepton data): at
-    /// most `max`, and within what the file may still claim.
+    /// The length of a part that isn't restored as it is (a decoded stream, Lepton data): at most `max`, and
+    /// within what the file may still claim.
     fn part(&mut self, v: Option<u64>, max: usize) -> usize {
         let n = self.length(v, max);
         if n as u64 > self.budget {
@@ -545,8 +544,8 @@ impl<'m, C: Coder> Io<'m, C> {
 }
 
 /// Choices of the encoder. The decoder needs none of them: what they decide is stored in the file, so a
-/// file restores the same whatever they were (a file with parts made by the existing libraries needs a
-/// build that has them, see `existing`).
+/// file restores the same whatever they were (a file with parts made by the existing library needs a build
+/// that has it, see `existing`).
 #[derive(Clone, Debug)]
 pub struct PackOptions {
     /// How hard to try, 0 to 100. Below `PLAIN_BELOW`, data that looks compressed already (no structure in
@@ -565,9 +564,9 @@ pub struct PackOptions {
     /// it is. (The decoder takes up to `MAX_PART` per part and `MAX_EXPANSION` bytes per byte of the file
     /// in all, whatever this was.)
     pub max_stream: usize,
-    /// Try the existing libraries (preflate, Lepton) when the build includes them (`--features existing`).
-    /// A file with parts they made restores only with such a build (`unpack` says so); the default is what
-    /// the build has.
+    /// Try the existing library (Lepton, for JPEG streams) when the build includes it (`--features existing`).
+    /// A file with parts it made restores only with such a build (`unpack` says so); the default is what the
+    /// build has.
     pub existing: bool,
 }
 
@@ -577,7 +576,7 @@ impl Default for PackOptions {
     }
 }
 
-/// Whether this build has the existing libraries (preflate, Lepton).
+/// Whether this build has the existing library (Lepton).
 const HAVE_EXISTING: bool = cfg!(feature = "existing");
 
 /// Choices of the decoder.
@@ -602,7 +601,7 @@ const PLAIN_BELOW: u8 = 50;
 const T_SYNTAX: u8 = 0;
 const T_RAW: u8 = 1;
 const T_REBUILT: u8 = 2;
-const T_PREFLATED: u8 = 3;
+// Tag 3 was the preflate part of version 6 and is not used.
 const T_LEPTON: u8 = 4;
 /// A CCITT fax stream coded as an image (see `crate::fax::part`).
 const T_FAX: u8 = 10;
@@ -626,8 +625,6 @@ enum Plan {
     Raw(usize, usize),
     /// `lep`: the decoded data is a JPEG, recompressed with Lepton (when that beats the Flate bytes).
     Rebuilt { params: zlibexact::Params, data: Vec<u8>, tail: Vec<u8>, lep: Option<Vec<u8>> },
-    /// Rebuilt with the corrections an existing library (preflate) records for non-zlib encoders.
-    Preflated { header: [u8; 2], corrections: Vec<u8>, data: Vec<u8>, adler_ok: bool, rest: Vec<u8>, lep: Option<Vec<u8>> },
     /// A JPEG recompressed with an existing library (Lepton), restored bit for bit.
     Lepton { data: Vec<u8> },
     /// An encrypted stream's decrypted bytes that nothing rebuilds (coded like a raw stream).
@@ -666,9 +663,9 @@ fn plan(d: &[u8], opt: &PackOptions) -> Vec<Plan> {
 }
 
 /// The plan for a stream's bytes, wherever they come from (as stored in the file, or an encrypted stream's
-/// bytes decrypted): a zlib rebuild, preflate or Lepton, or None when none of them applies. Every way of
-/// storing a stream's bytes other than as they are goes through here, so a decrypted stream gets the same
-/// choices as a plain one.
+/// bytes decrypted): a zlib rebuild or Lepton, or None when neither applies (the stream is then stored as it
+/// is). Every way of storing a stream's bytes other than as they are goes through here, so a decrypted
+/// stream gets the same choices as a plain one.
 fn stream_plan(raw: &[u8], opt: &PackOptions) -> Option<Plan> {
     if let Some((params, data, tail)) = rebuild_params(raw, opt.max_stream) {
         let lep = if opt.existing { nested_lepton(&data, raw.len()) } else { None };
@@ -677,7 +674,7 @@ fn stream_plan(raw: &[u8], opt: &PackOptions) -> Option<Plan> {
     if !opt.existing {
         return None;
     }
-    preflated(raw, opt.max_stream).or_else(|| lepton(raw))
+    lepton(raw)
 }
 
 /// The plans of a file with the encoder's choices in `opt`: `plan`, with the encrypted streams of a file the
@@ -690,9 +687,8 @@ fn plans(d: &[u8], opt: &PackOptions) -> Vec<Plan> {
 
 /// For measuring only: the file with every stream we can rebuild replaced by its decoded bytes (Type 1 fonts
 /// opened) and the JPEGs Lepton takes left out, plus the size of what a restore needs on top (rebuild
-/// settings, preflate corrections, Lepton data). A general compressor on the first, plus the second, is the
-/// fair "decompress first, then compress" baseline for the peyaji format: the same preparation, without our
-/// model.
+/// settings, Lepton data). A general compressor on the first, plus the second, is the fair "decompress
+/// first, then compress" baseline for the peyaji format: the same preparation, without our model.
 pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
     // Type 1 font programs are opened, as in a pack.
     fn put(out: &mut Vec<u8>, data: &[u8]) -> usize {
@@ -718,14 +714,6 @@ pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
                 out.extend_from_slice(&tail);
                 extra += 2;
             }
-            Plan::Preflated { corrections, data, rest, lep, .. } => {
-                match lep {
-                    Some(l) => extra += l.len(),
-                    None => extra += put(&mut out, &data),
-                }
-                out.extend_from_slice(&rest);
-                extra += corrections.len();
-            }
             Plan::Lepton { data } => extra += data.len(),
             Plan::Fax { parsed, .. } => {
                 out.extend_from_slice(&crate::fax::part::packed(&parsed.image));
@@ -735,46 +723,6 @@ pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
         }
     }
     (out, extra)
-}
-
-#[cfg(feature = "existing")]
-fn preflated(raw: &[u8], max_stream: usize) -> Option<Plan> {
-    if !zlib_header(raw) {
-        return None;
-    }
-    let (cmf, flg) = (raw[0], raw[1]);
-    let cfg = preflate_rs::PreflateConfig::default();
-    let r = preflate_rs::preflate_whole_deflate_stream(&raw[2..], &cfg);
-    if std::env::var_os("PDFE_DEBUG").is_some() {
-        match &r {
-            Ok((res, _)) => eprintln!("preflate: raw {} corrections {}", raw.len(), res.corrections.len()),
-            Err(e) => eprintln!("preflate: raw {} error {e:?}", raw.len()),
-        }
-    }
-    let (res, plain) = r.ok()?;
-    let used = 2 + res.compressed_size;
-    if plain.text().len() > max_stream {
-        return None;
-    }
-    let data = plain.text().to_vec();
-    // Worth it only if the corrections are small next to what decoding gains.
-    if res.corrections.len() > raw.len() / 3 {
-        return None;
-    }
-    let back = preflate_rs::recreate_whole_deflate_stream(&data, &res.corrections).ok()?;
-    if back != raw[2..used] {
-        return None;
-    }
-    let after = &raw[used..];
-    let adler_ok = after.len() >= 4 && after[..4] == zlib::adler32(&data).to_be_bytes();
-    let rest = if adler_ok { after[4..].to_vec() } else { after.to_vec() };
-    let lep = nested_lepton(&data, raw.len());
-    Some(Plan::Preflated { header: [cmf, flg], corrections: res.corrections, data, adler_ok, rest, lep })
-}
-
-#[cfg(not(feature = "existing"))]
-fn preflated(_raw: &[u8], _max_stream: usize) -> Option<Plan> {
-    None
 }
 
 #[cfg(feature = "existing")]
@@ -841,30 +789,6 @@ fn unlepton(_data: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-/// Bytes of the checksum stored with a preflate part.
-const PREFLATE_SUM_LEN: usize = 4;
-
-/// The checksum of a preflate part's corrections and decoded data (the first bytes of their SHA-256).
-fn preflate_checksum(corrections: &[u8], data: &[u8]) -> [u8; PREFLATE_SUM_LEN] {
-    let mut all = Vec::with_capacity(corrections.len() + data.len());
-    all.extend_from_slice(corrections);
-    all.extend_from_slice(data);
-    let h = sha256(&all);
-    let mut out = [0u8; PREFLATE_SUM_LEN];
-    out.copy_from_slice(&h[..PREFLATE_SUM_LEN]);
-    out
-}
-
-#[cfg(feature = "existing")]
-fn recreate(data: &[u8], corrections: &[u8]) -> Option<Vec<u8>> {
-    std::panic::catch_unwind(|| preflate_rs::recreate_whole_deflate_stream(data, corrections).ok()).ok()?
-}
-
-#[cfg(not(feature = "existing"))]
-fn recreate(_data: &[u8], _corrections: &[u8]) -> Option<Vec<u8>> {
-    None
-}
-
 /// One pass of the format: encoding `d` (Some) or rebuilding it (None). The same code runs both ways so the
 /// model sees exactly the same sequence of events. `opt` only guides the encoder's choices, which are stored
 /// (among them whether encrypted streams are stored decrypted, see `sealed`).
@@ -900,7 +824,6 @@ fn run_within<C: Coder>(c: C, d: Option<&[u8]>, plans: Option<Vec<Plan>>, total_
             Some(Plan::Syntax(..)) => T_SYNTAX,
             Some(Plan::Raw(..)) | Some(Plan::Plain(..)) => T_RAW,
             Some(Plan::Rebuilt { .. }) => T_REBUILT,
-            Some(Plan::Preflated { .. }) => T_PREFLATED,
             Some(Plan::Lepton { .. }) => T_LEPTON,
             Some(Plan::CryptKey(..)) => T_CRYPT_KEY,
             Some(Plan::Crypt(..)) => T_CRYPT,
@@ -918,7 +841,7 @@ fn run_within<C: Coder>(c: C, d: Option<&[u8]>, plans: Option<Vec<Plan>>, total_
         let in_order = match tag {
             T_CRYPT_KEY => crypt_key.is_none() && prev == Some(T_SYNTAX),
             T_CRYPT => matches!(prev, Some(T_SYNTAX) | Some(T_CRYPT_KEY)),
-            T_RAW | T_REBUILT | T_PREFLATED | T_LEPTON | T_FAX => prev != Some(T_CRYPT_KEY),
+            T_RAW | T_REBUILT | T_LEPTON | T_FAX => prev != Some(T_CRYPT_KEY),
             _ => sealing.is_none() && prev != Some(T_CRYPT_KEY),
         };
         if !in_order {
@@ -986,57 +909,11 @@ fn run_within<C: Coder>(c: C, d: Option<&[u8]>, plans: Option<Vec<Plan>>, total_
                 stats.rebuilt += 1;
                 stats.rebuilt_bytes += z.len();
             }
-            // Parts the existing libraries made restore only where they are (see `PackOptions::existing`).
-            T_PREFLATED | T_LEPTON if !HAVE_EXISTING => {
+            // Parts the existing library made restore only where it is (see `PackOptions::existing`).
+            T_LEPTON if !HAVE_EXISTING => {
                 stats.needs_existing = true;
                 io.damaged = true;
                 break;
-            }
-            T_PREFLATED => {
-                let cur_p = match cur.flatten() {
-                    Some(Plan::Preflated { header, corrections, data, adler_ok, rest, lep }) => Some((*header, corrections.as_slice(), data.as_slice(), *adler_ok, rest.as_slice(), lep.as_deref())),
-                    _ => None,
-                };
-                let h0 = io.byte(cur_p.map(|p| p.0[0]));
-                let h1 = io.byte(cur_p.map(|p| p.0[1]));
-                // The corrections are at most a third of the stream (see `preflated`), so never more than
-                // what is left of the file.
-                let clen = io.part(cur_p.map(|p| p.1.len() as u64), left);
-                io.m.set_kind(Kind::Data, Geom::default(), 0);
-                let mut corrections = Vec::with_capacity(reserve(clen));
-                io.bytes(cur_p.map(|p| p.1), clen, &mut corrections);
-                io.m.set_kind(Kind::Meta, Geom::default(), 0);
-                let adler_ok = io.byte(cur_p.map(|p| p.3 as u8)) == 1;
-                let rlen = io.length(cur_p.map(|p| p.4.len() as u64), left);
-                let mut rest = Vec::with_capacity(reserve(rlen));
-                io.bytes(cur_p.map(|p| p.4), rlen, &mut rest);
-                // A checksum of the corrections and the decoded data, checked before they go to the existing
-                // library: it isn't ours, and damaged corrections can keep it busy without end.
-                let sum_in = cur_p.map(|p| preflate_checksum(p.1, p.2));
-                let mut sum = Vec::with_capacity(PREFLATE_SUM_LEN);
-                io.bytes(sum_in.as_ref().map(|x| &x[..]), PREFLATE_SUM_LEN, &mut sum);
-                let decoded = payload(&mut io, cur_p.map(|p| p.2), cur_p.map(|p| p.5), &out, stats);
-                if io.damaged || sum[..] != preflate_checksum(&corrections, &decoded)[..] {
-                    io.damaged = true;
-                    break;
-                }
-                // The stream must fit in what is left of the file, with its header and trailer.
-                let z = match recreate(&decoded, &corrections) {
-                    Some(z) if z.len() <= left.saturating_sub(2 + rest.len() + if adler_ok { 4 } else { 0 }) => z,
-                    _ => {
-                        io.damaged = true;
-                        break;
-                    }
-                };
-                out.push(h0);
-                out.push(h1);
-                out.extend_from_slice(&z);
-                if adler_ok {
-                    out.extend_from_slice(&zlib::adler32(&decoded).to_be_bytes());
-                }
-                out.extend_from_slice(&rest);
-                stats.streams += 1;
-                stats.preflated += 1;
             }
             T_LEPTON => {
                 let src = match cur.flatten() {
@@ -1510,7 +1387,7 @@ pub fn unpack_with(a: &[u8], opt: &UnpackOptions) -> Result<Vec<u8>, String> {
             let mut stats = PackStats::default();
             let (out, _) = run(Decoder::new(body), None, len, &PackOptions::default(), &mut stats);
             if stats.needs_existing {
-                return Err("this peyaji file has parts made with the existing libraries (preflate, Lepton); restoring it needs a build with them".into());
+                return Err("this peyaji file has parts made with the existing library (Lepton); restoring it needs a build with it".into());
             }
             if stats.damaged {
                 return Err("damaged peyaji file".into());
@@ -1620,7 +1497,7 @@ mod tests {
         // A 100-byte file: its decoded parts may add up to about 170 KB (MAX_EXPANSION per byte and a little).
         // A pack of it that claims a 4 MiB decoded stream (zeros, so it codes to almost nothing) is refused
         // when the length is read, before any of it is decoded: in a few milliseconds and without reserving
-        // the memory. The same for Lepton data or corrections larger than what is left of the file.
+        // the memory. The same for Lepton data larger than what is left of the file.
         let d = b"%PDF-1.4\n1 0 obj\n<< /Length 4 >>\nstream\nABCD\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
         let a = d.windows(4).position(|w| w == b"ABCD").unwrap();
         assert!(decode_budget(d.len()) < 4 << 20);
@@ -1630,7 +1507,6 @@ mod tests {
             vec![Plan::Syntax(0, a), Plan::Rebuilt { params, data: huge.clone(), tail: Vec::new(), lep: None }, Plan::Syntax(a + 4, d.len())],
             vec![Plan::Syntax(0, a), Plan::Lepton { data: huge.clone() }, Plan::Syntax(a + 4, d.len())],
             vec![Plan::Syntax(0, a), Plan::Rebuilt { params, data: vec![0xFFu8; 2048], tail: Vec::new(), lep: Some(huge.clone()) }, Plan::Syntax(a + 4, d.len())],
-            vec![Plan::Syntax(0, a), Plan::Preflated { header: [0x78, 0x9c], corrections: huge.clone(), data: vec![1u8; 16], adler_ok: false, rest: Vec::new(), lep: None }, Plan::Syntax(a + 4, d.len())],
         ];
         for (k, plans) in cases.into_iter().enumerate() {
             let packed = pack_unbounded(d, plans);
@@ -1645,8 +1521,8 @@ mod tests {
         assert_eq!(unpack(&packed).unwrap(), &d[..]);
     }
 
-    /// A build without the existing libraries meets a part they made: the error says what the file needs
-    /// instead of calling it damaged, and nothing of the part is decoded first.
+    /// A build without the existing library meets a part it made: the error says what the file needs instead
+    /// of calling it damaged, and nothing of the part is decoded first.
     #[cfg(not(feature = "existing"))]
     #[test]
     fn parts_made_with_the_existing_libraries_say_so() {
@@ -1654,14 +1530,13 @@ mod tests {
         let a = d.windows(4).position(|w| w == b"ABCD").unwrap();
         let params = Params { level: 6, window_bits: 15, mem_level: 8, filtered: false };
         let cases: Vec<Plan> = vec![
-            Plan::Preflated { header: [0x78, 0x9c], corrections: vec![1, 2, 3], data: b"ABCD".to_vec(), adler_ok: false, rest: Vec::new(), lep: None },
             Plan::Lepton { data: vec![1, 2, 3, 4] },
             Plan::Rebuilt { params, data: vec![0xFFu8; 2048], tail: Vec::new(), lep: Some(vec![5, 6, 7, 8]) },
         ];
         for (k, part) in cases.into_iter().enumerate() {
             let packed = pack_unbounded(d, vec![Plan::Syntax(0, a), part, Plan::Syntax(a + 4, d.len())]);
             let err = unpack(&packed).unwrap_err();
-            assert!(err.contains("existing libraries"), "case {k}: {err}");
+            assert!(err.contains("existing library"), "case {k}: {err}");
         }
         assert!(!PackOptions::default().existing);
     }
