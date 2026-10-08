@@ -150,15 +150,22 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, conformance: bool) -> Resul
     if doc.trailing > 1024 {
         return Err("data after the end of the file".into());
     }
+    // Only objects the document uses count (an xref stream numbered at /Size is harmless), and the encryption
+    // dictionary's.
+    let enc = crypt_objects(doc.crypt.as_ref().and_then(|c| c.as_ref().ok()));
+    let max_used = objs.keys().copied().chain(enc.iter().map(|o| o.0)).max().unwrap_or(0);
     // Objects numbered at or beyond /Size: readers disagree on whether they exist.
     if let Some(size) = doc.trailer.get(b"Size").and_then(|x| x.as_int()) {
-        // Only objects the document uses count (an xref stream numbered at /Size is harmless), and the
-        // encryption dictionary's.
-        let enc = crypt_objects(doc.crypt.as_ref().and_then(|c| c.as_ref().ok()));
-        let max_used = objs.keys().copied().chain(enc.iter().map(|o| o.0)).max().unwrap_or(0) as i64;
-        if max_used >= size {
+        if max_used as i64 >= size {
             return Err("object numbers beyond /Size".into());
         }
+    }
+    // The cross-reference stream written has a row for every number up to the highest one used, so a file
+    // whose numbering leaves far more numbers unused than it uses would cost rows out of all proportion to its
+    // size (the test files leave at most about as many unused as used). Such a file is left untouched.
+    let used = (objs.len() + enc.len()) as u64;
+    if max_used as u64 + 1 > 2 * used + SPARE_NUMBERS {
+        return Err("object numbers far apart".into());
     }
     // A reference to an object missing from the cross-reference data is null — unless the object is
     // physically in the file, where some readers find it anyway.
@@ -210,6 +217,10 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, conformance: bool) -> Resul
         None => Ok(()),
     }
 }
+
+/// Unused object numbers below the highest one used that a file may have beyond its count of objects (see
+/// `gate`).
+const SPARE_NUMBERS: u64 = 4096;
 
 /// Encrypted files we rewrite: the encryption dictionary and the objects it refers to stay apart from the
 /// document (they are written as they are, unencrypted). Trailer strings need nothing: readers read the trailer
@@ -723,8 +734,10 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
 
     // Object streams, grouped by kind so similar objects sit together.
     packable.sort_by(|a, b| kind_key(a.1).cmp(&kind_key(b.1)).then(a.0.cmp(&b.0)));
-    let max_num = objs.keys().copied().max().unwrap_or(0).max(doc.trailer.get(b"Size").and_then(|x| x.as_int()).unwrap_or(0) as u32);
-    // The encryption dictionary's objects keep their numbers.
+    // New objects are numbered after the ones written (the encryption dictionary's objects keep their numbers
+    // too), never after the old /Size: that is a claim of the file, not something it holds, and the gate has
+    // already checked that no object is numbered at or beyond it.
+    let max_num = objs.keys().copied().max().unwrap_or(0);
     let max_num = crypt_objects(crypt).iter().fold(max_num, |m, o| m.max(o.0));
     let mut next_num = max_num + 1;
     let mut in_stm: HashMap<u32, (u32, u32)> = HashMap::new();
