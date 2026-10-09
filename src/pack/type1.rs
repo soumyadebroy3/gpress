@@ -13,7 +13,7 @@
 //! end, one letter case), so the same text can be written back; otherwise the font stays as it is. The encoder
 //! closes every opened font again and opens it only if that gives back exactly the original bytes.
 
-use super::{find as find_from, reserve, Io, PackStats};
+use super::{find as find_from, Io, PackStats};
 use crate::cm::model::{Geom, Kind};
 use crate::cm::Coder;
 use crate::pdf::object::{is_delim, is_white, Dict, Obj};
@@ -500,15 +500,16 @@ pub(super) fn expanded<'a>(prev: &[u8], data: &'a [u8]) -> (Cow<'a, [u8]>, usize
     (Cow::Borrowed(data), 0)
 }
 
-/// Codes a Type 1 font program of `n` bytes (`src` when encoding) and appends it to `out`: opened when it
-/// closes back to exactly the same bytes, as it is (model set to `plain`) otherwise. Both sides run this.
+/// Codes a Type 1 font program of `n` bytes (`src` when encoding) and hands it to `keep`: opened when it
+/// closes back to exactly the same bytes, as it is (model set to `plain`) otherwise. Both sides run this; the
+/// encoder hands on `src` itself, which `opened` checked the opened font closes back to.
 pub(super) fn code<C: Coder>(
     io: &mut Io<C>,
     src: Option<&[u8]>,
     n: usize,
     dict: Option<&Dict>,
     plain: Kind,
-    out: &mut Vec<u8>,
+    mut keep: impl FnMut(&[u8]),
     stats: &mut PackStats,
 ) {
     let (h1, h2) = hints(dict, n);
@@ -522,7 +523,7 @@ pub(super) fn code<C: Coder>(
     }));
     if form == AS_IS {
         io.m.set_kind(plain, Geom::default(), 0);
-        io.bytes(src, n, out);
+        io.bytes_to(src, n, |b| keep(&[b]));
         return;
     }
     let l = code_layout(io, lay.as_ref(), form == HEX, n, h1, h2);
@@ -539,19 +540,24 @@ pub(super) fn code<C: Coder>(
     };
     let t_len = n - end + start + count;
     let t_in = opened.as_ref().and_then(|o| o.as_ref()).map(|(_, t)| t.as_slice());
-    let mut t = Vec::with_capacity(reserve(t_len));
+    let mut t = Vec::new();
     for (kind, a, b) in
         [(Kind::Font, 0, start), (Kind::Charstring, start, start + count), (Kind::Font, start + count, t_len)]
     {
         io.m.set_kind(kind, Geom::default(), 0);
-        io.bytes(t_in.map(|x| &x[a..b]), b - a, &mut t);
+        io.source_bytes(t_in.map(|x| &x[a..b]), b - a, &mut t);
         if io.damaged {
             return;
         }
     }
+    if let Some(f) = src {
+        keep(f);
+        stats.type1 += 1;
+        return;
+    }
     match close(&t, &l) {
         Some(f) if f.len() == n => {
-            out.extend_from_slice(&f);
+            keep(&f);
             stats.type1 += 1;
         }
         _ => io.damaged = true,
@@ -891,10 +897,9 @@ mod tests {
         io.m.set_kind(Kind::Meta, Geom::default(), 0);
         io.byte(Some(if l.hex.is_some() { HEX } else { BINARY }));
         code_layout(&mut io, Some(l), l.hex.is_some(), n, 0, 0);
-        let mut sink = Vec::new();
         for &(kind, bytes) in parts {
             io.m.set_kind(kind, Geom::default(), 0);
-            io.bytes(Some(bytes), bytes.len(), &mut sink);
+            io.skip(Some(bytes), bytes.len());
         }
         let Io { c, .. } = io;
         c.finish()
@@ -914,7 +919,7 @@ mod tests {
             timed_out: false,
         };
         let (mut out, mut stats) = (Vec::new(), PackStats::default());
-        code(&mut io, None, n, None, Kind::Font, &mut out, &mut stats);
+        code(&mut io, None, n, None, Kind::Font, |x| out.extend_from_slice(x), &mut stats);
         (out, io.damaged, io.c.decisions)
     }
 

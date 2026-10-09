@@ -145,10 +145,11 @@ Memory while expanding follows these three: at most about `max_len` for the outp
 for the model's history (one byte per byte it codes, and while an image part is coded a ring of its residuals:
 about a row and a pixel, never more than the part), twice the largest part (a decoded stream, at most
 `max_decoded` and 2 GiB) while it is decoded and its zlib stream re-created, and the model's tables (up to
-164 MiB for files over 4 MiB). Compress holds the input, its copy, the same history and the same per-part
-buffers; the planner keeps no decoded data (a stream is inflated again when its turn comes), only each
-stream's zlib settings and Lepton data. The security suite runs every pack and unpack with `max_decoded` at
-64 MiB and holds them to 512 MiB.
+164 MiB for files over 4 MiB). Compress holds the input, the same history and the same per-part buffers; the
+restore check every pack ends with is an expand as above, after the encoder with one thread and beside it with
+two; the planner keeps no decoded data (a stream is inflated again when its turn comes), only each stream's
+zlib settings and Lepton data. The security suite runs every pack and unpack with `max_decoded` at 64 MiB and
+holds them to 512 MiB.
 
 Three kinds of constants stay in the code: the ones that define the file formats (a decoder must agree with
 its encoder on those: the model's settings, the part tags, the fax work budget); the ones readers set (JBIG2

@@ -23,6 +23,7 @@ use crate::flate::{zlib, zlibexact};
 use crate::par;
 use crate::pdf::object::{Dict, Obj};
 use crate::pdf::parse::Lexer;
+use std::borrow::Cow;
 
 pub const MAGIC: &[u8; 4] = b"\x89GPZ";
 /// The format version this build writes and reads (plus 0 and 2, the fallback and stored forms). Version 8
@@ -584,6 +585,20 @@ impl<'m, C: Coder> Io<'m, C> {
             i = end;
         }
     }
+    /// Codes `n` bytes without keeping them.
+    fn skip(&mut self, data: Option<&[u8]>, n: usize) {
+        self.bytes_to(data, n, |_| ());
+    }
+    /// Codes `n` bytes the decoder makes a stream again from, which it keeps in `out`. The encoder makes
+    /// nothing again (see `Restored`), so it keeps none.
+    fn source_bytes(&mut self, data: Option<&[u8]>, n: usize, out: &mut Vec<u8>) {
+        if data.is_some() {
+            self.skip(data, n);
+        } else {
+            out.reserve(reserve(n));
+            self.bytes(None, n, out);
+        }
+    }
     /// Encoder only: whether the deadline has passed; the pass is then given up (as if damaged, so nothing
     /// of it is used) and `timed_out` says why.
     fn out_of_time(&mut self) -> bool {
@@ -986,6 +1001,59 @@ fn unlepton(_data: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+/// The file restored so far. The decoder builds it: it is the result. The encoder only counts it: each part
+/// restores exactly the input bytes it was planned from (the planner checked every way a part is made again:
+/// the zlib settings rebuild the stream, Lepton's data gives the JPEG back, an opened font closes to itself, a
+/// fax image writes its stream again, a decrypted payload encrypts back), so the input's first `len` bytes
+/// stand for it, and the encoder makes nothing again but a fax stream, which its coder writes as it goes, and
+/// an encrypted payload, encrypted again from the bytes it was given. Within the turn of an encrypted stream's
+/// payload it counts the decrypted bytes, which are replaced by the encrypted ones before anything looks back.
+enum Restored<'a> {
+    Built(Vec<u8>),
+    Counted(&'a [u8], usize),
+}
+
+impl Restored<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Restored::Built(v) => v.len(),
+            Restored::Counted(_, n) => *n,
+        }
+    }
+    /// The bytes restored so far, for looking back (at the dictionary before a stream, say).
+    fn view(&self) -> &[u8] {
+        match self {
+            Restored::Built(v) => v,
+            Restored::Counted(d, n) => &d[..(*n).min(d.len())],
+        }
+    }
+    fn keep(&mut self, b: u8) {
+        match self {
+            Restored::Built(v) => v.push(b),
+            Restored::Counted(_, n) => *n += 1,
+        }
+    }
+    fn keep_all(&mut self, x: &[u8]) {
+        match self {
+            Restored::Built(v) => v.extend_from_slice(x),
+            Restored::Counted(_, n) => *n += x.len(),
+        }
+    }
+    fn truncate(&mut self, len: usize) {
+        match self {
+            Restored::Built(v) => v.truncate(len),
+            Restored::Counted(_, n) => *n = len.min(*n),
+        }
+    }
+    /// The decoder's file (the encoder keeps none).
+    fn into_file(self) -> Vec<u8> {
+        match self {
+            Restored::Built(v) => v,
+            Restored::Counted(..) => Vec::new(),
+        }
+    }
+}
+
 /// The decoded form of a stream from its source, inflated again: exactly `dlen` bytes, or None (which
 /// can't happen for a stream the planner inflated once already).
 fn inflated(src: &Source, d: Option<&[u8]>, dlen: usize) -> Option<Vec<u8>> {
@@ -998,15 +1066,15 @@ fn inflated(src: &Source, d: Option<&[u8]>, dlen: usize) -> Option<Vec<u8>> {
 /// which are stored (among them whether encrypted streams are stored decrypted, see `sealed`), and gives
 /// the deadline. `budget` is what the parts may claim in all: what the plans claim for the encoder, what the
 /// header declares for the decoder.
-fn run<C: Coder>(
+fn run<'d, C: Coder>(
     c: C,
-    d: Option<&[u8]>,
+    d: Option<&'d [u8]>,
     plans: Option<Vec<Plan>>,
     total_len: usize,
     opt: &PackOptions,
     stats: &mut PackStats,
     budget: u64,
-) -> (Vec<u8>, C) {
+) -> (Restored<'d>, C) {
     let mut model = primed(table_bits(total_len));
     let mut io = Io {
         m: &mut model,
@@ -1017,7 +1085,10 @@ fn run<C: Coder>(
         deadline: opt.deadline,
         timed_out: false,
     };
-    let mut out: Vec<u8> = Vec::with_capacity(reserve(total_len));
+    let mut out = match d {
+        Some(d) => Restored::Counted(d, 0),
+        None => Restored::Built(Vec::with_capacity(reserve(total_len))),
+    };
     // Encrypted files: the file key, and the settings of the stream whose decrypted payload comes next with
     // where that payload starts in `out`.
     let mut crypt_key: Option<Vec<u8>> = None;
@@ -1061,6 +1132,9 @@ fn run<C: Coder>(
             break;
         }
         let before = out.len();
+        // Encoder: the bytes this part restores, which it has at hand. An encrypted stream's payload is
+        // encrypted again from them (the decoder encrypts what it restored).
+        let mut given: Cow<[u8]> = Cow::Borrowed(&[]);
         match tag {
             T_END => break,
             T_SYNTAX | T_RAW => {
@@ -1072,7 +1146,7 @@ fn run<C: Coder>(
                 let n = io.length(src.map(|x| x.len() as u64), left);
                 // A Type 1 font stored without a filter: opened, never coded plainly (encrypted it looks random,
                 // opened it is text; see `PackOptions::effort`). Both sides find it from the restored bytes.
-                let font = if tag == T_RAW { type1::raw_font_dict(&out) } else { None };
+                let font = if tag == T_RAW { type1::raw_font_dict(out.view()) } else { None };
                 let mut flat = false;
                 if tag == T_SYNTAX {
                     io.m.set_kind(Kind::Syntax, Geom::default(), out.len() as u64);
@@ -1088,22 +1162,29 @@ fn run<C: Coder>(
                 }
                 io.m.set_flat(flat);
                 match (font, flat) {
-                    (Some(dict), false) => type1::code(&mut io, src, n, Some(&dict), Kind::Raw, &mut out, stats),
-                    _ => io.bytes(src, n, &mut out),
+                    (Some(dict), false) => {
+                        type1::code(&mut io, src, n, Some(&dict), Kind::Raw, |x| out.keep_all(x), stats)
+                    }
+                    _ => io.bytes_to(src, n, |b| out.keep(b)),
                 }
                 io.m.set_flat(false);
+                if let Some(x) = src {
+                    given = Cow::Borrowed(&x[..n]);
+                }
             }
             T_REBUILT => {
                 // The encoder inflates the stream again here: the plan kept only its settings.
-                let (p_in, data, tail_in, lep_in) = match cur.flatten() {
+                let (p_in, raw_in, data, tail_in, lep_in) = match cur.flatten() {
                     Some(Plan::Rebuilt { params, src, dlen, tail, lep }) => match inflated(src, d, *dlen) {
-                        Some(data) => (Some(*params), Some(data), Some(tail.as_slice()), Some(lep.as_deref())),
+                        Some(data) => {
+                            (Some(*params), src.bytes(d), Some(data), Some(tail.as_slice()), Some(lep.as_deref()))
+                        }
                         None => {
                             io.damaged = true;
                             break;
                         }
                     },
-                    _ => (None, None, None, None),
+                    _ => (None, None, None, None, None),
                 };
                 let data_in = data.as_deref();
                 let level = io.byte(p_in.map(|p| p.level));
@@ -1118,18 +1199,28 @@ fn run<C: Coder>(
                     break;
                 }
                 let tail_n = io.length(tail_in.map(|t| t.len() as u64), left);
-                let mut tail = Vec::with_capacity(reserve(tail_n));
-                io.bytes(tail_in, tail_n, &mut tail);
-                let decoded = payload(&mut io, data_in, lep_in, &out, stats);
+                let mut tail = Vec::new();
+                io.source_bytes(tail_in, tail_n, &mut tail);
+                let decoded = payload(&mut io, data_in, lep_in, out.view(), stats);
                 if io.damaged {
                     break;
                 }
-                let z = zlibexact::zlib_stream(&decoded, params);
-                out.extend_from_slice(&z);
-                out.extend_from_slice(&tail);
+                match raw_in {
+                    // The encoder: these settings were found to make exactly the stream's bytes.
+                    Some(raw) => {
+                        out.keep_all(raw);
+                        stats.rebuilt_bytes += raw.len().saturating_sub(tail_n);
+                        given = Cow::Borrowed(raw);
+                    }
+                    None => {
+                        let z = zlibexact::zlib_stream(&decoded, params);
+                        out.keep_all(&z);
+                        out.keep_all(&tail);
+                        stats.rebuilt_bytes += z.len();
+                    }
+                }
                 stats.streams += 1;
                 stats.rebuilt += 1;
-                stats.rebuilt_bytes += z.len();
             }
             // Parts the existing library made restore only where it is (see `PackOptions::existing`).
             T_LEPTON if !HAVE_EXISTING => {
@@ -1138,24 +1229,31 @@ fn run<C: Coder>(
                 break;
             }
             T_LEPTON => {
-                let src = match cur.flatten() {
-                    Some(Plan::Lepton { data, .. }) => Some(data.as_slice()),
-                    _ => None,
+                let (src, jpeg_in) = match cur.flatten() {
+                    Some(Plan::Lepton { data, src }) => (Some(data.as_slice()), src.bytes(d)),
+                    _ => (None, None),
                 };
                 // Lepton's data is smaller than the JPEG it restores (see `lepton_bytes`), so never more than
                 // what is left of the file.
                 let n = io.part(src.map(|x| x.len() as u64), left);
-                let mut lep = Vec::with_capacity(reserve(n));
+                let mut lep = Vec::new();
                 lepton_part(&mut io, src, n, &mut lep, stats);
                 if io.damaged {
                     break;
                 }
-                match unlepton(&lep) {
-                    Some(j) => out.extend_from_slice(&j),
-                    None => {
-                        io.damaged = true;
-                        break;
+                match jpeg_in {
+                    // The encoder: `lepton_bytes` checked that the data gives this JPEG back.
+                    Some(j) => {
+                        out.keep_all(j);
+                        given = Cow::Borrowed(j);
                     }
+                    None => match unlepton(&lep) {
+                        Some(j) => out.keep_all(&j),
+                        None => {
+                            io.damaged = true;
+                            break;
+                        }
+                    },
                 }
                 stats.streams += 1;
                 stats.leptons += 1;
@@ -1178,7 +1276,7 @@ fn run<C: Coder>(
                     Some(Plan::Crypt(s)) => Some(s),
                     _ => None,
                 };
-                match sealed::code_settings(&mut io, s_in, &out, crypt_key.as_deref()) {
+                match sealed::code_settings(&mut io, s_in, out.view(), crypt_key.as_deref()) {
                     Some(s) => sealing = Some((s, out.len())),
                     None => {
                         io.damaged = true;
@@ -1193,7 +1291,10 @@ fn run<C: Coder>(
                 };
                 let fc = fax_coder.get_or_insert_with(|| crate::fax::part::FaxCoder::new(total_len));
                 match crate::fax::part::code(&mut io.c, fc, src, out.len(), left) {
-                    Some(bytes) => out.extend_from_slice(&bytes),
+                    Some(bytes) => {
+                        out.keep_all(&bytes);
+                        given = Cow::Owned(bytes);
+                    }
                     None => {
                         io.damaged = true;
                         break;
@@ -1207,20 +1308,24 @@ fn run<C: Coder>(
                 break;
             }
         }
-        // The payload of an encrypted stream is now in `out`, decrypted: encrypt it again. An empty payload is
+        // The payload of an encrypted stream is now restored, decrypted: encrypt it again. An empty payload is
         // never stored this way.
         if tag != T_CRYPT {
             if let Some((s, mark)) = sealing.take() {
-                let plain = out.split_off(mark);
+                let plain = match &out {
+                    Restored::Built(v) => &v[mark..],
+                    Restored::Counted(..) => &given[..],
+                };
                 match crypt_key
                     .as_deref()
                     .filter(|_| !plain.is_empty())
-                    .and_then(|k| sealed::seal_payload(&s, k, &plain))
+                    .and_then(|k| sealed::seal_payload(&s, k, plain))
                 {
                     Some(z) => {
                         stats.decrypted += 1;
                         stats.decrypted_bytes += z.len();
-                        out.extend_from_slice(&z);
+                        out.truncate(mark);
+                        out.keep_all(&z);
                     }
                     None => {
                         io.damaged = true;
@@ -1252,7 +1357,7 @@ fn lepton_part<C: Coder>(io: &mut Io<C>, src: Option<&[u8]>, n: usize, lep: &mut
     let flat = io.byte(src.map(|x| looks_compressed(x, true) as u8)) == 1;
     io.m.set_kind(Kind::Raw, Geom::default(), 0);
     io.m.set_flat(flat);
-    io.bytes(src, n, lep);
+    io.source_bytes(src, n, lep);
     io.m.set_flat(false);
     if flat {
         stats.flat_bytes += n;
@@ -1278,10 +1383,14 @@ fn payload<C: Coder>(
         }
         let src = lep_in.flatten();
         let n = io.part(src.map(|x| x.len() as u64), MAX_PART);
-        let mut lep = Vec::with_capacity(reserve(n));
+        let mut lep = Vec::new();
         lepton_part(io, src, n, &mut lep, stats);
         stats.leptons += 1;
         stats.decoded_bytes += dlen;
+        // The encoder checked when it planned the part that the data gives the JPEG back (`lepton_bytes`).
+        if src.is_some() {
+            return Vec::new();
+        }
         return match (io.damaged, unlepton(&lep)) {
             (false, Some(j)) if j.len() == dlen => j,
             _ => {
@@ -1293,7 +1402,8 @@ fn payload<C: Coder>(
     let dict = dict_before(out, out.len().saturating_sub(1));
     let looks = io.byte(data_in.map(|x| looks_like_content(x) as u8));
     let mut inf = info(dict.as_ref(), Some(if looks == 1 { b"q" as &[u8] } else { b"\x00" as &[u8] }));
-    let mut decoded: Vec<u8> = Vec::with_capacity(reserve(dlen));
+    // The decoder's decoded stream, made again from what was coded (the encoder keeps nothing).
+    let mut decoded: Vec<u8> = Vec::new();
     let mut used_png = false;
     if let Some((row, bpp)) = inf.png {
         let split = data_in.map(|x| unfilter(x, row, bpp));
@@ -1305,11 +1415,11 @@ fn payload<C: Coder>(
             };
             let rows = dlen / (row + 1);
             io.m.set_kind(Kind::Data, Geom::default(), 0);
-            let mut types = Vec::with_capacity(reserve(rows));
-            io.bytes(types_in, rows, &mut types);
+            let mut types = Vec::new();
+            io.source_bytes(types_in, rows, &mut types);
             io.m.set_kind(Kind::Image, Geom { stride: row, bpp, exact: inf.geom.exact }, 0);
-            let mut px = Vec::with_capacity(reserve(rows * row));
-            io.bytes(px_in, rows * row, &mut px);
+            let mut px = Vec::new();
+            io.source_bytes(px_in, rows * row, &mut px);
             if io.damaged {
                 return Vec::new();
             }
@@ -1332,8 +1442,8 @@ fn payload<C: Coder>(
                 v
             });
             io.m.set_kind(Kind::Image, Geom { stride: row, bpp, exact: false }, 0);
-            let mut px = Vec::with_capacity(reserve(dlen));
-            io.bytes(px_in.as_deref(), dlen, &mut px);
+            let mut px = Vec::new();
+            io.source_bytes(px_in.as_deref(), dlen, &mut px);
             for r in px.chunks_mut(row) {
                 for i in (bpp..r.len()).rev() {
                     r[i] = r[i].wrapping_sub(r[i - bpp]);
@@ -1367,9 +1477,15 @@ fn payload<C: Coder>(
         io.m.set_kind(inf.kind, inf.geom, 0);
         io.m.set_flat(flat);
         if font && !flat {
-            type1::code(io, data_in, dlen, dict.as_ref(), inf.kind, &mut decoded, stats);
+            let decoding = data_in.is_none();
+            let keep = |x: &[u8]| {
+                if decoding {
+                    decoded.extend_from_slice(x)
+                }
+            };
+            type1::code(io, data_in, dlen, dict.as_ref(), inf.kind, keep, stats);
         } else {
-            io.bytes(data_in, dlen, &mut decoded);
+            io.source_bytes(data_in, dlen, &mut decoded);
         }
         io.m.set_flat(false);
         if flat {
@@ -1553,11 +1669,11 @@ fn pack_pass(input: &[u8], opt: &PackOptions) -> (Vec<u8>, PackStats) {
                     &mut st,
                     claimed,
                 );
-                !st.damaged && back == input
+                !st.damaged && back.view() == input
             })?;
             let (copy, enc) =
                 run(pipe::TeeEncoder::new(tx), Some(input), plans.take(), input.len(), opt, &mut stats, claimed);
-            debug_assert!(stats.timed_out || copy == input);
+            debug_assert!(stats.timed_out || copy.len() == input.len());
             let mut out = header(VERSION, input, claimed);
             out.extend_from_slice(&enc.finish());
             Some((out, check.join().unwrap_or(false)))
@@ -1567,7 +1683,7 @@ fn pack_pass(input: &[u8], opt: &PackOptions) -> (Vec<u8>, PackStats) {
         Some(r) => r,
         None => {
             let (copy, enc) = run(Encoder::new(), Some(input), plans.take(), input.len(), opt, &mut stats, claimed);
-            debug_assert!(stats.timed_out || copy == input);
+            debug_assert!(stats.timed_out || copy.len() == input.len());
             let mut out = header(VERSION, input, claimed);
             out.extend_from_slice(&enc.finish());
             // The check accepts exactly what this pack declares, whatever the caller's budget was.
@@ -1688,6 +1804,7 @@ pub fn unpack_with(a: &[u8], opt: &UnpackOptions) -> Result<Vec<u8>, UnpackError
             let mut stats = PackStats::default();
             let dec_opt = PackOptions { deadline: opt.deadline, ..PackOptions::default() };
             let (out, _) = run(Decoder::new(body), None, None, len, &dec_opt, &mut stats, claimed);
+            let out = out.into_file();
             if stats.timed_out {
                 return Err(TimedOut);
             }
