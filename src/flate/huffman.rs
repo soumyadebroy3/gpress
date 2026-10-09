@@ -429,6 +429,12 @@ pub fn kraft(lens: &[u8]) -> u64 {
 /// hold the faster code to.
 #[cfg(test)]
 pub(crate) mod old {
+    pub fn limited_lengths(freqs: &[u32], max_bits: u32) -> Vec<u8> {
+        let mut lens = vec![0u8; freqs.len()];
+        limited_lengths_into(freqs, max_bits, &mut lens);
+        lens
+    }
+
     pub fn limited_lengths_into(freqs: &[u32], max_bits: u32, lens: &mut [u8]) {
         for l in lens.iter_mut() {
             *l = 0;
