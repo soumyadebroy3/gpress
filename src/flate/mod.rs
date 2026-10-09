@@ -65,6 +65,7 @@ mod tests {
                 polish: true,
                 shared: None,
                 deadline: crate::clock::Deadline::NONE,
+                fast: 0,
             },
         ] {
             for d in samples() {

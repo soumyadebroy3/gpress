@@ -42,6 +42,8 @@ pub struct Options {
     /// Once this has passed, the segments still to do are written stored (cheap) so the job ends soon; the
     /// caller checks the deadline afterwards and never uses such an output. Never changes a finished output.
     pub deadline: Deadline,
+    /// 0: the encoder above; 1 to `fast::LEVELS`: the fast encoder (`fast.rs`) at that level instead.
+    pub fast: u8,
 }
 
 impl Options {
@@ -59,6 +61,7 @@ impl Options {
             polish: true,
             shared: None,
             deadline: Deadline::NONE,
+            fast: 0,
         }
     }
     /// Fast but still optimal-parsed.
@@ -75,6 +78,7 @@ impl Options {
             polish: false,
             shared: None,
             deadline: Deadline::NONE,
+            fast: 0,
         }
     }
 
@@ -95,6 +99,7 @@ impl Options {
             polish,
             shared: None,
             deadline: Deadline::NONE,
+            fast: 0,
         };
         match effort {
             0..=19 => Options::quick(),
@@ -112,7 +117,7 @@ impl Options {
     }
 
     /// The settings that decide the output (everything but `shared` and `deadline`).
-    fn fingerprint(&self) -> [usize; 9] {
+    fn fingerprint(&self) -> [usize; 10] {
         [
             self.iterations,
             self.exact_rounds,
@@ -123,6 +128,7 @@ impl Options {
             self.multi_start_limit,
             self.nice,
             self.polish as usize,
+            self.fast as usize,
         ]
     }
 }
@@ -136,7 +142,7 @@ pub struct Shared {
 }
 
 /// What an encoded input is remembered by: the hash and length of the data and the settings that matter.
-type MemoKey = (u64, usize, [usize; 9]);
+type MemoKey = (u64, usize, [usize; 10]);
 
 impl Shared {
     /// A new pool of `threads` threads, remembering every output.
@@ -162,6 +168,9 @@ const SEGMENTS_AT_ONCE: usize = 8;
 
 /// Raw Deflate data for `data`.
 pub fn deflate(data: &[u8], opt: &Options) -> Vec<u8> {
+    if opt.fast > 0 {
+        return super::fast::deflate(data, opt.fast, opt.shared.as_ref().map(|s| &*s.pool), opt.deadline);
+    }
     let mut w = BitWriter::with_capacity(data.len() / 2 + 64);
     if data.is_empty() {
         write_fixed(&mut w, &[], true);
