@@ -27,6 +27,8 @@ user + system CPU time, peak resident set):
   ours, archive:     `pack`, then a separate `unpack` (measured too) compared byte for byte with the input;
   qpdf:              normal PDF, the setting used since the first comparison (object streams, Flate
                      recompressed at level 9);
+  qpdf-max:          normal PDF, qpdf's strongest lossless setting (as qpdf, with the specialized filters
+                     decoded too);
   xz, brotli, zstd:  archive, the command-line tools (xz -9e, Brotli 11 with a 16 MiB window, Zstandard 19
                      with long matching), each its own process so its memory is seen as well;
   expandxz:          our preparation of the file (`expand`: every rebuildable stream decoded in place) then
@@ -73,6 +75,11 @@ DEFAULTS = {
                  'cmd': ['qpdf', '--object-streams=generate', '--compress-streams=y', '--recompress-flate',
                          '--compression-level=9', '--decode-level=generalized', '{in}', '{out}'],
                  'version': ['qpdf', '--version']},
+        # qpdf's strongest lossless setting: also the specialized filters decoded and recompressed.
+        'qpdf-max': {'mode': 'pdf', 'ok_rc': [0, 3],
+                     'cmd': ['qpdf', '--object-streams=generate', '--compress-streams=y', '--recompress-flate',
+                             '--compression-level=9', '--decode-level=specialized', '{in}', '{out}'],
+                     'version': ['qpdf', '--version']},
         'xz': {'mode': 'archive', 'stdout': True, 'cmd': ['xz', '-9e', '-k', '-c', '-T1', '{in}'], 'version': ['xz', '--version']},
         'brotli': {'mode': 'archive', 'stdout': True, 'cmd': ['brotli', '-q', '11', '-w', '24', '-c', '{in}'], 'version': ['brotli', '--version']},
         'zstd': {'mode': 'archive', 'stdout': True, 'cmd': ['zstd', '-19', '--long=27', '-T1', '-q', '-c', '{in}'], 'version': ['zstd', '--version']},
