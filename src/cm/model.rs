@@ -1084,6 +1084,17 @@ impl Model {
             self.slot[i] = self.tables[i].find(h);
         }
     }
+
+    /// The number of bytes coded so far: the history's length.
+    pub fn hist_len(&self) -> usize {
+        self.hist.len()
+    }
+
+    /// `n` bytes of the history from `at`, or None when it doesn't hold them. Every byte coded is added to the
+    /// history once, in order, and nothing else changes it, so this reads back exactly what was coded.
+    pub fn history(&self, at: usize, n: usize) -> Option<&[u8]> {
+        self.hist.get(at..at.checked_add(n)?)
+    }
 }
 
 #[cfg(test)]

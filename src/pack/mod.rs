@@ -436,35 +436,22 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
     }
 }
 
-/// Filtered rows -> (filter types, pixels). None if the data isn't whole valid rows.
-fn unfilter(data: &[u8], row: usize, bpp: usize) -> Option<(Vec<u8>, Vec<u8>)> {
-    if row == 0 || !data.len().is_multiple_of(row + 1) {
-        return None;
+/// Undoes PNG filter type `ft` (0 to 4) on one row in place: `cur` holds the filtered bytes and becomes the
+/// pixels; `prev` is the row above (pixels), None for the first row.
+fn unfilter_row(ft: u8, cur: &mut [u8], prev: Option<&[u8]>, bpp: usize) {
+    for i in 0..cur.len() {
+        let a = if i >= bpp { cur[i - bpp] } else { 0 };
+        let b = prev.map_or(0, |p| p[i]);
+        let c = if i >= bpp { prev.map_or(0, |p| p[i - bpp]) } else { 0 };
+        let x = cur[i];
+        cur[i] = match ft {
+            0 => x,
+            1 => x.wrapping_add(a),
+            2 => x.wrapping_add(b),
+            3 => x.wrapping_add(((a as u16 + b as u16) / 2) as u8),
+            _ => x.wrapping_add(paeth(a, b, c)),
+        };
     }
-    let rows = data.len() / (row + 1);
-    let mut types = Vec::with_capacity(rows);
-    let mut px = vec![0u8; rows * row];
-    for r in 0..rows {
-        let ft = data[r * (row + 1)];
-        if ft > 4 {
-            return None;
-        }
-        types.push(ft);
-        let src = &data[r * (row + 1) + 1..(r + 1) * (row + 1)];
-        for i in 0..row {
-            let a = if i >= bpp { px[r * row + i - bpp] } else { 0 };
-            let b = if r > 0 { px[(r - 1) * row + i] } else { 0 };
-            let c = if r > 0 && i >= bpp { px[(r - 1) * row + i - bpp] } else { 0 };
-            px[r * row + i] = match ft {
-                0 => src[i],
-                1 => src[i].wrapping_add(a),
-                2 => src[i].wrapping_add(b),
-                3 => src[i].wrapping_add(((a as u16 + b as u16) / 2) as u8),
-                _ => src[i].wrapping_add(paeth(a, b, c)),
-            };
-        }
-    }
-    Some((types, px))
 }
 
 fn refilter(types: &[u8], px: &[u8], row: usize, bpp: usize) -> Vec<u8> {
@@ -733,15 +720,19 @@ enum Plan {
     Syntax(usize, usize),
     Raw(usize, usize),
     /// A zlib stream stored decoded: the planner keeps its settings and the length of its decoded form,
-    /// `dlen`, and the stream is inflated again when its turn comes (a plan holds no decoded data, so the
+    /// `dlen`, and the stream is inflated again, in pieces, as it is coded (a plan holds no decoded data, so the
     /// planner's memory doesn't follow what the streams decode to). `tail`: the bytes after the zlib stream.
-    /// `lep`: the decoded data is a JPEG, recompressed with Lepton (when that beats the Flate bytes).
+    /// `lep`: the decoded data is a JPEG, recompressed with Lepton (when that beats the Flate bytes). `looks`
+    /// and `plain`: what the coding of the decoded data decides from all of it (`looks_like_content`,
+    /// `plainly`), worked out by the planner, which holds it.
     Rebuilt {
         params: zlibexact::Params,
         src: Source,
         dlen: usize,
         tail: Vec<u8>,
         lep: Option<Vec<u8>>,
+        looks: bool,
+        plain: bool,
     },
     /// A JPEG recompressed with an existing library (Lepton), restored bit for bit.
     Lepton {
@@ -794,14 +785,16 @@ fn plan(d: &[u8], opt: &PackOptions) -> Vec<Plan> {
 
 /// What `stream_plan` found for a stream's bytes, before it knows where they come from.
 enum Found {
-    Rebuilt { params: zlibexact::Params, dlen: usize, tail: Vec<u8>, lep: Option<Vec<u8>> },
+    Rebuilt { params: zlibexact::Params, dlen: usize, tail: Vec<u8>, lep: Option<Vec<u8>>, looks: bool, plain: bool },
     Lepton(Vec<u8>),
 }
 
 impl Found {
     fn plan(self, src: Source) -> Plan {
         match self {
-            Found::Rebuilt { params, dlen, tail, lep } => Plan::Rebuilt { params, src, dlen, tail, lep },
+            Found::Rebuilt { params, dlen, tail, lep, looks, plain } => {
+                Plan::Rebuilt { params, src, dlen, tail, lep, looks, plain }
+            }
             Found::Lepton(data) => Plan::Lepton { src, data },
         }
     }
@@ -815,7 +808,8 @@ impl Found {
 fn stream_plan(raw: &[u8], opt: &PackOptions) -> Option<Found> {
     if let Some((params, data, tail)) = rebuild_params(raw, opt.max_stream) {
         let lep = if opt.existing { nested_lepton(&data, raw.len()) } else { None };
-        return Some(Found::Rebuilt { params, dlen: data.len(), tail, lep });
+        let (looks, plain) = (looks_like_content(&data), plainly(&data, opt.effort < PLAIN_BELOW));
+        return Some(Found::Rebuilt { params, dlen: data.len(), tail, lep, looks, plain });
     }
     if !opt.existing {
         return None;
@@ -881,10 +875,9 @@ fn within_budget(mut plans: Vec<Plan>, max_decoded: u64) -> (Vec<Plan>, u64) {
 pub fn crafted_claim(input: &[u8], claim: u64) -> Vec<u8> {
     let claim = usize::try_from(claim).unwrap_or(usize::MAX).min(MAX_PART);
     let params = zlibexact::Params { level: 6, window_bits: 15, mem_level: 8, filtered: false };
-    let plans = vec![
-        Plan::Syntax(0, input.len()),
-        Plan::Rebuilt { params, src: Source::Bytes(zlib_of_zeros(claim)), dlen: claim, tail: Vec::new(), lep: None },
-    ];
+    let src = Source::Bytes(zlib_of_zeros(claim));
+    let zeros = Plan::Rebuilt { params, src, dlen: claim, tail: Vec::new(), lep: None, looks: false, plain: false };
+    let plans = vec![Plan::Syntax(0, input.len()), zeros];
     let mut stats = PackStats::default();
     let (_, enc) =
         run(Encoder::new(), Some(input), Some(plans), input.len(), &PackOptions::default(), &mut stats, claim as u64);
@@ -925,7 +918,10 @@ pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
             Plan::Rebuilt { src, dlen, tail, lep, .. } => {
                 match lep {
                     Some(l) => extra += l.len(),
-                    None => extra += put(&mut out, &inflated(&src, Some(d), dlen).unwrap_or_default()),
+                    None => {
+                        let data = src.bytes(Some(d)).and_then(|z| inflated(z, dlen));
+                        extra += put(&mut out, &data.unwrap_or_default())
+                    }
                 }
                 out.extend_from_slice(&tail);
                 extra += 2;
@@ -1047,11 +1043,156 @@ impl Restored<'_> {
     }
 }
 
-/// The decoded form of a stream from its source, inflated again: exactly `dlen` bytes, or None (which
-/// can't happen for a stream the planner inflated once already).
-fn inflated(src: &Source, d: Option<&[u8]>, dlen: usize) -> Option<Vec<u8>> {
-    let u = zlib::unwrap(src.bytes(d)?, dlen).ok()?;
+/// The decoded form of a stream's bytes, inflated again: exactly `dlen` bytes, or None (which can't happen for
+/// a stream the planner inflated once already).
+fn inflated(raw: &[u8], dlen: usize) -> Option<Vec<u8>> {
+    let u = zlib::unwrap(raw, dlen).ok()?;
     (u.data.len() == dlen).then_some(u.data)
+}
+
+/// Encoder only: a rebuilt stream (`raw`, its bytes as stored), whose decoded bytes are inflated again in
+/// pieces as they are coded, never held whole, and what the planner found in them (see `Plan::Rebuilt`).
+struct Feed<'a> {
+    raw: &'a [u8],
+    dlen: usize,
+    looks: bool,
+    plain: bool,
+}
+
+impl Feed<'_> {
+    /// Hands the decoded bytes to `f` in order, a Deflate block at a time. False if `f` stopped, or if they
+    /// aren't the `dlen` bytes they were when the stream was planned.
+    fn each(&self, mut f: impl FnMut(&[u8]) -> bool) -> bool {
+        matches!(zlib::unwrap_pieces(self.raw, self.dlen, &mut f), Ok(Some((n, _))) if n == self.dlen)
+    }
+
+    /// The row types of PNG predictor rows of `row` bytes, from a first pass: Ok(None) when the data isn't
+    /// whole rows whose types are all known (0 to 4), and Err when it doesn't inflate again as planned.
+    fn png_types(&self, row: usize) -> Result<Option<Vec<u8>>, ()> {
+        if row == 0 || !self.dlen.is_multiple_of(row + 1) {
+            return Ok(None);
+        }
+        let mut types = Vec::with_capacity(self.dlen / (row + 1));
+        let (mut at, mut known) = (0, true);
+        let done = self.each(|p| {
+            // The rows start every row + 1 bytes from the start of the data; `at` is where `p` starts.
+            let mut i = (row + 1 - at % (row + 1)) % (row + 1);
+            while i < p.len() {
+                known &= p[i] <= 4;
+                types.push(p[i]);
+                i += row + 1;
+            }
+            at += p.len();
+            known
+        });
+        match (known, done) {
+            (false, _) => Ok(None),
+            (true, true) => Ok(Some(types)),
+            (true, false) => Err(()),
+        }
+    }
+
+    /// The whole decoded stream (for a Type 1 font program, which is small).
+    fn whole(&self) -> Option<Vec<u8>> {
+        inflated(self.raw, self.dlen)
+    }
+}
+
+/// Encoder: codes the pixels of PNG predictor rows of `row` bytes as the stream is inflated again, a row at a
+/// time (the types are coded already): a row is unfiltered in place once its bytes are in. Holds two rows.
+/// False if the stream doesn't inflate again as planned.
+fn png_pixels<C: Coder>(io: &mut Io<C>, feed: &Feed, row: usize, bpp: usize) -> bool {
+    let (mut cur, mut prev): (Vec<u8>, Vec<u8>) = (Vec::new(), Vec::new());
+    let (mut ft, mut first) = (None, true);
+    feed.each(|mut p| {
+        while !p.is_empty() {
+            let Some(t) = ft else {
+                ft = Some(p[0]);
+                p = &p[1..];
+                cur.clear();
+                cur.reserve_exact(row);
+                continue;
+            };
+            let take = (row - cur.len()).min(p.len());
+            cur.extend_from_slice(&p[..take]);
+            p = &p[take..];
+            if cur.len() == row {
+                unfilter_row(t, &mut cur, (!first).then_some(&prev[..]), bpp);
+                io.skip(Some(&cur), row);
+                std::mem::swap(&mut cur, &mut prev);
+                (ft, first) = (None, false);
+                if io.damaged {
+                    return false;
+                }
+            }
+        }
+        true
+    })
+}
+
+/// Encoder: codes the samples of TIFF predictor 2 rows of `row` bytes, `bpp` per pixel, as the stream is
+/// inflated again: each byte plus the sample `bpp` before it in its row, a piece at a time.
+fn tiff_samples<C: Coder>(io: &mut Io<C>, feed: &Feed, row: usize, bpp: usize) -> bool {
+    // The last `bpp` samples of the row by their column modulo `bpp` (`k`), and the samples of one piece.
+    let mut back = vec![0u8; bpp];
+    let (mut col, mut k) = (0, 0);
+    let mut px = Vec::new();
+    feed.each(|p| {
+        px.clear();
+        px.extend(p.iter().map(|&x| {
+            let s = if col >= bpp { x.wrapping_add(back[k]) } else { x };
+            back[k] = s;
+            (col, k) = (col + 1, k + 1);
+            if k == bpp {
+                k = 0;
+            }
+            if col == row {
+                (col, k) = (0, 0);
+            }
+            s
+        }));
+        io.skip(Some(&px), px.len());
+        !io.damaged
+    })
+}
+
+/// A decoded stream as `payload` leaves it, for the decoder to make its zlib bytes again. The bytes it coded
+/// are in the model's history, which keeps them (every byte coded is added to it, once), so they are read
+/// from there; only what the model doesn't see as it is needs a copy.
+enum Decoded {
+    /// Coded as they are: `len` bytes of the history from `at`.
+    Hist { at: usize, len: usize },
+    /// PNG predictor rows: `rows` row types from `at`, then the pixels; filtered again on the way out.
+    Png { at: usize, rows: usize, row: usize, bpp: usize },
+    /// TIFF predictor 2: `len` samples from `at`, differenced again on the way out.
+    Tiff { at: usize, len: usize, row: usize, bpp: usize },
+    /// Made on the way: a Type 1 font closed again, a JPEG from Lepton (nothing on the encoder).
+    Bytes(Vec<u8>),
+}
+
+impl Decoded {
+    /// The zlib stream of the decoded bytes, or None when the history doesn't hold them (a damaged file).
+    fn zlib(&self, m: &Model, p: zlibexact::Params) -> Option<Vec<u8>> {
+        let z = match *self {
+            Decoded::Hist { at, len } => zlibexact::zlib_stream(m.history(at, len)?, p),
+            Decoded::Png { at, rows, row, bpp } => {
+                let types = m.history(at, rows)?;
+                let px = m.history(at.checked_add(rows)?, rows.checked_mul(row)?)?;
+                zlibexact::zlib_stream(&refilter(types, px, row, bpp), p)
+            }
+            Decoded::Tiff { at, len, row, bpp } => {
+                let mut px = m.history(at, len)?.to_vec();
+                for r in px.chunks_mut(row) {
+                    for i in (bpp..r.len()).rev() {
+                        r[i] = r[i].wrapping_sub(r[i - bpp]);
+                    }
+                }
+                zlibexact::zlib_stream(&px, p)
+            }
+            Decoded::Bytes(ref v) => zlibexact::zlib_stream(v, p),
+        };
+        Some(z)
+    }
 }
 
 /// One pass of the format: encoding `d` with its `plans` (Some) or rebuilding it (None). The same code runs
@@ -1166,20 +1307,19 @@ fn run<'d, C: Coder>(
                 }
             }
             T_REBUILT => {
-                // The encoder inflates the stream again here: the plan kept only its settings.
-                let (p_in, raw_in, data, tail_in, lep_in) = match cur.flatten() {
-                    Some(Plan::Rebuilt { params, src, dlen, tail, lep }) => match inflated(src, d, *dlen) {
-                        Some(data) => {
-                            (Some(*params), src.bytes(d), Some(data), Some(tail.as_slice()), Some(lep.as_deref()))
-                        }
-                        None => {
+                // The encoder inflates the stream again as it codes it: the plan kept only its settings and what
+                // the planner found in the decoded bytes.
+                let (p_in, feed, tail_in, lep_in) = match cur.flatten() {
+                    Some(Plan::Rebuilt { params, src, dlen, tail, lep, looks, plain }) => {
+                        let Some(raw) = src.bytes(d) else {
                             io.damaged = true;
                             break;
-                        }
-                    },
-                    _ => (None, None, None, None, None),
+                        };
+                        let feed = Feed { raw, dlen: *dlen, looks: *looks, plain: *plain };
+                        (Some(*params), Some(feed), Some(tail.as_slice()), Some(lep.as_deref()))
+                    }
+                    _ => (None, None, None, None),
                 };
-                let data_in = data.as_deref();
                 let level = io.byte(p_in.map(|p| p.level));
                 let wb = io.byte(p_in.map(|p| p.window_bits));
                 let mem = io.byte(p_in.map(|p| p.mem_level));
@@ -1194,19 +1334,22 @@ fn run<'d, C: Coder>(
                 let tail_n = io.length(tail_in.map(|t| t.len() as u64), left);
                 let mut tail = Vec::new();
                 io.source_bytes(tail_in, tail_n, &mut tail);
-                let decoded = payload(&mut io, data_in, lep_in, out.view(), stats);
+                let decoded = payload(&mut io, feed.as_ref(), lep_in, out.view(), stats);
                 if io.damaged {
                     break;
                 }
-                match raw_in {
+                match &feed {
                     // The encoder: these settings were found to make exactly the stream's bytes.
-                    Some(raw) => {
-                        out.keep_all(raw);
-                        stats.rebuilt_bytes += raw.len().saturating_sub(tail_n);
-                        given = Cow::Borrowed(raw);
+                    Some(f) => {
+                        out.keep_all(f.raw);
+                        stats.rebuilt_bytes += f.raw.len().saturating_sub(tail_n);
+                        given = Cow::Borrowed(f.raw);
                     }
                     None => {
-                        let z = zlibexact::zlib_stream(&decoded, params);
+                        let Some(z) = decoded.zlib(io.m, params) else {
+                            io.damaged = true;
+                            break;
+                        };
                         out.keep_all(&z);
                         out.keep_all(&tail);
                         stats.rebuilt_bytes += z.len();
@@ -1229,8 +1372,7 @@ fn run<'d, C: Coder>(
                 // Lepton's data is smaller than the JPEG it restores (see `lepton_bytes`), so never more than
                 // what is left of the file.
                 let n = io.part(src.map(|x| x.len() as u64), left);
-                let mut lep = Vec::new();
-                lepton_part(&mut io, src, n, &mut lep, stats);
+                let at = lepton_part(&mut io, src, n, stats);
                 if io.damaged {
                     break;
                 }
@@ -1240,7 +1382,7 @@ fn run<'d, C: Coder>(
                         out.keep_all(j);
                         given = Cow::Borrowed(j);
                     }
-                    None => match unlepton(&lep) {
+                    None => match io.m.history(at, n).and_then(unlepton) {
                         Some(j) => out.keep_all(&j),
                         None => {
                             io.damaged = true;
@@ -1345,104 +1487,105 @@ fn run<'d, C: Coder>(
 }
 
 /// Lepton's output: usually entropy-coded already, so coded plainly (repeats are still found); our model
-/// when it isn't (an odd JPEG). The encoder decides; the decision is stored.
-fn lepton_part<C: Coder>(io: &mut Io<C>, src: Option<&[u8]>, n: usize, lep: &mut Vec<u8>, stats: &mut PackStats) {
+/// when it isn't (an odd JPEG). The encoder decides; the decision is stored. Returns where the data starts
+/// in the model's history, which keeps it.
+fn lepton_part<C: Coder>(io: &mut Io<C>, src: Option<&[u8]>, n: usize, stats: &mut PackStats) -> usize {
     let flat = io.byte(src.map(|x| looks_compressed(x, true) as u8)) == 1;
     io.m.set_kind(Kind::Raw, Geom::default(), 0);
     io.m.set_flat(flat);
-    io.source_bytes(src, n, lep);
+    let at = io.m.hist_len();
+    io.skip(src, n);
     io.m.set_flat(false);
     if flat {
         stats.flat_bytes += n;
     }
+    at
 }
 
 /// Codes a decoded stream payload (shared by the rebuilt kinds): its length, then the data with the model
-/// set for what it is; image rows lose their PNG predictor bytes on the way.
+/// set for what it is; image rows lose their PNG predictor bytes on the way. The encoder takes the data from
+/// `feed`, inflated again in pieces as it is coded.
 fn payload<C: Coder>(
     io: &mut Io<C>,
-    data_in: Option<&[u8]>,
+    feed: Option<&Feed>,
     lep_in: Option<Option<&[u8]>>,
     out: &[u8],
     stats: &mut PackStats,
-) -> Vec<u8> {
-    let dlen = io.part(data_in.map(|x| x.len() as u64), MAX_PART);
+) -> Decoded {
+    let dlen = io.part(feed.map(|f| f.dlen as u64), MAX_PART);
     // A JPEG behind Flate (as normal-PDF output writes them): Lepton for the JPEG inside.
     if io.byte(lep_in.map(|l| l.is_some() as u8)) == 1 {
         if !HAVE_EXISTING {
             stats.needs_existing = true;
             io.damaged = true;
-            return Vec::new();
+            return Decoded::Bytes(Vec::new());
         }
         let src = lep_in.flatten();
         let n = io.part(src.map(|x| x.len() as u64), MAX_PART);
-        let mut lep = Vec::new();
-        lepton_part(io, src, n, &mut lep, stats);
+        let at = lepton_part(io, src, n, stats);
         stats.leptons += 1;
         stats.decoded_bytes += dlen;
         // The encoder checked when it planned the part that the data gives the JPEG back (`lepton_bytes`).
-        if src.is_some() {
-            return Vec::new();
+        if src.is_some() || io.damaged {
+            return Decoded::Bytes(Vec::new());
         }
-        return match (io.damaged, unlepton(&lep)) {
-            (false, Some(j)) if j.len() == dlen => j,
+        return match io.m.history(at, n).and_then(unlepton) {
+            Some(j) if j.len() == dlen => Decoded::Bytes(j),
             _ => {
                 io.damaged = true;
-                Vec::new()
+                Decoded::Bytes(Vec::new())
             }
         };
     }
     let dict = dict_before(out, out.len().saturating_sub(1));
-    let looks = io.byte(data_in.map(|x| looks_like_content(x) as u8));
+    let looks = io.byte(feed.map(|f| f.looks as u8));
     let mut inf = info(dict.as_ref(), Some(if looks == 1 { b"q" as &[u8] } else { b"\x00" as &[u8] }));
-    // The decoder's decoded stream, made again from what was coded (the encoder keeps nothing).
-    let mut decoded: Vec<u8> = Vec::new();
+    let mut decoded = Decoded::Bytes(Vec::new());
     let mut used_png = false;
     if let Some((row, bpp)) = inf.png {
-        let split = data_in.map(|x| unfilter(x, row, bpp));
-        let ok = io.byte(split.as_ref().map(|s| s.is_some() as u8));
+        // The encoder's first pass: the row types, which must all be known for the rows to be unfiltered.
+        let Ok(types_in) = feed.map(|f| f.png_types(row)).transpose() else {
+            io.damaged = true;
+            return decoded;
+        };
+        let ok = io.byte(types_in.as_ref().map(|t| t.is_some() as u8));
         if ok == 1 {
-            let (types_in, px_in) = match &split {
-                Some(Some((t, p))) => (Some(t.as_slice()), Some(p.as_slice())),
-                _ => (None, None),
-            };
             let rows = dlen / (row + 1);
             io.m.set_kind(Kind::Data, Geom::default(), 0);
-            let mut types = Vec::new();
-            io.source_bytes(types_in, rows, &mut types);
+            let at = io.m.hist_len();
+            io.skip(types_in.as_ref().and_then(|t| t.as_deref()), rows);
             io.m.set_kind(Kind::Image, Geom { stride: row, bpp, exact: inf.geom.exact }, 0);
-            let mut px = Vec::new();
-            io.source_bytes(px_in, rows * row, &mut px);
-            if io.damaged {
-                return Vec::new();
+            match feed {
+                Some(f) => {
+                    if !png_pixels(io, f, row, bpp) {
+                        io.damaged = true;
+                    }
+                }
+                None => io.skip(None, rows * row),
             }
-            decoded = refilter(&types, &px, row, bpp);
+            if io.damaged {
+                return decoded;
+            }
+            decoded = Decoded::Png { at, rows, row, bpp };
             used_png = true;
             stats.unpredicted_images += 1;
         }
     }
     if let (false, Some((row, bpp))) = (used_png, inf.tiff) {
         // TIFF differences back to samples (per row, 8-bit), and differenced again on the way out.
-        let ok = io.byte(data_in.map(|x| (row > 0 && x.len() % row == 0) as u8));
+        let ok = io.byte(feed.map(|f| (row > 0 && f.dlen.is_multiple_of(row)) as u8));
         if ok == 1 && row > 0 {
-            let px_in = data_in.map(|x| {
-                let mut v = x.to_vec();
-                for r in v.chunks_mut(row) {
-                    for i in bpp..r.len() {
-                        r[i] = r[i].wrapping_add(r[i - bpp]);
+            io.m.set_kind(Kind::Image, Geom { stride: row, bpp, exact: false }, 0);
+            let at = io.m.hist_len();
+            match feed {
+                Some(f) => {
+                    if !tiff_samples(io, f, row, bpp) {
+                        io.damaged = true;
                     }
                 }
-                v
-            });
-            io.m.set_kind(Kind::Image, Geom { stride: row, bpp, exact: false }, 0);
-            let mut px = Vec::new();
-            io.source_bytes(px_in.as_deref(), dlen, &mut px);
-            for r in px.chunks_mut(row) {
-                for i in (bpp..r.len()).rev() {
-                    r[i] = r[i].wrapping_sub(r[i - bpp]);
-                }
+                None => io.skip(None, dlen),
             }
-            decoded = px;
+            decoded = Decoded::Tiff { at, len: dlen, row, bpp };
             used_png = true;
             stats.unpredicted_images += 1;
         }
@@ -1466,19 +1609,39 @@ fn payload<C: Coder>(
         // Decoded data can itself be compressed (a JPEG behind Flate, say); a Type 1 font program is opened
         // instead, never coded plainly (see `PackOptions::effort`).
         let font = type1::is_type1(dict.as_ref());
-        let flat = io.byte(data_in.map(|x| (inf.png.is_none() && !font && plainly(x, io.plain)) as u8)) == 1;
+        let flat = io.byte(feed.map(|f| (inf.png.is_none() && !font && f.plain) as u8)) == 1;
         io.m.set_kind(inf.kind, inf.geom, 0);
         io.m.set_flat(flat);
         if font && !flat {
-            let decoding = data_in.is_none();
-            let keep = |x: &[u8]| {
-                if decoding {
-                    decoded.extend_from_slice(x)
-                }
-            };
-            type1::code(io, data_in, dlen, dict.as_ref(), inf.kind, keep, stats);
+            // A font program is small: the encoder inflates it whole, as the planner did.
+            let font_in = feed.map(|f| f.whole());
+            if font_in.as_ref().is_some_and(Option::is_none) {
+                io.damaged = true;
+            } else {
+                let mut made = Vec::new();
+                let keep = |x: &[u8]| {
+                    if feed.is_none() {
+                        made.extend_from_slice(x)
+                    }
+                };
+                type1::code(io, font_in.flatten().as_deref(), dlen, dict.as_ref(), inf.kind, keep, stats);
+                decoded = Decoded::Bytes(made);
+            }
         } else {
-            io.source_bytes(data_in, dlen, &mut decoded);
+            let at = io.m.hist_len();
+            match feed {
+                Some(f) => {
+                    let done = f.each(|p| {
+                        io.skip(Some(p), p.len());
+                        !io.damaged
+                    });
+                    if !done {
+                        io.damaged = true;
+                    }
+                }
+                None => io.skip(None, dlen),
+            }
+            decoded = Decoded::Hist { at, len: dlen };
         }
         io.m.set_flat(false);
         if flat {
@@ -1950,7 +2113,7 @@ mod tests {
         let cases: Vec<Vec<Plan>> = vec![
             vec![
                 Plan::Syntax(0, a),
-                Plan::Rebuilt { params, src, dlen, tail: Vec::new(), lep: None },
+                Plan::Rebuilt { params, src, dlen, tail: Vec::new(), lep: None, looks: false, plain: false },
                 Plan::Syntax(a + 4, d.len()),
             ],
             vec![
@@ -1960,7 +2123,15 @@ mod tests {
             ],
             vec![
                 Plan::Syntax(0, a),
-                Plan::Rebuilt { params, src: small_src, dlen: small_len, tail: Vec::new(), lep: Some(huge.clone()) },
+                Plan::Rebuilt {
+                    params,
+                    src: small_src,
+                    dlen: small_len,
+                    tail: Vec::new(),
+                    lep: Some(huge.clone()),
+                    looks: false,
+                    plain: false,
+                },
                 Plan::Syntax(a + 4, d.len()),
             ],
         ];
@@ -2007,7 +2178,10 @@ mod tests {
         let params = Params { level: 6, window_bits: 15, mem_level: 8, filtered: false };
         let lying = pack_declaring(
             d,
-            vec![Plan::Syntax(0, d.len()), Plan::Rebuilt { params, src, dlen, tail: Vec::new(), lep: None }],
+            vec![
+                Plan::Syntax(0, d.len()),
+                Plan::Rebuilt { params, src, dlen, tail: Vec::new(), lep: None, looks: false, plain: false },
+            ],
             0,
         );
         assert_eq!(unpack(&lying).unwrap_err(), UnpackError::Damaged("a part doesn't restore"));
@@ -2029,8 +2203,9 @@ mod tests {
         assert!(st.rebuilt == 1 && !st.fallback, "{st:?}");
         assert_eq!(unpack(&packed).unwrap(), d);
         let params = Params { window_bits: 8, ..params };
+        let src = Source::File(a, b);
         let rebuilt =
-            Plan::Rebuilt { params, src: Source::File(a, b), dlen: content.len(), tail: Vec::new(), lep: None };
+            Plan::Rebuilt { params, src, dlen: content.len(), tail: Vec::new(), lep: None, looks: true, plain: false };
         let packed = pack_declaring(&d, vec![Plan::Syntax(0, a), rebuilt, Plan::Syntax(b, d.len())], 1 << 20);
         assert_eq!(unpack(&packed).unwrap_err(), UnpackError::Damaged("a part doesn't restore"));
     }
@@ -2115,7 +2290,15 @@ mod tests {
         let small = Source::Bytes(zlibexact::zlib_stream(&[0xFFu8; 2048], params));
         let cases: Vec<Plan> = vec![
             Plan::Lepton { src: Source::File(a, a + 4), data: vec![1, 2, 3, 4] },
-            Plan::Rebuilt { params, src: small, dlen: 2048, tail: Vec::new(), lep: Some(vec![5, 6, 7, 8]) },
+            Plan::Rebuilt {
+                params,
+                src: small,
+                dlen: 2048,
+                tail: Vec::new(),
+                lep: Some(vec![5, 6, 7, 8]),
+                looks: false,
+                plain: false,
+            },
         ];
         for (k, part) in cases.into_iter().enumerate() {
             let packed = pack_declaring(d, vec![Plan::Syntax(0, a), part, Plan::Syntax(a + 4, d.len())], 4096);

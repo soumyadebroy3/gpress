@@ -192,3 +192,50 @@ fn every_part_kind_restores_and_packs_to_the_pinned_bytes() {
         assert_eq!(hex(&sha256(&packed)), want, "{name} at effort {effort}: {} bytes", packed.len());
     }
 }
+
+/// Images whose rows the encoder works out as the stream is inflated again (see `every_kind` for the
+/// rest): one long row, 16-bit samples (two bytes a pixel), four colours, and the same for TIFF.
+fn images() -> Vec<u8> {
+    let long = picture(5000, 1, 3);
+    let deep = picture(30, 20, 2);
+    let cmyk = picture(25, 18, 4);
+    let objs: Vec<(String, Vec<u8>)> = vec![
+        (image(5000, 1, "DeviceRGB", &png(5000, 3)), z(&png_rows(&long, 15000, 3, |_| 4), 1)),
+        (
+            format!("/Type /XObject /Subtype /Image /Width 30 /Height 20 /ColorSpace /DeviceGray /BitsPerComponent 16 {FLATE} /DecodeParms << /Predictor 15 /BitsPerComponent 16 /Columns 30 >>"),
+            z(&png_rows(&deep, 60, 2, |r| (r % 5) as u8), 1),
+        ),
+        (image(25, 18, "DeviceCMYK", &png(25, 4)), z(&png_rows(&cmyk, 100, 4, |r| (3 * r % 5) as u8), 2)),
+        (
+            image(25, 18, "DeviceCMYK", "/Filter /FlateDecode /DecodeParms << /Predictor 2 /Colors 4 /Columns 25 >>"),
+            z(&tiff_rows(&cmyk, 100, 4), 1),
+        ),
+        (image(5000, 1, "DeviceRGB", &TIFF.replace("40", "5000")), z(&tiff_rows(&long, 15000, 3), 1)),
+    ];
+    let mut d = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n".to_vec();
+    for (k, (dict, data)) in objs.iter().enumerate() {
+        d.extend_from_slice(format!("{} 0 obj\n<< {dict} /Length {} >>\nstream\n", k + 2, data.len()).as_bytes());
+        d.extend_from_slice(data);
+        d.extend_from_slice(b"\nendstream\nendobj\n");
+    }
+    d.extend_from_slice(b"trailer\n<< /Root 1 0 R >>\n%%EOF\n");
+    d
+}
+
+/// Measured before the encoder took rebuilt streams in pieces (the same with or without the existing
+/// library): (effort, hash).
+const PINNED_IMAGES: [(u8, &str); 2] = [
+    (100, "12cce703a3eece9c07d3fb58f1ded7bc9b43bf41d934112cbb2b340aea8d5a05"),
+    (0, "12cce703a3eece9c07d3fb58f1ded7bc9b43bf41d934112cbb2b340aea8d5a05"),
+];
+
+#[test]
+fn images_made_row_by_row_pack_to_the_pinned_bytes() {
+    let pdf = images();
+    for (effort, want) in PINNED_IMAGES {
+        let (packed, st) = pack_with(&pdf, &PackOptions { effort, threads: 1, ..PackOptions::default() });
+        assert!(st.rebuilt == 5 && st.unpredicted_images == 5 && !st.fallback && !st.stored, "{st:?}");
+        assert_eq!(unpack(&packed).unwrap(), pdf);
+        assert_eq!(hex(&sha256(&packed)), want, "effort {effort}: {} bytes", packed.len());
+    }
+}
