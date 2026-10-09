@@ -41,6 +41,15 @@ impl Matches {
     pub fn same_at(&self, pos: usize) -> usize {
         self.same[pos - self.from] as usize
     }
+    /// What `chain_at` reads, for a whole parse: position `from + k` has `list[start[k]..start[k + 1]]`.
+    #[inline(always)]
+    pub fn chain_lists(&self) -> (&[u32], &[(u16, u16)]) {
+        if self.chain_start.is_empty() {
+            (&self.start, &self.steps)
+        } else {
+            (&self.chain_start, &self.chain)
+        }
+    }
 }
 
 #[inline]
