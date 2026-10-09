@@ -49,6 +49,15 @@ archive briefs.)
 all, measured in CI's Node test. No large table built at start-up; tables built on first use, sized to the
 input.
 
+**L6. Every core in the browser too.** The TypeScript package runs the work on a pool of Web Workers sized
+from `navigator.hardwareConcurrency` (each worker its own module instance, so no `SharedArrayBuffer` and no
+cross-origin isolation is needed), with one worker as the fallback; or WebAssembly threads when the page is
+cross-origin isolated, whichever measures faster at equal memory. This needs the engine to split a job into
+a plan, independent pieces (streams, segments) and an assembly step; add that to the library's API without
+changing any output byte, and keep the one-call API for simple use. Output identical to the native
+library's for any worker count. Target: a 5 MB PDF at effort 0 at least 2.5 times faster with 4 workers than
+with 1 on a 4-core runner; memory at most the one-worker peak plus a stated amount per worker.
+
 **L5. Report it.** A "Lightweight" section in `bench/RESULTS.md`: sizes per build, the memory fit, the start-up
 time, and what each feature costs in bytes.
 

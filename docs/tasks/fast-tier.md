@@ -54,6 +54,14 @@ below are this machine's; on another machine, scale them by qpdf's own time ther
 - **T5, lightweight:** peak memory at effort 0 not above today's (95 MB on the sample), lower where the fast
   path allows.
 - **T6, nothing else moves:** efforts 21 to 100 byte-identical to the baseline; effort 100 above all.
+- **T7, every core:** with all the machine's cores (report how many), the fast path cuts large streams into
+  segments at fixed input offsets (1 MiB, never offsets that depend on the thread count), each primed with
+  the previous 32 KiB as its dictionary, and runs segments and streams on the thread pool. On the sample's 1
+  to 10 MB files at effort 0: total wall time at most 1.5 times (one-thread CPU time divided by the number of
+  cores), CPU time with all cores at most 1.15 times the one-thread CPU time, peak memory at most the
+  one-thread peak plus a stated working set per thread, and output byte-identical for 1, 2 and all cores.
+  Make the default thread count every core the machine offers (`default_threads` in `src/par.rs` drops its
+  cap of 8; a one-line change in its own commit, since session 4 also edits that file).
 
 ## The work
 
@@ -97,8 +105,10 @@ in shared files small and in their own commits.
     cargo build --release --features existing
     python3 -I bench/benchmark.py time new --set sample120 --who ours --efforts 0,10,20,50,100 --threads 1
     python3 -I bench/benchmark.py compare base new
+    python3 -I bench/benchmark.py time new-all --set sample120 --who ours --efforts 0 --threads $(nproc)
+    python3 -I bench/benchmark.py compare new new-all --metric wall      # T7: the speed-up with every core
 
-- T1 to T6 hold, with the numbers in the report (whole-sample CPU, the time-to-result percentiles per size
+- T1 to T7 hold, with the numbers in the report (whole-sample CPU, the time-to-result percentiles per size
   class, the saved percentage against qpdf's on the same files, peak memory, effort 21 to 100
   byte-identical);
 - both test suites, clippy on both feature sets, `cargo fmt --all --check`;
