@@ -1411,6 +1411,50 @@ mod effort_tests {
     }
 
     #[test]
+    fn the_fast_path_gives_images_a_lazy_level_and_the_bridge_the_strong_encoder() {
+        let text: Vec<u8> = (0..60_000u32).map(|i| b"BT 12 Tf (abc) Tj ET\n"[(i % 21) as usize]).collect();
+        let px: Vec<u8> = (0..200 * 150u32).map(|i| ((i % 200) + (i / 200)) as u8).collect();
+        let page = flate_stream(&text, &[]);
+        let image = flate_stream(&px, &[(b"Subtype", Obj::Name(b"Image".to_vec()))]);
+        let streams: Vec<(u32, &Stream)> = vec![(1, &page), (2, &image)];
+        let levels = |e: u8, input_len: usize| -> Vec<u8> {
+            effort_plan(&streams, &[0, 1], &Options::effort(e), input_len, None)
+                .iter()
+                .map(|o| o.as_ref().unwrap().flate.fast)
+                .collect()
+        };
+        // Effort 0: the page at the fast encoder's top level, the image at a lazy one.
+        assert_eq!(levels(0, 10_000), vec![flate::fast::LEVELS, image_level(0)]);
+        assert!(image_level(0) < flate::fast::LEVELS);
+        // Images get closer parses as the effort grows; nothing gets the strong encoder below STRONG_FROM.
+        for e in 1..STRONG_FROM {
+            let l = levels(e, 10_000_000);
+            assert!(l[0] == flate::fast::LEVELS && l[1] >= image_level(e - 1), "effort {e}: {l:?}");
+        }
+        // From STRONG_FROM the streams that take the most room get the strong encoder (fast 0) while their
+        // decoded bytes fit in the bridge budget: none of these at 10 in a 10 KB file, both at 19.
+        assert_eq!(levels(STRONG_FROM, 10_000), vec![flate::fast::LEVELS, image_level(STRONG_FROM)]);
+        assert_eq!(levels(19, 10_000), vec![0, 0]);
+        assert!(bridge_budget(9, 1000) == 0.0 && bridge_budget(20, 1000) == 0.0);
+        assert!((STRONG_FROM..19).all(|e| bridge_budget(e + 1, 1000) == 2.0 * bridge_budget(e, 1000)));
+    }
+
+    #[test]
+    fn below_20_a_stream_that_will_not_shrink_is_kept_as_it_is() {
+        let resolve = |o: &Obj| Some(o.clone());
+        let text: Vec<u8> = (0..40_000u32).map(|i| format!("{} {} l ", i % 97, i % 13).into_bytes()[0]).collect();
+        let mut d = Dict::default();
+        d.set(b"Filter", Obj::Name(b"FlateDecode".to_vec()));
+        // Stored with the strongest settings already: effort 0's re-encode is larger, so a bridge effort spends
+        // nothing more on it, while effort 20 still tries the strong encoder.
+        let s = Stream { dict: d, data: flate::deflate_zlib(&text, &flate::Options::max()) };
+        assert!(flate::deflate_zlib(&text, &flate::Options::effort(0)).len() >= s.data.len());
+        let strong = |e: u8| Options { flate: flate::Options::quick(), ..Options::effort(e) };
+        assert!(reencode(&s, &strong(15), &resolve).is_none());
+        assert!(reencode(&s, &Options::effort(0), &resolve).is_none());
+    }
+
+    #[test]
     fn a_stream_over_the_quick_budget_is_kept_as_it_is() {
         // 8 MB of blank image in a 20 KB file: the quick budget is 16 times the file at effort 0, twice as
         // much every 10 points, and at least 4 MiB. Another stream that takes more room in the file comes
@@ -1526,7 +1570,7 @@ mod effort_tests {
         pdf.extend_from_slice(
             format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes(),
         );
-        for effort in [0u8, 100] {
+        for effort in [0u8, 10, 100] {
             let one = optimize(&pdf, &Options { threads: 1, ..Options::effort(effort) });
             assert!(matches!(one.outcome, Outcome::Smaller(_)), "{:?}", one.outcome);
             // The system gives no thread, one, or two of the three asked for.
