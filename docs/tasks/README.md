@@ -26,7 +26,9 @@ The rules every branch is held to, from the owner:
 
 The owner's standard for every branch, in his words: "it has to be not a resource heavy tool, yet the best
 tool out there in terms of speed and compression level; security should not be compromised; it should use
-the CPU's threads as parallel cores for all the work." In practice:
+the CPU's threads as parallel cores for all the work", and "the threads could get only the information they
+need; all threads should be interconnected so that each can see each other's work, so repetitive tasks are
+avoided." In practice:
 
 - **Parallel everywhere it can be.** Every stage whose pieces are independent runs on the thread pool
   (`src/par.rs`): decoding, encoding, the self-check, image candidates, the archive's independent parts. A
@@ -35,6 +37,12 @@ the CPU's threads as parallel cores for all the work." In practice:
   almost nothing in size. The default thread count becomes every core the machine offers
   (`available_parallelism`, no cap of 8); `Options::threads` still sets it, and 1 still runs without any
   thread machinery.
+- **Each thread gets only what it needs.** A job receives an immutable view of its own input and its
+  resolved parameters, never the whole document; no job can read or change another's data.
+- **Threads see each other's work.** Work that repeats is found in a planning pass before any thread starts
+  and done once; repeats found while running go through one shared single-flight store per file (bounded,
+  checked before reuse). Only exact repeats are shared, so timing never changes the output
+  (`parallel-engine.md` builds this; the other briefs use it).
 - **Deterministic.** Identical output bytes for any thread count, any machine, with or without a time budget.
 - **Light.** Threads must not multiply the cost: total CPU time with N threads at most 1.15 times the one-thread
   CPU time; peak memory at most the one-thread peak plus a bounded working set per thread (state the bound);
@@ -143,9 +151,10 @@ In the plan's order of gain per unit of risk, pure changes first:
 
 Items the plan tried and rejected (A2) or that no longer apply (D6, preflate-rs is gone) have no brief.
 
-Three briefs are not from the plan: `fast-tier.md` (F1 to F5: a real fast path for effort 0, the owner's
-first priority), `lightweight.md` (L1 to L5: features, size, memory, start-up) and `security-hardening.md`
-(S1 to S5: an unsafe gate, fuzzing at length, Miri, sanitizers, a weekly CI job).
+Four briefs are not from the plan: `fast-tier.md` (F1 to F5: a real fast path for effort 0, the owner's
+first priority), `lightweight.md` (L1 to L6: features, size, memory, start-up, workers in the browser),
+`parallel-engine.md` (P1 to P5: each thread gets only what it needs and sees the others' work) and
+`security-hardening.md` (S1 to S5: an unsafe gate, fuzzing at length, Miri, sanitizers, a weekly CI job).
 
 ## Cloud sessions, wave 1: six at once, time first
 
@@ -162,7 +171,7 @@ pull request.
 | 1 | `ultracode: do the task in docs/tasks/flate-fixed-costs.md` | A1, A3, A4 | `src/flate/block.rs`, `huffman.rs`, the table set-up in `matcher.rs` |
 | 2 | `ultracode: do the task in docs/tasks/flate-inner-loops.md, then docs/tasks/pdf-memory.md on the same branch` | A6, A5, B3 | `src/flate/parse.rs`, the search loop and the lists in `matcher.rs` |
 | 3 | `ultracode: do the task in docs/tasks/model-loops.md, then docs/tasks/archive-memory.md on the same branch` | D1, D2, D4 | `src/cm/`, `src/pack/` |
-| 4 | `ultracode: do the task in docs/tasks/small-pure-gains.md, then docs/tasks/image-candidates-parallel.md on the same branch` | A7, A8, B2, D5, B1 | `src/flate/deflate.rs`, `zlibexact.rs`, `inflate.rs`, `src/pdf/`, `src/par.rs` |
+| 4 | `ultracode: do the task in docs/tasks/small-pure-gains.md, then docs/tasks/image-candidates-parallel.md, then docs/tasks/parallel-engine.md, all on the same branch` | A7, A8, B2, D5, B1, P1 to P5 | `src/flate/deflate.rs`, `zlibexact.rs`, `inflate.rs`, `src/pdf/`, `src/par.rs` |
 | 5 | `ultracode: do the task in docs/tasks/fast-tier.md` | F1 to F5 | `src/flate/fast.rs` (new), the effort plan in `src/pdf/rewrite.rs`, the predictor choice in `src/pdf/images.rs` |
 | 6 | `ultracode: do the task in docs/tasks/lightweight.md` | L1 to L5 | `Cargo.toml` features and profiles, `crates/`, CI size jobs, memory fixes in their own commits |
 
