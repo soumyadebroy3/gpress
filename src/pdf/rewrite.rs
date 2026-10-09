@@ -23,14 +23,20 @@ pub struct Options {
     pub objstm_size: usize,
     /// Largest decoded stream we re-encode.
     pub max_stream: usize,
-    /// How hard to try, 0 to 100. At 100 every stream gets `flate` and the full predictor search. Below,
-    /// the streams that take the most room in the file come first and get `flate`, or a cheaper step of 20,
-    /// while the work stays within a budget proportional to the file's size; the others get the quick
-    /// settings, and image predictors are chosen from a sample of rows (see `effort_plan`). The quick settings
-    /// have a budget too (16 decoded bytes per byte of the file at effort 0, at least 4 MiB): a stream beyond
-    /// it is kept as it is. Decided from sizes only, never from time, so the output is repeatable.
+    /// How hard to try, 0 to 100. Below 20 (`FAST_BELOW`) the fast encoder (`flate::fast`): effort 0 is the
+    /// fast path, with the fast encoder's near-optimal top level for page content, fonts and the rest, a lazy
+    /// level for images (`IMAGE_LEVEL`), image predictors chosen from an estimate and only the cheap steps.
+    /// 1 to 19 bridge to the strong encoder: images get closer parses and from 10 (`STRONG_FROM`) the streams
+    /// that take the most room get the strong encoder's quick settings within a budget that doubles every
+    /// point; a stream already compressed by Flate that effort 0's settings can't shrink is kept as it is. From
+    /// 20 on the strong encoder: at 100 every stream gets `flate` and the full predictor search; below, the
+    /// streams that take the most room come first and get `flate`, or a cheaper step of 20, while the work
+    /// stays within a budget proportional to the file's size, the others get the quick settings, and image
+    /// predictors are chosen from a sample of rows (see `effort_plan`). Below 100 the decoded bytes have a
+    /// budget too (16 per byte of the file at effort 0, twice as much every 10 points, at least 4 MiB): a
+    /// stream beyond it is kept as it is. Decided from sizes only, never from time, so the output is repeatable.
     pub effort: u8,
-    /// Threads to use (0: what the machine offers, at most 8). Never changes the output.
+    /// Threads to use (0: every core the machine offers). Never changes the output.
     pub threads: usize,
     /// Leave files that claim a conformance or carry a signature untouched: PDF/A, PDF/X, signed, certified,
     /// usage rights (the safe default). With `false` every object's value is still kept, but those
@@ -370,6 +376,24 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
         None
     };
     let rest = &stages[k..];
+    // Below 20, what won't shrink is left alone: a stream other than an image, already compressed by Flate,
+    // whose re-encode at effort 0's settings is not smaller is kept as it is, and no slower settings are
+    // spent on it. Decided from sizes alone. (An image goes on: a predictor may still make it smaller.)
+    if opt.effort < FAST_BELOW
+        && rest.is_empty()
+        && carried.is_none()
+        && stages[..k].iter().any(|st| st.name == b"FlateDecode")
+        && s.dict.name(b"Subtype") != Some(b"Image")
+    {
+        let fast = flate::Options {
+            shared: opt.flate.shared.clone(),
+            deadline: opt.flate.deadline,
+            ..flate::Options::effort(0)
+        };
+        if !opt.flate.same_output(&fast) && flate::deflate_zlib(&data, &fast).len() >= s.data.len() {
+            return None;
+        }
+    }
     let mut best: Option<(Dict, Vec<u8>)> = None;
     let mut best_len = s.data.len();
     // Whether `best` holds the JPEG with its new tables (alone, or behind Flate).
@@ -435,8 +459,16 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
         best = Some((d, data.clone()));
         best_retabled = false;
     }
-    // Images: try storing the samples with a different (or no) PNG predictor.
-    if rest.is_empty() && data.len() <= 48 << 20 {
+    // Images: try storing the samples with a different (or no) PNG predictor. The fast path tries one,
+    // chosen without encoding, and compares whole sizes (the dictionaries counted).
+    if rest.is_empty() && data.len() <= 48 << 20 && opt.flate.fast > 0 && opt.effort < TRIAL_PREDICTORS {
+        let dict = best.as_ref().map_or(&s.dict, |b| &b.0);
+        let plain = best_len + to_bytes(&Obj::Dict(dict.clone())).len();
+        if let Some((d, z)) = repredict_fast(s, &data, carried.as_ref(), opt, resolve, plain) {
+            best = Some((d, z));
+            best_retabled = false;
+        }
+    } else if rest.is_empty() && data.len() <= 48 << 20 {
         if let Some((d, z)) = repredict(s, &data, carried.as_ref(), opt, resolve) {
             if z.len() < best_len {
                 best = Some((d, z));
@@ -467,16 +499,16 @@ fn reencode_xmp(s: &Stream, opt: &Options) -> Option<Reencoded> {
     Some((d, z, Change::default()))
 }
 
-fn repredict(
+/// An image's geometry and its samples, whatever predictor they are stored with now; None when it is not an
+/// image we can work on (unknown geometry, a predictor that doesn't fit it, under 1 KiB, not whole rows).
+fn samples(
     s: &Stream,
     data: &[u8],
     carried: Option<&Dict>,
-    opt: &Options,
     resolve: &dyn Fn(&Obj) -> Option<Obj>,
-) -> Option<(Dict, Vec<u8>)> {
+) -> Option<(images::Geometry, Vec<u8>)> {
     let g = images::geometry(&s.dict, resolve)?;
     let (row, bpp) = (g.row(), g.bpp());
-    // The samples, whatever predictor they are stored with now.
     let px = match carried {
         None => data.to_vec(),
         Some(p) => {
@@ -499,13 +531,67 @@ fn repredict(
     if px.is_empty() || px.len() % row != 0 || px.len() < 1024 {
         return None;
     }
+    Some((g, px))
+}
+
+/// The PNG predictor parameters for an image of geometry `g`.
+fn png_parms(g: &images::Geometry) -> Dict {
+    let mut p = Dict::default();
+    p.set(b"Predictor", Obj::Int(15));
+    p.set(b"Colors", Obj::Int(g.colors as i64));
+    p.set(b"BitsPerComponent", Obj::Int(g.bpc as i64));
+    p.set(b"Columns", Obj::Int(g.columns as i64));
+    p
+}
+
+/// The fast path's predictor choice (efforts below `TRIAL_PREDICTORS`): one candidate, chosen without
+/// encoding (`images::estimate_choice`), and encoded once: the predictor the estimate prefers, else the plain
+/// samples when they are stored with a predictor now. `plain` is the best size `reencode` has so far with its
+/// stream dictionary counted; the candidate is kept only when it is smaller with its own dictionary.
+fn repredict_fast(
+    s: &Stream,
+    data: &[u8],
+    carried: Option<&Dict>,
+    opt: &Options,
+    resolve: &dyn Fn(&Obj) -> Option<Obj>,
+    plain: usize,
+) -> Option<(Dict, Vec<u8>)> {
+    let (g, px) = samples(s, data, carried, resolve)?;
+    let (row, bpp) = (g.row(), g.bpp());
+    let nrows = px.len() / row;
+    let bands = predictor_sample(nrows, row, 0).unwrap_or_else(|| vec![(0, nrows)]);
+    let (parms, bytes) = if let Some(how) = images::estimate_choice(&px, row, bpp, g.bpc, &bands) {
+        (Some(png_parms(&g)), images::png_filter(&px, row, bpp, how))
+    } else if carried.is_some() {
+        (None, px)
+    } else {
+        return None;
+    };
+    let mut d = s.dict.clone();
+    set_chain(&mut d, &[Stage { name: b"FlateDecode".to_vec(), parms }]);
+    let z = flate::deflate_zlib(&bytes, &opt.flate);
+    (z.len() + to_bytes(&Obj::Dict(d.clone())).len() < plain).then_some((d, z))
+}
+
+fn repredict(
+    s: &Stream,
+    data: &[u8],
+    carried: Option<&Dict>,
+    opt: &Options,
+    resolve: &dyn Fn(&Obj) -> Option<Obj>,
+) -> Option<(Dict, Vec<u8>)> {
+    let (g, px) = samples(s, data, carried, resolve)?;
+    let (row, bpp) = (g.row(), g.bpp());
     // The candidates are ranked by their size with the quick settings plus the size of their stream
     // dictionary (the predictor parameters take room too), and only the best one gets the full encode. Below
     // effort 100 the data is a sample of rows across the image, so the dictionary counts in proportion. The
     // first of equal sizes wins. Only their sizes count, so their outputs are not remembered.
+    // On the fast path the candidates are ranked with the level effort 0 gives images, else with the quick
+    // settings.
+    let rank = flate::Options { fast: if opt.flate.fast > 0 { image_level(0) } else { 0 }, ..flate::Options::quick() };
     let quick = flate::Options {
         shared: opt.flate.shared.as_ref().map(|sh| flate::deflate::Shared::with_pool(sh.pool.clone(), false)),
-        ..flate::Options::quick()
+        ..rank
     };
     let nrows = px.len() / row;
     let rows = predictor_sample(nrows, row, opt.effort);
@@ -526,14 +612,7 @@ fn repredict(
     ] {
         let (parms, bytes, stride) = match how {
             None => (None, px.clone(), row),
-            Some(how) => {
-                let mut p = Dict::default();
-                p.set(b"Predictor", Obj::Int(15));
-                p.set(b"Colors", Obj::Int(g.colors as i64));
-                p.set(b"BitsPerComponent", Obj::Int(g.bpc as i64));
-                p.set(b"Columns", Obj::Int(g.columns as i64));
-                (Some(p), images::png_filter(&px, row, bpp, how), row + 1)
-            }
+            Some(how) => (Some(png_parms(&g)), images::png_filter(&px, row, bpp, how), row + 1),
         };
         let data_len = match &rows {
             None => flate::deflate_zlib(&bytes, &quick).len(),
@@ -561,6 +640,14 @@ fn repredict(
     }
     Some((dict_with(&parms), z))
 }
+
+/// Below this effort the fast encoder is used (`flate::fast`): effort 0 is the fast path, 1 to 19 bridge to
+/// the strong encoder with slower fast levels; from 20 on everything is as it was before the fast path.
+pub const FAST_BELOW: u8 = 20;
+
+/// From this effort on, image predictors are chosen by encoding candidates (on sampled rows below 100); below
+/// it, on the fast path, from an estimate (`repredict_fast`).
+const TRIAL_PREDICTORS: u8 = 10;
 
 /// Bytes of an image the predictor candidates are ranked on below effort 100: 64 KiB at effort 0, twice as
 /// much every 20 points.
@@ -624,6 +711,39 @@ fn identical_streams(streams: &[(u32, &Stream)]) -> (Vec<usize>, Vec<usize>) {
     (same, unique)
 }
 
+/// Bytes the general filters of a stream decode to; None when they don't decode within `limit`.
+fn decoded_size(s: &Stream, limit: usize) -> Option<usize> {
+    let Some(stages) = chain(&s.dict) else { return Some(s.data.len()) };
+    let mut data: std::borrow::Cow<[u8]> = std::borrow::Cow::Borrowed(&s.data);
+    for st in stages.iter().take_while(|st| is_general(&st.name)) {
+        data = std::borrow::Cow::Owned(decode_stage(st, &data, limit).ok()?);
+    }
+    Some(data.len())
+}
+
+/// The fast encoder's level for image streams below `FAST_BELOW` (other streams get `flate::Options::effort`).
+/// Images are most of the decoded bytes and gain least from a closer parse, so they get a lazy level.
+fn image_level(effort: u8) -> u8 {
+    IMAGE_LEVEL[effort.min(FAST_BELOW - 1) as usize]
+}
+
+/// From this effort, the bridge to 20 gives some streams the strong encoder (see `effort_plan`).
+const STRONG_FROM: u8 = 10;
+
+/// Decoded bytes that get the strong encoder's quick settings at an effort below 20: none below `STRONG_FROM`,
+/// a sixteenth of the input's size at it, twice as much every point (32 times the input at 19).
+fn bridge_budget(effort: u8, input_len: usize) -> f64 {
+    if !(STRONG_FROM..FAST_BELOW).contains(&effort) {
+        return 0.0;
+    }
+    input_len as f64 * (1u64 << (effort - STRONG_FROM)) as f64 / 16.0
+}
+
+/// Effort 0 gives images the lazy level with two steps of lookahead (on the sample: 86.93% of the input against
+/// 87.08% with one step and 86.96% with the near-optimal level 8, at 17.4 s of CPU against 16.8 and 22.1).
+const IMAGE_LEVEL: [u8; FAST_BELOW as usize] =
+    [7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12];
+
 /// Bytes the general filters of a stream decode to (the stored size when they don't decode).
 fn decoded_len(s: &Stream, limit: usize) -> usize {
     let Some(stages) = chain(&s.dict) else { return s.data.len() };
@@ -678,6 +798,46 @@ fn effort_plan(
     if opt.effort >= 100 {
         return vec![Some(opt.clone()); unique.len()];
     }
+    let mut order: Vec<usize> = (0..unique.len()).collect();
+    order.sort_by_key(|&u| (std::cmp::Reverse(streams[unique[u]].1.data.len()), u));
+    let mut floor = quick_budget(opt.effort, input_len);
+    let mut out = vec![None; unique.len()];
+    // The fast path: every stream gets the effort's own settings while its decoded bytes fit, images a faster
+    // level of the fast encoder. From `STRONG_FROM` on, the streams that take the most room get the strong
+    // encoder's quick settings instead (what effort 0 was before the fast path) while their decoded bytes fit
+    // in `bridge_budget`, so the time and the size go on smoothly to 20. A stream whose filters don't decode
+    // within `max_stream` is kept as it is (`reencode` would find the same).
+    if opt.effort < FAST_BELOW {
+        let sizes = par::map(pool, unique.len(), None, |u| decoded_size(streams[unique[u]].1, opt.max_stream));
+        let strong = Options {
+            flate: flate::Options {
+                shared: opt.flate.shared.clone(),
+                deadline: opt.flate.deadline,
+                ..flate::Options::quick()
+            },
+            ..opt.clone()
+        };
+        let mut budget = bridge_budget(opt.effort, input_len);
+        for u in order {
+            let s = streams[unique[u]].1;
+            let Some(n) = sizes[u] else { continue };
+            if n as f64 > floor {
+                continue;
+            }
+            floor -= n as f64;
+            if n as f64 <= budget {
+                budget -= n as f64;
+                out[u] = Some(strong.clone());
+                continue;
+            }
+            let mut o = opt.clone();
+            if s.dict.name(b"Subtype") == Some(b"Image") {
+                o.flate.fast = image_level(opt.effort);
+            }
+            out[u] = Some(o);
+        }
+        return out;
+    }
     let at = |e: u8| Options {
         flate: flate::Options {
             shared: opt.flate.shared.clone(),
@@ -687,7 +847,17 @@ fn effort_plan(
         effort: e,
         ..opt.clone()
     };
-    let quick = at(0);
+    let sizes = par::map(pool, unique.len(), None, |u| decoded_len(streams[unique[u]].1, opt.max_stream));
+    // From 20 on, every stream gets at least the strong encoder's quick settings.
+    let quick = Options {
+        flate: flate::Options {
+            shared: opt.flate.shared.clone(),
+            deadline: opt.flate.deadline,
+            ..flate::Options::quick()
+        },
+        effort: 0,
+        ..opt.clone()
+    };
     // The settings that may be given above quick, strongest first, with their extra work per decoded byte.
     let mut steps = Vec::new();
     if !(opt.flate.same_output(&quick.flate) && predictor_budget(opt.effort) == predictor_budget(0)) {
@@ -696,12 +866,7 @@ fn effort_plan(
             steps.push((at(e), work_per_byte(e) - 1.0));
         }
     }
-    let sizes = par::map(pool, unique.len(), None, |u| decoded_len(streams[unique[u]].1, opt.max_stream));
-    let mut order: Vec<usize> = (0..unique.len()).collect();
-    order.sort_by_key(|&u| (std::cmp::Reverse(streams[unique[u]].1.data.len()), u));
-    let mut floor = quick_budget(opt.effort, input_len);
     let mut budget = input_len as f64 * work_budget(opt.effort);
-    let mut out = vec![None; unique.len()];
     for u in order {
         if sizes[u] as f64 > floor {
             continue;
