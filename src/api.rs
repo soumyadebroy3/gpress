@@ -38,8 +38,12 @@ pub const ARCHIVE_VERSION: u8 = pack::VERSION;
 /// Most worker threads a caller may ask for.
 pub const MAX_THREADS: usize = 64;
 
-/// How hard to try, 0 to 100. 0 is the quick setting (still optimal-parsed Flate), 100 is everything the
-/// engine knows how to do. A percentage control maps straight onto this.
+/// How hard to try, 0 to 100. 0 is the fast path: our fast Flate encoder (a near-optimal parse for page
+/// content and fonts, a lazy one for images), image predictors chosen from an estimate, and only the cheap
+/// steps (object streams, the cross-reference stream, JPEG Huffman tables, JBIG2 for fax images). 1 to 19
+/// bridge to the strong encoder, so that time and size move smoothly; 20 to 100 are the strong encoder's
+/// steps, and 100 is everything the engine knows how to do. A percentage control maps straight onto this.
+/// See `pdf::rewrite::Options::effort`; the archive's use of effort is `pack::PackOptions::effort`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Effort(u8);
 
@@ -68,7 +72,7 @@ impl Default for Effort {
 pub struct Options {
     /// Effort for both outputs, 0 to 100 (see [`Effort`]).
     pub effort: Effort,
-    /// Worker threads for independent work: 0 = what the machine offers (at most 8), else at most
+    /// Worker threads for independent work: 0 = every core the machine offers, else at most
     /// [`MAX_THREADS`]. Output is identical whatever the count; this only changes speed. A thread the system
     /// refuses is no loss: the calling thread does the work.
     pub threads: usize,
