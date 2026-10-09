@@ -589,17 +589,25 @@ mod tests {
 
     #[test]
     fn effort_levels_move_every_knob_monotonically() {
-        let mut last = Options::new().effort(0).flate();
-        for e in 1..=100u8 {
+        // Below 20 the fast encoder (its level for streams other than images; images get theirs in the plan).
+        for e in 0..crate::pdf::rewrite::FAST_BELOW {
+            assert_eq!(Options::new().effort(e).flate().fast, crate::flate::fast::LEVELS, "effort {e}");
+        }
+        // From 20 the strong encoder, every knob moving one way.
+        let mut last = Options::new().effort(20).flate();
+        assert_eq!(last.fast, 0);
+        for e in 21..=100u8 {
             let f = Options::new().effort(e).flate();
             assert!(
-                f.iterations >= last.iterations && f.exact_rounds >= last.exact_rounds && f.max_chain >= last.max_chain,
+                f.fast == 0
+                    && f.iterations >= last.iterations
+                    && f.exact_rounds >= last.exact_rounds
+                    && f.max_chain >= last.max_chain,
                 "effort {e}"
             );
             last = f;
         }
         assert_eq!(Options::new().effort(100).flate().max_chain, crate::flate::Options::max().max_chain);
-        assert_eq!(Options::new().effort(0).flate().max_chain, crate::flate::Options::quick().max_chain);
     }
 
     #[test]
