@@ -1202,7 +1202,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     out.extend_from_slice(format!("startxref\n{xref_off}\n%%EOF\n").as_bytes());
 
     // Read our own output back and compare everything reachable.
-    self_check(&objs, &out, &doc.trailer, crypt)?;
+    self_check(&objs, &out, &doc.trailer, crypt, pool)?;
     // Anything written after the deadline passed (object streams, say) went out stored and is not an
     // output of these settings: a rewrite either finishes in time or gives nothing.
     if opt.deadline.passed() {
@@ -1263,6 +1263,7 @@ fn self_check(
     out: &[u8],
     trailer: &Dict,
     crypt: Option<&Crypt>,
+    pool: Option<&par::Pool>,
 ) -> Result<(), String> {
     let doc2 = xref::open(out).map_err(|e| format!("self-check: output unreadable: {e:?}"))?;
     // It opens the same way: the same encryption dictionary and object, file key and methods. Objects are then
@@ -1290,7 +1291,13 @@ fn self_check(
         }
         return Err("self-check: different objects reachable".into());
     }
-    for (n, (g, o)) in objs {
+    // Objects are compared on the pool (the biggest streams first); the first difference in object order is
+    // the one reported, whatever the number of threads.
+    let all: Vec<(&u32, &(u16, Obj))> = objs.iter().collect();
+    let mut order: Vec<usize> = (0..all.len()).collect();
+    order.sort_by_key(|&k| (std::cmp::Reverse(if let Obj::Stream(s) = &all[k].1 .1 { s.data.len() } else { 0 }), k));
+    let checked = par::map(pool, all.len(), Some(&order), |k| {
+        let (n, (g, o)) = all[k];
         let (g2, o2) = &objs2[n];
         if g != g2 {
             return Err(format!("self-check: generation of {n} differs"));
@@ -1304,7 +1311,7 @@ fn self_check(
                     && s1.dict.get(b"Filter") == s2.dict.get(b"Filter")
                     && s1.dict.get(b"DecodeParms") == s2.dict.get(b"DecodeParms")
                 {
-                    continue;
+                    return Ok(());
                 }
                 let c1 = content_of(s1).ok_or(format!("self-check: stream {n} undecodable"))?;
                 let c2 = content_of(s2).ok_or(format!("self-check: stream {n} undecodable in output"))?;
@@ -1317,15 +1324,17 @@ fn self_check(
                 if c1 != c2 && !same_jpeg(&c1, &c2) && !crate::fax::pdf::same_image(s1, s2, &resolve) {
                     return Err(format!("self-check: content of stream {n} differs"));
                 }
+                Ok(())
             }
             (x, y) => {
                 if x != y {
                     return Err(format!("self-check: object {n} differs"));
                 }
+                Ok(())
             }
         }
-    }
-    Ok(())
+    });
+    checked.into_iter().collect()
 }
 
 #[cfg(test)]
