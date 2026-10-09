@@ -17,7 +17,8 @@
 //! Measuring tools (the engine's own modules, for the benchmarks): deflate, inflate, batch, pdf-batch,
 //! repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info, fax-decode, fax-encode, fax-scan,
 //! fax-model, jbig2-encode, claim-archive (the security suite's crafted archive). `--iter`, `--exact`, `--chain`, `--nice`, `--nosplit`, `--noalt`, `--nomulti`
-//! and `--nopolish` fine-tune the Flate settings of the deflate tools below the effort.
+//! and `--nopolish` fine-tune the Flate settings of the deflate tools below the effort; `--fast N` (1 to
+//! `flate::fast::LEVELS`) uses the fast encoder at level N instead.
 //!
 //! Exit status: 0 done; a library error exits with its code (1 input too large, 2 not an archive or damaged,
 //! 3 archive version, 4 internal error (a caught panic: a bug), 5 invalid options, 6 time budget, 7 declared
@@ -61,6 +62,7 @@ const WITH_VALUE: &[&str] = &[
     "--exact",
     "--chain",
     "--nice",
+    "--fast",
     "--threads",
     "--effort",
     "--max-input",
@@ -155,6 +157,9 @@ fn main() {
     }
     if flag("--nopolish") {
         opt.polish = false;
+    }
+    if let Some(v) = num("--fast") {
+        opt.fast = v.min(255) as u8;
     }
     if threads > 0 {
         opt.shared = Some(flate::deflate::Shared::new(threads));
