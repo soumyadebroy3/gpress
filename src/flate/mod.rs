@@ -3,6 +3,7 @@
 pub mod bits;
 pub mod block;
 pub mod deflate;
+pub mod fast;
 pub mod huffman;
 pub mod inflate;
 pub mod lz;
