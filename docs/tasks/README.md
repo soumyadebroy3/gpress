@@ -22,6 +22,28 @@ The rules every branch is held to, from the owner:
   `PDFE_DEBUG` print switch.
 - Plain short English in code comments, documents and commit messages.
 
+## Every session: fast, light, parallel, safe
+
+The owner's standard for every branch, in his words: "it has to be not a resource heavy tool, yet the best
+tool out there in terms of speed and compression level; security should not be compromised; it should use
+the CPU's threads as parallel cores for all the work." In practice:
+
+- **Parallel everywhere it can be.** Every stage whose pieces are independent runs on the thread pool
+  (`src/par.rs`): decoding, encoding, the self-check, image candidates, the archive's independent parts. A
+  large single stream is cut into segments at fixed input offsets (never at offsets that depend on the thread
+  count), each segment primed with the previous 32 KiB as its dictionary (as pigz does), so splitting costs
+  almost nothing in size. The default thread count becomes every core the machine offers
+  (`available_parallelism`, no cap of 8); `Options::threads` still sets it, and 1 still runs without any
+  thread machinery.
+- **Deterministic.** Identical output bytes for any thread count, any machine, with or without a time budget.
+- **Light.** Threads must not multiply the cost: total CPU time with N threads at most 1.15 times the one-thread
+  CPU time; peak memory at most the one-thread peak plus a bounded working set per thread (state the bound);
+  no thread holds a whole decoded file.
+- **Measured both ways.** CPU time (the work) and wall time (what a person waits), one thread and all cores;
+  report the speed-up and the parallel efficiency (wall time times threads, over CPU time).
+- **Safe.** Every security rule holds with threads: a hostile file with thousands of streams cannot make the
+  pool hold more than its bound, and the security suite runs with the default thread count too.
+
 ## The procedure every brief follows
 
 1. Clone and build. The release profile in `Cargo.toml` (LTO, one codegen unit) is what the benchmark
