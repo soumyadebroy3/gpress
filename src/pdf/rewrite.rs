@@ -1122,10 +1122,12 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     // A comment of high bytes tells transfer tools the file is binary.
     out.extend_from_slice(&[b'%', 0xE2, 0xE3, 0xCF, 0xD3, b'\n']);
     let mut offsets: HashMap<u32, (usize, u16)> = HashMap::new();
-    for (n, (g, body)) in &direct {
-        offsets.insert(*n, (out.len(), *g));
+    // Each body is freed once it is in the file, so the objects are not held twice from here on (the
+    // self-check reads the output back while the input's objects are still held).
+    for (n, (g, body)) in direct {
+        offsets.insert(n, (out.len(), g));
         out.extend_from_slice(format!("{n} {g} obj\n").as_bytes());
-        out.extend_from_slice(body);
+        out.extend_from_slice(&body);
         out.extend_from_slice(b"\nendobj\n");
     }
     // Cross-reference stream.
