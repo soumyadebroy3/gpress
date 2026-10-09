@@ -55,9 +55,9 @@ impl Pool {
     }
 }
 
-/// The default thread count: what the machine offers, at most 8.
+/// The default thread count: every core the machine offers.
 pub fn default_threads() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 8)
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).max(1)
 }
 
 /// Starts `f` on a new thread of scope `s`. None when the system refuses one (thread or process limits);
