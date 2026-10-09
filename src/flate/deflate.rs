@@ -82,9 +82,11 @@ impl Options {
         }
     }
 
-    /// Settings for an effort from 0 (`quick`) to 100 (`max`), in steps of 20. Measured on 92 sampled PDF
-    /// streams (3.4 MB) and on 6 large images (14.9 MB), against `max` (CPU time; bytes):
-    ///   0: 0.34x, 0.23x; +0.47%, +1.75%      20: 0.43x, 0.39x; +0.15%, +0.10%
+    /// Settings for an effort from 0 to 100. Below 20 the fast encoder (`fast.rs`) at its near-optimal top
+    /// level (`FAST_LEVEL`; the PDF plan gives images faster levels and, from 10, some streams `quick`); from
+    /// 20 the encoder above in steps of 20 up to `max` at 100. Measured on 92 sampled PDF streams (3.4 MB) and
+    /// on 6 large images (14.9 MB), against `max` (CPU time; bytes):
+    ///   quick: 0.34x, 0.23x; +0.47%, +1.75%      20: 0.43x, 0.39x; +0.15%, +0.10%
     ///  40: 0.47x, 0.45x; +0.13%, +0.09%      60: 0.77x, 0.71x; +0.03%, +0.00%      80: 0.93x, 0.90x; +0.01%, +0.00%
     pub fn effort(effort: u8) -> Options {
         let o = |iterations, exact_rounds, max_chain, alternatives, polish| Options {
@@ -102,7 +104,7 @@ impl Options {
             fast: 0,
         };
         match effort {
-            0..=19 => Options::quick(),
+            0..=19 => Options { fast: FAST_LEVEL, ..Options::quick() },
             20..=39 => o(2, 1, 1024, false, false),
             40..=59 => o(3, 1, 1024, false, false),
             60..=79 => o(4, 2, 2048, true, true),
@@ -132,6 +134,10 @@ impl Options {
         ]
     }
 }
+
+/// The fast encoder's level for efforts 0 to 19: its near-optimal top level (images get a faster one, see
+/// `pdf::rewrite`).
+const FAST_LEVEL: u8 = super::fast::LEVELS;
 
 /// What the encodes of one job share: a pool of threads, and (optionally) the output for inputs already
 /// encoded with the same settings, so that an input is encoded once. Neither changes any output.
