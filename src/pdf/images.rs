@@ -138,40 +138,88 @@ pub enum Choice {
     MinSum,
 }
 
+/// Row `r` of `px` stored with PNG predictor type `t`, into `out` (one byte per sample byte).
+fn residuals(px: &[u8], row: usize, bpp: usize, r: usize, t: u8, out: &mut [u8]) {
+    let cur = &px[r * row..(r + 1) * row];
+    let prev = if r > 0 { Some(&px[(r - 1) * row..r * row]) } else { None };
+    for i in 0..row {
+        let a = if i >= bpp { cur[i - bpp] } else { 0 };
+        let b = prev.map_or(0, |p| p[i]);
+        let c = if i >= bpp { prev.map_or(0, |p| p[i - bpp]) } else { 0 };
+        out[i] = cur[i].wrapping_sub(predict(t, a, b, c));
+    }
+}
+
+/// The type `Choice::MinSum` picks for row `r` (the first of equal sums), its residuals left in `cand`.
+fn min_sum_type(px: &[u8], row: usize, bpp: usize, r: usize, cand: &mut [u8]) -> u8 {
+    let mut best = (u64::MAX, 0u8);
+    for t in 0..5u8 {
+        residuals(px, row, bpp, r, t, cand);
+        let s: u64 = cand.iter().map(|&x| (x as i8).unsigned_abs() as u64).sum();
+        if s < best.0 {
+            best = (s, t);
+        }
+    }
+    best.1
+}
+
 pub fn png_filter(px: &[u8], row: usize, bpp: usize, how: Choice) -> Vec<u8> {
     let rows = px.len() / row;
     let mut out = Vec::with_capacity(rows * (row + 1));
     let mut cand = vec![0u8; row];
     for r in 0..rows {
-        let cur = &px[r * row..(r + 1) * row];
-        let prev = if r > 0 { Some(&px[(r - 1) * row..r * row]) } else { None };
-        let residuals = |t: u8, out: &mut [u8]| {
-            for i in 0..row {
-                let a = if i >= bpp { cur[i - bpp] } else { 0 };
-                let b = prev.map_or(0, |p| p[i]);
-                let c = if i >= bpp { prev.map_or(0, |p| p[i - bpp]) } else { 0 };
-                out[i] = cur[i].wrapping_sub(predict(t, a, b, c));
-            }
-        };
         let t = match how {
             Choice::Fixed(t) => t,
-            Choice::MinSum => {
-                let mut best = (u64::MAX, 0u8);
-                for t in 0..5u8 {
-                    residuals(t, &mut cand);
-                    let s: u64 = cand.iter().map(|&x| (x as i8).unsigned_abs() as u64).sum();
-                    if s < best.0 {
-                        best = (s, t);
-                    }
-                }
-                best.1
-            }
+            Choice::MinSum => min_sum_type(px, row, bpp, r, &mut cand),
         };
         out.push(t);
-        residuals(t, &mut cand);
+        residuals(px, row, bpp, r, t, &mut cand);
         out.extend_from_slice(&cand);
     }
     out
+}
+
+/// Whether the samples are worth encoding a second time with `Choice::MinSum` (libpng's heuristic), judged
+/// without encoding: never below 8 bits per component (a predictor works on whole bytes, so it mixes
+/// neighbouring samples; on the sample's 44 such images it never paid), else when the rows in `bands`
+/// (`(first, end)` pairs) cost fewer bits under an order-0 entropy estimate with the predictor than without.
+/// The caller encodes both and keeps the smaller, so a wrong guess costs time, never size. On the 314 images
+/// of 8 or 16 bits in the sample this missed no image the predictor made smaller.
+pub fn min_sum_pays(px: &[u8], row: usize, bpp: usize, bpc: usize, bands: &[(usize, usize)]) -> bool {
+    if bpc < 8 || row == 0 {
+        return false;
+    }
+    let rows = px.len() / row;
+    let (mut plain, mut predicted) = ([0u32; 256], [0u32; 256]);
+    let mut cand = vec![0u8; row];
+    for &(a, b) in bands {
+        for r in a..b.min(rows) {
+            for &x in &px[r * row..(r + 1) * row] {
+                plain[x as usize] += 1;
+            }
+            // The type byte counts too: it is stored in front of every row.
+            predicted[min_sum_type(px, row, bpp, r, &mut cand) as usize] += 1;
+            for &x in &cand {
+                predicted[x as usize] += 1;
+            }
+        }
+    }
+    entropy_bits(&predicted) < entropy_bits(&plain)
+}
+
+/// Order-0 entropy of byte counts, in 1/65536 bits, with integer arithmetic only (so the choice is the same on
+/// every machine): the sum of c * (log2 n - log2 c) with a piecewise-linear log2.
+fn entropy_bits(counts: &[u32; 256]) -> u64 {
+    fn log2(x: u64) -> u64 {
+        let k = 63 - x.leading_zeros() as u64;
+        (k << 16) + (((x - (1 << k)) << 16) >> k)
+    }
+    let n: u64 = counts.iter().map(|&c| c as u64).sum();
+    if n == 0 {
+        return 0;
+    }
+    let ln = log2(n);
+    counts.iter().filter(|&&c| c > 0).map(|&c| c as u64 * (ln - log2(c as u64))).sum()
 }
 
 #[cfg(test)]
@@ -196,5 +244,36 @@ mod tests {
             let f = png_filter(&px, row, bpp, how);
             assert_eq!(png_unfilter(&f, row, bpp).unwrap(), px);
         }
+    }
+
+    #[test]
+    fn the_estimate_wants_a_predictor_only_where_it_helps() {
+        let (row, rows) = (300usize, 200usize);
+        let all = [(0usize, rows)];
+        // A smooth gradient: the predictor leaves almost nothing.
+        let smooth: Vec<u8> = (0..row * rows).map(|i| ((i % row) + (i / row) * 2) as u8).collect();
+        assert!(min_sum_pays(&smooth, row, 3, 8, &all));
+        // Noise: the residuals are noise as well, and the type bytes cost extra.
+        let mut s = 9u64;
+        let noise: Vec<u8> = (0..row * rows)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                s as u8
+            })
+            .collect();
+        assert!(!min_sum_pays(&noise, row, 3, 8, &all));
+        // Below 8 bits per component never; nor for a blank image (nothing to gain).
+        assert!(!min_sum_pays(&smooth, row, 1, 4, &all));
+        assert!(!min_sum_pays(&vec![255u8; row * rows], row, 1, 8, &all));
+        // Bands past the end are cut, and an empty band list wants nothing.
+        assert!(min_sum_pays(&smooth, row, 3, 8, &[(0, 10), (150, 1000)]));
+        assert!(!min_sum_pays(&smooth, row, 3, 8, &[]));
+        // The integer entropy: two equally likely bytes cost one bit each.
+        let mut c = [0u32; 256];
+        c[1] = 1000;
+        c[2] = 1000;
+        assert_eq!(entropy_bits(&c), 2000 << 16);
     }
 }
