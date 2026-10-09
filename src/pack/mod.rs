@@ -605,7 +605,7 @@ pub struct PackOptions {
     /// still finds a little in. A Type 1 font program is never coded plainly: encrypted it looks random, but
     /// opened (see `type1`) it is text and charstrings the model codes to a third or less.
     pub effort: u8,
-    /// Threads for looking at the streams (0: what the machine offers, at most 8). Never changes the output.
+    /// Threads for looking at the streams (0: every core the machine offers). Never changes the output.
     pub threads: usize,
     /// Store the encrypted streams of a file the empty password opens decrypted, so the usual plan applies
     /// to them (see `sealed`); they are encrypted again exactly on restore. When the pack isn't clearly
