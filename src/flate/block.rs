@@ -1,7 +1,7 @@
 //! Block costs and block writing: dynamic Huffman blocks with an optimised header, fixed blocks, stored blocks.
 
 use super::bits::BitWriter;
-use super::huffman::{canonical_codes, lengths_into, limited_lengths};
+use super::huffman::{canonical_codes, limited_lengths, LengthCoder};
 use super::lz::{d_extra, ll_extra, Hist, Sym};
 use super::tables::*;
 
@@ -181,34 +181,134 @@ pub fn entropy_estimate_bits(h: &Hist) -> u64 {
     (part(&h.ll, ll_extra) + part(&h.d, d_extra) + 40.0) as u64
 }
 
-/// Quick size estimate: the plain optimal code with a cheap header estimate, without heap allocation.
+/// Quick size estimate: the plain optimal code with a cheap header estimate.
 pub fn estimate_dynamic_bits(h: &Hist) -> u64 {
-    let mut ll = [0u8; LITLEN_SYMS];
-    let mut d = [0u8; DIST_SYMS];
-    lengths_into(&h.ll, 15, &mut ll);
-    lengths_into(&h.d, 15, &mut d);
-    patch_litlen(&mut ll);
-    patch_distances(&mut d);
-    data_bits(h, &ll, &d) + fast_header_bits(&ll, &d)
+    Estimator::new().bits(h)
 }
 
-/// Header size with greedy run-length tokens, computed without allocation.
-fn fast_header_bits(ll: &[u8], d: &[u8]) -> u64 {
+/// `estimate_dynamic_bits` for many histograms in a row, as the block-split search asks: each code keeps its
+/// symbols' order from one histogram to the next, which is quick to repair when the counts changed a little.
+/// The estimates are the same. What it keeps (several KB) is on the heap, made with it and freed with it, so
+/// that a search that holds two of them needs little stack.
+pub struct Estimator {
+    coders: Box<Coders>,
+}
+
+struct Coders {
+    ll: LengthCoder<LITLEN_SYMS>,
+    d: LengthCoder<DIST_SYMS>,
+    header: HeaderMemo,
+}
+
+/// What the header estimate keeps between calls: neighbouring histograms often give the same lengths.
+struct HeaderMemo {
+    /// The last length sequence.
+    seq: [u8; LITLEN_SYMS + DIST_SYMS],
+    /// Its length and header bits, once there is one.
+    last: Option<(usize, u64)>,
+    cl: LengthCoder<19>,
+    /// The last code-length counts and the header bits they gave, without the extra bits.
+    last_cl: Option<([u32; 19], u64)>,
+}
+
+impl Default for Estimator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Estimator {
+    pub fn new() -> Estimator {
+        // A constant, so that it is copied straight to the heap.
+        const NEW: Coders = Coders {
+            ll: LengthCoder::new(),
+            d: LengthCoder::new(),
+            header: HeaderMemo { seq: [0; LITLEN_SYMS + DIST_SYMS], last: None, cl: LengthCoder::new(), last_cl: None },
+        };
+        Estimator { coders: Box::new(NEW) }
+    }
+
+    /// The same as `estimate_dynamic_bits(h)`.
+    pub fn bits(&mut self, h: &Hist) -> u64 {
+        self.coders.bits(h)
+    }
+}
+
+impl Coders {
+    fn bits(&mut self, h: &Hist) -> u64 {
+        // Data bits: count times length, plus the extra bits.
+        let mut bits = self.ll.lengths(&h.ll, 15) + self.d.lengths(&h.d, 15);
+        for (&c, &e) in h.ll[257..].iter().zip(&LEN_EXTRA) {
+            bits += c as u64 * e as u64;
+        }
+        for (&c, &e) in h.d.iter().zip(&DIST_EXTRA) {
+            bits += c as u64 * e as u64;
+        }
+        // The patches give lengths to unused symbols only, so the data bits stay. For the distances this is
+        // `patch_distances` without its allocation.
+        if self.ll.used() == 1 {
+            patch_litlen(&mut self.ll.lens);
+        }
+        let used_d = self.d.used();
+        let d = &mut self.d.lens;
+        match used_d {
+            0 => {
+                d[0] = 1;
+                d[1] = 1;
+            }
+            1 if d[0] != 0 => d[1] = 1,
+            1 => d[0] = 1,
+            _ => {}
+        }
+        bits + fast_header_bits(&self.ll.lens, &self.d.lens, &mut self.header)
+    }
+}
+
+/// How many bytes from `i` on equal `seq[i]`, compared eight at a time.
+fn run_length(seq: &[u8], i: usize) -> usize {
+    let v = seq[i];
+    let pattern = u64::from_le_bytes([v; 8]);
+    let mut j = i + 1;
+    while let Some(chunk) = seq.get(j..j + 8) {
+        let x = u64::from_le_bytes(chunk.try_into().unwrap()) ^ pattern;
+        if x != 0 {
+            return j - i + x.trailing_zeros() as usize / 8;
+        }
+        j += 8;
+    }
+    while j < seq.len() && seq[j] == v {
+        j += 1;
+    }
+    j - i
+}
+
+/// Header size with greedy run-length tokens, computed without allocation. The size depends on the length
+/// sequence only, so the same sequence as last time gives the last size.
+fn fast_header_bits(ll: &[u8], d: &[u8], memo: &mut HeaderMemo) -> u64 {
     let hlit = (ll.iter().rposition(|&l| l != 0).map_or(0, |p| p + 1)).max(257);
     let hdist = (d.iter().rposition(|&l| l != 0).map_or(0, |p| p + 1)).max(1);
-    let mut seq = [0u8; LITLEN_SYMS + DIST_SYMS];
-    seq[..hlit].copy_from_slice(&ll[..hlit]);
-    seq[hlit..hlit + hdist].copy_from_slice(&d[..hdist]);
-    let seq = &seq[..hlit + hdist];
+    let len = hlit + hdist;
+    if let Some((last_len, bits)) = memo.last {
+        if last_len == len && memo.seq[..hlit] == ll[..hlit] && memo.seq[hlit..len] == d[..hdist] {
+            return bits;
+        }
+    }
+    memo.seq[..hlit].copy_from_slice(&ll[..hlit]);
+    memo.seq[hlit..len].copy_from_slice(&d[..hdist]);
+    let bits = header_size(&memo.seq[..len], &mut memo.cl, &mut memo.last_cl);
+    memo.last = Some((len, bits));
+    bits
+}
+
+/// The header size of a length sequence; the code-length code is worked out again only when its counts differ
+/// from `last`.
+fn header_size(seq: &[u8], clc: &mut LengthCoder<19>, last: &mut Option<([u32; 19], u64)>) -> u64 {
     let mut f = [0u32; 19];
     let mut extra = 0u64;
     let mut i = 0;
     while i < seq.len() {
         let v = seq[i];
-        let mut run = 1;
-        while i + run < seq.len() && seq[i + run] == v {
-            run += 1;
-        }
+        let run = run_length(seq, i);
         let mut r = run;
         if v == 0 {
             while r >= 11 {
@@ -236,17 +336,23 @@ fn fast_header_bits(ll: &[u8], d: &[u8]) -> u64 {
         }
         i += run;
     }
-    let mut cl = [0u8; 19];
-    lengths_into(&f, 7, &mut cl);
+    if let Some((lf, bits)) = *last {
+        if lf == f {
+            return bits + extra;
+        }
+    }
+    clc.lengths(&f, 7);
+    let cl = &mut clc.lens;
     if cl.iter().filter(|&&x| x != 0).count() == 1 {
         cl[16] = 1;
     }
     let hclen = (CL_ORDER.iter().rposition(|&s| cl[s] != 0).map_or(0, |p| p + 1)).max(4);
-    let mut bits = 14 + 3 * hclen as u64 + extra;
+    let mut bits = 14 + 3 * hclen as u64;
     for s in 0..19 {
         bits += f[s] as u64 * cl[s] as u64;
     }
-    bits
+    *last = Some((f, bits));
+    bits + extra
 }
 
 fn sequence(ll: &[u8], d: &[u8]) -> (usize, usize, Vec<u8>) {
@@ -720,6 +826,145 @@ mod tests {
                 assert_eq!(lens.len(), hl + hd);
                 assert_eq!(&lens[..hl], &code.ll[..hl]);
                 assert_eq!(&lens[hl..], &code.d[..hd]);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod estimate_tests {
+    use super::super::huffman::{old, tests::walk};
+    use super::*;
+
+    /// The estimate as it was before `Estimator`, on the old length code.
+    fn old_estimate_dynamic_bits(h: &Hist) -> u64 {
+        let mut ll = [0u8; LITLEN_SYMS];
+        let mut d = [0u8; DIST_SYMS];
+        old::lengths_into(&h.ll, 15, &mut ll);
+        old::lengths_into(&h.d, 15, &mut d);
+        patch_litlen(&mut ll);
+        patch_distances(&mut d);
+        data_bits(h, &ll, &d) + old_fast_header_bits(&ll, &d)
+    }
+
+    fn old_fast_header_bits(ll: &[u8], d: &[u8]) -> u64 {
+        let hlit = (ll.iter().rposition(|&l| l != 0).map_or(0, |p| p + 1)).max(257);
+        let hdist = (d.iter().rposition(|&l| l != 0).map_or(0, |p| p + 1)).max(1);
+        let mut seq = [0u8; LITLEN_SYMS + DIST_SYMS];
+        seq[..hlit].copy_from_slice(&ll[..hlit]);
+        seq[hlit..hlit + hdist].copy_from_slice(&d[..hdist]);
+        let seq = &seq[..hlit + hdist];
+        let mut f = [0u32; 19];
+        let mut extra = 0u64;
+        let mut i = 0;
+        while i < seq.len() {
+            let v = seq[i];
+            let mut run = 1;
+            while i + run < seq.len() && seq[i + run] == v {
+                run += 1;
+            }
+            let mut r = run;
+            if v == 0 {
+                while r >= 11 {
+                    let k = r.min(138);
+                    f[18] += 1;
+                    extra += 7;
+                    r -= k;
+                }
+                if r >= 3 {
+                    f[17] += 1;
+                    extra += 3;
+                    r = 0;
+                }
+                f[0] += r as u32;
+            } else {
+                f[v as usize] += 1;
+                r -= 1;
+                while r >= 3 {
+                    let k = r.min(6);
+                    f[16] += 1;
+                    extra += 2;
+                    r -= k;
+                }
+                f[v as usize] += r as u32;
+            }
+            i += run;
+        }
+        let mut cl = [0u8; 19];
+        old::lengths_into(&f, 7, &mut cl);
+        if cl.iter().filter(|&&x| x != 0).count() == 1 {
+            cl[16] = 1;
+        }
+        let hclen = (CL_ORDER.iter().rposition(|&s| cl[s] != 0).map_or(0, |p| p + 1)).max(4);
+        let mut bits = 14 + 3 * hclen as u64 + extra;
+        for s in 0..19 {
+            bits += f[s] as u64 * cl[s] as u64;
+        }
+        bits
+    }
+
+    fn rng(s: &mut u64) -> u64 {
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
+        *s
+    }
+
+    /// Symbols whose statistics drift along the way, like real data.
+    fn random_syms(s: &mut u64, n: usize) -> Vec<Sym> {
+        let mut out = Vec::with_capacity(n);
+        let (mut lits, mut far) = (256, 32768);
+        while out.len() < n {
+            if rng(s).is_multiple_of(300) {
+                lits = 1 + rng(s) % 256;
+                far = 1 + rng(s) % 32768;
+            }
+            if rng(s).is_multiple_of(3) {
+                let len = 3 + rng(s) % (1 + rng(s) % 256);
+                out.push(Sym::mat(len as usize, 1 + (rng(s) % far) as usize));
+            } else {
+                out.push(Sym::lit((rng(s) % lits) as u8));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn estimator_gives_the_estimates_of_before() {
+        let mut s = 0xe571_3a7eu64;
+        // As in the block-split search: the blocks between candidate cuts, `i` walking up or down for each `j`.
+        for round in 0..6 {
+            let syms = random_syms(&mut s, 2000 + round * 1500);
+            let g = 32 + (rng(&mut s) % 64) as usize;
+            let mut pref = vec![Hist { ll: [0; LITLEN_SYMS], d: [0; DIST_SYMS] }];
+            for c in syms.chunks(g) {
+                let mut h = pref.last().unwrap().clone();
+                c.iter().for_each(|x| h.add(x));
+                pref.push(h);
+            }
+            let mut es = Estimator::new();
+            for j in 1..pref.len() {
+                let lo = j.saturating_sub(96);
+                let mut is: Vec<usize> = (lo..j).collect();
+                if round % 2 == 0 && j % 2 == 0 {
+                    is.reverse();
+                }
+                for i in is {
+                    let h = Hist::diff(&pref[j], &pref[i]);
+                    assert_eq!(es.bits(&h), old_estimate_dynamic_bits(&h), "round {round}, {i}..{j}");
+                }
+            }
+        }
+        // Random walks over related histograms, now and then an unrelated one, with every kind of count.
+        let mut es = Estimator::new();
+        let mut h = Hist::empty();
+        for k in 0..30_000 {
+            walk(&mut s, &mut h.ll);
+            walk(&mut s, &mut h.d);
+            let want = old_estimate_dynamic_bits(&h);
+            assert_eq!(es.bits(&h), want, "{:?} {:?}", h.ll, h.d);
+            if k % 16 == 0 {
+                assert_eq!(estimate_dynamic_bits(&h), want);
             }
         }
     }
