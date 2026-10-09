@@ -61,17 +61,17 @@ fn hash3(d: &[u8], i: usize) -> usize {
 /// Length of the common prefix of `d[a..]` and `d[b..]`, at most `max`, starting the comparison at `skip`.
 #[inline]
 fn common(d: &[u8], a: usize, b: usize, skip: usize, max: usize) -> usize {
+    // Both sides are cut to `max` once, so the word and byte reads below need no bounds checks.
+    let (x, y) = (&d[a..a + max], &d[b..b + max]);
     let mut n = skip;
-    while n + 8 <= max {
-        let x = u64::from_le_bytes(d[a + n..a + n + 8].try_into().unwrap());
-        let y = u64::from_le_bytes(d[b + n..b + n + 8].try_into().unwrap());
-        let z = x ^ y;
+    for (u, v) in x[skip..].chunks_exact(8).zip(y[skip..].chunks_exact(8)) {
+        let z = u64::from_le_bytes(u.try_into().unwrap()) ^ u64::from_le_bytes(v.try_into().unwrap());
         if z != 0 {
             return n + (z.trailing_zeros() / 8) as usize;
         }
         n += 8;
     }
-    while n < max && d[a + n] == d[b + n] {
+    while n < max && x[n] == y[n] {
         n += 1;
     }
     n
@@ -85,13 +85,22 @@ fn common(d: &[u8], a: usize, b: usize, skip: usize, max: usize) -> usize {
 /// longer common prefixes, which gives exactly the smallest distance for each length. Each comparison
 /// starts after the prefix already known to match, so repetitive data stays fast.
 pub fn find_matches(data: &[u8], from: usize, to: usize, max_depth: usize, alternatives: bool) -> Matches {
+    // Two builds of the search: without alternatives the distance buckets are never looked at.
+    if alternatives {
+        search::<true>(data, from, to, max_depth)
+    } else {
+        search::<false>(data, from, to, max_depth)
+    }
+}
+
+fn search<const ALT: bool>(data: &[u8], from: usize, to: usize, max_depth: usize) -> Matches {
     const NIL: u32 = u32::MAX;
     let hist = from.saturating_sub(WINDOW);
     let n = to - from;
     let mut start = Vec::with_capacity(n + 1);
     let mut steps: Vec<(u16, u16)> = Vec::with_capacity(n * 2);
     let (mut chain_start, mut chain) =
-        if alternatives { (Vec::with_capacity(n + 1), Vec::with_capacity(n)) } else { (Vec::new(), Vec::new()) };
+        if ALT { (Vec::with_capacity(n + 1), Vec::with_capacity(n)) } else { (Vec::new(), Vec::new()) };
 
     let mut same = vec![0u16; to - hist];
     for i in (hist..to).rev() {
@@ -109,7 +118,7 @@ pub fn find_matches(data: &[u8], from: usize, to: usize, max_depth: usize, alter
         let searching = i >= from;
         if searching {
             start.push(steps.len() as u32);
-            if alternatives {
+            if ALT {
                 chain_start.push(chain.len() as u32);
             }
         }
@@ -143,14 +152,16 @@ pub fn find_matches(data: &[u8], from: usize, to: usize, max_depth: usize, alter
                 len = common(data, c, i, len + 1, lim);
                 if searching {
                     let dist = i - c;
-                    let bk = dist_code(dist);
-                    if bk != bucket {
-                        bucket = bk;
-                        bucket_best = MIN_MATCH - 1;
+                    if ALT {
+                        let bk = dist_code(dist);
+                        if bk != bucket {
+                            bucket = bk;
+                            bucket_best = MIN_MATCH - 1;
+                        }
                     }
-                    if len > best || (alternatives && len > bucket_best && kept < 24) {
+                    if len > best || (ALT && len > bucket_best && kept < 24) {
                         steps.push((len as u16, dist as u16));
-                        if alternatives && len > best {
+                        if ALT && len > best {
                             chain.push((len as u16, dist as u16));
                         }
                         kept += 1;
@@ -179,7 +190,7 @@ pub fn find_matches(data: &[u8], from: usize, to: usize, max_depth: usize, alter
         }
     }
     start.push(steps.len() as u32);
-    if alternatives {
+    if ALT {
         chain_start.push(chain.len() as u32);
     }
     let same_seg = same[from - hist..].to_vec();
@@ -287,6 +298,162 @@ mod validity {
                     );
                     assert_eq!(&data[i - d..i - d + l], &data[i..i + l], "pos {i}: len {l} dist {d}");
                     prev = (l as u16, d as u16);
+                }
+            }
+        }
+    }
+}
+
+/// The search as it was before its inner loop was tuned, kept to prove the tuned one finds exactly the same
+/// steps, chains and runs.
+#[cfg(test)]
+mod same_as_before {
+    use super::*;
+
+    struct Old {
+        steps: Vec<Vec<(u16, u16)>>,
+        chain: Vec<Vec<(u16, u16)>>,
+        same: Vec<u16>,
+    }
+
+    fn common(d: &[u8], a: usize, b: usize, skip: usize, max: usize) -> usize {
+        let mut n = skip;
+        while n + 8 <= max {
+            let x = u64::from_le_bytes(d[a + n..a + n + 8].try_into().unwrap());
+            let y = u64::from_le_bytes(d[b + n..b + n + 8].try_into().unwrap());
+            let z = x ^ y;
+            if z != 0 {
+                return n + (z.trailing_zeros() / 8) as usize;
+            }
+            n += 8;
+        }
+        while n < max && d[a + n] == d[b + n] {
+            n += 1;
+        }
+        n
+    }
+
+    fn old_find_matches(data: &[u8], from: usize, to: usize, max_depth: usize, alternatives: bool) -> Old {
+        const NIL: u32 = u32::MAX;
+        const CYC: usize = 2 * WINDOW;
+        const CMASK: usize = CYC - 1;
+        let hist = from.saturating_sub(WINDOW);
+        let mut out = Old { steps: Vec::new(), chain: Vec::new(), same: vec![0u16; to - hist] };
+        for i in (hist..to).rev() {
+            let k = i - hist;
+            out.same[k] = if i + 1 < to && data[i + 1] == data[i] { out.same[k + 1].saturating_add(1) } else { 1 };
+        }
+        out.same.drain(..from - hist);
+        let mut head = vec![NIL; HASH_SIZE];
+        let mut son = vec![NIL; 2 * CYC];
+        for i in hist..to {
+            let searching = i >= from;
+            let (mut steps, mut chain) = (Vec::new(), Vec::new());
+            let lim = (to - i).min(MAX_MATCH);
+            if lim >= MIN_MATCH {
+                let h = hash3(data, i);
+                let mut cur = head[h];
+                head[h] = i as u32;
+                let slot = 2 * (i & CMASK);
+                let (mut p1, mut p0) = (slot, slot + 1);
+                let (mut len0, mut len1) = (0usize, 0usize);
+                let mut best = MIN_MATCH - 1;
+                let (mut bucket, mut bucket_best) = (usize::MAX, MIN_MATCH - 1);
+                let mut kept = 0;
+                let mut depth = max_depth;
+                loop {
+                    if cur == NIL || i - cur as usize > WINDOW || depth == 0 {
+                        son[p0] = NIL;
+                        son[p1] = NIL;
+                        break;
+                    }
+                    depth -= 1;
+                    let c = cur as usize;
+                    let pair = 2 * (c & CMASK);
+                    let mut len = len0.min(len1);
+                    if data[c + len] == data[i + len] {
+                        len = common(data, c, i, len + 1, lim);
+                        if searching {
+                            let dist = i - c;
+                            let bk = dist_code(dist);
+                            if bk != bucket {
+                                bucket = bk;
+                                bucket_best = MIN_MATCH - 1;
+                            }
+                            if len > best || (alternatives && len > bucket_best && kept < 24) {
+                                steps.push((len as u16, dist as u16));
+                                if len > best {
+                                    chain.push((len as u16, dist as u16));
+                                }
+                                kept += 1;
+                                best = best.max(len);
+                                bucket_best = len;
+                            }
+                        }
+                        if len >= lim {
+                            son[p1] = son[pair];
+                            son[p0] = son[pair + 1];
+                            break;
+                        }
+                    }
+                    if data[c + len] < data[i + len] {
+                        son[p1] = cur;
+                        p1 = pair + 1;
+                        cur = son[p1];
+                        len1 = len;
+                    } else {
+                        son[p0] = cur;
+                        p0 = pair;
+                        cur = son[p0];
+                        len0 = len;
+                    }
+                }
+            }
+            if searching {
+                out.steps.push(steps);
+                out.chain.push(chain);
+            }
+        }
+        out
+    }
+
+    fn data(seed: u64, len: usize) -> Vec<u8> {
+        let mut s = seed;
+        (0..len)
+            .map(|k| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                match (k / 3000 + seed as usize) % 4 {
+                    0 => (s % 3) as u8,
+                    1 => (s >> 9) as u8,
+                    2 => b"abcabdabcabcabd 0 0 0 1 0 1"[(k * 7 + (s % 2) as usize) % 27],
+                    _ => [0u8, 0, 0, 0, 0, 0, 0, 0, 255][k % 9],
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_search_finds_what_it_found_before() {
+        for seed in 1..=6u64 {
+            let d = data(seed, 90_000);
+            for (from, to) in [(0usize, 40_000usize), (40_000, 90_000), (89_990, 90_000), (5, 7)] {
+                for depth in [1usize, 16, 300, 8192] {
+                    for alternatives in [false, true] {
+                        let new = find_matches(&d, from, to, depth, alternatives);
+                        let old = old_find_matches(&d, from, to, depth, alternatives);
+                        for i in from..to {
+                            let k = i - from;
+                            assert_eq!(new.at(i), &old.steps[k][..], "steps {seed} {from} {depth} {alternatives} {i}");
+                            assert_eq!(
+                                new.chain_at(i),
+                                &old.chain[k][..],
+                                "chain {seed} {from} {depth} {alternatives} {i}"
+                            );
+                            assert_eq!(new.same_at(i), old.same[k] as usize, "same {seed} {from} {i}");
+                        }
+                    }
                 }
             }
         }
