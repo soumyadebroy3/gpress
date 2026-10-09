@@ -1149,4 +1149,322 @@ mod tests {
             }
         }
     }
+
+    /// A small deterministic generator (xorshift).
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+        fn byte(&mut self) -> u8 {
+            (self.next() >> 24) as u8
+        }
+    }
+
+    /// One step of a script run through the model, the same on both sides.
+    enum Step {
+        Kind(Kind, Geom, u64),
+        Flat(bool),
+        Bypass(bool),
+        Forget,
+        Bytes(Vec<u8>),
+    }
+
+    /// Page drawing instructions: operators with numbers, names, strings (some nested) and arrays.
+    fn content(r: &mut Rng, n: usize) -> Vec<u8> {
+        let mut t = String::new();
+        while t.len() < n {
+            let (a, b, c, d) = (r.below(612), r.below(792), r.below(100), r.below(10));
+            t += &match r.below(7) {
+                0 => format!("BT /F{} {} Tf {a} {b} Td (word {c}) Tj ET\n", d % 3 + 1, 8 + d),
+                1 => format!("q {c} 0 0 {d} {a} {b} cm /Im{d} Do Q\n"),
+                2 => format!("{a}.{d} {b} m {c} {a} l S\n"),
+                3 => format!("0.{c} 0.{d} 0 rg {a} {b} {c} {d} re f\n"),
+                4 => format!("[(Hel) -{c} (lo \\(x\\)) 3.5 <00ff>] TJ\n(a (nested {d}) string) Tj\n"),
+                5 => format!("/GS{d} gs {d} w 1 J [{c} {d}] 0 d\n"),
+                _ => format!("{a} {b} {c} {d} {a} {b} c\n"),
+            };
+        }
+        t.into_bytes()
+    }
+
+    /// A Type 1 charstring of `groups` commands: `len_iv` random bytes, then numbers of every encoding
+    /// (one byte, two bytes either sign, 32-bit) before each command, some of them escaped.
+    fn charstring(r: &mut Rng, len_iv: i64, groups: u64) -> Vec<u8> {
+        let mut c: Vec<u8> = (0..len_iv.max(0)).map(|_| r.byte()).collect();
+        for _ in 0..groups {
+            for _ in 0..r.below(5) {
+                match r.below(8) {
+                    0..=3 => c.push(32 + r.below(215) as u8),
+                    4 => {
+                        let v = r.below(1024);
+                        c.extend([247 + (v >> 8) as u8, v as u8]);
+                    }
+                    5 => {
+                        let v = r.below(1024);
+                        c.extend([251 + (v >> 8) as u8, v as u8]);
+                    }
+                    _ => {
+                        c.push(255);
+                        c.extend((((r.next() as i32) >> 12) as u32).to_be_bytes());
+                    }
+                }
+            }
+            if r.below(6) == 0 {
+                c.extend([12, [0, 1, 2, 6, 7, 16, 17, 33][r.below(8) as usize]]);
+            } else {
+                c.push([1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 21, 22, 30, 31][r.below(16) as usize]);
+            }
+        }
+        c
+    }
+
+    /// An opened Type 1 private part: text with /lenIV, then subroutines and charstrings ("n RD " or "n -| "
+    /// and n bytes), one of them twice (a long repeat inside charstrings).
+    fn private(r: &mut Rng, len_iv: i64) -> Vec<u8> {
+        let mut t =
+            b"dup /Private 8 dict dup begin\n/RD{string currentfile exch readstring pop}executeonly def\n".to_vec();
+        t.extend(format!("/lenIV {len_iv} def\n/BlueValues [-22 0 683 705 431 448] def\n/Subrs 4 array\n").bytes());
+        for i in 0..4 {
+            let cs = charstring(r, len_iv, 3 + i * 2);
+            t.extend(format!("dup {i} {} RD ", cs.len()).bytes());
+            t.extend(cs);
+            t.extend(b" NP\n");
+        }
+        t.extend(b"2 index /CharStrings 12 dict dup begin\n");
+        let twice = charstring(r, len_iv, 60);
+        for (k, name) in ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"].iter().enumerate() {
+            let groups = 8 + r.below(16);
+            let cs = if k == 3 || k == 7 { twice.clone() } else { charstring(r, len_iv, groups) };
+            let (rd, nd) = if k % 4 == 1 { ("-|", "|-") } else { ("RD", "ND") };
+            t.extend(format!("/{name} {} {rd} ", cs.len()).bytes());
+            t.extend(cs);
+            t.extend(format!(" {nd}\n").bytes());
+        }
+        t.extend(b"end\nend\nreadonly put\nnoaccess put\ndup/FontName get exch definefont pop\n");
+        t
+    }
+
+    /// Image rows of `bpp`-byte pixels: a smooth picture with a little noise, a run of rows equal to the one
+    /// before them and a blank band (long repeats).
+    fn picture(r: &mut Rng, stride: usize, rows: usize, bpp: usize) -> Vec<u8> {
+        let mut v = Vec::new();
+        for y in 0..rows {
+            if y % 20 >= 8 && y % 20 < 14 {
+                let at = v.len() - stride;
+                v.extend_from_within(at..at + stride);
+            } else if y % 20 >= 16 {
+                v.extend(std::iter::repeat_n(255, stride));
+            } else {
+                v.extend(
+                    (0..stride).map(|x| ((x / bpp.max(1)) * 3 + y * 2 + x % bpp.max(1) * 60) as u8 ^ r.below(4) as u8),
+                );
+            }
+        }
+        v
+    }
+
+    /// Symbol rows: palette indices (or packed pixels) of `bpp` bytes, with repeated rows.
+    fn symbols(r: &mut Rng, stride: usize, rows: usize) -> Vec<u8> {
+        let mut v = Vec::new();
+        for y in 0..rows {
+            if y % 12 >= 4 {
+                let at = v.len() - stride;
+                v.extend_from_within(at..at + stride);
+            } else {
+                v.extend((0..stride).map(|x| if r.below(9) == 0 { r.byte() } else { ((x / 4 + y / 3) % 4) as u8 }));
+            }
+        }
+        v
+    }
+
+    /// A small PDF cut as the archive cuts it: syntax segments (with their offsets in the file) around content
+    /// streams, numbered objects ("N 0 obj ... endobj"), a long repeat, and cross-reference tables whose entries
+    /// the model expects.
+    fn document(r: &mut Rng, steps: &mut Vec<Step>) {
+        let mut file = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n".to_vec();
+        let mut seg = 0;
+        let mut offsets = Vec::new();
+        let widths: String = (0..70).map(|i| format!("{} ", 250 + (i * 37) % 500)).collect();
+        for i in 1..=24 {
+            offsets.push(file.len());
+            if i % 3 == 0 {
+                let c = content(r, 300 + 40 * i);
+                file.extend(format!("{i} 0 obj\n<< /Length {} >>\nstream\n", c.len()).bytes());
+                steps.push(Step::Kind(Kind::Syntax, Geom::default(), seg as u64));
+                steps.push(Step::Bytes(file[seg..].to_vec()));
+                steps.push(Step::Kind(Kind::Content, Geom::default(), file.len() as u64));
+                steps.push(Step::Bytes(c.clone()));
+                file.extend(c);
+                seg = file.len();
+                file.extend(b"\nendstream\nendobj\n");
+            } else if i % 7 == 2 {
+                file.extend(format!("{i} 0 obj\n<< /Type /Font /FirstChar 32 /Widths [{widths}] >>\nendobj\n").bytes());
+            } else {
+                let p = r.below(9);
+                file.extend(
+                    format!("{i} 0 obj\n<< /Type /Page /Parent 2 0 R /Contents {} 0 R /Rotate {p} >>\nendobj\n", i + 1)
+                        .bytes(),
+                );
+            }
+        }
+        let xref = file.len();
+        file.extend(format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).bytes());
+        for off in &offsets {
+            file.extend(format!("{off:010} 00000 n \n").bytes());
+        }
+        file.extend(format!("trailer\n<< /Size 25 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").bytes());
+        // An update: one more object and its own table.
+        let last = file.len();
+        file.extend(b"25 0 obj\n<< /Producer (test) >>\nendobj\n");
+        let xref2 = file.len();
+        file.extend(format!("xref\n0 1\n0000000000 65535 f \n25 1\n{last:010} 00000 n \n").bytes());
+        file.extend(format!("trailer\n<< /Size 26 /Prev {xref} >>\nstartxref\n{xref2}\n%%EOF\n").bytes());
+        steps.push(Step::Kind(Kind::Syntax, Geom::default(), seg as u64));
+        steps.push(Step::Bytes(file[seg..].to_vec()));
+    }
+
+    /// Every kind and every path of the model: priming with the shortcut off, numbered objects and
+    /// cross-reference tables (expected text), content, Type 1 private parts, residual images (1 to 3 bytes per
+    /// pixel, odd row lengths, plain bytes in the middle), symbol images, rows of unknown length, other kinds,
+    /// plain coding, long repeats everywhere, and many switches of kind.
+    fn script() -> Vec<Step> {
+        let mut r = Rng(0x9E37_79B9_7F4A_7C15);
+        let mut s = Vec::new();
+        let text =
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Kids [3 0 R] /Count 1 >>\nendobj\n";
+        s.push(Step::Bypass(false));
+        for _ in 0..2 {
+            s.push(Step::Kind(Kind::Syntax, Geom::default(), 0));
+            s.push(Step::Bytes(text.to_vec()));
+            s.push(Step::Kind(Kind::Content, Geom::default(), 0));
+            s.push(Step::Bytes(b"BT /F1 12 Tf 72 712 Td (Hello) Tj ET\nq 1 0 0 1 0 0 cm Q\n".to_vec()));
+        }
+        s.push(Step::Forget);
+        s.push(Step::Bypass(true));
+        document(&mut r, &mut s);
+
+        s.push(Step::Kind(Kind::Font, Geom::default(), 0));
+        s.push(Step::Bytes(
+            b"%!PS-AdobeFont-1.0: CMR10 003.002\n/FontName /CMR10 def\n/PaintType 0 def\neexec\n".to_vec(),
+        ));
+        s.push(Step::Kind(Kind::Charstring, Geom::default(), 0));
+        s.push(Step::Bytes(private(&mut r, 4)));
+        s.push(Step::Kind(Kind::Font, Geom::default(), 0));
+        s.push(Step::Bytes(b"cleartomark\n".to_vec()));
+
+        for (stride, rows, bpp) in [(37, 50, 1), (87, 30, 3), (5, 60, 2), (1, 300, 1), (7, 40, 0)] {
+            s.push(Step::Kind(Kind::Image, Geom { stride, bpp, exact: false }, 0));
+            s.push(Step::Bytes(picture(&mut r, stride, rows, bpp)));
+        }
+        // Plain bytes inside a residual image, then the full model again.
+        s.push(Step::Kind(Kind::Image, Geom { stride: 37, bpp: 1, exact: false }, 0));
+        s.push(Step::Bytes(picture(&mut r, 37, 12, 1)));
+        s.push(Step::Flat(true));
+        let noise: Vec<u8> = (0..150).map(|_| r.byte()).collect();
+        s.push(Step::Bytes([noise.clone(), noise].concat()));
+        s.push(Step::Flat(false));
+        s.push(Step::Bytes(picture(&mut r, 37, 20, 1)));
+        for (stride, rows, bpp) in [(33, 30, 1), (22, 40, 2), (9, 20, 0)] {
+            s.push(Step::Kind(Kind::Image, Geom { stride, bpp, exact: true }, 0));
+            s.push(Step::Bytes(symbols(&mut r, stride, rows)));
+        }
+        s.push(Step::Kind(Kind::Image, Geom { stride: 0, bpp: 1, exact: false }, 0));
+        s.push(Step::Bytes(picture(&mut r, 50, 12, 1)));
+
+        s.push(Step::Kind(Kind::Meta, Geom::default(), 0));
+        s.push(Step::Bytes((0..120).map(|i| if i % 5 == 0 { 0x80 | (i as u8) } else { r.below(8) as u8 }).collect()));
+        s.push(Step::Kind(Kind::Data, Geom::default(), 0));
+        s.push(Step::Bytes((0..400).map(|i| if i % 41 == 0 { r.below(5) as u8 } else { (i * 7) as u8 }).collect()));
+        // Raw bytes, then a copy of the content of the document: a long repeat of earlier data.
+        let raw: Vec<u8> = (0..600).map(|i| (i as u8).wrapping_mul(13) ^ (r.below(3) as u8)).collect();
+        s.push(Step::Kind(Kind::Raw, Geom::default(), 9000));
+        s.push(Step::Bytes([raw, content(&mut Rng(5), 600), content(&mut Rng(5), 600)].concat()));
+        // Plain coding, with a repeat inside it (the shortcut works there too).
+        s.push(Step::Kind(Kind::Raw, Geom::default(), 0));
+        s.push(Step::Flat(true));
+        let noise: Vec<u8> = (0..700).map(|_| r.byte()).collect();
+        s.push(Step::Bytes([&noise[..], &noise[..300], &noise[200..]].concat()));
+        s.push(Step::Flat(false));
+        // The shortcut off for a while: long repeats go through the full model.
+        s.push(Step::Bypass(false));
+        s.push(Step::Kind(Kind::Data, Geom::default(), 0));
+        let block = content(&mut r, 250);
+        s.push(Step::Bytes([&block[..], &block[..]].concat()));
+        s.push(Step::Bypass(true));
+        s.push(Step::Forget);
+        s.push(Step::Kind(Kind::Charstring, Geom::default(), 0));
+        s.push(Step::Bytes(private(&mut r, -1)));
+
+        // Many switches of kind, with a few bytes of each.
+        let kinds = [
+            (Kind::Meta, Geom::default()),
+            (Kind::Syntax, Geom::default()),
+            (Kind::Content, Geom::default()),
+            (Kind::Image, Geom { stride: 9, bpp: 1, exact: false }),
+            (Kind::Font, Geom::default()),
+            (Kind::Data, Geom::default()),
+            (Kind::Raw, Geom::default()),
+            (Kind::Charstring, Geom::default()),
+            (Kind::Image, Geom { stride: 6, bpp: 2, exact: true }),
+            (Kind::Image, Geom { stride: 0, bpp: 3, exact: false }),
+        ];
+        for i in 0..60 {
+            let (kind, geom) = kinds[r.below(kinds.len() as u64) as usize];
+            s.push(Step::Kind(kind, geom, i * 100));
+            let n = 5 + r.below(50) as usize;
+            let bytes = if i % 2 == 0 { content(&mut r, n) } else { (0..n).map(|_| r.byte()).collect() };
+            s.push(Step::Bytes(bytes));
+        }
+        s.push(Step::Kind(Kind::Syntax, Geom::default(), 0));
+        s.push(Step::Bytes(text.to_vec()));
+        s
+    }
+
+    /// Runs the script through the model with coder `c` (the bytes given when encoding) and returns the bytes
+    /// the model gave back.
+    fn run_script<C: Coder>(steps: &[Step], c: &mut C, encode: bool) -> (Vec<u8>, u64) {
+        let mut m = Model::new(12);
+        let mut got = Vec::new();
+        for st in steps {
+            match st {
+                Step::Kind(kind, geom, orig) => m.set_kind(*kind, *geom, *orig),
+                Step::Flat(f) => m.set_flat(*f),
+                Step::Bypass(b) => m.bypass_on = *b,
+                Step::Forget => m.forget_document(),
+                Step::Bytes(v) => {
+                    for &b in v {
+                        got.push(m.code_byte(c, encode.then_some(b)));
+                    }
+                }
+            }
+        }
+        (got, m.bypassed)
+    }
+
+    #[test]
+    fn coded_bytes_stay_the_same_for_every_kind() {
+        // The model is part of the archive format: this pins its output. A change that alters these numbers
+        // changes the format.
+        let steps = script();
+        let input: Vec<u8> =
+            steps.iter().flat_map(|s| if let Step::Bytes(v) = s { v.clone() } else { Vec::new() }).collect();
+        let mut e = Encoder::new();
+        let (back, bypassed) = run_script(&steps, &mut e, true);
+        assert_eq!(back, input);
+        assert!(bypassed > 1000, "long repeats: {bypassed}");
+        let out = e.finish();
+        let fnv = out.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3));
+        assert_eq!((input.len(), out.len(), fnv), (30_806, 10_764, 0x3720_ab6b_a31b_18ca));
+        let mut d = Decoder::new(&out);
+        let (decoded, _) = run_script(&steps, &mut d, false);
+        assert!(decoded == input);
+    }
 }
