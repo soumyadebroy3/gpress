@@ -327,6 +327,7 @@ fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &m
     let mut next_id = plans.len();
     let mut no_merge: HashSet<(usize, usize)> = HashSet::new();
     let mut no_split: HashSet<usize> = HashSet::new();
+    let (mut el, mut er) = (Estimator::new(), Estimator::new());
     for _pass in 0..2 {
         let mut changed = false;
         // Merges.
@@ -380,8 +381,7 @@ fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &m
                 }
                 c += step;
                 let right = Hist::diff(&total, &left);
-                let v = estimate_dynamic_bits(&left).min(fixed_bits(&left))
-                    + estimate_dynamic_bits(&right).min(fixed_bits(&right));
+                let v = el.bits(&left).min(fixed_bits(&left)) + er.bits(&right).min(fixed_bits(&right));
                 if v < best.0 {
                     best = (v, c);
                 }
@@ -538,10 +538,12 @@ fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>) -> Vec<Plan> {
         pref.push(h.clone());
     }
     let span_limit = 96usize;
-    let est = |i: usize, j: usize| -> u64 {
+    // One estimator for all pairs: for a given j, the histograms of i and i + 1 differ by one block.
+    let mut es = Estimator::new();
+    let mut est = |i: usize, j: usize| -> u64 {
         let hh = Hist::diff(&pref[j], &pref[i]);
         let nbytes = pos[j] - pos[i];
-        3 + estimate_dynamic_bits(&hh).min(fixed_bits(&hh)).min(8 * nbytes as u64 + 40)
+        3 + es.bits(&hh).min(fixed_bits(&hh)).min(8 * nbytes as u64 + 40)
     };
     let mut best = vec![u64::MAX; k];
     let mut from = vec![0usize; k];
@@ -568,6 +570,8 @@ fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>) -> Vec<Plan> {
     cuts.reverse();
     // Fine-tune each inner boundary in symbol steps around its candidate (histograms kept incrementally).
     let mut idx: Vec<usize> = cuts.iter().map(|&c| cand[c]).collect();
+    // The search's estimator serves the left side (it gives the same estimates whatever it priced before).
+    let (mut el, mut er) = (es, Estimator::new());
     for t in 1..idx.len() - 1 {
         let (l, r) = (idx[t - 1], idx[t + 1]);
         let total = Hist::of(&syms[l..r]);
@@ -580,8 +584,7 @@ fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>) -> Vec<Plan> {
         let mut bestv = u64::MAX;
         while c <= hi {
             let right = Hist::diff(&total, &left);
-            let v = estimate_dynamic_bits(&left).min(fixed_bits(&left))
-                + estimate_dynamic_bits(&right).min(fixed_bits(&right));
+            let v = el.bits(&left).min(fixed_bits(&left)) + er.bits(&right).min(fixed_bits(&right));
             if v < bestv {
                 bestv = v;
                 bestc = c;
