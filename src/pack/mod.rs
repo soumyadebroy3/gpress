@@ -1101,7 +1101,9 @@ fn run<C: Coder>(
                 let mem = io.byte(p_in.map(|p| p.mem_level));
                 let filt = io.byte(p_in.map(|p| p.filtered as u8));
                 let params = zlibexact::Params { level, window_bits: wb, mem_level: mem, filtered: filt != 0 };
-                if !(1..=9).contains(&level) || !(8..=15).contains(&wb) || !(1..=9).contains(&mem) || filt > 1 {
+                // Window bits 9 to 15, all that `find_params` makes (zlib itself takes 8 as 9); the re-creation
+                // needs a window larger than its lookahead, so 8 can only come from a damaged file.
+                if !(1..=9).contains(&level) || !(9..=15).contains(&wb) || !(1..=9).contains(&mem) || filt > 1 {
                     io.damaged = true;
                     break;
                 }
@@ -1889,6 +1891,28 @@ mod tests {
             0,
         );
         assert_eq!(unpack(&lying).unwrap_err(), UnpackError::Damaged("a part doesn't restore"));
+    }
+
+    #[test]
+    fn window_bits_8_are_refused_as_damaged() {
+        // No pack declares window bits 8 for a rebuilt part (`find_params` makes 9 to 15), and the zlib
+        // re-creation can't run with so small a window: a file declaring them is refused where the settings
+        // are read, never a panic (in a debug build too). 9, the smallest real one, packs and restores.
+        let content: Vec<u8> = (0..400).flat_map(|i| format!("BT ({i}) Tj ET\n").into_bytes()).collect();
+        let params = Params { level: 6, window_bits: 9, mem_level: 8, filtered: false };
+        let z = zlib_stream(&content, params);
+        let mut d = format!("%PDF-1.4\n1 0 obj\n<< /Filter /FlateDecode /Length {} >>\nstream\n", z.len()).into_bytes();
+        let (a, b) = (d.len(), d.len() + z.len());
+        d.extend_from_slice(&z);
+        d.extend_from_slice(b"\nendstream\nendobj\n%%EOF\n");
+        let (packed, st) = pack_with(&d, &PackOptions { threads: 1, ..PackOptions::default() });
+        assert!(st.rebuilt == 1 && !st.fallback, "{st:?}");
+        assert_eq!(unpack(&packed).unwrap(), d);
+        let params = Params { window_bits: 8, ..params };
+        let rebuilt =
+            Plan::Rebuilt { params, src: Source::File(a, b), dlen: content.len(), tail: Vec::new(), lep: None };
+        let packed = pack_declaring(&d, vec![Plan::Syntax(0, a), rebuilt, Plan::Syntax(b, d.len())], 1 << 20);
+        assert_eq!(unpack(&packed).unwrap_err(), UnpackError::Damaged("a part doesn't restore"));
     }
 
     #[test]
