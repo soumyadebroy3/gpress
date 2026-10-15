@@ -37,7 +37,7 @@ pub struct Options {
     /// budget too (16 per byte of the file at effort 0, twice as much every 10 points, at least 4 MiB): a
     /// stream beyond it is kept as it is. Decided from sizes only, never from time, so the output is repeatable.
     pub effort: u8,
-    /// Threads to use (0: every core the machine offers). Never changes the output.
+    /// Threads to use (0: every core the machine offers, at most 64). Never changes the output.
     pub threads: usize,
     /// Leave files that claim a conformance or carry a signature untouched: PDF/A, PDF/X, signed, certified,
     /// usage rights (the safe default). With `false` every object's value is still kept, but those
@@ -748,11 +748,11 @@ fn bridge_budget(effort: u8, input_len: usize) -> f64 {
     input_len as f64 * (1u64 << (effort - STRONG_FROM)) as f64 / 16.0
 }
 
-/// Effort 0 gives images the lazy level with two steps of lookahead (on the sample: 86.93% of the input against
-/// 87.08% with one step and 86.96% with the near-optimal level 8, at 17.4 s of CPU against 16.8 and 22.1).
-/// Level 8 is the one level weaker than 7 on images, so the scale goes from 7 to 9 (with images at each level
-/// and the rest as at effort 0, the 90 files the sample rewrites: 7 87.02%, 8 87.04%, 9 86.70%, 10 86.63%, 11
-/// 86.37%, 12 86.30%).
+/// Effort 0 gives images the lazy level with two steps of lookahead, the fastest level that pays. With images
+/// at each level and everything else as at effort 0, the 90 files the sample rewrites come to (output as a
+/// share of their input, and the time against level 7's): 7 87.02%; 8 87.04%, 1.3x; 9 86.70%, 1.45x; 10
+/// 86.63%, 1.6x; 11 86.37%, 1.95x; 12 86.30%, 2.15x. Level 8 is the one level weaker than 7 on images, so the
+/// scale goes from 7 to 9.
 const IMAGE_LEVEL: [u8; FAST_BELOW as usize] =
     [7, 7, 7, 9, 9, 9, 10, 10, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12];
 
@@ -763,15 +763,20 @@ const BIG_STREAM: usize = 4 << 20;
 
 /// The fast encoder's level for a stream over `BIG_STREAM` below `FAST_BELOW`: level 9 (one pass of the
 /// near-optimal parse, 40% faster than the top level, 0.2% larger on fonts and 1.4% on page content) up to
-/// effort 5, then as images, so the top level again from 10.
+/// effort 5, 10 from 6 and the top level again from 10. Level 11 is left out: on a 4.9 MB CFF font it was
+/// larger than both 10 and 12, so efforts 8 and 9 would have made a larger file than 6 and 7.
 fn big_level(effort: u8) -> u8 {
-    image_level(effort).max(9)
+    match image_level(effort) {
+        l if l < 10 => 9,
+        l if l < 12 => 10,
+        _ => flate::fast::LEVELS,
+    }
 }
 
-/// The Flate settings for the object streams and the cross-reference stream (`raw`: the object streams'
-/// bytes): the effort's own, except on the bridge from `STRONG_FROM`, where they get the strong encoder's quick
-/// settings when they fit in `bridge_budget` (as the streams that take the most room do), so that effort 19
-/// ends where 20 begins.
+/// The Flate settings for the object streams and the cross-reference stream (`raw`: the bytes to encode): the
+/// effort's own, except on the bridge from `STRONG_FROM`, where they get the strong encoder's quick settings
+/// when those bytes fit in `bridge_budget` (a budget of their own, as large as the streams' one), so that
+/// effort 19 ends where 20 begins.
 fn structure_flate(opt: &Options, raw: usize, input_len: usize) -> flate::Options {
     if opt.flate.fast > 0
         && (STRONG_FROM..FAST_BELOW).contains(&opt.effort)
@@ -842,10 +847,11 @@ fn effort_plan(
     let mut floor = quick_budget(opt.effort, input_len);
     let mut out = vec![None; unique.len()];
     // The fast path: every stream gets the effort's own settings while its decoded bytes fit, images a faster
-    // level of the fast encoder, and so does a stream over `BIG_STREAM` up to effort 9. From `STRONG_FROM` on, the streams that take the most room get the strong
-    // encoder's quick settings instead (what effort 0 was before the fast path) while their decoded bytes fit
-    // in `bridge_budget`, so the time and the size go on smoothly to 20. A stream whose filters don't decode
-    // within `max_stream` is kept as it is (`reencode` would find the same).
+    // level of the fast encoder, and so does a stream over `BIG_STREAM` up to effort 9. From `STRONG_FROM` on,
+    // the streams that take the most room get the strong encoder's quick settings instead (what effort 0 was
+    // before the fast path) while their decoded bytes fit in `bridge_budget`, so the time and the size go on
+    // smoothly to 20. A stream whose filters don't decode within `max_stream` is kept as it is (`reencode` would
+    // find the same).
     if opt.effort < FAST_BELOW {
         // Out of time: nothing more is decoded (the whole rewrite is given up after the plan). A stream that
         // decodes to more than the whole budget is kept whatever comes before it, so its decoding stops there
@@ -1132,7 +1138,8 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         raw.extend_from_slice(&body);
         raws.push((raw, first));
     }
-    let structure = structure_flate(opt, raws.iter().map(|r| r.0.len()).sum(), input.len());
+    let objstm_bytes: usize = raws.iter().map(|r| r.0.len()).sum();
+    let structure = structure_flate(opt, objstm_bytes, input.len());
     let zs = par::map(pool, raws.len(), None, |k| flate::deflate_zlib(&raws[k].0, &structure));
     for (chunk, ((_, first), z)) in chunks.iter().zip(raws.iter().zip(zs)) {
         let sn = next_num;
@@ -1224,6 +1231,8 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
             up.push(b.wrapping_sub(above));
         }
     }
+    // Its rows count too: a file can claim object numbers far beyond what it holds.
+    let structure = structure_flate(opt, objstm_bytes + rows.len() + up.len(), input.len());
     let mut both = par::map(pool, 2, None, |k| flate::deflate_zlib(if k == 0 { &rows } else { &up }, &structure));
     let (z_up, z_plain) = (both.pop().unwrap(), both.pop().unwrap());
     let mut xd = Dict::default();
@@ -1531,6 +1540,7 @@ mod effort_tests {
             .map(|e| effort_plan(&streams, &[0], &Options::effort(e), 1_000_000, None)[0].as_ref().unwrap().flate.fast)
             .collect();
         assert_eq!(big_levels[0], 9);
+        assert!(!big_levels.contains(&11), "{big_levels:?}");
         assert!((0..STRONG_FROM).all(|e| big_levels[e as usize] == big_level(e)), "{big_levels:?}");
         assert!(big_levels.windows(2).take(16).all(|w| w[0] <= w[1]), "{big_levels:?}");
         assert_eq!(big_levels[STRONG_FROM as usize], flate::fast::LEVELS);
