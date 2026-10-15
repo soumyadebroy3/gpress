@@ -206,8 +206,9 @@ impl Out {
 }
 
 /// The final stream. Neighbouring stored pieces are joined, so that incompressible input costs the
-/// stored-block overhead (5 bytes per 65535) and at most 2 bytes more: a segment that ends in a few bytes
-/// codes them in a block of its own (a whole number of MiB plus 1 to 8 random bytes, say).
+/// stored-block overhead (5 bytes per 65535) and at most 5 bytes more: the last segment, when short, prices a
+/// stored block of its own at 5 bytes of overhead, so a few random bytes there can go into a fixed block that
+/// costs up to 5 bytes over them, where joining them to the stored run before would have cost nothing.
 struct Stream {
     w: BitWriter,
     pending: Option<(usize, usize)>,
@@ -1466,12 +1467,14 @@ mod tests {
                 assert!(z.len() <= n + 5 * n.div_ceil(65535), "level {level}, {n} bytes: {}", z.len());
             }
         }
-        // Where a segment ends in a few bytes, at most 2 bytes more (see `Stream`).
-        for n in [SEGMENT + 1, SEGMENT + 3, SEGMENT + 8, 2 * SEGMENT + 5] {
-            let d = random(n, n as u64);
-            for level in [1, 7, LEVELS] {
+        // A short last segment: at most 5 bytes more (see `Stream`), whatever its length and bytes.
+        let tails = (1..=80).chain([100, 150, 200, 1000, 65519, 65535, 70_000]);
+        for (k, tail) in tails.enumerate() {
+            let n = SEGMENT + tail;
+            let d = random(n, 1 + k as u64 % 3);
+            for level in [1, LEVELS] {
                 let z = round_trip(&d, level, None);
-                assert!(z.len() <= n + 5 * n.div_ceil(65535) + 2, "level {level}, {n} bytes: {}", z.len());
+                assert!(z.len() <= n + 5 * n.div_ceil(65535) + 5, "level {level}, {n} bytes: {}", z.len());
             }
         }
     }

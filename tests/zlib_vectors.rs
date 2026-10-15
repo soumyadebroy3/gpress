@@ -60,14 +60,23 @@ fn the_fast_encoder_against_zlib_on_the_same_inputs() {
     }
 }
 
-/// The Flate streams of the PDFs in tests/data (page content, fonts, cross-reference streams), decoded and
-/// encoded again by the fast encoder at every level: each gives its data back.
+/// The Flate streams of every PDF in tests/data that are not encrypted (page content, a grey and an RGB image,
+/// a long mostly-zero stream, a cross-reference stream: 6 in all), decoded and encoded again by the fast
+/// encoder at every level: each gives its data back.
 #[test]
 fn the_fast_encoder_round_trips_the_test_pdfs_streams() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    let mut pdfs: Vec<_> = [dir.clone(), dir.join("enc")]
+        .iter()
+        .flat_map(|d| std::fs::read_dir(d).unwrap().map(|e| e.unwrap().path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "pdf"))
+        .collect();
+    pdfs.sort();
+    assert!(pdfs.len() >= 20, "{} PDFs", pdfs.len());
     let mut n = 0;
-    for pdf in ["format-v8.pdf", "enc/base.pdf"] {
-        let d = std::fs::read(dir.join(pdf)).unwrap();
+    for path in &pdfs {
+        let pdf = path.display();
+        let d = std::fs::read(path).unwrap();
         let mut at = 0;
         while let Some(k) = d[at..].windows(6).position(|w| w == b"stream") {
             at += k + 6;
@@ -84,5 +93,5 @@ fn the_fast_encoder_round_trips_the_test_pdfs_streams() {
             n += 1;
         }
     }
-    assert!(n >= 5, "{n} streams");
+    assert!(n >= 6, "{n} streams");
 }
