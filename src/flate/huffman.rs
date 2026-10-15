@@ -28,7 +28,7 @@ pub fn fast_lengths(freqs: &[u32], lens: &mut [u8]) -> u8 {
     with_scratch(2 * freqs.len(), |s| {
         let (keys, room) = s.split_at_mut(freqs.len());
         let n = sorted_keys(freqs, keys, room);
-        unlimited_sorted(&keys[..n], room, lens).0
+        unlimited_sorted(&keys[..n], room, lens, &mut [0; 16]).0
     })
 }
 
@@ -40,7 +40,7 @@ pub fn lengths_into(freqs: &[u32], max_bits: u32, lens: &mut [u8]) {
         let (keys, room) = s.split_at_mut(freqs.len());
         let n = sorted_keys(freqs, keys, room);
         let keys = &keys[..n];
-        if unlimited_sorted(keys, room, lens).0 as u32 > max_bits {
+        if unlimited_sorted(keys, room, lens, &mut [0; 16]).0 as u32 > max_bits {
             lens.fill(0);
             limited_sorted(keys, max_bits, lens, &mut Guide::new());
         }
@@ -66,8 +66,10 @@ pub struct LengthCoder<const N: usize> {
     used: usize,
     /// Room for the keys that moved and for the code tree.
     work: [u64; N],
-    /// The lengths of the last call, one per symbol; its counts, limit (none before the first) and result.
+    /// The lengths of the last call, one per symbol, and how many symbols have each length from 1 to 15 (at
+    /// 0 nothing); its counts, limit (none before the first) and result.
     lens: [u8; N],
+    per_len: [u32; 16],
     counts: [u32; N],
     max_bits: Option<u32>,
     bits: u64,
@@ -93,6 +95,7 @@ impl<const N: usize> LengthCoder<N> {
             used: 0,
             work: [0; N],
             lens: [0; N],
+            per_len: [0; 16],
             counts: [0; N],
             max_bits: None,
             bits: 0,
@@ -128,6 +131,7 @@ impl<const N: usize> LengthCoder<N> {
         if (RUN_MIN..=RUN_SYMS).contains(&N) && !skip {
             let runs = self.runs.get_or_insert_with(|| Box::new(Runs::new()));
             if let Some((bits, used)) = runs.lengths(freqs, max_bits, &mut self.lens, self.from_runs) {
+                self.per_len = runs.per_len();
                 self.used = used;
                 self.sorted = false;
                 self.from_runs = true;
@@ -156,11 +160,21 @@ impl<const N: usize> LengthCoder<N> {
         self.lens.fill(0);
         let (max, mut bits) = match deep {
             true => (u8::MAX, 0),
-            false => unlimited_sorted(keys, &mut self.work, &mut self.lens),
+            false => unlimited_sorted(keys, &mut self.work, &mut self.lens, &mut self.per_len),
         };
         if max as u32 > max_bits {
             limited_sorted(keys, max_bits, &mut self.lens, &mut self.guide);
-            bits = keys.iter().map(|&k| (k >> 16) * self.lens[(k & 0xffff) as usize] as u64).sum();
+            bits = 0;
+            self.per_len = [0; 16];
+            for &k in keys {
+                let len = self.lens[(k & 0xffff) as usize];
+                bits += (k >> 16) * len as u64;
+                // Only lengths 1 to 15 are counted, as on the way without a limit; longer ones (a limit over 15)
+                // are left out.
+                if let Some(x) = self.per_len.get_mut(len as usize) {
+                    *x += 1;
+                }
+            }
         }
         bits
     }
@@ -218,6 +232,11 @@ impl<const N: usize> LengthCoder<N> {
     /// How many symbols had a nonzero count in the last call.
     pub fn used(&self) -> usize {
         self.used
+    }
+
+    /// How many symbols have each length from 1 to 15 in the last call (at 0 nothing).
+    pub fn per_len(&self) -> &[u32; 16] {
+        &self.per_len
     }
 }
 
@@ -306,9 +325,10 @@ struct Runs {
     node_first: [u16; RUN_SYMS + 1],
     node_taken: [u16; RUN_SYMS + 1],
     node_last: [u16; RUN_SYMS + 1],
-    /// How many leaves are at each depth; whether the tallies are of the counts of this call and whether it
-    /// failed because the longest length was over the limit.
+    /// How many leaves are at each depth, down to `max`; whether the tallies are of the counts of this call
+    /// and whether it failed because the longest length was over the limit.
     bl: [u16; 64],
+    max: usize,
     current: bool,
     deep: bool,
 }
@@ -333,6 +353,7 @@ impl Runs {
             node_taken: [0; RUN_SYMS + 1],
             node_last: [0; RUN_SYMS + 1],
             bl: [0; 64],
+            max: 0,
             current: false,
             deep: false,
         }
@@ -457,6 +478,7 @@ impl Runs {
             self.deep = true;
             return None;
         };
+        self.max = max as usize;
         // The leaves of a depth are those of a range of ranks, the deepest the lightest, and the symbols of a
         // count have the ranks of a range, in symbol order.
         let mut depth_of_rank = [0u8; RUN_SYMS];
@@ -562,6 +584,15 @@ impl Runs {
             keys[small..n].sort_unstable();
         }
         n
+    }
+
+    /// How many symbols have each length from 1 to 15 in the lengths last given.
+    fn per_len(&self) -> [u32; 16] {
+        let mut per_len = [0; 16];
+        for (x, &k) in per_len.iter_mut().zip(&self.bl[..=self.max]) {
+            *x = k as u32;
+        }
+        per_len
     }
 
     /// Moffat and Katajainen's passes on the `ra` runs of leaves (`n` of them, at least 48): the leaves at
@@ -704,11 +735,12 @@ fn insertion_sort(keys: &mut [u64]) {
 
 /// Huffman lengths without a limit for the used symbols, given their sorted keys, by Moffat and Katajainen's
 /// method: `tree` (at least as long as `keys`) holds the internal nodes. Writes each used symbol's length into
-/// `lens` and returns the longest and the sum of count times length. Always inlined, so that the arrays' sizes
-/// are known.
+/// `lens` and how many symbols have each length up to 15 into `per_len`, and returns the longest and the sum
+/// of count times length. Always inlined, so that the arrays' sizes are known.
 #[inline(always)]
-fn unlimited_sorted(keys: &[u64], tree: &mut [u64], lens: &mut [u8]) -> (u8, u64) {
+fn unlimited_sorted(keys: &[u64], tree: &mut [u64], lens: &mut [u8], per_len: &mut [u32; 16]) -> (u8, u64) {
     let n = keys.len();
+    *per_len = [0; 16];
     if n == 0 {
         return (0, 0);
     }
@@ -716,6 +748,7 @@ fn unlimited_sorted(keys: &[u64], tree: &mut [u64], lens: &mut [u8]) -> (u8, u64
         for &k in keys {
             lens[(k & 0xffff) as usize] = 1;
         }
+        per_len[1] = n as u32;
         return (1, keys.iter().map(|&k| k >> 16).sum());
     }
     let w = |i: usize| keys[i] >> 16;
@@ -798,6 +831,9 @@ fn unlimited_sorted(keys: &[u64], tree: &mut [u64], lens: &mut [u8]) -> (u8, u64
         let len = depth.min(255) as u8;
         for &k in &keys[next - leaves..next] {
             lens[(k & 0xffff) as usize] = len;
+        }
+        if let Some(x) = per_len.get_mut(depth) {
+            *x = leaves as u32;
         }
         next -= leaves;
         if lo == hi {
@@ -1492,7 +1528,17 @@ pub(crate) mod tests {
             assert_eq!(c.lens(), &b, "{f:?}");
             assert_eq!(bits, cost(&f, &b));
             assert_eq!(c.used(), f.iter().filter(|&&x| x > 0).count());
+            assert_eq!(c.per_len(), &per_len(&b));
         }
+    }
+
+    /// How many lengths are 1 to 15, counted.
+    fn per_len(lens: &[u8]) -> [u32; 16] {
+        let mut per_len = [0; 16];
+        for &l in lens.iter().filter(|&&l| (1..16).contains(&l)) {
+            per_len[l as usize] += 1;
+        }
+        per_len
     }
 
     /// Counts most of which are below 256, as `Runs` takes them: a few counts many symbols share, some of 256
@@ -1547,6 +1593,7 @@ pub(crate) mod tests {
                 old::lengths_into(&f, max_bits, &mut b);
                 assert_eq!(c.lens(), &b, "{f:?}");
                 assert_eq!(bits, cost(&f, &b));
+                assert_eq!(c.per_len(), &per_len(&b));
             }
         }
     }
@@ -1577,6 +1624,7 @@ pub(crate) mod tests {
                 assert_eq!(c.lens(), &b, "{max_bits} {f:?}");
                 assert_eq!(bits, cost(&f, &b));
                 assert_eq!(c.used(), f.iter().filter(|&&x| x > 0).count());
+                assert_eq!(c.per_len(), &per_len(&b));
             }
         }
         split_walk::<286>(21, 300, 15);
@@ -1674,6 +1722,52 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn length_coder_counts_lengths_up_to_15_under_a_longer_limit() {
+        // Fibonacci counts need codes far longer than 15, so a limit over 15 leaves lengths over 15: those are
+        // not counted, and the lengths are those of before. Returns how many of the calls the runs answered.
+        fn check<const N: usize>(f: &[u32; N], limits: &[u32]) -> usize {
+            let mut c = LengthCoder::<N>::new();
+            let mut from_runs = 0;
+            for &max_bits in limits {
+                let mut want = [0u8; N];
+                old::lengths_into(f, max_bits, &mut want);
+                let bits = c.lengths(f, max_bits);
+                assert_eq!(c.lens(), &want, "{max_bits}");
+                assert_eq!(bits, cost(f, &want));
+                assert_eq!(c.per_len(), &per_len(&want), "{max_bits}");
+                assert!(max_bits <= 15 || want.iter().any(|&l| l > 15), "{max_bits}: some length over 15");
+                from_runs += c.from_runs as usize;
+            }
+            from_runs
+        }
+        fn fibonacci<const N: usize>(n: usize) -> [u32; N] {
+            let mut f = [0u32; N];
+            let (mut a, mut b) = (1u32, 1u32);
+            for x in f.iter_mut().take(n) {
+                *x = a;
+                (a, b) = (b, a.saturating_add(b));
+            }
+            f
+        }
+        let limits = [15, 16, 17, 20, 25, 15, 17];
+        check(&fibonacci::<30>(30), &limits);
+        check(&fibonacci::<48>(40), &limits);
+        check(&fibonacci::<286>(40), &limits);
+        // The runs take 48 symbols or more with at most RUN_BIG counts of 256 or more, and give the lengths
+        // when the limit allows the longest: 40 counts of 1, then 40, 64 and each the sum of the two before,
+        // twelve counts of which the last eight are 256 or more.
+        let mut f = [0u32; 286];
+        f[..40].fill(1);
+        let (mut a, mut b) = (40u32, 64u32);
+        for x in f[40..52].iter_mut() {
+            *x = a;
+            (a, b) = (b, a + b);
+        }
+        assert_eq!(f.iter().filter(|&&x| x >= 256).count(), RUN_BIG);
+        assert!(check(&f, &[15, 16, 20, 25, 30, 16, 30]) >= 2, "the runs gave lengths over 15");
+    }
+
+    #[test]
     fn length_coder_follows_the_limit_from_call_to_call() {
         // The limit changes from one call to the next, down to 0 (for at most two symbols), also right after
         // calls the runs answered: nothing of an earlier call is taken for this one.
@@ -1702,6 +1796,7 @@ pub(crate) mod tests {
                 assert_eq!(c.lens(), &b, "{max_bits} {f:?}");
                 assert_eq!(bits, cost(&f, &b));
                 assert_eq!(c.used(), f.iter().filter(|&&x| x > 0).count());
+                assert_eq!(c.per_len(), &per_len(&b));
             }
             // The runs are not made for alphabets too large for them.
             assert!(N <= RUN_SYMS || c.runs.is_none());

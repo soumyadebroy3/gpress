@@ -404,31 +404,20 @@ impl Coders {
             1 => d[0] = 1,
             _ => {}
         }
-        bits + fast_header_bits(ll, &d, &mut self.header)
-    }
-}
-
-/// How many bytes from `i` on equal `seq[i]`, compared eight at a time.
-fn run_length(seq: &[u8], i: usize) -> usize {
-    let v = seq[i];
-    let pattern = u64::from_le_bytes([v; 8]);
-    let mut j = i + 1;
-    while let Some(chunk) = seq.get(j..j + 8) {
-        let x = u64::from_le_bytes(chunk.try_into().unwrap()) ^ pattern;
-        if x != 0 {
-            return j - i + x.trailing_zeros() as usize / 8;
+        // How many lengths of each value from 1 on the header sends; the patches add lengths of 1.
+        let mut single = [0u32; 16];
+        for ((x, &a), &b) in single.iter_mut().zip(self.ll.per_len()).zip(self.d.per_len()) {
+            *x = a + b;
         }
-        j += 8;
+        single[1] += (self.ll.used() == 1) as u32 + 2u32.saturating_sub(self.d.used() as u32);
+        bits + fast_header_bits(ll, &d, &single, &mut self.header)
     }
-    while j < seq.len() && seq[j] == v {
-        j += 1;
-    }
-    j - i
 }
 
-/// Header size with greedy run-length tokens, computed without allocation. The size depends on the length
-/// sequence only, so the same sequence as last time gives the last size.
-fn fast_header_bits(ll: &[u8], d: &[u8], memo: &mut HeaderMemo) -> u64 {
+/// Header size with greedy run-length tokens, computed without allocation, given how many of the lengths
+/// sent are 1 to 15 (`single`). The size depends on the length sequence only, so the same sequence as last
+/// time gives the last size.
+fn fast_header_bits(ll: &[u8], d: &[u8], single: &[u32; 16], memo: &mut HeaderMemo) -> u64 {
     let hlit = (ll.iter().rposition(|&l| l != 0).map_or(0, |p| p + 1)).max(257);
     let hdist = (d.iter().rposition(|&l| l != 0).map_or(0, |p| p + 1)).max(1);
     let len = hlit + hdist;
@@ -439,21 +428,49 @@ fn fast_header_bits(ll: &[u8], d: &[u8], memo: &mut HeaderMemo) -> u64 {
     }
     memo.seq[..hlit].copy_from_slice(&ll[..hlit]);
     memo.seq[hlit..len].copy_from_slice(&d[..hdist]);
-    let bits = header_size(&memo.seq[..len], &mut memo.cl, &mut memo.last_cl);
+    let bits = header_size(&memo.seq[..len], single, &mut memo.cl, &mut memo.last_cl);
     memo.last = Some((len, bits));
     bits
 }
 
-/// The header size of a length sequence; the code-length code is worked out again only when its counts differ
-/// from `last`.
-fn header_size(seq: &[u8], clc: &mut LengthCoder<19>, last: &mut Option<([u32; 19], u64)>) -> u64 {
+/// The code-length symbol counts and the extra bits of a length sequence's greedy run-length tokens (lengths
+/// 0 to 15, at most `LITLEN_SYMS + DIST_SYMS` of them), given how many of the lengths are 1 to 15 (`single`).
+fn token_counts(seq: &[u8], single: &[u32; 16]) -> ([u32; 19], u64) {
+    // A length on its own is one token; most lengths are. Each run of three or more equal lengths is then put
+    // right: a run of zeros takes 17s and 18s, a run of another length one token for the length and 16s for
+    // its repeats. Runs are found eight lengths at a time, from a byte for each length that says whether it
+    // equals the next (none past the end).
+    let n = seq.len();
     let mut f = [0u32; 19];
+    f[..16].copy_from_slice(single);
+    f[0] = n as u32 - single[1..].iter().sum::<u32>();
+    let mut eq = [0u8; LITLEN_SYMS + DIST_SYMS + 16];
+    for ((e, &a), &b) in eq.iter_mut().zip(seq).zip(&seq[1..]) {
+        *e = (a == b) as u8;
+    }
+    let word = |i: usize| u64::from_le_bytes(eq[i..i + 8].try_into().unwrap());
     let mut extra = 0u64;
     let mut i = 0;
-    while i < seq.len() {
-        let v = seq[i];
-        let run = run_length(seq, i);
+    while i + 2 < n {
+        // A run of three or more begins where a length equals the next two; none began earlier, so the
+        // first such place begins a run.
+        let three = word(i) & word(i + 1);
+        if three == 0 {
+            i += 8;
+            continue;
+        }
+        let p = i + three.trailing_zeros() as usize / 8;
+        let mut q = p;
+        let run = loop {
+            let other = word(q) ^ 0x0101_0101_0101_0101;
+            if other != 0 {
+                break q - p + 1 + other.trailing_zeros() as usize / 8;
+            }
+            q += 8;
+        };
+        let v = seq[p];
         let mut r = run;
+        f[v as usize] -= run as u32;
         if v == 0 {
             while r >= 11 {
                 let k = r.min(138);
@@ -478,8 +495,15 @@ fn header_size(seq: &[u8], clc: &mut LengthCoder<19>, last: &mut Option<([u32; 1
             }
             f[v as usize] += r as u32;
         }
-        i += run;
+        i = p + run;
     }
+    (f, extra)
+}
+
+/// The header size of a length sequence; the code-length code is worked out again only when its counts differ
+/// from `last`.
+fn header_size(seq: &[u8], single: &[u32; 16], clc: &mut LengthCoder<19>, last: &mut Option<([u32; 19], u64)>) -> u64 {
+    let (f, extra) = token_counts(seq, single);
     if let Some((lf, bits)) = *last {
         if lf == f {
             return bits + extra;
@@ -1583,7 +1607,22 @@ mod estimate_tests {
         let mut seq = [0u8; LITLEN_SYMS + DIST_SYMS];
         seq[..hlit].copy_from_slice(&ll[..hlit]);
         seq[hlit..hlit + hdist].copy_from_slice(&d[..hdist]);
-        let seq = &seq[..hlit + hdist];
+        let (f, extra) = old_token_counts(&seq[..hlit + hdist]);
+        let mut cl = [0u8; 19];
+        old::lengths_into(&f, 7, &mut cl);
+        if cl.iter().filter(|&&x| x != 0).count() == 1 {
+            cl[16] = 1;
+        }
+        let hclen = (CL_ORDER.iter().rposition(|&s| cl[s] != 0).map_or(0, |p| p + 1)).max(4);
+        let mut bits = 14 + 3 * hclen as u64 + extra;
+        for s in 0..19 {
+            bits += f[s] as u64 * cl[s] as u64;
+        }
+        bits
+    }
+
+    /// The code-length symbol counts and extra bits of a length sequence, as they were counted before.
+    fn old_token_counts(seq: &[u8]) -> ([u32; 19], u64) {
         let mut f = [0u32; 19];
         let mut extra = 0u64;
         let mut i = 0;
@@ -1620,17 +1659,7 @@ mod estimate_tests {
             }
             i += run;
         }
-        let mut cl = [0u8; 19];
-        old::lengths_into(&f, 7, &mut cl);
-        if cl.iter().filter(|&&x| x != 0).count() == 1 {
-            cl[16] = 1;
-        }
-        let hclen = (CL_ORDER.iter().rposition(|&s| cl[s] != 0).map_or(0, |p| p + 1)).max(4);
-        let mut bits = 14 + 3 * hclen as u64 + extra;
-        for s in 0..19 {
-            bits += f[s] as u64 * cl[s] as u64;
-        }
-        bits
+        (f, extra)
     }
 
     fn rng(s: &mut u64) -> u64 {
@@ -1696,6 +1725,68 @@ mod estimate_tests {
             if k % 16 == 0 {
                 assert_eq!(estimate_dynamic_bits(&h), want);
             }
+        }
+    }
+
+    #[test]
+    fn estimator_on_skewed_and_narrow_data() {
+        // Few kinds of literals (few symbols, below and above where the runs begin), one literal far more
+        // often than the others (deep trees), long matches only (large counts), all in block-split walks.
+        let mut s = 0x5eed_0fda_7a00_u64;
+        for round in 0..12 {
+            let kinds = [8, 40, 50, 64, 120, 256][round % 6];
+            let mut syms = Vec::new();
+            while syms.len() < 6000 {
+                match rng(&mut s) % 16 {
+                    0 if round % 3 == 0 => {
+                        syms.push(Sym::mat(3 + (rng(&mut s) % 256) as usize, 1 + (rng(&mut s) % 32768) as usize))
+                    }
+                    1..=8 if round % 4 == 1 => syms.push(Sym::lit(b'e')),
+                    _ => {
+                        let r = rng(&mut s) % kinds;
+                        syms.push(Sym::lit((r * r / kinds) as u8));
+                    }
+                }
+            }
+            let g = 32 + (rng(&mut s) % 128) as usize;
+            let mut pref = vec![Hist { ll: [0; LITLEN_SYMS], d: [0; DIST_SYMS] }];
+            for c in syms.chunks(g) {
+                let mut h = pref.last().unwrap().clone();
+                c.iter().for_each(|x| h.add(x));
+                pref.push(h);
+            }
+            let mut es = Estimator::new();
+            for j in 1..pref.len() {
+                for i in j.saturating_sub(96)..j {
+                    let h = Hist::diff(&pref[j], &pref[i]);
+                    assert_eq!(es.bits(&h), old_estimate_dynamic_bits(&h), "round {round}, {i}..{j}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn token_counts_are_those_of_before() {
+        // Length sequences with runs of every length, at the ends and across them, and the singles counted.
+        let mut s = 0x0070_c375_u64;
+        for _ in 0..200_000 {
+            let n = 258 + (rng(&mut s) % 59) as usize;
+            let mut seq = [0u8; LITLEN_SYMS + DIST_SYMS];
+            let mut i = 0;
+            while i < n {
+                let v = if rng(&mut s).is_multiple_of(3) { 0 } else { (rng(&mut s) % 16) as u8 };
+                let run = [1, 1, 2, 3, 4, 6, 7, 10, 11, 138, 139, 300][(rng(&mut s) % 12) as usize];
+                for x in &mut seq[i..(i + run).min(n)] {
+                    *x = v;
+                }
+                i += run;
+            }
+            let seq = &seq[..n];
+            let mut single = [0u32; 16];
+            for &v in seq.iter().filter(|&&v| v != 0) {
+                single[v as usize] += 1;
+            }
+            assert_eq!(token_counts(seq, &single), old_token_counts(seq), "{seq:?}");
         }
     }
 }
