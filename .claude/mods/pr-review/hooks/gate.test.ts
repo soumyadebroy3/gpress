@@ -92,6 +92,18 @@ test('every gh merge form is gated', async ($, on) => {
     'gh api -X PUT repos/soumyadebroy3/gpress/pulls/7/merge',
     'gh api graphql -f query="mutation { mergePullRequest(input: {}) { clientMutationId } }"',
     'git push origin HEAD:main',
+    'gh pr --repo soumyadebroy3/gpress merge 7',
+    ' gh pr merge 7',
+    'if gh pr merge 7; then echo ok; fi',
+    'GH_REPO=soumyadebroy3/gpress gh pr merge 7',
+    'sudo /usr/bin/gh pr merge 7',
+    'bash -c "gh pr merge 7"',
+    'echo `gh pr merge 7`',
+    'gh api -X POST graphql -f query="mutation { mergePullRequest(input: {}) { clientMutationId } }"',
+    'gh api graphql -F query=@m.graphql',
+    'curl -X PUT https://api.github.com/repos/soumyadebroy3/gpress/pulls/7/merge',
+    'git -C . push origin main',
+    "gh alias set m 'pr merge'",
   ]) {
     expect({ command, denied: denied(await bash($, command)) }).toEqual({ command, denied: true })
   }
@@ -117,6 +129,25 @@ test('a verdict must sit on the first line, with a whole sha', async ($, on) => 
   await comment($, 6, `gpress-review: PASS deadbeefcafe-not-a-sha`)
   expect(denied(await merge($, 5, SHA))).toBe(true)
   expect(denied(await merge($, 6, 'deadbeefcafe'))).toBe(true)
+})
+
+test('a merge pins its head only with its own flag', async ($, on) => {
+  ok(on)
+  await comment($, 7, `gpress-review: PASS ${SHA}`)
+  expect(denied(await bash($, `gh pr merge 7 --squash --subject "sha=${SHA}"`))).toBe(true)
+  expect(denied(await bash($, `echo sha=${SHA}; gh pr merge 7`))).toBe(true)
+})
+
+test('only the comment command itself carries its verdict', async ($, on) => {
+  ok(on)
+  await bash($, `echo --body "gpress-review: PASS ${SHA}"; gh pr comment 7 --body "lgtm"`)
+  expect(denied(await bash($, `gh pr merge 7 --match-head-commit ${SHA}`))).toBe(true)
+})
+
+test('a repository named after the number still counts', async ($, on) => {
+  ok(on)
+  await bash($, `gh pr comment 7 --body "gpress-review: PASS ${SHA}" --repo other/x`)
+  expect(denied(await merge($, 7, SHA))).toBe(true)
 })
 
 test('a heredoc body counts', async ($, on) => {

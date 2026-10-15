@@ -12,9 +12,6 @@ export type PrKey = string
 const HERE = 'here'
 const SHA = '([0-9a-f]{7,40})'
 const VERDICT_AT_START = new RegExp(`^\\s*${MARK.replace(/[-:]/g, '\\$&')}\\s*(PASS|FINDINGS)\\s+${SHA}(?=\\s|$)`)
-// A gh command at the start of the line or after a shell separator, not one
-// quoted inside another command.
-const GH = String.raw`(?:^|[;&|(]\s*|\n\s*)gh\s+(?:-R\s+(\S+)\s+|--repo[= ](\S+)\s+)?`
 
 const num = (v: unknown): string | undefined =>
   typeof v === 'number' || (typeof v === 'string' && /^\d+$/.test(v)) ? String(v) : undefined
@@ -27,12 +24,47 @@ const verdictOf = (body: string): Verdict | undefined => {
   return m ? { pass: m[1] === 'PASS', sha: m[2]! } : undefined
 }
 
-// The body text a shell command posts, when it posts one.
-const shellBody = (command: string): string | undefined =>
-  /(?:--body|-b)[= ]\s*(["'])([\s\S]*?)\1/.exec(command)?.[2] ?? /-[fF]\s+body=(["'])([\s\S]*?)\1/.exec(command)?.[2]
+// The simple commands of a shell line: split at ; & | newlines and
+// backticks outside quotes, so one command's text never speaks for another.
+const segments = (command: string): string[] => {
+  const out: string[] = []
+  let cur = ''
+  let quote = ''
+  for (const ch of command) {
+    if (quote) {
+      if (ch === quote) quote = ''
+      cur += ch
+    } else if (ch === '"' || ch === "'") {
+      quote = ch
+      cur += ch
+    } else if (';&|\n`'.includes(ch)) {
+      if (cur.trim()) out.push(cur)
+      cur = ''
+    } else cur += ch
+  }
+  if (cur.trim()) out.push(cur)
+  return out
+}
+
+const unquoted = (segment: string): string => segment.replace(/(["'])[\s\S]*?\1/g, ' ')
+
+// A command with its quoted text taken out, so words inside a message are not
+// read as the command's own. A shell started with -c, or eval, keeps its
+// quoted text: there that text is the command.
+const bare = (segment: string): string => (/\b(bash|sh|zsh|eval)\b/.test(segment) ? segment : unquoted(segment))
+
+const repoIn = (segment: string): string | undefined =>
+  /\s(?:-R\s*|--repo[= ])([^\s'"]+\/[^\s'"]+)/.exec(` ${segment}`)?.[1] ?? /\bGH_REPO=([^\s'"]+)/.exec(segment)?.[1]
+
+const numberAfter = (text: string, word: RegExp): string | undefined => {
+  const m = word.exec(text)
+  if (!m) return undefined
+  const rest = text.slice(m.index + m[0].length)
+  return /(?:^|\s)(\d+)(?=\s|$)/.exec(rest)?.[1] ?? /\/pull\/(\d+)/.exec(rest)?.[1]
+}
 
 // A comment whose first line is a verdict: which pull request it is on, and
-// the verdict. Only calls that post a comment count, never ones that read.
+// the verdict. Only a command that posts a comment counts, never one that reads.
 export const postedVerdict = (tool: string, input: Record<string, unknown>): { pr: PrKey; verdict: Verdict } | undefined => {
   if (/(^|__)add_issue_comment$/.test(tool)) {
     const pr = num(input.issue_number)
@@ -41,19 +73,21 @@ export const postedVerdict = (tool: string, input: Record<string, unknown>): { p
     return pr && verdict ? { pr: key(repo, pr), verdict } : undefined
   }
   if (tool !== 'Bash') return undefined
-  const command = String(input.command ?? '')
-  const body = shellBody(command)
-  const verdict = body === undefined ? undefined : verdictOf(body)
-  if (!verdict) return undefined
-  const prComment = new RegExp(`${GH}pr\\s+(?:-R\\s+(\\S+)\\s+)?comment\\b`).exec(command)
-  if (prComment) {
-    // The number may come before or after the flags; the body is cut out first.
-    const args = command.slice(prComment.index + prComment[0].length).replace(/(["'])[\s\S]*?\1/g, '')
-    const pr = /^[^;&|\n]*?(?:^|\s)(\d+)(?=\s|$)/.exec(args)?.[1]
-    return pr ? { pr: key(prComment[1] ?? prComment[2] ?? prComment[3], pr), verdict } : undefined
+  for (const segment of segments(String(input.command ?? ''))) {
+    const plain = unquoted(segment)
+    if (/\bgh\b[\s\S]*\bpr\b[\s\S]*\bcomment\b/.test(plain)) {
+      const body = /(?:--body|-b)[= ]\s*(["'])([\s\S]*?)\1/.exec(segment)?.[2]
+      const verdict = body === undefined ? undefined : verdictOf(body)
+      const pr = numberAfter(plain, /\bcomment\b/)
+      if (verdict && pr) return { pr: key(repoIn(segment), pr), verdict }
+    }
+    const api = /\bgh\b[\s\S]*\bapi\b[\s\S]*?(?:repos\/([^/\s]+\/[^/\s]+)\/)?issues\/(\d+)\/comments\b/.exec(plain)
+    if (api && !/(?:-X|--method)[= ]?\s*(GET|PATCH|DELETE)\b/i.test(plain)) {
+      const body = /-[fF]\s+body=(["'])([\s\S]*?)\1/.exec(segment)?.[2]
+      const verdict = body === undefined ? undefined : verdictOf(body)
+      if (verdict) return { pr: key(api[1], api[2]!), verdict }
+    }
   }
-  const api = new RegExp(`${GH}api\\s+(?:-X\\s+POST\\s+)?(?:/?repos/([^/\\s]+/[^/\\s]+)/)issues/(\\d+)/comments\\b`).exec(command)
-  if (api && !/-X\s+(GET|PATCH|DELETE)/.test(command)) return { pr: key(api[3], api[4]!), verdict }
   return undefined
 }
 
@@ -61,7 +95,8 @@ export type MergeTarget = { pr?: PrKey; sha?: string; why?: string }
 
 // A call that merges a pull request, turns auto-merge on, or pushes to main.
 // `why` is set when the call is a merge the gate cannot tie to one pull
-// request and one head.
+// request and one head. It matches broadly: a refused command that was not a
+// merge costs a retry, a merge that slips through costs the review.
 export const mergeTarget = (tool: string, input: Record<string, unknown>): MergeTarget | undefined => {
   if (/(^|__)enable_pr_auto_merge$/.test(tool)) {
     return { why: 'auto-merge cannot pin the reviewed head; merge directly with expectedHeadSha once CI is green.' }
@@ -76,27 +111,31 @@ export const mergeTarget = (tool: string, input: Record<string, unknown>): Merge
     return { why: 'changes go to main through a reviewed pull request, not a direct write.' }
   }
   if (tool !== 'Bash') return undefined
-  const command = String(input.command ?? '')
-  const sha = new RegExp(`--match-head-commit[= ]${SHA}`).exec(command)?.[1] ?? new RegExp(`\\bsha=${SHA}`).exec(command)?.[1]
-
-  const prMerge = new RegExp(`${GH}pr\\s+(?:-R\\s+(\\S+)\\s+)?merge\\b([^;&|\\n]*)`).exec(command)
-  if (prMerge && !/--disable-auto\b/.test(prMerge[4]!)) {
-    const repo = prMerge[1] ?? prMerge[2] ?? prMerge[3]
-    const rest = prMerge[4]!
-    const pr = /(?:^|\s)(\d+)(?=\s|$)/.exec(rest)?.[1] ?? /\/pull\/(\d+)/.exec(rest)?.[1]
-    const urlRepo = /github\.com\/([^/\s]+\/[^/\s]+)\/pull\//.exec(rest)?.[1]
-    return pr ? { pr: key(repo ?? urlRepo, pr), sha } : { why: 'name the pull request by number (`gh pr merge <n>`).' }
-  }
-  const apiMerge = new RegExp(`${GH}api\\b[^;&|\\n]*?(?:repos/([^/\\s]+/[^/\\s]+)/)?pulls/([^/\\s]+)/(?:merge|ccr/auto_merge)\\b`).exec(command)
-  if (apiMerge && /(?:-X|--method)[= ]?\s*PUT\b/i.test(command)) {
-    const pr = num(apiMerge[4])
-    return pr ? { pr: key(apiMerge[3], pr), sha } : { why: 'name the pull request by number in the merge route.' }
-  }
-  if (new RegExp(`${GH}api\\s+graphql\\b`).test(command) && /mergePullRequest|enablePullRequestAutoMerge/.test(command)) {
-    return { why: 'merge through `gh pr merge <n> --match-head-commit <sha>` or the merge tool, not GraphQL.' }
-  }
-  if (/(?:^|[;&|(]\s*|\n\s*)git\s+push\b[^;&|\n]*\s(?:\S+:)?(?:refs\/heads\/)?(main|master)\b/.test(command)) {
-    return { why: 'changes go to main through a reviewed pull request, not a direct push.' }
+  for (const segment of segments(String(input.command ?? ''))) {
+    const plain = bare(segment)
+    if (/\bgh\b[\s\S]*\bpr\b[\s\S]*\bmerge\b/.test(plain) && !/\bcomment\b/.test(plain)) {
+      if (/--disable-auto\b/.test(plain)) continue
+      const pr = numberAfter(plain, /\bmerge\b/)
+      const urlRepo = /github\.com\/([^/\s]+\/[^/\s]+)\/pull\//.exec(plain)?.[1]
+      const sha = new RegExp(`--match-head-commit[= ]${SHA}`).exec(plain)?.[1]
+      return pr ? { pr: key(repoIn(segment) ?? urlRepo, pr), sha } : { why: 'name the pull request by number (`gh pr merge <n>`).' }
+    }
+    if (/\bgh\b[\s\S]*\balias\b/.test(plain) && /\bmerge\b/.test(segment)) return { why: 'no gh alias for merging; use `gh pr merge <n>`.' }
+    if (/\bgh\b[\s\S]*\bapi\b/.test(plain) && /graphql/.test(segment) && /mergePullRequest|enablePullRequestAutoMerge|query=@/.test(segment)) {
+      return { why: 'merge through `gh pr merge <n> --match-head-commit <sha>` or the merge tool, not GraphQL.' }
+    }
+    const route = /pulls\/([^/\s'"]+)\/(?:merge|ccr\/auto_merge)\b/.exec(segment)
+    if (route && /\bcurl\b/.test(plain)) return { why: 'merge through `gh pr merge <n> --match-head-commit <sha>`, not curl.' }
+    if (route && /\bgh\b[\s\S]*\bapi\b/.test(plain) && /(?:-X|--method)[= ]?\s*PUT\b/i.test(plain)) {
+      const pr = num(route[1])
+      const repo = /repos\/([^/\s]+\/[^/\s]+)\/pulls\//.exec(segment)?.[1]
+      const sha = new RegExp(`-[fF]\\s+sha=${SHA}`).exec(segment)?.[1]
+      return pr ? { pr: key(repo, pr), sha } : { why: 'name the pull request by number in the merge route.' }
+    }
+    const push = plain.search(/\bpush\b/)
+    if (/\bgit\b/.test(plain) && push >= 0 && /(?:^|\s)\+?(?:\S*:)?(?:refs\/heads\/)?(main|master)(?=\s|$)/.test(plain.slice(push))) {
+      return { why: 'changes go to main through a reviewed pull request, not a direct push.' }
+    }
   }
   return undefined
 }
