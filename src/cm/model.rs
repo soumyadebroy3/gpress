@@ -105,6 +105,12 @@ impl Table {
         }
         (i, *b)
     }
+    /// A bucket's check byte, read early and changing nothing, so that the `find` a little later finds the
+    /// bucket in the cache (safe code has no prefetch; an early read is the nearest thing).
+    #[inline]
+    fn peek(&self, h: u32) -> u8 {
+        self.t[(h as usize) & self.mask][0]
+    }
 }
 
 /// Tokenizer state over PDF syntax and content streams.
@@ -256,6 +262,8 @@ pub struct Model {
     hashes: [u32; NCTX],
     tables: [Table; NCTX],
     slot: [usize; NCTX],
+    /// The hashes of the next slots, worked out (and their buckets read) at a nibble's last bit.
+    next: [u32; NCTX],
     /// The current bucket of each context: a copy of `tables[i].t[slot[i]]`, the one that counts while the
     /// slot holds (written back before the slot changes, see `reslot`).
     cur: [[u8; 16]; NCTX],
@@ -418,6 +426,7 @@ impl Model {
             hashes: [0; NCTX],
             tables,
             slot: [0; NCTX],
+            next: [0; NCTX],
             cur: [[0; 16]; NCTX],
             states,
             smaps: super::boxed(smap),
@@ -553,23 +562,32 @@ impl Model {
         }
         let bc = self.byte_cx();
         let sym = byte.map(|b| b.wrapping_sub(self.pred));
+        let mut b = 0;
         for k in (0..8).rev() {
             let bit = sym.map(|b| ((b >> k) & 1) as u32);
             let (p, states) = self.predict(&bc, k);
             let got = c.code(bit, p);
+            self.update_side(&bc, k, got);
+            if k == 0 {
+                // The byte is complete. Its bookkeeping and the next byte's hashes come before the last bit's
+                // updates, which touch none of what they read or write, so the next buckets are read early.
+                let r = ((self.c0 << 1 | got) & 0xff) as u8;
+                b = r.wrapping_add(self.pred);
+                if self.resid {
+                    debug_assert_eq!(self.resid_end(), self.hist.len());
+                    self.push_resid(r);
+                }
+                self.byte_done(b);
+                self.hash_contexts();
+                self.peek_next(1);
+            }
             self.update(&bc, k, &states, got);
         }
-        // The byte is complete.
-        let r = (self.c0 & 0xff) as u8;
-        let b = r.wrapping_add(self.pred);
-        if self.resid {
-            debug_assert_eq!(self.resid_end(), self.hist.len());
-            self.push_resid(r);
-        }
-        self.byte_done(b);
         self.c0 = 1;
         self.nib = 1;
-        self.contexts();
+        for i in 0..NCTX {
+            self.reslot(i, self.next[i]);
+        }
         b
     }
 
@@ -646,17 +664,10 @@ impl Model {
         (((pm + p1 + 2 * p2 + 2) >> 2).clamp(1, 4095), states)
     }
 
-    /// Learns the coded bit `k`; `states` are the contexts' states `predict` gave.
+    /// Learns the coded bit `k` in the match and expected-text models; at the first nibble's last bit, works out
+    /// the next slots and reads their buckets.
     #[inline(always)]
-    fn update(&mut self, bc: &ByteCx, k: u32, states: &[u8; NCTX], bit: u32) {
-        let node = self.nib as usize & 15;
-        let kb = (bc.kind & (KINDS - 1)) * NCTX;
-        let sm = &mut self.smaps[kb..kb + NCTX];
-        for i in 0..NCTX {
-            let state = states[i] as usize & 127;
-            sm[i][state].update(bit, STATE_LIMIT);
-            self.cur[i][node] = self.states.next[state][bit as usize & 1];
-        }
+    fn update_side(&mut self, bc: &ByteCx, k: u32, bit: u32) {
         if bc.mm_on && !self.mm_miss {
             self.mm_sm.update(bit);
             if (bc.mm_byte >> k) & 1 != bit {
@@ -669,19 +680,48 @@ impl Model {
                 self.exp_miss = true;
             }
         }
+        if k == 4 {
+            // Read before the updates that follow, so that their cache misses overlap that work.
+            self.peek_next(self.c0 << 1 | bit);
+        }
+    }
+
+    /// Learns the coded bit `k` in the contexts, the mixer and the APMs; `states` are the contexts' states
+    /// `predict` gave.
+    #[inline(always)]
+    fn update(&mut self, bc: &ByteCx, k: u32, states: &[u8; NCTX], bit: u32) {
+        let node = self.nib as usize & 15;
+        let kb = (bc.kind & (KINDS - 1)) * NCTX;
+        let sm = &mut self.smaps[kb..kb + NCTX];
+        for i in 0..NCTX {
+            let state = states[i] as usize & 127;
+            sm[i][state].update(bit, STATE_LIMIT);
+            self.cur[i][node] = self.states.next[state][bit as usize & 1];
+        }
         self.mx.update(bit);
         self.a1.update(bit);
         self.a2.update(bit);
         self.c0 = (self.c0 << 1) | bit;
         self.nib = (self.nib << 1) | bit;
         if k == 4 {
-            // The first nibble is done: the buckets of the second.
+            // The first nibble is done: the buckets of the second (worked out by `update_side`).
             self.nib = 1;
             for i in 0..NCTX {
-                let h = h2(self.hashes[i], self.c0);
-                self.reslot(i, h);
+                self.reslot(i, self.next[i]);
             }
         }
+    }
+
+    /// The hashes of the next slots, for a nibble that starts with `c0`, and an early read of their buckets.
+    #[inline(always)]
+    fn peek_next(&mut self, c0: u32) {
+        let mut any = 0;
+        for i in 0..NCTX {
+            self.next[i] = h2(self.hashes[i], c0);
+            any |= self.tables[i].peek(self.next[i]);
+        }
+        // Keeps the reads, whose values nothing uses.
+        std::hint::black_box(any);
     }
 
     /// Writes the current bucket of context `i` back to its table, then finds the one for hash `h` and copies
@@ -1192,6 +1232,15 @@ impl Model {
 
     /// The ten context hashes of the next byte, and the buckets of its first nibble.
     fn contexts(&mut self) {
+        self.hash_contexts();
+        for i in 0..NCTX {
+            let h = h2(self.hashes[i], 1);
+            self.reslot(i, h);
+        }
+    }
+
+    /// The ten context hashes of the next byte (and in residual-coded images its prediction).
+    fn hash_contexts(&mut self) {
         if self.resid && self.resid_end() < self.hist.len() {
             self.fill_residuals();
         }
@@ -1338,10 +1387,6 @@ impl Model {
         };
         for i in 0..NCTX {
             self.hashes[i] = k ^ hs[i];
-        }
-        for i in 0..NCTX {
-            let h = h2(self.hashes[i], 1);
-            self.reslot(i, h);
         }
     }
 }
