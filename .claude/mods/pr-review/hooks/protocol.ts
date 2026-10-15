@@ -22,7 +22,7 @@ export const protocol = (pr: string) => `Review gpress pull request ${pr} with t
    \`${MARK} PASS <head sha>\` when no blocker holds, or \`${MARK} FINDINGS <head sha>\` otherwise,
    then one line per finding (severity, file:line, what goes wrong) and one line per check run (fmt, clippy, tests, compare). End it with the Claude Code attribution footer.
 
-5. Merge only after a PASS for the current head sha, with CI green apart from checks that fail on main too, pinning that sha in the merge (\`expectedHeadSha\`, or \`gh pr merge <n> --match-head-commit <sha>\`; auto-merge cannot pin one and is refused). A push after the review means a new review. On FINDINGS, fix them (when it is your pull request) or report them, and review again after the fix.`
+5. Merge only after a PASS for the current head sha, with CI green apart from checks that fail on main too, pinning that sha in the merge (\`expectedHeadSha\`, or \`gh pr merge <n> --match-head-commit <sha>\`; the auto-merge tool cannot pin one and is refused). A push after the review means a new review. On FINDINGS, fix them (when it is your pull request) or report them, and review again after the fix.`
 
 export const SYSTEM_SECTION = `# Reviewing gpress pull requests
 

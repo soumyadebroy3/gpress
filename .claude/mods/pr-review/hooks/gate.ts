@@ -51,7 +51,8 @@ const unquoted = (segment: string): string => segment.replace(/(["'])[\s\S]*?\1/
 // A command with its quoted text taken out, so words inside a message are not
 // read as the command's own. A shell started with -c, or eval, keeps its
 // quoted text: there that text is the command.
-const bare = (segment: string): string => (/\b(bash|sh|zsh|eval)\b/.test(segment) ? segment : unquoted(segment))
+const bare = (segment: string): string =>
+  /(?:^|\s)(?:\S*\/)?(?:bash|sh|zsh)\s+-c\b|(?:^|\s)eval\s/.test(unquoted(segment)) ? segment : unquoted(segment)
 
 const repoIn = (segment: string): string | undefined =>
   /\s(?:-R\s*|--repo[= ])([^\s'"]+\/[^\s'"]+)/.exec(` ${segment}`)?.[1] ?? /\bGH_REPO=([^\s'"]+)/.exec(segment)?.[1]
@@ -117,7 +118,8 @@ export const mergeTarget = (tool: string, input: Record<string, unknown>): Merge
       if (/--disable-auto\b/.test(plain)) continue
       const pr = numberAfter(plain, /\bmerge\b/)
       const urlRepo = /github\.com\/([^/\s]+\/[^/\s]+)\/pull\//.exec(plain)?.[1]
-      const sha = new RegExp(`--match-head-commit[= ]${SHA}`).exec(plain)?.[1]
+      // Read off the command itself, where a quoted sha keeps its quotes.
+      const sha = new RegExp(`--match-head-commit[= ]["']?${SHA}["']?(?=\\s|$)`).exec(segment)?.[1]
       return pr ? { pr: key(repoIn(segment) ?? urlRepo, pr), sha } : { why: 'name the pull request by number (`gh pr merge <n>`).' }
     }
     if (/\bgh\b[\s\S]*\balias\b/.test(plain) && /\bmerge\b/.test(segment)) return { why: 'no gh alias for merging; use `gh pr merge <n>`.' }

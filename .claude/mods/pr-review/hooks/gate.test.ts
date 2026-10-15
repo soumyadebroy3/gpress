@@ -150,6 +150,13 @@ test('a repository named after the number still counts', async ($, on) => {
   expect(denied(await merge($, 7, SHA))).toBe(true)
 })
 
+test('a verdict that mentions bash and pushes is still posted', async ($, on) => {
+  ok(on)
+  const r: any = await bash($, `gh pr comment 7 --body "gpress-review: PASS ${SHA}\n- bash hooks ok; git push origin main refused"`)
+  expect(denied(r)).toBe(false)
+  expect(denied(await bash($, `gh pr merge 7 --match-head-commit "${SHA}"`))).toBe(false)
+})
+
 test('a heredoc body counts', async ($, on) => {
   ok(on)
   await bash($, `gh pr comment 7 --body "$(cat <<'EOF'\ngpress-review: PASS ${SHA}\n- all checks pass\nEOF\n)"`)
