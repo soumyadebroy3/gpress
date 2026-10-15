@@ -1239,12 +1239,17 @@ fn bytes_for(v: u64) -> usize {
 /// Decoded content of a stream through its general filters, predictors undone, plus the image-codec stages
 /// that remain (their bytes are compared as they are).
 fn content_of(s: &Stream) -> Option<(Vec<u8>, Vec<Stage>)> {
+    content_within(s, 1 << 30)
+}
+
+/// `content_of` with each stage decoding to at most `limit` bytes (None beyond it, as for damaged data).
+fn content_within(s: &Stream, limit: usize) -> Option<(Vec<u8>, Vec<Stage>)> {
     let stages = chain(&s.dict)?;
     let mut data = s.data.clone();
     let mut rest = Vec::new();
     for st in stages {
         if is_general(&st.name) && rest.is_empty() {
-            data = decode_stage(&st, &data, 1 << 30).ok()?;
+            data = decode_stage(&st, &data, limit).ok()?;
             if st.name == b"FlateDecode" || st.name == b"LZWDecode" {
                 let pred = st.parms.as_ref().and_then(|p| p.get(b"Predictor")).and_then(|x| x.as_int()).unwrap_or(1);
                 if pred > 1 {
@@ -1304,30 +1309,38 @@ fn self_check(
         }
         return Err("self-check: different objects reachable".into());
     }
-    // Objects are compared on the pool (the biggest streams first); the first difference in object order is
-    // the one reported, whatever the number of threads.
+    // Objects are compared on the pool (the biggest streams first), each stream decoded to at most
+    // `CHECK_ON_POOL` bytes there; a stream that needs more is compared afterwards, one at a time, so the check
+    // holds at most two such copies per thread beside two of the largest stream. The first difference in object
+    // order is the one reported, whatever the number of threads.
     let all: Vec<(&u32, &(u16, Obj))> = objs.iter().collect();
     let mut order: Vec<usize> = (0..all.len()).collect();
     order.sort_by_key(|&k| (std::cmp::Reverse(if let Obj::Stream(s) = &all[k].1 .1 { s.data.len() } else { 0 }), k));
-    let checked = par::map(pool, all.len(), Some(&order), |k| {
+    // None: the stream needs more than `limit` decoded bytes (or doesn't decode within it).
+    let check = |k: usize, limit: usize| -> Option<Result<(), String>> {
         let (n, (g, o)) = all[k];
         let (g2, o2) = &objs2[n];
         if g != g2 {
-            return Err(format!("self-check: generation of {n} differs"));
+            return Some(Err(format!("self-check: generation of {n} differs")));
         }
         match (o, o2) {
             (Obj::Stream(s1), Obj::Stream(s2)) => {
                 if !same_except_encoding(&s1.dict, &s2.dict) {
-                    return Err(format!("self-check: dictionary of stream {n} differs"));
+                    return Some(Err(format!("self-check: dictionary of stream {n} differs")));
                 }
                 if s1.data == s2.data
                     && s1.dict.get(b"Filter") == s2.dict.get(b"Filter")
                     && s1.dict.get(b"DecodeParms") == s2.dict.get(b"DecodeParms")
                 {
-                    return Ok(());
+                    return Some(Ok(()));
                 }
-                let c1 = content_of(s1).ok_or(format!("self-check: stream {n} undecodable"))?;
-                let c2 = content_of(s2).ok_or(format!("self-check: stream {n} undecodable in output"))?;
+                let full = limit == 1 << 30;
+                let Some(c1) = content_within(s1, limit) else {
+                    return full.then(|| Err(format!("self-check: stream {n} undecodable")));
+                };
+                let Some(c2) = content_within(s2, limit) else {
+                    return full.then(|| Err(format!("self-check: stream {n} undecodable in output")));
+                };
                 // Different bytes are fine for a JPEG with other Huffman tables (the same coded symbols) and
                 // for a CCITT image written as JBIG2 (the same pixels).
                 let resolve = |o: &Obj| match o {
@@ -1335,20 +1348,23 @@ fn self_check(
                     x => Some(x.clone()),
                 };
                 if c1 != c2 && !same_jpeg(&c1, &c2) && !crate::fax::pdf::same_image(s1, s2, &resolve) {
-                    return Err(format!("self-check: content of stream {n} differs"));
+                    return Some(Err(format!("self-check: content of stream {n} differs")));
                 }
-                Ok(())
+                Some(Ok(()))
             }
-            (x, y) => {
-                if x != y {
-                    return Err(format!("self-check: object {n} differs"));
-                }
-                Ok(())
-            }
+            (x, y) => Some(if x != y { Err(format!("self-check: object {n} differs")) } else { Ok(()) }),
         }
-    });
+    };
+    let on_pool = par::map(pool, all.len(), Some(&order), |k| check(k, CHECK_ON_POOL));
+    let mut checked = Vec::with_capacity(all.len());
+    for (k, r) in on_pool.into_iter().enumerate() {
+        checked.push(r.or_else(|| check(k, 1 << 30)).unwrap_or_else(|| Err("self-check: stream undecodable".into())));
+    }
     checked.into_iter().collect()
 }
+
+/// Decoded bytes a stream may take, per copy, while it is compared on the thread pool (see `self_check`).
+const CHECK_ON_POOL: usize = 16 << 20;
 
 #[cfg(test)]
 mod effort_tests {
@@ -1633,6 +1649,69 @@ mod effort_tests {
                 let _refuse = par::tests::RefuseSpawns::after(allowed);
                 let r = optimize(&pdf, &Options { threads: 4, ..Options::effort(effort) });
                 assert!(r.data == one.data, "effort {effort}, {allowed} threads allowed");
+            }
+        }
+    }
+
+    /// A one-page PDF whose content stream is `content`, stored with the fast encoder's quickest level.
+    fn page_with(content: &[u8]) -> Vec<u8> {
+        let data = flate::deflate_zlib(content, &flate::Options { fast: 1, ..flate::Options::quick() });
+        let mut objs: Vec<Vec<u8>> =
+            vec![b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(), b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()];
+        objs.push(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>".to_vec());
+        let mut o = format!("<< /Filter /FlateDecode /Length {} >>\nstream\n", data.len()).into_bytes();
+        o.extend_from_slice(&data);
+        o.extend_from_slice(b"\nendstream");
+        objs.push(o);
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, o) in objs.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+            pdf.extend_from_slice(o);
+            pdf.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+        for off in offsets {
+            pdf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes(),
+        );
+        pdf
+    }
+
+    #[test]
+    fn the_self_check_finds_a_wrong_stream_on_the_pool_and_after_it() {
+        // One content stream below the bytes a comparison may take on the pool, one above (compared after the
+        // pool, one at a time). Each is checked against the output of a file that differs in one byte of it.
+        for size in [100_000usize, CHECK_ON_POOL + 100_000] {
+            // Drawing instructions with varied numbers, so that a closer parse finds something to gain.
+            let mut content = Vec::with_capacity(size + 32);
+            let mut r = 1u64;
+            while content.len() < size {
+                r = r.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                content.extend_from_slice(format!("{} {} l\n", (r >> 40) % 600, (r >> 20) % 800).as_bytes());
+            }
+            content.truncate(size);
+            let mut other = content.clone();
+            other[size / 2] = b'9';
+            let (a, b) = (page_with(&content), page_with(&other));
+            let doc = xref::open(&a).unwrap();
+            let objs = load_reachable(&doc).unwrap();
+            for threads in [1usize, 3] {
+                let opt = Options { threads, ..Options::effort(0) };
+                let (out_a, out_b) = (optimize(&a, &opt), optimize(&b, &opt));
+                assert!(matches!(out_a.outcome, Outcome::Smaller(_)), "{size}: {:?}", out_a.outcome);
+                let pool = par::Pool::new(threads);
+                assert_eq!(self_check(&objs, &out_a.data, &doc.trailer, None, Some(&pool)), Ok(()));
+                let wrong = self_check(&objs, &out_b.data, &doc.trailer, None, Some(&pool));
+                assert_eq!(
+                    wrong,
+                    Err("self-check: content of stream 4 differs".to_string()),
+                    "{size}, {threads} threads"
+                );
             }
         }
     }
