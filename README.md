@@ -104,6 +104,11 @@ module, and the wrapper turns the trap into a `GpressError` with code 4 and mark
 a fresh one). Sizes are 32-bit inside it: the wrapper refuses inputs of 2 GiB and more. Pages that load it
 need `'wasm-unsafe-eval'` in their Content Security Policy's `script-src`.
 
+Compiling is most of the cost of a first load. `Gpress.compile(source)` returns the compiled module, and
+`Gpress.load(module)` makes an instance from it without compiling again: compile once, then make one
+instance per worker (a module can be posted to a Web Worker) or a fresh one after a trap. Serve the file as
+`application/wasm` so that it compiles while it downloads.
+
 ### Command line
 
 ```

@@ -7,6 +7,9 @@
  *   const archive = g.compress(anyBytes);                       // the gpress archive (.gpz)
  *   const original = g.expand(archive.data);                    // Uint8Array, or throws GpressError
  *
+ *   const module = await Gpress.compile(fetch("gpress.wasm"));  // compile once ...
+ *   const a = await Gpress.load(module), b = await Gpress.load(module);   // ... and make instances cheaply
+ *
  * The module is deterministic (the same bytes as the native library, on any machine) and problems come
  * back as GpressError with a stable numeric code. The module is built with panic = "abort", so a bug in
  * the engine (or a failed memory growth) traps it instead of returning: the wrapper turns the trap into a
@@ -115,7 +118,8 @@ interface Exports {
   gpress_archive_version(): number;
 }
 
-type Source = Response | Promise<Response> | ArrayBuffer | Uint8Array | WebAssembly.Module | string;
+/** Where the module comes from: a fetch() Response, bytes, a compiled Module, a URL, or (in Node) a file path. */
+export type Source = Response | Promise<Response> | ArrayBuffer | ArrayBufferView | WebAssembly.Module | URL | string;
 
 interface Packed {
   effort: number;
@@ -132,28 +136,33 @@ export class Gpress {
 
   private constructor(private readonly ex: Exports) {}
 
-  /** Loads the module from a fetch() Response, bytes, a compiled Module, or (in Node) a file path. */
-  static async load(source: Source): Promise<Gpress> {
-    let module: WebAssembly.Module;
-    if (source instanceof WebAssembly.Module) {
-      module = source;
-    } else if (typeof source === "string") {
-      // A file path (Node only). The import is dynamic so browser bundlers don't try to resolve it.
-      const fs = (await import(/* @vite-ignore */ "node:fs/promises" as string)) as { readFile(p: string): Promise<Uint8Array> };
-      const bytes = await fs.readFile(source);
-      module = await WebAssembly.compile(bytes.slice().buffer as ArrayBuffer);
-    } else if (source instanceof ArrayBuffer) {
-      module = await WebAssembly.compile(source);
-    } else if (source instanceof Uint8Array) {
-      module = await WebAssembly.compile(source.slice().buffer as ArrayBuffer);
-    } else {
-      const response = await source;
-      module =
-        typeof WebAssembly.compileStreaming === "function" && response.headers.get("content-type")?.includes("application/wasm")
-          ? await WebAssembly.compileStreaming(response)
-          : await WebAssembly.compile(await response.arrayBuffer());
+  /**
+   * Compiles the module without making an instance. Compiling is most of the cost of a first load, so
+   * compile once and pass the Module to load() for every instance after that (one per worker, or a fresh
+   * one after a trap). A Module can be posted to a Web Worker. A Response (or a URL that is not a file)
+   * compiles while it downloads when the server sends it as application/wasm.
+   */
+  static async compile(source: Source): Promise<WebAssembly.Module> {
+    if (source instanceof WebAssembly.Module) return source;
+    if (typeof source === "string" || (source instanceof URL && source.protocol === "file:")) {
+      // A file (Node only). The import is dynamic so browser bundlers don't try to resolve it.
+      const fs = (await import(/* @vite-ignore */ "node:fs/promises" as string)) as { readFile(p: string | URL): Promise<Uint8Array> };
+      return WebAssembly.compile(bytesOf(await fs.readFile(source)));
     }
-    const instance = await WebAssembly.instantiate(module, {});
+    if (source instanceof ArrayBuffer || ArrayBuffer.isView(source)) return WebAssembly.compile(bytesOf(source));
+    const response = await (source instanceof URL ? fetch(source) : (source as Response | Promise<Response>));
+    if (!response.ok) throw new Error(`could not fetch the module: HTTP ${response.status}`);
+    return typeof WebAssembly.compileStreaming === "function" && response.headers.get("content-type")?.includes("application/wasm")
+      ? WebAssembly.compileStreaming(response)
+      : WebAssembly.compile(await response.arrayBuffer());
+  }
+
+  /**
+   * A new instance from a compiled Module (cheap: no compiling), or from any other source (compiled first).
+   * Each instance has its own memory and runs one call at a time.
+   */
+  static async load(source: Source): Promise<Gpress> {
+    const instance = await WebAssembly.instantiate(await Gpress.compile(source), {});
     return new Gpress(instance.exports as unknown as Exports);
   }
 
@@ -253,6 +262,13 @@ function pack(options: GpressOptions): Packed {
       (options.rewriteEncrypted === false ? FLAG_KEEP_ENCRYPTED : 0) |
       (options.decrypt === false ? FLAG_NO_DECRYPT : 0),
   };
+}
+
+/** The bytes as compile() takes them: as they are, or copied when they live in shared memory (which it refuses). */
+function bytesOf(b: ArrayBuffer | ArrayBufferView): BufferSource {
+  if (b instanceof ArrayBuffer) return b;
+  if (b.buffer instanceof ArrayBuffer) return b as unknown as BufferSource;
+  return new Uint8Array(b.buffer, b.byteOffset, b.byteLength).slice();
 }
 
 function clamp(v: number, lo: number, hi: number): number {
