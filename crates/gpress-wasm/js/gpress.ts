@@ -143,16 +143,24 @@ export class Gpress {
    * compiles while it downloads when the server sends it as application/wasm.
    */
   static async compile(source: Source): Promise<WebAssembly.Module> {
-    if (source instanceof WebAssembly.Module) return source;
-    if (typeof source === "string" || (source instanceof URL && source.protocol === "file:")) {
+    // The kinds are told apart by their tags, not instanceof, so that a value made in another realm (an
+    // iframe, a vm context) is taken too.
+    const kind = tagOf(source);
+    if (kind === "WebAssembly.Module") return source as WebAssembly.Module;
+    if (kind === "ArrayBuffer" || kind === "SharedArrayBuffer" || ArrayBuffer.isView(source)) {
+      return WebAssembly.compile(bytesOf(source as ArrayBufferLike | ArrayBufferView));
+    }
+    const url = kind === "URL" ? (source as URL) : null;
+    if (typeof source === "string" || url?.protocol === "file:") {
       // A file (Node only). The import is dynamic so browser bundlers don't try to resolve it.
       const fs = (await import(/* @vite-ignore */ "node:fs/promises" as string)) as { readFile(p: string | URL): Promise<Uint8Array> };
-      return WebAssembly.compile(bytesOf(await fs.readFile(source)));
+      return WebAssembly.compile(bytesOf(await fs.readFile(source as string | URL)));
     }
-    if (source instanceof ArrayBuffer || ArrayBuffer.isView(source)) return WebAssembly.compile(bytesOf(source));
-    const response = await (source instanceof URL ? fetch(source) : (source as Response | Promise<Response>));
+    const response = await (url ? fetch(url) : (source as Response | Promise<Response>));
     if (!response.ok) throw new Error(`could not fetch the module: HTTP ${response.status}`);
-    return typeof WebAssembly.compileStreaming === "function" && response.headers.get("content-type")?.includes("application/wasm")
+    // compileStreaming() refuses any type but exactly "application/wasm" (no parameters, lower case), and
+    // compiling the whole body works for every type.
+    return typeof WebAssembly.compileStreaming === "function" && response.headers.get("content-type") === "application/wasm"
       ? WebAssembly.compileStreaming(response)
       : WebAssembly.compile(await response.arrayBuffer());
   }
@@ -264,11 +272,18 @@ function pack(options: GpressOptions): Packed {
   };
 }
 
-/** The bytes as compile() takes them: as they are, or copied when they live in shared memory (which it refuses). */
-function bytesOf(b: ArrayBuffer | ArrayBufferView): BufferSource {
-  if (b instanceof ArrayBuffer) return b;
-  if (b.buffer instanceof ArrayBuffer) return b as unknown as BufferSource;
-  return new Uint8Array(b.buffer, b.byteOffset, b.byteLength).slice();
+/** "ArrayBuffer", "URL", "WebAssembly.Module" and so on: the same in every realm. */
+function tagOf(v: unknown): string {
+  return Object.prototype.toString.call(v).slice(8, -1);
+}
+
+/**
+ * The bytes as compile() takes them: a Uint8Array over them (compile() refuses a DataView), copied when
+ * they live in shared memory (which compile() need not take).
+ */
+function bytesOf(b: ArrayBufferLike | ArrayBufferView): BufferSource {
+  const view = ArrayBuffer.isView(b) ? new Uint8Array(b.buffer, b.byteOffset, b.byteLength) : new Uint8Array(b);
+  return (tagOf(view.buffer) === "SharedArrayBuffer" ? view.slice() : view) as BufferSource;
 }
 
 function clamp(v: number, lo: number, hi: number): number {
