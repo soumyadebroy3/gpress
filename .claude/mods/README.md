@@ -1,23 +1,38 @@
 # Claude Code mods for gpress
 
+## Turning them on
+
+Repo settings cannot load a mod by themselves, so each place that runs Claude Code needs one switch:
+
+- **Cloud sessions (claude.ai/code and projects):** in the cloud environment, set
+  `CLAUDE_CODE_PLUGIN_DIRS=/home/user/gpress/.claude/mods:/home/claude/gpress/.claude/mods`
+  (both clone locations are listed; a path that does not exist is skipped). Every mod in this folder loads in
+  sessions started after that, including mods added later.
+- **Your own machine:** `.claude/settings.json` registers this folder as the `gpress-mods` marketplace and
+  enables its mods; trust the folder when Claude Code asks, or run `/plugin install <mod>@gpress-mods`.
+
+Checks for any mod: `claude plugin validate .claude/mods/<mod>` and `claude plugin test .claude/mods/<mod>`.
+
 ## cheap-route
 
 Sends read-only subagent tasks (lookups, summaries, status checks, reading files or logs, Explore searches) to Haiku. Anything that writes (code, tests, docs, renames, typo fixes, version bumps, changelog edits, commits) or needs judgement (implementing, debugging, optimizing, benchmarking, reviewing, planning) stays on the session's model, and so does any task with no clear read-only signal, so code quality is unchanged.
 
 It also switches up on its own. Each step of a cheap subagent is held until it is complete. If that step tries to edit a file or run a command that changes things, comes back empty or unsure, gets refused, or the task runs past 20 steps, the step is thrown away and re-run on the session's model, and the session's model keeps the rest of the task. Two failed tool calls switch it up too. It covers the Agent tool and workflow `agent()` calls. A task that already names a model, forks, resumes and prompts over 2000 characters are left alone. `/cheap-route` lists recent decisions; `/config` turns it off, switches the cheap model to Sonnet, or changes the length and step limits.
 
-### Turning it on
 
-Repo settings cannot load a mod by themselves, so each place that runs Claude Code needs one switch:
+## pr-review
 
-- **Cloud sessions (claude.ai/code and projects):** in the cloud environment, set
-  `CLAUDE_CODE_PLUGIN_DIRS=/home/user/gpress/.claude/mods/cheap-route:/home/claude/gpress/.claude/mods/cheap-route`
-  (both clone locations are listed; a path that does not exist is skipped). Sessions started after that load it.
-- **Your own machine:** `.claude/settings.json` registers this folder as the `gpress-mods` marketplace and enables `cheap-route`; trust the folder when Claude Code asks, or run `/plugin install cheap-route@gpress-mods`.
+Claude is the only reviewer of gpress pull requests and merges them itself, so this mod makes the review a
+fixed procedure and makes merging wait for it.
 
-### Checks
-
-```
-claude plugin validate .claude/mods/cheap-route
-claude plugin test .claude/mods/cheap-route
-```
+- `/review-pr <number>` sends the main model the review protocol: read the diff, the brief and
+  `docs/tasks/README.md`; start five fresh reviewer subagents (correctness and no data loss, security, fmt,
+  clippy and tests on both feature sets, the brief's acceptance numbers and file ownership, byte identity
+  through `bench/benchmark.py compare` for a pure brief); verify each blocker with another fresh agent; post one
+  comment whose first line is `gpress-review: PASS <head sha>` or `gpress-review: FINDINGS <head sha>`.
+- The same rule sits in the main model's system prompt, so a session asked to merge reviews first without
+  being told.
+- A merge (the GitHub merge or auto-merge tool, `gh pr merge`, or the REST merge route) is refused until this
+  session has posted a PASS for that pull request's current head. A push after the review means a new review.
+  `/config` can turn the gate off.
+- Reviewers run on the session's model: cheap-route keeps any task that mentions reviewing there.
