@@ -1,13 +1,11 @@
 import type { Register } from 'claude-code'
-import { mergeBlocked, mergeTarget, postedVerdict, type Verdict } from './gate'
+import { findVerdict, mergeBlocked, mergeTarget, postedVerdict, type PrKey, type Verdict } from './gate'
 import { protocol, SYSTEM_SECTION } from './protocol'
 
 export const register: Register = (on, options) => {
   const requireReview = options.requireReview !== false
   // The last verdict this session posted on each pull request.
-  const verdicts = new Map<string, Verdict>()
-  // A review asked for by /review-pr, sent once the command's turn ends.
-  let queued: string | undefined
+  const verdicts = new Map<PrKey, Verdict>()
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -20,18 +18,11 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'review-pr' }, ($, e) => {
     const pr = /\d+/.exec(e.args)?.[0]
     if (!pr) return { text: 'Usage: /review-pr <pull request number>' }
-    queued = protocol(`#${pr}`)
+    // Sent from a timer: a prompt submitted inside the command's own hook
+    // would wait on it.
+    const text = protocol(`#${pr}`)
+    $.clock.after(0, () => void $.prompt.submit({ text }))
     return { text: `Reviewing pull request #${pr} with fresh agents.` }
-  })
-
-  on('turn.complete', async ($, e, next) => {
-    const done = await next(e)
-    if (e.agentId === undefined && queued) {
-      const text = queued
-      queued = undefined
-      void $.prompt.submit({ text })
-    }
-    return done
   })
 
   // The main loop's prompt carries the rule; subagents (no Agent tool) don't.
@@ -45,14 +36,14 @@ export const register: Register = (on, options) => {
     const input = e as unknown as Record<string, unknown>
     const target = requireReview ? mergeTarget(e.tool, input) : undefined
     if (target) {
-      const why = mergeBlocked(target, verdicts.get(target.pr))
+      const why = mergeBlocked(target, target.pr ? findVerdict(verdicts, target.pr) : undefined)
       if (why) return { deny: `pr-review: ${why}` }
     }
     const result = await next(e)
     const posted = result.deny === undefined && result.isError !== true ? postedVerdict(e.tool, input) : undefined
     if (posted) {
       verdicts.set(posted.pr, posted.verdict)
-      $.ui.status(`pr-review: #${posted.pr} ${posted.verdict.pass ? 'PASS' : 'FINDINGS'} ${posted.verdict.sha.slice(0, 7)}`)
+      $.ui.status(`pr-review: ${posted.pr} ${posted.verdict.pass ? 'PASS' : 'FINDINGS'} ${posted.verdict.sha.slice(0, 7)}`)
     }
     return result
   }).catch(($, e, next) =>
