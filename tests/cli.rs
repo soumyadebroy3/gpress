@@ -14,7 +14,7 @@ fn input() -> Vec<u8> {
         out.extend_from_slice(
             format!("{} {} m {} {} l S\n", s % 600, s / 7 % 800, s / 11 % 600, s / 13 % 800).as_bytes(),
         );
-        if s % 5 == 0 && out.len() > 1000 {
+        if s.is_multiple_of(5) && out.len() > 1000 {
             let back = out.len() / 2;
             let piece = out[back..back + 200].to_vec();
             out.extend_from_slice(&piece);
