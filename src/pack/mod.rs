@@ -361,7 +361,8 @@ fn info(dict: Option<&Dict>, decoded_sample: Option<&[u8]>) -> Info {
             },
             _ => (1, false),
         };
-        let row = w.saturating_mul(comps * bpc).div_ceil(8);
+        // In u64, so that a 32-bit build gets the value a 64-bit one does (at most 2^30, which fits); so `prow`.
+        let row = (w as u64 * (comps * bpc) as u64).div_ceil(8) as usize;
         let bpp = ((comps * bpc) / 8).max(1);
         inf.kind = Kind::Image;
         // Palette indices and packed pixels are symbols: modelled exactly, not as differences.
@@ -376,7 +377,7 @@ fn info(dict: Option<&Dict>, decoded_sample: Option<&[u8]>) -> Info {
             let colors = int(p, b"Colors").unwrap_or(1).clamp(1, 32) as usize;
             let pbpc = int(p, b"BitsPerComponent").unwrap_or(8).clamp(1, 16) as usize;
             if pred >= 10 {
-                let prow = cols.saturating_mul(colors * pbpc).div_ceil(8);
+                let prow = (cols as u64 * (colors * pbpc) as u64).div_ceil(8) as usize;
                 let pbpp = (colors * pbpc).div_ceil(8).max(1);
                 inf.png = Some((prow, pbpp));
                 inf.geom = Geom { stride: prow, bpp: pbpp, exact: exact || pbpc < 8 };
@@ -1631,11 +1632,12 @@ fn payload<C: Coder>(
         }
         if let Some((w, h, bpc, comps)) = inf.img {
             // The colour space can't always tell the number of components (an ICC profile's /N lives in another
-            // object); the data length can. Both sides see the same length and dictionary.
+            // object); the data length can. Both sides see the same length and dictionary. In u64: w * c * bpc can
+            // pass 2^32, and a 32-bit build must make the same guess as a 64-bit one.
             for c in [comps, 1, 3, 4, 2, 5, 6, 7, 8] {
-                let row = (w * c * bpc).div_ceil(8);
-                if row > 0 && h > 0 && row.checked_mul(h) == Some(dlen) {
-                    inf.geom.stride = row;
+                let row = (w as u64 * c as u64 * bpc as u64).div_ceil(8);
+                if row > 0 && h > 0 && row.checked_mul(h as u64) == Some(dlen as u64) {
+                    inf.geom.stride = row as usize;
                     inf.geom.bpp = ((c * bpc) / 8).max(1);
                     break;
                 }
