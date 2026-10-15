@@ -387,6 +387,8 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
         && carried.is_none()
         && stages[..k].iter().any(|st| st.name == b"FlateDecode")
         && s.dict.name(b"Subtype") != Some(b"Image")
+        // The data without any filter is an alternative too (below); when it is smaller, go on.
+        && data.len() >= s.data.len()
     {
         let fast = flate::Options {
             shared: opt.flate.shared.clone(),
@@ -811,7 +813,13 @@ fn effort_plan(
     // in `bridge_budget`, so the time and the size go on smoothly to 20. A stream whose filters don't decode
     // within `max_stream` is kept as it is (`reencode` would find the same).
     if opt.effort < FAST_BELOW {
-        let sizes = par::map(pool, unique.len(), None, |u| decoded_size(streams[unique[u]].1, opt.max_stream));
+        // Out of time: nothing more is decoded (the whole rewrite is given up after the plan).
+        let sizes = par::map(pool, unique.len(), None, |u| {
+            if opt.deadline.passed() {
+                return None;
+            }
+            decoded_size(streams[unique[u]].1, opt.max_stream)
+        });
         let strong = Options {
             flate: flate::Options {
                 shared: opt.flate.shared.clone(),
@@ -1480,6 +1488,25 @@ mod effort_tests {
         assert!(reencode(&s, &strong(15), &resolve).is_none());
         let legacy_quick = Options { flate: flate::Options::quick(), effort: 0, ..Options::effort(50) };
         assert!(reencode(&s, &legacy_quick, &resolve).is_some());
+        // Noise behind Flate takes more room than the noise itself: the bridge goes on and, like effort 0,
+        // stores it without a filter.
+        let mut r = 7u64;
+        let noise: Vec<u8> = (0..5000)
+            .map(|_| {
+                r ^= r << 13;
+                r ^= r >> 7;
+                r ^= r << 17;
+                r as u8
+            })
+            .collect();
+        let mut d = Dict::default();
+        d.set(b"Filter", Obj::Name(b"FlateDecode".to_vec()));
+        let s = Stream { dict: d, data: flate::deflate_zlib(&noise, &flate::Options::effort(0)) };
+        assert!(s.data.len() > noise.len());
+        for opt in [Options::effort(0), strong(15)] {
+            let (d, z, _) = reencode(&s, &opt, &resolve).expect("stored without a filter");
+            assert!(!d.has(b"Filter") && z == noise, "effort {}", opt.effort);
+        }
     }
 
     #[test]
