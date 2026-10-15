@@ -1,11 +1,18 @@
 {
   "name": "gpress-mods",
-  "owner": { "name": "Soumya" },
+  "owner": {
+    "name": "Soumya"
+  },
   "plugins": [
     {
       "name": "cheap-route",
       "source": "./cheap-route",
       "description": "Sends easy subagent and workflow-agent tasks to a cheaper model; hard work keeps the session's model."
+    },
+    {
+      "name": "pr-review",
+      "source": "./pr-review",
+      "description": "Reviews gpress pull requests with fresh agents and blocks a merge until a passing review of the current head is posted."
     }
   ]
 }

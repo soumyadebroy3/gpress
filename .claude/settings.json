@@ -1,6 +1,14 @@
 {
   "extraKnownMarketplaces": {
-    "gpress-mods": { "source": { "source": "directory", "path": "./.claude/mods" } }
+    "gpress-mods": {
+      "source": {
+        "source": "directory",
+        "path": "./.claude/mods"
+      }
+    }
   },
-  "enabledPlugins": { "cheap-route@gpress-mods": true }
+  "enabledPlugins": {
+    "cheap-route@gpress-mods": true,
+    "pr-review@gpress-mods": true
+  }
 }
