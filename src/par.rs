@@ -88,6 +88,8 @@ impl Pool {
 
     /// A helper thread running `work`, if a slot is free and the system gives a thread.
     fn helper<'scope>(&'scope self, s: &'scope Scope<'scope, '_>, work: impl FnOnce() + Send + 'scope) -> bool {
+        #[cfg(test)]
+        jitter::pause();
         if !self.take() {
             return false;
         }
@@ -132,6 +134,15 @@ impl Drop for Slot<'_> {
     }
 }
 
+/// Counts a `map` helper out when it stops, also when its piece panicked.
+struct Gone<'a>(&'a AtomicUsize);
+
+impl Drop for Gone<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// Takes back the slot a `map` caller lent once its helpers are done, also when a piece panicked.
 struct Lend<'p>(&'p Pool, Cell<bool>);
 
@@ -148,7 +159,8 @@ impl Drop for Lend<'_> {
 /// calling thread does everything. Every free thread joins at the start; later, a pool slot released by
 /// another part of the job is picked up at the next piece. A caller with nothing left to start lends its
 /// slot to the rest of the job while its helpers finish, and takes a slot back before it goes on, so the
-/// job never runs more threads than its pool has.
+/// job never runs more threads than its pool has. One map never has more threads than the pool either, so
+/// it never has more pieces under way: a slot lent from inside one of its pieces goes to nested work.
 pub fn map<R: Send>(pool: Option<&Pool>, n: usize, order: Option<&[usize]>, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
     debug_assert!(order.is_none_or(|o| o.len() == n));
     let at = |k: usize| order.map_or(k, |o| o[k]);
@@ -183,10 +195,29 @@ pub fn map<R: Send>(pool: Option<&Pool>, n: usize, order: Option<&[usize]>, f: i
         run(k);
     };
     let lend = Lend(pool, Cell::new(false));
+    // This map's helpers still running. Only the caller adds to it, so a check here cannot race another add.
+    let helping = AtomicUsize::new(0);
     std::thread::scope(|s| {
+        // A helper, if the pool has a slot and this map has fewer threads than the pool. (A slot can be free
+        // while a piece of this map is under way only because a caller inside it lent its slot.)
+        let recruit = || {
+            if helping.load(Ordering::Relaxed) + 1 >= pool.threads {
+                return false;
+            }
+            helping.fetch_add(1, Ordering::Relaxed);
+            let helping = &helping;
+            let ok = pool.helper(s, move || {
+                let _gone = Gone(helping);
+                help();
+            });
+            if !ok {
+                helping.fetch_sub(1, Ordering::Relaxed);
+            }
+            ok
+        };
         // As many helpers as the pool gives now (the caller takes a piece too).
         let mut helpers = 0;
-        while helpers + 1 < n && pool.helper(s, help) {
+        while helpers + 1 < n && recruit() {
             helpers += 1;
         }
         loop {
@@ -196,7 +227,7 @@ pub fn map<R: Send>(pool: Option<&Pool>, n: usize, order: Option<&[usize]>, f: i
             }
             // A slot given back since then: someone else can take what is left after this piece.
             if k + 1 < n {
-                pool.helper(s, help);
+                recruit();
             }
             run(k);
         }
@@ -546,6 +577,36 @@ pub(crate) mod tests {
                     })
                 });
                 assert_eq!(got, (0..60).map(|i| i * 3).collect::<Vec<_>>());
+                let most = most.load(Ordering::SeqCst);
+                assert!(most <= threads, "{most} outer pieces at once, {threads} threads, seed {seed}");
+                all_back(&pool);
+            }
+        }
+    }
+
+    #[test]
+    fn a_lent_slot_never_starts_another_piece_of_the_same_map() {
+        // A helper that starts first can lend its slot (in its nested map) while the outer map still recruits,
+        // and that slot can come free again before its lender asks for it back. The outer map must not use it
+        // for another of its own pieces. (The jitter seam pauses before every recruit, so this window opens
+        // often.)
+        for threads in [3, 4, 8] {
+            for seed in 1..=40 {
+                let pool = Pool::new(threads);
+                let (now, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+                let got = jitter::with(seed, || {
+                    map(Some(&pool), 40, None, |i| {
+                        counted(&now, &most, || {
+                            map(Some(&pool), 2, None, |j| {
+                                std::thread::sleep(std::time::Duration::from_micros(100 * j as u64));
+                                i + j
+                            })
+                            .iter()
+                            .sum::<usize>()
+                        })
+                    })
+                });
+                assert_eq!(got, (0..40).map(|i| 2 * i + 1).collect::<Vec<_>>());
                 let most = most.load(Ordering::SeqCst);
                 assert!(most <= threads, "{most} outer pieces at once, {threads} threads, seed {seed}");
                 all_back(&pool);
