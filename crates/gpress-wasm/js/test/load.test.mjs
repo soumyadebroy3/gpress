@@ -3,6 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { Gpress } from "../dist/gpress.js";
@@ -46,4 +47,23 @@ test("the module loads from a file and from a Response", async () => {
   }
   await works(Promise.resolve(new Response(wasm)));
   await assert.rejects(Gpress.load(new Response("nope", { status: 404 })), /HTTP 404/);
+});
+
+test("the module loads from an http URL", async () => {
+  const server = createServer((req, res) => {
+    if (req.url === "/gpress.wasm") res.writeHead(200, { "content-type": "application/wasm" }).end(wasm);
+    else if (req.url === "/bytes") res.writeHead(200, { "content-type": "application/octet-stream" }).end(wasm);
+    else if (req.url === "/moved") res.writeHead(302, { location: "/gpress.wasm" }).end();
+    else res.writeHead(404).end();
+  });
+  await new Promise((done) => server.listen(0, "127.0.0.1", done));
+  const at = (path) => new URL(path, `http://127.0.0.1:${server.address().port}`);
+  try {
+    await works(at("/gpress.wasm"));
+    await works(at("/bytes"));
+    await works(at("/moved"));
+    await assert.rejects(Gpress.load(at("/missing")), /HTTP 404/);
+  } finally {
+    server.close();
+  }
 });
