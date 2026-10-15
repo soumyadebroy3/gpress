@@ -246,7 +246,8 @@ impl Options {
         self.time_budget.map_or(Deadline::NONE, Deadline::after)
     }
 
-    /// The Flate encoder settings this effort level means (the engine's own steps of 20).
+    /// The Flate encoder settings this effort level means: the fast encoder below 20, the strong encoder's
+    /// steps of 20 from there (see `flate::Options::effort`).
     pub(crate) fn flate(&self) -> crate::flate::Options {
         crate::flate::Options::effort(self.effort.level())
     }
