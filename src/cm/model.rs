@@ -234,11 +234,16 @@ fn num_class(v: i32) -> u32 {
 
 pub struct Model {
     pub hist: Vec<u8>,
-    /// For residual-coded images: the residual (byte less its prediction) of each position from `rh_lo` on, in
-    /// the current segment only (a residual is never read across a segment boundary, nor more than a row and a
-    /// pixel back). Only `resid_at`, `push_resid`, `fill_row` and `forget_resid` read or write it.
+    /// For residual-coded images: the residuals (byte less its prediction) of the last positions before
+    /// `rh_end`, in the current segment only (a residual is never read across a segment boundary, nor more than
+    /// a row and a pixel back). A ring: position `p` is at `(p - seg_start) & rmask`, and `rmask + 1` is a power
+    /// of two at least a row and a pixel. It grows only as the segment does, so a huge row length costs nothing
+    /// until its bytes come, and its room is freed with the segment unless the next one can use all of it. Only
+    /// `push_resid`, `grow_ring`, `fill_row`, `fill_residuals` and `set_kind` change these (`resid_at`,
+    /// `hash_contexts` and a check in `code_full` read them).
     rhist: Vec<u8>,
-    rh_lo: usize,
+    rmask: usize,
+    rh_end: usize,
     /// Prediction subtracted from the current byte before coding (residual-coded images only). After a byte
     /// that skipped the full model it is stale until `contexts` works it out again.
     pred: u8,
@@ -409,7 +414,8 @@ impl Model {
         let mut m = Model {
             hist: Vec::new(),
             rhist: Vec::new(),
-            rh_lo: 0,
+            rmask: 0,
+            rh_end: 0,
             pred: 0,
             kind: Kind::Meta,
             geom: Geom { bpp: 1, ..Geom::default() },
@@ -475,7 +481,18 @@ impl Model {
         self.resid = kind == Kind::Image && geom.stride > 0 && !geom.exact;
         self.tracks = matches!(kind, Kind::Syntax | Kind::Content | Kind::Charstring);
         self.seg_start = self.hist.len();
-        self.forget_resid(self.seg_start);
+        // The ring holds a row and a pixel, the farthest back `contexts` reads (all of the segment if no power
+        // of two that large fits, which the row lengths of `pack` never reach).
+        let back = self.geom.stride.saturating_add(self.geom.bpp);
+        self.rmask = if self.resid { back.checked_next_power_of_two().map_or(usize::MAX, |r| r - 1) } else { 0 };
+        // Room this segment can't use goes, so a wide image's ring doesn't stay for the rest of the file.
+        let full = if self.resid { self.rmask.saturating_add(1) } else { 0 };
+        if self.rhist.capacity() > full {
+            self.rhist = Vec::new();
+        } else {
+            self.rhist.clear();
+        }
+        self.rh_end = self.seg_start;
         self.col = 0;
         self.seg_orig = orig_offset;
         self.exp.clear();
@@ -574,7 +591,7 @@ impl Model {
                 let r = ((self.c0 << 1 | got) & 0xff) as u8;
                 b = r.wrapping_add(self.pred);
                 if self.resid {
-                    debug_assert_eq!(self.resid_end(), self.hist.len());
+                    debug_assert_eq!(self.rh_end, self.hist.len());
                     self.push_resid(r);
                 }
                 self.byte_done(b);
@@ -917,42 +934,55 @@ impl Model {
         }
     }
 
-    /// The residual of position `p` (at least where the stored ones start).
+    /// The residual of position `p`: one of the last `rmask + 1` stored, from this segment.
     #[inline]
     fn resid_at(&self, p: usize) -> u8 {
-        self.rhist[p - self.rh_lo]
+        self.rhist[(p - self.seg_start) & self.rmask]
     }
 
-    /// Where the stored residuals end.
-    #[inline]
-    fn resid_end(&self) -> usize {
-        self.rh_lo + self.rhist.len()
-    }
-
-    /// Stores the residual of position `resid_end()`.
+    /// Stores the residual of position `rh_end`.
     #[inline]
     fn push_resid(&mut self, r: u8) {
-        self.rhist.push(r);
+        let i = (self.rh_end - self.seg_start) & self.rmask;
+        if i >= self.rhist.len() {
+            self.grow_ring(i + 1);
+        }
+        self.rhist[i] = r;
+        self.rh_end += 1;
     }
 
-    /// Residuals before `p` will not be read again: when none is stored from `p` on, they are all dropped and
-    /// the stored ones start again at `p`.
-    #[inline]
-    fn forget_resid(&mut self, p: usize) {
-        if p >= self.resid_end() {
-            self.rhist.clear();
-            self.rh_lo = p;
+    /// Makes the ring at least `n` bytes long, or its full `rmask + 1`. Its room grows by doubling (a ring filled
+    /// byte by byte grows in few steps), never past the full size.
+    #[inline(never)]
+    fn grow_ring(&mut self, n: usize) {
+        let full = self.rmask.saturating_add(1);
+        let n = n.min(full);
+        if self.rhist.len() < n {
+            if self.rhist.capacity() < n {
+                let room = n.max(2 * self.rhist.capacity()).min(full);
+                self.rhist.reserve_exact(room - self.rhist.len());
+            }
+            self.rhist.resize(n, 0);
         }
     }
 
-    /// Stores the residuals of positions `p..end` (`p` is where the stored ones end), all in one row, past its
-    /// first pixel and below the first row: the left, upper and upper-left bytes are all in the segment.
+    /// Stores the residuals of positions `p..end` (`p` is `rh_end`), all in one row, past its first pixel and
+    /// below the first row: the left, upper and upper-left bytes are all in the segment.
     fn fill_row(&mut self, p: usize, end: usize) {
         let (s, bpp) = (self.geom.stride, self.geom.bpp);
         let h = &self.hist;
         let (cur, w, n, nw) = (&h[p..end], &h[p - bpp..end - bpp], &h[p - s..end - s], &h[p - s - bpp..end - s - bpp]);
-        self.rhist
-            .extend(cur.iter().zip(w).zip(n).zip(nw).map(|(((&c, &w), &n), &nw)| c.wrapping_sub(loco8(w, n, nw))));
+        // The ring holds these positions (see `fill_residuals`); they may go past its end and on at its start.
+        let i = (p - self.seg_start) & self.rmask;
+        let k = (end - p).min(self.rhist.len() - i);
+        for (at, from, to) in [(i, 0, k), (0, k, end - p)] {
+            let dst = &mut self.rhist[at..at + (to - from)];
+            let src = cur[from..to].iter().zip(&w[from..to]).zip(&n[from..to]).zip(&nw[from..to]);
+            for (d, (((&c, &w), &n), &nw)) in dst.iter_mut().zip(src) {
+                *d = c.wrapping_sub(loco8(w, n, nw));
+            }
+        }
+        self.rh_end = end;
     }
 
     /// The residuals the contexts may read (a row and a pixel back) that are not stored yet: bytes coded by a
@@ -964,8 +994,10 @@ impl Model {
         let pos = self.hist.len();
         let lo = self.seg_start;
         let (s, bpp) = (self.geom.stride, self.geom.bpp);
-        self.forget_resid(pos.saturating_sub(s + bpp).max(lo));
-        let mut p = self.resid_end();
+        // Those more than a row and a pixel back are never read: a longer gap is skipped.
+        self.rh_end = self.rh_end.max(pos.saturating_sub(s + bpp).max(lo));
+        self.grow_ring(pos - lo);
+        let mut p = self.rh_end;
         // One division per fill.
         let mut col = (p - lo) % s;
         while p < pos {
@@ -1241,7 +1273,7 @@ impl Model {
 
     /// The ten context hashes of the next byte (and in residual-coded images its prediction).
     fn hash_contexts(&mut self) {
-        if self.resid && self.resid_end() < self.hist.len() {
+        if self.resid && self.rh_end < self.hist.len() {
             self.fill_residuals();
         }
         self.ctx_dirty = false;
@@ -1905,5 +1937,65 @@ mod tests {
             }
         }
         assert!(m.bypassed > 0);
+    }
+
+    #[test]
+    fn residuals_read_through_the_ring_are_the_eager_ones() {
+        // Row lengths just below, at and just above a power of two, alone and with the pixel added, at 1 to 4
+        // bytes per pixel. Each segment is many rings long, with noise, long repeats and plain bytes.
+        let mut r = Rng(29);
+        let mut m = Model::new(12);
+        let mut n = Null;
+        for bpp in 1..=4usize {
+            for stride in [31, 32, 33, 32 - bpp, 33 - bpp, 255, 256, 257, 256 - bpp, 257 - bpp] {
+                m.set_kind(Kind::Image, Geom { stride, bpp, exact: false }, 0);
+                let ring = m.rmask + 1;
+                assert!(ring.is_power_of_two() && ring >= stride + bpp && ring / 2 < stride + bpp);
+                for k in 0..3000usize {
+                    m.set_flat(k % 1100 >= 1000);
+                    let b = if k % 700 < 400 { (k % 5) as u8 } else { r.byte() };
+                    m.code_byte(&mut n, Some(b));
+                    let (pos, lo) = (m.hist.len(), m.seg_start);
+                    assert!(m.rhist.len() <= ring.min(pos - lo));
+                    if !m.ctx_dirty {
+                        for p in pos.saturating_sub(stride + bpp).max(lo)..pos {
+                            let want = m.hist[p].wrapping_sub(eager_pred(&m.hist, lo, stride, bpp, p));
+                            assert_eq!(m.resid_at(p), want, "row length {stride}, {bpp} bytes per pixel, byte {k}");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(m.bypassed > 0);
+    }
+
+    #[test]
+    fn a_huge_row_length_costs_only_the_bytes_that_come() {
+        let mut m = Model::new(12);
+        let mut n = Null;
+        let mut r = Rng(29);
+        m.set_kind(Kind::Image, Geom { stride: 1 << 30, bpp: 64, exact: false }, 0);
+        assert_eq!(m.rmask, (1 << 31) - 1);
+        // Long repeats, whose residuals are filled in when the full model comes back, and noise.
+        for k in 0..3000usize {
+            m.code_byte(&mut n, Some(if k % 700 < 400 { (k % 5) as u8 } else { r.byte() }));
+        }
+        assert!(m.bypassed > 0 && m.rhist.len() > 2000 && m.rhist.capacity() <= 2 * 3000);
+        // The ring's room goes with its segment; other kinds store no residuals.
+        m.set_kind(Kind::Data, Geom::default(), 0);
+        assert_eq!(m.rhist.capacity(), 0);
+        for k in 0..3000usize {
+            m.code_byte(&mut n, Some((k % 5) as u8));
+        }
+        assert_eq!(m.rhist.capacity(), 0);
+        // A segment that can use all of a ring's room keeps it.
+        let geom = Geom { stride: 100, bpp: 3, exact: false };
+        m.set_kind(Kind::Image, geom, 0);
+        for _ in 0..1000 {
+            m.code_byte(&mut n, Some(r.byte()));
+        }
+        let room = m.rhist.capacity();
+        m.set_kind(Kind::Image, geom, 0);
+        assert!(room == 128 && m.rhist.is_empty() && m.rhist.capacity() == room);
     }
 }
