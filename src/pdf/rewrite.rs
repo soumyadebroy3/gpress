@@ -768,6 +768,21 @@ fn big_level(effort: u8) -> u8 {
     image_level(effort).max(9)
 }
 
+/// The Flate settings for the object streams and the cross-reference stream (`raw`: the object streams'
+/// bytes): the effort's own, except on the bridge from `STRONG_FROM`, where they get the strong encoder's quick
+/// settings when they fit in `bridge_budget` (as the streams that take the most room do), so that effort 19
+/// ends where 20 begins.
+fn structure_flate(opt: &Options, raw: usize, input_len: usize) -> flate::Options {
+    if opt.flate.fast > 0
+        && (STRONG_FROM..FAST_BELOW).contains(&opt.effort)
+        && raw as f64 <= bridge_budget(opt.effort, input_len)
+    {
+        flate::Options { shared: opt.flate.shared.clone(), deadline: opt.flate.deadline, ..flate::Options::quick() }
+    } else {
+        opt.flate.clone()
+    }
+}
+
 /// Bytes the general filters of a stream decode to (the stored size when they don't decode).
 fn decoded_len(s: &Stream, limit: usize) -> usize {
     let Some(stages) = chain(&s.dict) else { return s.data.len() };
@@ -1123,7 +1138,8 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         raw.extend_from_slice(&body);
         raws.push((raw, first));
     }
-    let zs = par::map(pool, raws.len(), None, |k| flate::deflate_zlib(&raws[k].0, &opt.flate));
+    let structure = structure_flate(opt, raws.iter().map(|r| r.0.len()).sum(), input.len());
+    let zs = par::map(pool, raws.len(), None, |k| flate::deflate_zlib(&raws[k].0, &structure));
     for (chunk, ((_, first), z)) in chunks.iter().zip(raws.iter().zip(zs)) {
         let sn = next_num;
         next_num += 1;
@@ -1214,7 +1230,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
             up.push(b.wrapping_sub(above));
         }
     }
-    let mut both = par::map(pool, 2, None, |k| flate::deflate_zlib(if k == 0 { &rows } else { &up }, &opt.flate));
+    let mut both = par::map(pool, 2, None, |k| flate::deflate_zlib(if k == 0 { &rows } else { &up }, &structure));
     let (z_up, z_plain) = (both.pop().unwrap(), both.pop().unwrap());
     let mut xd = Dict::default();
     xd.set(b"Type", Obj::Name(b"XRef".to_vec()));
@@ -1538,6 +1554,21 @@ mod effort_tests {
         assert!(big_levels.windows(2).take(16).all(|w| w[0] <= w[1]), "{big_levels:?}");
         assert_eq!(big_levels[STRONG_FROM as usize], flate::fast::LEVELS);
         assert_eq!(big_levels[16..], [flate::fast::LEVELS, 0, 0, 0]);
+    }
+
+    #[test]
+    fn the_bridge_gives_the_object_streams_the_strong_encoder_when_they_fit() {
+        let fast = |e: u8, raw: usize, input_len: usize| structure_flate(&Options::effort(e), raw, input_len).fast;
+        // Below STRONG_FROM and from 20 on: the effort's own settings (the fast encoder below 20).
+        assert_eq!(fast(0, 0, 1_000_000), Options::effort(0).flate.fast);
+        assert_eq!(fast(9, 100, 1_000_000), Options::effort(9).flate.fast);
+        assert!(fast(0, 0, 1_000_000) > 0);
+        assert!(structure_flate(&Options::effort(20), 100, 1_000_000).same_output(&Options::effort(20).flate));
+        // On the bridge: the strong encoder (fast 0) while the bytes fit in its budget, which doubles every point.
+        assert_eq!(fast(10, 62_500, 1_000_000), 0);
+        assert_eq!(fast(10, 62_501, 1_000_000), Options::effort(10).flate.fast);
+        assert_eq!(fast(19, 32_000_000, 1_000_000), 0);
+        assert_eq!(fast(19, 32_000_001, 1_000_000), Options::effort(19).flate.fast);
     }
 
     #[test]
