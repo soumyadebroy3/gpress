@@ -8,7 +8,7 @@
 // script too, so the size it records is the size of the package's module.
 
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, mkdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -72,6 +72,6 @@ if (probe.error || probe.status !== 0) {
     console.error("build-wasm: wasm-opt failed");
     process.exit(opt.status ?? 1);
   }
-  console.error(`build-wasm: ${probe.stdout.trim()}, ${level}`);
+  console.error(`build-wasm: ${probe.stdout.trim()}, ${level}: ${statSync(built).size} bytes from cargo, ${statSync(out).size} after`);
 }
 console.error(`build-wasm: wrote ${out}`);
