@@ -1,0 +1,14 @@
+{
+  "name": "pr-review",
+  "version": "0.1.0",
+  "description": "Reviews gpress pull requests with fresh agents against the briefs, and blocks a merge until a passing review of the current head is posted.",
+  "author": { "name": "Soumya" },
+  "userConfig": {
+    "requireReview": {
+      "type": "boolean",
+      "title": "Block merges without a review",
+      "description": "Refuse to merge a pull request until this session has posted a passing review of its head commit.",
+      "default": true
+    }
+  }
+}
