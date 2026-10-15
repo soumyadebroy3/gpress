@@ -100,7 +100,7 @@ fn cbc_encrypt(c: &Aes, iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
     debug_assert!(data.len().is_multiple_of(16));
     let mut out = Vec::with_capacity(data.len());
     let mut prev = *iv;
-    for chunk in data.chunks_exact(16) {
+    for chunk in data.as_chunks::<16>().0 {
         let mut b = [0u8; 16];
         for i in 0..16 {
             b[i] = chunk[i] ^ prev[i];
@@ -117,9 +117,8 @@ fn cbc_decrypt(c: &Aes, iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
     debug_assert!(data.len().is_multiple_of(16));
     let mut out = Vec::with_capacity(data.len());
     let mut prev = *iv;
-    for chunk in data.chunks_exact(16) {
-        let mut b = [0u8; 16];
-        b.copy_from_slice(chunk);
+    for chunk in data.as_chunks::<16>().0 {
+        let mut b = *chunk;
         let here = b;
         c.decrypt(&mut b);
         for i in 0..16 {

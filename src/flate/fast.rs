@@ -555,16 +555,16 @@ fn common(buf: &[u8], a: usize, b: usize, max: usize) -> usize {
     let x = &buf[a..a + max];
     let y = &buf[b..b + max];
     let mut n = 0;
-    let mut xs = x.chunks_exact(8);
-    let mut ys = y.chunks_exact(8);
-    for (u, v) in (&mut xs).zip(&mut ys) {
-        let z = u64::from_le_bytes(u.try_into().unwrap()) ^ u64::from_le_bytes(v.try_into().unwrap());
+    let (xs, xr) = x.as_chunks::<8>();
+    let (ys, yr) = y.as_chunks::<8>();
+    for (u, v) in xs.iter().zip(ys) {
+        let z = u64::from_le_bytes(*u) ^ u64::from_le_bytes(*v);
         if z != 0 {
             return n + (z.trailing_zeros() / 8) as usize;
         }
         n += 8;
     }
-    for (u, v) in xs.remainder().iter().zip(ys.remainder()) {
+    for (u, v) in xr.iter().zip(yr) {
         if u != v {
             break;
         }
