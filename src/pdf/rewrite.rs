@@ -750,8 +750,11 @@ fn bridge_budget(effort: u8, input_len: usize) -> f64 {
 
 /// Effort 0 gives images the lazy level with two steps of lookahead (on the sample: 86.93% of the input against
 /// 87.08% with one step and 86.96% with the near-optimal level 8, at 17.4 s of CPU against 16.8 and 22.1).
+/// Level 8 is the one level weaker than 7 on images, so the scale goes from 7 to 9 (with images at each level
+/// and the rest as at effort 0, the 90 files the sample rewrites: 7 87.02%, 8 87.04%, 9 86.70%, 10 86.63%, 11
+/// 86.37%, 12 86.30%).
 const IMAGE_LEVEL: [u8; FAST_BELOW as usize] =
-    [7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12];
+    [7, 7, 7, 9, 9, 9, 10, 10, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12];
 
 /// A stream other than an image that decodes to more than this gets at most `big_level` below `FAST_BELOW`.
 /// The top level parses about 6 MB a second on one thread, so this much takes about 0.65 s: past it, one
@@ -1505,6 +1508,8 @@ mod effort_tests {
         // Effort 0: the page at the fast encoder's top level, the image at a lazy one.
         assert_eq!(levels(0, 10_000), vec![flate::fast::LEVELS, image_level(0)]);
         assert!(image_level(0) < flate::fast::LEVELS);
+        // Never weaker than effort 0's: level 8 (weaker than 7 on images) is skipped.
+        assert!((0..FAST_BELOW).all(|e| image_level(e) >= image_level(0) && image_level(e) != 8));
         // Images get closer parses as the effort grows; nothing gets the strong encoder below STRONG_FROM.
         for e in 1..STRONG_FROM {
             let l = levels(e, 10_000_000);
