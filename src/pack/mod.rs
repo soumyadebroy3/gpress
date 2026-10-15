@@ -509,6 +509,9 @@ struct Io<'m, C: Coder> {
 
 /// Bytes coded between two looks at the deadline (a few milliseconds of model work).
 const DEADLINE_STEP: usize = 1 << 16;
+/// Bytes coded between two looks for a damaged file (`Coder::exhausted`).
+const CHECK_STEP: usize = 1 << 12;
+const _: () = assert!(DEADLINE_STEP.is_multiple_of(CHECK_STEP));
 
 /// Largest single part a file may declare (decoded stream, Lepton data): 2 GiB.
 const MAX_PART: usize = 1 << 31;
@@ -562,16 +565,23 @@ impl<'m, C: Coder> Io<'m, C> {
         }
     }
     fn bytes(&mut self, data: Option<&[u8]>, n: usize, out: &mut Vec<u8>) {
-        for i in 0..n {
-            if i & 0xfff == 0 && self.c.exhausted() {
+        self.bytes_to(data, n, |b| out.push(b));
+    }
+    /// Codes `n` bytes (those of `data`, which holds them, when encoding) and hands each to `keep`.
+    fn bytes_to(&mut self, data: Option<&[u8]>, n: usize, mut keep: impl FnMut(u8)) {
+        let mut i = 0;
+        while i < n {
+            // Before every CHECK_STEP bytes a look for a damaged file, and at the deadline every DEADLINE_STEP.
+            if self.c.exhausted() {
                 self.damaged = true;
                 return;
             }
             if i % DEADLINE_STEP == 0 && self.out_of_time() {
                 return;
             }
-            let b = self.byte(data.map(|d| d[i]));
-            out.push(b);
+            let end = n.min(i + CHECK_STEP);
+            self.m.code_bytes(&mut self.c, data.map(|d| &d[i..end]), end - i, &mut keep);
+            i = end;
         }
     }
     /// Encoder only: whether the deadline has passed; the pass is then given up (as if damaged, so nothing
