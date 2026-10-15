@@ -1,0 +1,11 @@
+{
+  "name": "gpress-mods",
+  "owner": { "name": "Soumya" },
+  "plugins": [
+    {
+      "name": "cheap-route",
+      "source": "./cheap-route",
+      "description": "Sends easy subagent and workflow-agent tasks to a cheaper model; hard work keeps the session's model."
+    }
+  ]
+}
