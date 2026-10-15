@@ -1,54 +1,87 @@
 //! Finds, for every position, the smallest distance for every possible match length.
 //!
-//! The result is a step function per position: lengths up to `steps[k].0` can use distance `steps[k].1`,
-//! with lengths and distances both increasing. The optimal parser reads it to price every length.
+//! The result is a step function per position: lengths up to a step's length can use its distance, with
+//! lengths and distances both increasing (followed, with alternatives, by farther matches). The optimal parser
+//! reads it to price every length.
 
 use super::tables::*;
 
 const HASH_BITS: u32 = 16;
 const HASH_SIZE: usize = 1 << HASH_BITS;
 
+/// One step in three bytes: its length less 3 (lengths are 3 to 258), then its distance.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Step([u8; 3]);
+
+impl Step {
+    #[inline(always)]
+    fn new(len: usize, dist: usize) -> Step {
+        let [lo, hi] = (dist as u16).to_le_bytes();
+        Step([(len - MIN_MATCH) as u8, lo, hi])
+    }
+    /// The length and the distance.
+    #[inline(always)]
+    pub fn get(self) -> (u16, u16) {
+        (self.0[0] as u16 + MIN_MATCH as u16, u16::from_le_bytes([self.0[1], self.0[2]]))
+    }
+}
+
+/// Steps as (length, distance) pairs.
+#[cfg(test)]
+pub fn pairs(steps: &[Step]) -> Vec<(u16, u16)> {
+    steps.iter().map(|s| s.get()).collect()
+}
+
+/// The run lengths the parser tells apart (see `Matches::same`).
+pub const RUNS: [usize; 4] = [MAX_MATCH, MAX_MATCH + 7, 2 * MAX_MATCH, 2 * MAX_MATCH + 7];
+
+#[cfg_attr(test, derive(Clone))]
 pub struct Matches {
     /// Position `from + k` has steps `steps[start[k]..start[k + 1]]`.
     pub start: Vec<u32>,
-    pub steps: Vec<(u16, u16)>,
-    /// With alternatives: the steps that are longer than every closer one (the smallest distance for each
-    /// length), in the same layout. Empty without alternatives, where every step is one of them.
-    chain_start: Vec<u32>,
-    chain: Vec<(u16, u16)>,
-    /// Equal bytes starting at each position (itself included), cut at `to` and at 65535.
-    pub same: Vec<u16>,
+    /// Each position's chain first: the steps longer than every closer one (the smallest distance for each
+    /// length), lengths and distances increasing. With alternatives, the farther matches that are no longer
+    /// than a closer step follow it: by length (of equal lengths the farther first) when the walk found at
+    /// most 32 steps, otherwise by distance. In order of distance, the two together are the order the walk
+    /// found them in.
+    pub steps: Vec<Step>,
+    /// Whether the steps include alternatives; without them every step is in the chain.
+    pub alternatives: bool,
+    /// With alternatives: how many of each position's steps (at the end) are alternatives. Empty without.
+    pub farther: Vec<u8>,
+    /// How far the run of one byte from each position goes (itself included, cut at `to`), as the number of
+    /// `RUNS` lengths it is longer than: all the parser asks of it.
+    pub same: Vec<u8>,
     pub from: usize,
     pub to: usize,
 }
 
 impl Matches {
     #[inline(always)]
-    pub fn at(&self, pos: usize) -> &[(u16, u16)] {
+    pub fn at(&self, pos: usize) -> &[Step] {
         let k = pos - self.from;
         &self.steps[self.start[k] as usize..self.start[k + 1] as usize]
     }
     /// The steps longer than every closer one: for each length, the smallest distance that reaches it.
     #[inline(always)]
-    pub fn chain_at(&self, pos: usize) -> &[(u16, u16)] {
-        if self.chain_start.is_empty() {
-            return self.at(pos);
-        }
-        let k = pos - self.from;
-        &self.chain[self.chain_start[k] as usize..self.chain_start[k + 1] as usize]
-    }
-    #[inline(always)]
-    pub fn same_at(&self, pos: usize) -> usize {
-        self.same[pos - self.from] as usize
-    }
-    /// What `chain_at` reads, for a whole parse: position `from + k` has `list[start[k]..start[k + 1]]`.
-    #[inline(always)]
-    pub fn chain_lists(&self) -> (&[u32], &[(u16, u16)]) {
-        if self.chain_start.is_empty() {
-            (&self.start, &self.steps)
+    pub fn chain_at(&self, pos: usize) -> &[Step] {
+        let steps = self.at(pos);
+        if self.alternatives {
+            &steps[..steps.len() - self.farther[pos - self.from] as usize]
         } else {
-            (&self.chain_start, &self.chain)
+            steps
         }
+    }
+    /// Every step in the order the walk found them (ever farther).
+    #[cfg(test)]
+    pub fn walk_at(&self, pos: usize) -> Vec<(u16, u16)> {
+        let mut all = pairs(self.at(pos));
+        all.sort_by_key(|s| s.1);
+        all
+    }
+    #[inline(always)]
+    pub fn same_at(&self, pos: usize) -> u8 {
+        self.same[pos - self.from]
     }
 }
 
@@ -87,25 +120,32 @@ fn common(d: &[u8], a: usize, b: usize, skip: usize, max: usize) -> usize {
 pub fn find_matches(data: &[u8], from: usize, to: usize, max_depth: usize, alternatives: bool) -> Matches {
     // Two builds of the search: without alternatives the distance buckets are never looked at.
     if alternatives {
-        search::<true>(data, from, to, max_depth)
+        search::<true>(data, from, to, max_depth, false)
     } else {
-        search::<false>(data, from, to, max_depth)
+        search::<false>(data, from, to, max_depth, false)
     }
 }
 
-fn search<const ALT: bool>(data: &[u8], from: usize, to: usize, max_depth: usize) -> Matches {
+/// `find_matches` with alternatives, keeping the ones that never win as well (to prove they never do).
+#[cfg(test)]
+pub fn find_matches_keeping_all(data: &[u8], from: usize, to: usize, max_depth: usize) -> Matches {
+    search::<true>(data, from, to, max_depth, true)
+}
+
+fn search<const ALT: bool>(data: &[u8], from: usize, to: usize, max_depth: usize, keep_all: bool) -> Matches {
     const NIL: u32 = u32::MAX;
     let hist = from.saturating_sub(WINDOW);
     let n = to - from;
     let mut start = Vec::with_capacity(n + 1);
-    let mut steps: Vec<(u16, u16)> = Vec::with_capacity(n * 2);
-    let (mut chain_start, mut chain) =
-        if ALT { (Vec::with_capacity(n + 1), Vec::with_capacity(n)) } else { (Vec::new(), Vec::new()) };
+    let mut farther_count = if ALT { vec![0u8; n] } else { Vec::new() };
+    let mut steps: Vec<Step> = Vec::with_capacity(n * 2);
 
-    let mut same = vec![0u16; to - hist];
-    for i in (hist..to).rev() {
-        let k = i - hist;
-        same[k] = if i + 1 < to && data[i + 1] == data[i] { same[k + 1].saturating_add(1) } else { 1 };
+    // Only the segment's own positions: each run looks forward, never back into the history.
+    let mut same = vec![0u8; n];
+    let mut run = 0;
+    for i in (from..to).rev() {
+        run = if i + 1 < to && data[i + 1] == data[i] { run + 1 } else { 1 };
+        same[i - from] = RUNS.iter().map(|&t| (run > t) as u8).sum();
     }
 
     // Tree slots cycle every 64 KiB: twice the window, so the node exactly 32 KiB back (a legal distance)
@@ -114,13 +154,13 @@ fn search<const ALT: bool>(data: &[u8], from: usize, to: usize, max_depth: usize
     const CMASK: usize = CYC - 1;
     let mut head = vec![NIL; HASH_SIZE];
     let mut son = vec![NIL; 2 * CYC];
+    // A position's alternatives, put after its chain once the walk is done, each marked once a longer step
+    // with the same distance code follows it.
+    let mut farther: Vec<(Step, bool)> = Vec::new();
     for i in hist..to {
         let searching = i >= from;
         if searching {
             start.push(steps.len() as u32);
-            if ALT {
-                chain_start.push(chain.len() as u32);
-            }
         }
         let lim = (to - i).min(MAX_MATCH);
         if lim < MIN_MATCH {
@@ -136,6 +176,8 @@ fn search<const ALT: bool>(data: &[u8], from: usize, to: usize, max_depth: usize
         // Besides the smallest distance for each length, keep the longest match seen in each distance code
         // bucket: a farther match can be cheaper when its distance code is common in the data.
         let (mut bucket, mut bucket_best) = (usize::MAX, MIN_MATCH - 1);
+        // The bucket of the last step kept, when that step was an alternative.
+        let mut far_bucket = usize::MAX;
         let mut kept = 0;
         let mut depth = max_depth;
         loop {
@@ -160,9 +202,16 @@ fn search<const ALT: bool>(data: &[u8], from: usize, to: usize, max_depth: usize
                         }
                     }
                     if len > best || (ALT && len > bucket_best && kept < 24) {
-                        steps.push((len as u16, dist as u16));
-                        if ALT && len > best {
-                            chain.push((len as u16, dist as u16));
+                        if ALT && bucket == far_bucket {
+                            // Longer than that alternative (as `bucket_best` was), at the same price.
+                            farther.last_mut().unwrap().1 = true;
+                        }
+                        if len > best {
+                            steps.push(Step::new(len, dist));
+                            far_bucket = usize::MAX;
+                        } else {
+                            farther.push((Step::new(len, dist), false));
+                            far_bucket = bucket;
                         }
                         kept += 1;
                         best = best.max(len);
@@ -188,13 +237,26 @@ fn search<const ALT: bool>(data: &[u8], from: usize, to: usize, max_depth: usize
                 len0 = len;
             }
         }
+        if ALT && searching {
+            // The parse prices each length with the cheapest distance among the first 32 steps of the walk
+            // that reach it, and of equal prices takes the longer step: so an alternative followed by a longer
+            // step with the same distance code (the same price) never wins when the whole walk is in those 32.
+            let walk = steps.len() - start[i - from] as usize + farther.len();
+            let before = steps.len();
+            steps.extend(farther.drain(..).filter(|&(_, beaten)| keep_all || !beaten || walk > 32).map(|(s, _)| s));
+            if walk <= 32 && steps.len() - before > 1 {
+                // In the order the parse sorts its candidates in: by length, of equal lengths the farther first.
+                steps[before..].sort_unstable_by_key(|s| {
+                    let (len, dist) = s.get();
+                    (len, !dist)
+                });
+            }
+            // At most 24 alternatives.
+            farther_count[i - from] = (steps.len() - before) as u8;
+        }
     }
     start.push(steps.len() as u32);
-    if ALT {
-        chain_start.push(chain.len() as u32);
-    }
-    let same_seg = same[from - hist..].to_vec();
-    Matches { start, steps, chain_start, chain, same: same_seg, from, to }
+    Matches { start, steps, alternatives: ALT, farther: farther_count, same, from, to }
 }
 
 #[cfg(test)]
@@ -246,7 +308,7 @@ mod tests {
             let (from, to) = (1000, 6000);
             let m = find_matches(&data, from, to, usize::MAX, false);
             for i in from..to {
-                assert_eq!(m.at(i), &brute(&data, to, i)[..], "position {i}");
+                assert_eq!(pairs(m.at(i)), brute(&data, to, i), "position {i}");
                 assert_eq!(m.chain_at(i), m.at(i), "position {i}");
             }
         }
@@ -287,7 +349,7 @@ mod validity {
             let m = find_matches(&data, from, to, 64, false);
             for i in from..to {
                 let mut prev = (0u16, 0u16);
-                for &(l, d) in m.at(i) {
+                for (l, d) in pairs(m.at(i)) {
                     let (l, d) = (l as usize, d as usize);
                     assert!((1..=WINDOW).contains(&d) && d <= i, "pos {i}: dist {d}");
                     assert!(i + l <= to, "pos {i}: len {l} past end");
@@ -331,6 +393,17 @@ mod same_as_before {
             n += 1;
         }
         n
+    }
+
+    /// The walk's steps without the alternatives the parse never takes: those followed by a step with the same
+    /// distance code, when the walk has at most 32 steps.
+    fn can_win(walk: &[(u16, u16)], chain: &[(u16, u16)]) -> Vec<(u16, u16)> {
+        let beaten = |j: usize| {
+            walk.len() <= 32
+                && !chain.contains(&walk[j])
+                && walk.get(j + 1).is_some_and(|n| dist_code(n.1 as usize) == dist_code(walk[j].1 as usize))
+        };
+        (0..walk.len()).filter(|&j| !beaten(j)).map(|j| walk[j]).collect()
     }
 
     fn old_find_matches(data: &[u8], from: usize, to: usize, max_depth: usize, alternatives: bool) -> Old {
@@ -445,13 +518,16 @@ mod same_as_before {
                         let old = old_find_matches(&d, from, to, depth, alternatives);
                         for i in from..to {
                             let k = i - from;
-                            assert_eq!(new.at(i), &old.steps[k][..], "steps {seed} {from} {depth} {alternatives} {i}");
+                            let want =
+                                if alternatives { can_win(&old.steps[k], &old.chain[k]) } else { old.steps[k].clone() };
+                            assert_eq!(new.walk_at(i), want, "steps {seed} {from} {depth} {alternatives} {i}");
                             assert_eq!(
-                                new.chain_at(i),
-                                &old.chain[k][..],
+                                pairs(new.chain_at(i)),
+                                old.chain[k],
                                 "chain {seed} {from} {depth} {alternatives} {i}"
                             );
-                            assert_eq!(new.same_at(i), old.same[k] as usize, "same {seed} {from} {i}");
+                            let class = RUNS.iter().map(|&t| (old.same[k] as usize > t) as u8).sum::<u8>();
+                            assert_eq!(new.same_at(i), class, "same {seed} {from} {i}");
                         }
                     }
                 }
