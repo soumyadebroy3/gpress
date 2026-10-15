@@ -1,0 +1,32 @@
+{
+  "name": "cheap-route",
+  "version": "0.1.0",
+  "description": "Sends easy subagent and workflow-agent tasks (lookups, summaries, status checks, mechanical edits) to a cheaper model; hard work keeps the session's model.",
+  "author": {
+    "name": "Soumya"
+  },
+  "userConfig": {
+    "enabled": {
+      "type": "boolean",
+      "title": "Route easy tasks",
+      "description": "Turn the routing on or off.",
+      "default": true
+    },
+    "cheapModel": {
+      "type": "string",
+      "title": "Cheap model",
+      "description": "The model easy subagent tasks run on.",
+      "options": [
+        "haiku",
+        "sonnet"
+      ],
+      "default": "haiku"
+    },
+    "maxEasyChars": {
+      "type": "number",
+      "title": "Longest easy prompt",
+      "description": "A task prompt longer than this many characters is never treated as easy.",
+      "default": 2000
+    }
+  }
+}
