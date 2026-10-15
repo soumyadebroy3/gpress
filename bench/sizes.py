@@ -16,7 +16,9 @@ Sizes are in bytes, raw and gzip at level 9 (Python's gzip module, with no name 
 module is built the way the npm package builds it (crates/gpress-wasm/js/build-wasm.mjs: cargo's "wasm"
 profile, then wasm-opt when it is on PATH), so it needs node; the native tool and the C library are
 built with the release profile. Builds use cargo's usual target directory and settings (CARGO_BUILD_JOBS
-and the like). `measure` also prints the rows for the Sizes table in bench/RESULTS.md.
+and the like). `measure` also prints the set's rows for the Sizes table in bench/RESULTS.md, in its columns,
+with the sizes it replaced in the "Before" cells (empty for a set measured the first time); the rows now in
+the table give commit 066b65e there instead.
 """
 import argparse
 import datetime
@@ -133,6 +135,7 @@ def measure(fset):
     entry['date'] = datetime.date.today().isoformat()
 
     record = load_record() or {}
+    was = record.get('builds', {}).get(fset)
     record.setdefault('about', 'Sizes in bytes of the builds of each feature set, written by '
                                '`python3 -I bench/sizes.py measure`; `check` compares the web module with them.')
     record['web'] = WEB
@@ -140,12 +143,33 @@ def measure(fset):
     with open(RECORD, 'w') as f:
         json.dump(record, f, indent=2, sort_keys=False)
         f.write('\n')
-    say(f'recorded in {os.path.relpath(RECORD, ROOT)}')
-    rows = [('native tool `gpress`', 'tool'), ('C library, shared', 'c_shared'),
-            ('C library, static', 'c_static'), ('WebAssembly module', 'wasm')]
-    for name, key in rows:
-        print(f'| {name} | {fset} | {entry[key]["raw"]:,} | {entry[key]["gzip"]:,} |')
+    say(f'recorded in {os.path.relpath(RECORD, ROOT)}; the rows for the Sizes table in bench/RESULTS.md, with the '
+        f'sizes this replaced as "Before":')
+    files = {'tool': tool[0], 'c_shared': shared[0], 'c_static': static[0]}
+    for row in table_rows(fset, entry, was, {k: os.path.basename(v) for k, v in files.items()}):
+        print(row)
     return 0
+
+
+def table_rows(fset, entry, was, names):
+    """The set's rows for the Sizes table in bench/RESULTS.md, in its columns and order. `was` is the entry this
+    measurement replaced; with none (a set measured the first time) the two "Before" cells are left empty."""
+    builds = [('wasm', 'WebAssembly module'), ('tool', f'Native tool `{names["tool"]}`'),
+              ('c_shared', f'C library, shared (`{names["c_shared"]}`)'),
+              ('c_static', f'C library, static (`{names["c_static"]}`)')]
+    rows = []
+    for key, build in builds:
+        now, before = entry[key], (was or {}).get(key)
+        label = f'{fset} (stands in for "web")' if key == 'wasm' and fset == WEB != 'web' else fset
+        if before is None:
+            then, change = '', ''
+        elif before == now:
+            then, change = 'the same', '0'
+        else:
+            then = f'{before["raw"]:,}, {before["gzip"]:,}'
+            change = f'{100 * (now["gzip"] / before["gzip"] - 1):+.1f}%'
+        rows.append(f'| {build} | {label} | {now["raw"]:,} | {now["gzip"]:,} | {then} | {change} |')
+    return rows
 
 
 def load_record():
