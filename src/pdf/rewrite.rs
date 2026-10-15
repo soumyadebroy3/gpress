@@ -405,6 +405,8 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
     // so that second pass belongs to effort 100 alone.
     let adds_layer = k == 0 && !rest.is_empty();
     let over_jpeg = adds_layer && rest.iter().any(|st| st.name == b"DCTDecode");
+    // The length of our Flate over `data` as it is, once made (repredict() compares with it).
+    let mut flate_len = None;
     if !(adds_layer && shape_matters) && !(over_jpeg && !opt.flate_over_jpeg) {
         let bare_len = best_len;
         let mut with_flate = vec![Stage { name: b"FlateDecode".to_vec(), parms: carried.clone() }];
@@ -412,6 +414,7 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
         let mut d = s.dict.clone();
         set_chain(&mut d, &with_flate);
         let z = flate::deflate_zlib(jpeg.as_ref().unwrap_or(&data), &opt.flate);
+        flate_len = jpeg.is_none().then_some(z.len());
         let again = opt.effort >= 100
             && jpeg.as_ref().is_some_and(|j| z.len() * 10 <= j.len() * 9 && j.len() * 10 <= data.len() * 9);
         // The first candidate is Flate over the JPEG with its new tables (when there is one), the second
@@ -435,9 +438,10 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
         best = Some((d, data.clone()));
         best_retabled = false;
     }
-    // Images: try storing the samples with a different (or no) PNG predictor.
+    // Images: try storing the samples with a different (or no) PNG predictor. (Without a codec after the
+    // general filters, our Flate over `data` was made above.)
     if rest.is_empty() && data.len() <= 48 << 20 {
-        if let Some((d, z)) = repredict(s, &data, carried.as_ref(), opt, resolve) {
+        if let Some((d, z)) = flate_len.and_then(|n| repredict(s, &data, n, carried.as_ref(), opt, resolve)) {
             if z.len() < best_len {
                 best = Some((d, z));
                 best_retabled = false;
@@ -467,9 +471,12 @@ fn reencode_xmp(s: &Stream, opt: &Options) -> Option<Reencoded> {
     Some((d, z, Change::default()))
 }
 
+/// The image's samples with the PNG predictor (or none) that suits them best, and their encode. `flate_len` is
+/// the length of our Flate over `data` as it is, which reencode() has already made.
 fn repredict(
     s: &Stream,
     data: &[u8],
+    flate_len: usize,
     carried: Option<&Dict>,
     opt: &Options,
     resolve: &dyn Fn(&Obj) -> Option<Obj>,
@@ -550,13 +557,15 @@ fn repredict(
         }
     }
     let (_, parms, bytes) = best?;
+    // The best is `data` itself (the plain samples without a predictor before, or the same predictor bytes):
+    // reencode() has already tried our Flate over it.
+    if bytes == data {
+        return None;
+    }
     let z = flate::deflate_zlib(&bytes, &opt.flate);
-    // Without a predictor before, the plain samples are what reencode() has already encoded (remembered, so
-    // this costs nothing): a predictor that saves fewer bytes than its parameters take is not kept.
-    if parms.is_some()
-        && carried.is_none()
-        && z.len() + dict_len(&parms) >= flate::deflate_zlib(&px, &opt.flate).len() + dict_len(&None)
-    {
+    // Without a predictor before, `data` is the plain samples: a predictor that saves fewer bytes than its
+    // parameters take is not kept.
+    if parms.is_some() && carried.is_none() && z.len() + dict_len(&parms) >= flate_len + dict_len(&None) {
         return None;
     }
     Some((dict_with(&parms), z))
