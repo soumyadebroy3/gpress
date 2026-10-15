@@ -926,9 +926,12 @@ def output_stats(cfg, run):
                         if r.get('status') == 'UNTOUCHED':
                             why = re.sub(r'\d+', 'N', (r.get('details') or '?').split(':')[0])  # "unreadable object 65560" -> one reason
                             reasons[why] = reasons.get(why, 0) + 1
-                    q = {r['file']: r for n2 in comps for r in run.groups[n2] if r.get('bytes_out')}
+                    # The like-for-like column: qpdf's strongest setting when the run has it, else plain qpdf.
+                    pick = [m for want in ('qpdf-max', 'qpdf') for m in comps if run.setting(m)[0] == want][:1]
+                    q = {r['file']: r for n2 in pick for r in run.groups[n2] if r.get('bytes_out')}
                     both = [r for r in smaller if r['file'] in q]
                     res['tools'][n].update(smaller=len(smaller), untouched=len(rows) - len(smaller), reasons=reasons,
+                                           smaller_vs=run.label(pick[0]) if pick else 'qpdf',
                                            smaller_in=sum(r['bytes_in'] for r in both), smaller_out=sum(r['bytes_out'] for r in both),
                                            smaller_qpdf=sum(min(q[r['file']]['bytes_out'], r['bytes_in']) for r in both), smaller_n=len(both))
         out[mode] = res
@@ -1102,8 +1105,9 @@ def report(cfg, a):
         # Normal PDF, the like-for-like table: the files ours made smaller, against qpdf on the same files.
         if fair:
             P('')
-            P('The files ours made smaller, against qpdf on the same files (a qpdf output larger than the input counts as the input):')
-            head = ['Tool', 'Files smaller', 'Untouched', 'Before', 'Ours', 'Saved %', 'qpdf', 'qpdf saved %']
+            vs = fair[0][1].get('smaller_vs', 'qpdf')
+            P(f'The files ours made smaller, against {vs} on the same files (an output of it larger than the input counts as the input):')
+            head = ['Tool', 'Files smaller', 'Untouched', 'Before', 'Ours', 'Saved %', vs, f'{vs} saved %']
             table = []
             for n, t in fair:
                 table.append([run.label(n), t['smaller_n'], t['untouched'], f"{t['smaller_in'] / 1e6:.2f} MB", f"{t['smaller_out'] / 1e6:.2f} MB", f"{100 - pct(t['smaller_out'], t['smaller_in']):.1f}",
