@@ -524,8 +524,8 @@ fn relax_matches(
         }
         let end = g + whole;
         // Two groups at a time, then the odd one.
-        let (cells, shifts) = (win[g..end].chunks_exact_mut(2), shift[g..end].chunks_exact(2));
-        for (pair, sh) in cells.zip(shifts) {
+        let (cells, shifts) = (win[g..end].as_chunks_mut::<2>().0, shift[g..end].as_chunks::<2>().0);
+        for (pair, sh) in cells.iter_mut().zip(shifts) {
             relax_whole(&mut pair[0], &sh[0], base, tag);
             relax_whole(&mut pair[1], &sh[1], base, tag);
         }
