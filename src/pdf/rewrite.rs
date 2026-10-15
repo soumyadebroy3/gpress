@@ -14,6 +14,7 @@ use super::xref::{self, Doc, Entry};
 use crate::clock::{self, Deadline};
 use crate::flate;
 use crate::par;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 #[derive(Clone, Debug)]
@@ -471,6 +472,25 @@ fn reencode_xmp(s: &Stream, opt: &Options) -> Option<Reencoded> {
     Some((d, z, Change::default()))
 }
 
+/// The predictor candidates in ranking order (the first of equal scores wins).
+const CANDIDATES: [Option<images::Choice>; 5] = [
+    None,
+    Some(images::Choice::MinSum),
+    Some(images::Choice::Fixed(2)),
+    Some(images::Choice::Fixed(1)),
+    Some(images::Choice::Fixed(4)),
+];
+
+/// Candidate inputs up to this size are ranked side by side; bigger ones one after another (their segments
+/// still run in parallel), so a big image never has more than two copies alive.
+const RANK_TOGETHER: usize = 8 << 20;
+
+/// The smallest score, the first of equals: the pick of a loop where only a strictly smaller score replaces
+/// the best so far.
+fn best_of(scores: &[u64]) -> Option<usize> {
+    (0..scores.len()).min_by_key(|&k| (scores[k], k))
+}
+
 /// The image's samples with the PNG predictor (or none) that suits them best, and their encode. `flate_len` is
 /// the length of our Flate over `data` as it is, which reencode() has already made.
 fn repredict(
@@ -509,7 +529,8 @@ fn repredict(
     // The candidates are ranked by their size with the quick settings plus the size of their stream
     // dictionary (the predictor parameters take room too), and only the best one gets the full encode. Below
     // effort 100 the data is a sample of rows across the image, so the dictionary counts in proportion. The
-    // first of equal sizes wins. Only their sizes count, so their outputs are not remembered.
+    // first of equal sizes wins. Only their sizes count, so their outputs are not remembered, and they are
+    // ranked side by side when threads are free.
     let quick = flate::Options {
         shared: opt.flate.shared.as_ref().map(|sh| flate::deflate::Shared::with_pool(sh.pool.clone(), false)),
         ..flate::Options::quick()
@@ -523,40 +544,35 @@ fn repredict(
         d
     };
     let dict_len = |parms: &Option<Dict>| to_bytes(&Obj::Dict(dict_with(parms))).len();
-    let mut best: Option<(u64, Option<Dict>, Vec<u8>)> = None;
-    for how in [
-        None,
-        Some(images::Choice::MinSum),
-        Some(images::Choice::Fixed(2)),
-        Some(images::Choice::Fixed(1)),
-        Some(images::Choice::Fixed(4)),
-    ] {
-        let (parms, bytes, stride) = match how {
-            None => (None, px.clone(), row),
-            Some(how) => {
-                let mut p = Dict::default();
-                p.set(b"Predictor", Obj::Int(15));
-                p.set(b"Colors", Obj::Int(g.colors as i64));
-                p.set(b"BitsPerComponent", Obj::Int(g.bpc as i64));
-                p.set(b"Columns", Obj::Int(g.columns as i64));
-                (Some(p), images::png_filter(&px, row, bpp, how), row + 1)
-            }
+    // The parameters of every candidate with a predictor, and both dictionary sizes.
+    let mut png = Dict::default();
+    png.set(b"Predictor", Obj::Int(15));
+    png.set(b"Colors", Obj::Int(g.colors as i64));
+    png.set(b"BitsPerComponent", Obj::Int(g.bpc as i64));
+    png.set(b"Columns", Obj::Int(g.columns as i64));
+    let (dict_plain, dict_png) = (dict_len(&None) as u64, dict_len(&Some(png.clone())) as u64);
+    // A candidate's score: (data for all rows + dictionary) x sampled rows, in whole numbers. Its input (the
+    // sampled rows below effort 100) is dropped once encoded; the winner is filtered again below.
+    let score = |k: usize| -> u64 {
+        let input: Cow<[u8]> = match (&rows, CANDIDATES[k]) {
+            (None, None) => Cow::Borrowed(&px[..]),
+            (None, Some(how)) => Cow::Owned(images::png_filter(&px, row, bpp, how)),
+            (Some(r), None) => Cow::Owned(r.iter().flat_map(|&(a, b)| &px[a * row..b * row]).copied().collect()),
+            (Some(r), Some(how)) => Cow::Owned(images::filter_rows(&px, row, bpp, how, r)),
         };
-        let data_len = match &rows {
-            None => flate::deflate_zlib(&bytes, &quick).len(),
-            Some(r) => flate::deflate_zlib(
-                &r.iter().flat_map(|&(a, b)| &bytes[a * stride..b * stride]).copied().collect::<Vec<u8>>(),
-                &quick,
-            )
-            .len(),
-        };
-        // (data for all rows + dictionary) x sampled rows, in whole numbers.
-        let score = data_len as u64 * nrows as u64 + dict_len(&parms) as u64 * sampled as u64;
-        if best.as_ref().is_none_or(|b| score < b.0) {
-            best = Some((score, parms, bytes));
-        }
-    }
-    let (_, parms, bytes) = best?;
+        let data_len = flate::deflate_zlib(&input, &quick).len() as u64;
+        let dict = if CANDIDATES[k].is_none() { dict_plain } else { dict_png };
+        data_len * nrows as u64 + dict * sampled as u64
+    };
+    // The size of a filtered candidate's input (the biggest): above RANK_TOGETHER the five go one at a time.
+    let input_len = rows.as_ref().map_or(px.len() + nrows, |r| r.iter().map(|&(a, b)| (b - a) * (row + 1)).sum());
+    let pool = quick.shared.as_ref().map(|sh| &*sh.pool).filter(|_| input_len <= RANK_TOGETHER);
+    let k = best_of(&par::map(pool, CANDIDATES.len(), None, score))?;
+    let parms = CANDIDATES[k].map(|_| png);
+    let bytes = match CANDIDATES[k] {
+        None => px,
+        Some(how) => images::png_filter(&px, row, bpp, how),
+    };
     // The best is `data` itself (the plain samples without a predictor before, or the same predictor bytes):
     // reencode() has already tried our Flate over it.
     if bytes == data {
@@ -1175,6 +1191,7 @@ fn self_check(
 #[cfg(test)]
 mod effort_tests {
     use super::*;
+    use std::sync::Arc;
 
     fn flate_stream(decoded: &[u8], extra: &[(&[u8], Obj)]) -> Stream {
         let mut d = Dict::default();
@@ -1380,6 +1397,220 @@ mod effort_tests {
                 assert!(r.data == one.data, "effort {effort}, {allowed} threads allowed");
             }
         }
+    }
+
+    #[test]
+    fn best_of_takes_the_first_of_equals() {
+        assert_eq!(best_of(&[7, 3, 3, 9, 3]), Some(1));
+        assert_eq!(best_of(&[4]), Some(0));
+        assert_eq!(best_of(&[]), None);
+        // The same scores from par::map, where later candidates finish first.
+        let scores = [7u64, 3, 3, 9, 3];
+        for threads in [1, 2, 4, 8] {
+            for seed in 1..=4 {
+                let pool = par::Pool::new(threads);
+                let got = par::jitter::with(seed, || {
+                    par::map(Some(&pool), scores.len(), None, |k| {
+                        std::thread::sleep(std::time::Duration::from_millis(5 - k as u64));
+                        scores[k]
+                    })
+                });
+                assert_eq!(best_of(&got), Some(1), "{threads} threads, seed {seed}");
+            }
+        }
+    }
+
+    /// `repredict` as it was before the candidates were ranked side by side: one after another, keeping the
+    /// best one's bytes. The reference for the test below.
+    fn repredict_one_by_one(
+        s: &Stream,
+        data: &[u8],
+        flate_len: usize,
+        carried: Option<&Dict>,
+        opt: &Options,
+        resolve: &dyn Fn(&Obj) -> Option<Obj>,
+    ) -> Option<(Dict, Vec<u8>)> {
+        let g = images::geometry(&s.dict, resolve)?;
+        let (row, bpp) = (g.row(), g.bpp());
+        // The samples, whatever predictor they are stored with now.
+        let px = match carried {
+            None => data.to_vec(),
+            Some(p) => {
+                let pred = p.get(b"Predictor").and_then(|x| x.as_int()).unwrap_or(1);
+                let pc = p.get(b"Colors").and_then(|x| x.as_int()).unwrap_or(1) as usize;
+                let pb = p.get(b"BitsPerComponent").and_then(|x| x.as_int()).unwrap_or(8) as usize;
+                let pcol = p.get(b"Columns").and_then(|x| x.as_int()).unwrap_or(1) as usize;
+                if (pc, pb, pcol) != (g.colors, g.bpc, g.columns) {
+                    return None; // predictor geometry differs from the image's: leave it
+                }
+                if pred >= 10 {
+                    images::png_unfilter(data, row, bpp)?
+                } else if pred == 2 && g.bpc == 8 {
+                    images::tiff_unfilter(data, row, bpp)
+                } else {
+                    return None;
+                }
+            }
+        };
+        if px.is_empty() || px.len() % row != 0 || px.len() < 1024 {
+            return None;
+        }
+        // The candidates are ranked by their size with the quick settings plus the size of their stream
+        // dictionary (the predictor parameters take room too), and only the best one gets the full encode. Below
+        // effort 100 the data is a sample of rows across the image, so the dictionary counts in proportion. The
+        // first of equal sizes wins. Only their sizes count, so their outputs are not remembered.
+        let quick = flate::Options {
+            shared: opt.flate.shared.as_ref().map(|sh| flate::deflate::Shared::with_pool(sh.pool.clone(), false)),
+            ..flate::Options::quick()
+        };
+        let nrows = px.len() / row;
+        let rows = predictor_sample(nrows, row, opt.effort);
+        let sampled = rows.as_ref().map_or(nrows, |r| r.iter().map(|&(a, b)| b - a).sum());
+        let dict_with = |parms: &Option<Dict>| {
+            let mut d = s.dict.clone();
+            set_chain(&mut d, &[Stage { name: b"FlateDecode".to_vec(), parms: parms.clone() }]);
+            d
+        };
+        let dict_len = |parms: &Option<Dict>| to_bytes(&Obj::Dict(dict_with(parms))).len();
+        let mut best: Option<(u64, Option<Dict>, Vec<u8>)> = None;
+        for how in [
+            None,
+            Some(images::Choice::MinSum),
+            Some(images::Choice::Fixed(2)),
+            Some(images::Choice::Fixed(1)),
+            Some(images::Choice::Fixed(4)),
+        ] {
+            let (parms, bytes, stride) = match how {
+                None => (None, px.clone(), row),
+                Some(how) => {
+                    let mut p = Dict::default();
+                    p.set(b"Predictor", Obj::Int(15));
+                    p.set(b"Colors", Obj::Int(g.colors as i64));
+                    p.set(b"BitsPerComponent", Obj::Int(g.bpc as i64));
+                    p.set(b"Columns", Obj::Int(g.columns as i64));
+                    (Some(p), images::png_filter(&px, row, bpp, how), row + 1)
+                }
+            };
+            let data_len = match &rows {
+                None => flate::deflate_zlib(&bytes, &quick).len(),
+                Some(r) => flate::deflate_zlib(
+                    &r.iter().flat_map(|&(a, b)| &bytes[a * stride..b * stride]).copied().collect::<Vec<u8>>(),
+                    &quick,
+                )
+                .len(),
+            };
+            // (data for all rows + dictionary) x sampled rows, in whole numbers.
+            let score = data_len as u64 * nrows as u64 + dict_len(&parms) as u64 * sampled as u64;
+            if best.as_ref().is_none_or(|b| score < b.0) {
+                best = Some((score, parms, bytes));
+            }
+        }
+        let (_, parms, bytes) = best?;
+        // The best is `data` itself (the plain samples without a predictor before, or the same predictor bytes):
+        // reencode() has already tried our Flate over it.
+        if bytes == data {
+            return None;
+        }
+        let z = flate::deflate_zlib(&bytes, &opt.flate);
+        // Without a predictor before, `data` is the plain samples: a predictor that saves fewer bytes than its
+        // parameters take is not kept.
+        if parms.is_some() && carried.is_none() && z.len() + dict_len(&parms) >= flate_len + dict_len(&None) {
+            return None;
+        }
+        Some((dict_with(&parms), z))
+    }
+
+    #[test]
+    fn repredict_matches_the_one_by_one_loop() {
+        let resolve = |o: &Obj| Some(o.clone());
+        let mut r = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            r ^= r << 13;
+            r ^= r >> 7;
+            r ^= r << 17;
+            r
+        };
+        let image = |w: usize, bpc: i64, cs: &[u8], px: Vec<u8>| {
+            let mut d = Dict::default();
+            d.set(b"Subtype", Obj::Name(b"Image".to_vec()));
+            d.set(b"Width", Obj::Int(w as i64));
+            d.set(b"BitsPerComponent", Obj::Int(bpc));
+            d.set(b"ColorSpace", Obj::Name(cs.to_vec()));
+            Stream { dict: d, data: px }
+        };
+        let png_parms = |colors: i64, bpc: i64, w: usize| {
+            let mut p = Dict::default();
+            p.set(b"Predictor", Obj::Int(15));
+            p.set(b"Colors", Obj::Int(colors));
+            p.set(b"BitsPerComponent", Obj::Int(bpc));
+            p.set(b"Columns", Obj::Int(w as i64));
+            p
+        };
+        // Under 64 KiB, ranked whole at every effort; over it, ranked on a sample of rows at effort 0.
+        let noise: Vec<u8> = (0..16 * 24 * 3).map(|_| next() as u8).collect();
+        let gradient = |w: usize, h: usize| -> Vec<u8> { (0..w * h).map(|i| (i % w + i / w * 2) as u8).collect() };
+        let ramps: Vec<u8> = (0..24)
+            .flat_map(|_| {
+                let o = next() as usize;
+                (0..64 * 3).map(move |i| (o + i / 3 * (1 + i % 3)) as u8)
+            })
+            .collect();
+        let rows: Vec<Vec<u8>> = (0..4).map(|_| (0..256).map(|_| (next() % 8) as u8 * 30).collect()).collect();
+        let repeating: Vec<u8> = (0..64).flat_map(|y| rows[[0, 1, 1, 2, 3, 3, 3, 0][y % 8]].clone()).collect();
+        let sixteen: Vec<u8> = (0..24 * 24 * 3)
+            .flat_map(|i| ((i % 72 * 800 + i / 72 * 180) as u16 ^ (next() % 4) as u16).to_be_bytes())
+            .collect();
+        let one_bit: Vec<u8> =
+            (0..256 * 32).map(|i| if (i / 32 / 7 + i % 32 / 3) % 3 == 0 { 0xF0 } else { 0x0F }).collect();
+        // One row: Sub and Paeth filter it alike but for the filter type, so the best scores tie.
+        let one_row: Vec<u8> = (0..1200).map(|i| (i * 3) as u8).collect();
+        let mut cases: Vec<(&str, Stream, Option<Dict>)> = vec![
+            ("noise", image(16, 8, b"DeviceRGB", noise.clone()), None),
+            ("one row", image(1200, 8, b"DeviceGray", one_row), None),
+            ("gradient", image(128, 8, b"DeviceGray", gradient(128, 128)), None),
+            ("big gradient", image(272, 8, b"DeviceGray", gradient(272, 248)), None),
+            ("ramps", image(64, 8, b"DeviceRGB", ramps), None),
+            ("repeating rows", image(256, 8, b"DeviceGray", repeating), None),
+            ("16-bit", image(24, 16, b"DeviceRGB", sixteen), None),
+            ("1-bit", image(256, 1, b"DeviceGray", one_bit), None),
+        ];
+        // Stored with a predictor: Up (the ranking's pick for this image, so nothing changes), and MinSum.
+        for how in [images::Choice::Fixed(2), images::Choice::MinSum] {
+            let data = images::png_filter(&gradient(128, 128), 128, 1, how);
+            cases.push(("gradient, predicted", image(128, 8, b"DeviceGray", data), Some(png_parms(1, 8, 128))));
+        }
+        // Noise stored with Sub: no predictor wins, by less than the size of the predictor parameters.
+        let data = images::png_filter(&noise, 48, 3, images::Choice::Fixed(1));
+        cases.push(("noise, predicted", image(16, 8, b"DeviceRGB", data), Some(png_parms(3, 8, 16))));
+        let (mut some, mut predicted) = (0, 0);
+        for (name, s, carried) in &cases {
+            for effort in [0u8, 50, 100] {
+                // The quick settings for the final encode too: only the ranking depends on the effort here.
+                let opt = |pool: &Arc<par::Pool>| Options {
+                    flate: flate::Options {
+                        shared: Some(flate::deflate::Shared::with_pool(pool.clone(), true)),
+                        ..flate::Options::quick()
+                    },
+                    ..Options::effort(effort)
+                };
+                let one = opt(&par::Pool::new(1));
+                let flate_len = flate::deflate_zlib(&s.data, &one.flate).len();
+                let want = repredict_one_by_one(s, &s.data, flate_len, carried.as_ref(), &one, &resolve);
+                some += want.is_some() as usize;
+                predicted += want.as_ref().is_some_and(|(d, _)| d.has(b"DecodeParms")) as usize;
+                for threads in [1, 2, 4, 8] {
+                    for seed in if threads == 1 { 0..=0 } else { 1..=4 } {
+                        let o = opt(&par::Pool::new(threads));
+                        let got = par::jitter::with(seed, || {
+                            repredict(s, &s.data, flate_len, carried.as_ref(), &o, &resolve)
+                        });
+                        assert!(got == want, "{name}, effort {effort}, {threads} threads, seed {seed}");
+                    }
+                }
+            }
+        }
+        // Both outcomes were tried: a new predictor, and none (or nothing better than what was there).
+        assert!(predicted >= 6 && some < cases.len() * 3, "{some} results, {predicted} with a predictor");
     }
 
     #[test]
