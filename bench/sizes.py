@@ -3,7 +3,8 @@
 
     python3 -I bench/sizes.py measure [--features SET]   build all three and record their sizes in bench/sizes.json
     python3 -I bench/sizes.py check   [--features SET]   build the module and fail when its gzip size is more than
-                                                         5% over the recorded one, or over the 400 KB target
+                                                         5% over the recorded one, or over the 400 KB target;
+                                                         warn when it is more than 5% under the recorded one
 
 SET is a feature set: "default" (a plain build) or the cargo features to build with, separated by commas
 (built with --no-default-features, so the set is exactly what is named). Each package is built with its own
@@ -37,6 +38,7 @@ BUILD_WASM = os.path.join(ROOT, 'crates', 'gpress-wasm', 'js', 'build-wasm.mjs')
 WEB = 'default'
 
 GROWTH = 1.05            # check: at most 5% over the recorded gzip size
+SHRINK = 0.95            # check: a warning more than 5% under it, since the budget is counted from the record
 TARGET_GZIP = 400_000    # the web module's budget: 400 KB gzip
 
 
@@ -163,11 +165,12 @@ def check(fset):
         now = build_module(module_args, os.path.join(tmp, 'gpress.wasm'))
     was = entry['wasm']
     limit = int(was['gzip'] * GROWTH)
+    floor = int(was['gzip'] * SHRINK)
     wasm_opt = tool_version(['wasm-opt', '--version'])
     target = f'; target {TARGET_GZIP:,}' if fset == WEB else ''
     print(f'WebAssembly module, feature set "{fset}": {now["raw"]:,} bytes raw, {now["gzip"]:,} gzip '
           f'(recorded {was["raw"]:,} and {was["gzip"]:,}, {100 * (now["gzip"] / was["gzip"] - 1):+.1f}% gzip; '
-          f'limit {limit:,}{target})')
+          f'limit {limit:,}, re-record under {floor:,}{target})')
     if wasm_opt != entry.get('wasm_opt'):
         print(f'note: recorded with {entry.get("wasm_opt") or "no wasm-opt"}, built now with {wasm_opt or "no wasm-opt"}')
     rustc = tool_version(['rustc', '--version'])
@@ -181,6 +184,14 @@ def check(fset):
     if fset == WEB and now['gzip'] > TARGET_GZIP:
         print(f'FAIL: the web module is over its {TARGET_GZIP:,}-byte gzip target')
         failed = True
+    if now['gzip'] < floor:
+        # Not a failure (a newer rustc or another change may have shrunk it), but the budget would now allow
+        # more than 5% growth over the real size. In GitHub Actions the line is a warning on the run's page.
+        lead = '::warning::' if os.environ.get('GITHUB_ACTIONS') == 'true' else 'warning: '
+        print(f'{lead}the module is {100 * (1 - now["gzip"] / was["gzip"]):.1f}% under its recorded gzip size, so '
+              f'the budget allows {100 * (limit / now["gzip"] - 1):.1f}% growth instead of '
+              f'{round(100 * (GROWTH - 1))}%. Record the new size with '
+              f'`python3 -I bench/sizes.py measure --features {fset}`.')
     if not failed:
         print('ok')
     return 1 if failed else 0

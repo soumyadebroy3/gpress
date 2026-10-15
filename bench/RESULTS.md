@@ -395,7 +395,9 @@ it is far larger than what a program linked with it gets.
 
 The budget: CI's WebAssembly job runs `python3 -I bench/sizes.py check`, which builds the module as the
 package does and fails when its gzip size is more than 5% over the recorded one (240,183 bytes today) or over
-400,000 bytes. A growth that is wanted is recorded with `measure`. When the web feature set exists,
+400,000 bytes. A growth that is wanted is recorded with `measure`. When the module is more than 5% under the
+record (under 217,308 bytes today), the check passes with a warning to record the new size, since the 5% is
+counted from the record and would otherwise allow more. When the web feature set exists,
 `WEB = 'web'` in `bench/sizes.py` and `measure --features web` move the check to it, and its rows join this
 table.
 
