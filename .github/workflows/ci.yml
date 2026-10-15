@@ -57,13 +57,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: cargo build --release -p gpress-wasm --target wasm32-unknown-unknown
-      - working-directory: crates/gpress-wasm/js
+      # binaryen's wasm-opt: the package build runs it on the module when it is on PATH.
+      - run: sudo apt-get update && sudo apt-get install -y binaryen
+      - id: build
+        working-directory: crates/gpress-wasm/js
         run: |
           npm ci
-          mkdir -p dist && cp ../../../target/wasm32-unknown-unknown/release/gpress_wasm.wasm dist/gpress.wasm
-          npm run build:js
-          npm test
+          npm run build
+      - working-directory: crates/gpress-wasm/js
+        run: npm test
       - uses: actions/upload-artifact@v4
         with:
           name: gpress-wasm
