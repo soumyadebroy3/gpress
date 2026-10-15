@@ -205,8 +205,9 @@ impl Out {
     }
 }
 
-/// The final stream. Neighbouring stored pieces are joined, so that incompressible input costs no more
-/// than the stored-block overhead.
+/// The final stream. Neighbouring stored pieces are joined, so that incompressible input costs the
+/// stored-block overhead (5 bytes per 65535) and at most 2 bytes more: a segment that ends in a few bytes
+/// codes them in a block of its own (a whole number of MiB plus 1 to 8 random bytes, say).
 struct Stream {
     w: BitWriter,
     pending: Option<(usize, usize)>,
@@ -1404,6 +1405,15 @@ mod tests {
                 }
             });
         }
+        // Every other level: every size up to 300, then one size in 97.
+        par::map(Some(&pool), LEVELS as usize, None, |i| {
+            let level = i as u8 + 1;
+            if level != 1 && level != 8 {
+                for n in (0..=300).chain((301..=70_000).step_by(97 * stride)) {
+                    round_trip(&d[..n], level, None);
+                }
+            }
+        });
     }
 
     #[test]
@@ -1454,6 +1464,14 @@ mod tests {
             for level in 1..=LEVELS {
                 let z = round_trip(&d, level, None);
                 assert!(z.len() <= n + 5 * n.div_ceil(65535), "level {level}, {n} bytes: {}", z.len());
+            }
+        }
+        // Where a segment ends in a few bytes, at most 2 bytes more (see `Stream`).
+        for n in [SEGMENT + 1, SEGMENT + 3, SEGMENT + 8, 2 * SEGMENT + 5] {
+            let d = random(n, n as u64);
+            for level in [1, 7, LEVELS] {
+                let z = round_trip(&d, level, None);
+                assert!(z.len() <= n + 5 * n.div_ceil(65535) + 2, "level {level}, {n} bytes: {}", z.len());
             }
         }
     }

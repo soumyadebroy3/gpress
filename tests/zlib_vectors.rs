@@ -1,6 +1,7 @@
-//! Our decoder against streams made by CPython's zlib (every level and strategy, two window sizes).
+//! Our decoder against streams made by CPython's zlib (every level and strategy, two window sizes), and our fast
+//! encoder against zlib on the same inputs.
 
-use gpress::flate::zlib;
+use gpress::flate::{self, zlib};
 use std::path::Path;
 
 #[test]
@@ -35,4 +36,53 @@ fn refuses_damaged_streams() {
     assert!(zlib::unwrap(&bad, 1 << 30).is_err());
     // Output limit.
     assert!(zlib::unwrap(&zb, 100).is_err());
+}
+
+/// The fast encoder (efforts 0 to 19) on the inputs of the vectors above, at every level: our decoder, checked
+/// against CPython's zlib by `decodes_every_zlib_vector`, gives each input back, and the output is never larger
+/// than zlib's own at level 1, nor from level 8 on larger than zlib's at level 9.
+#[test]
+fn the_fast_encoder_against_zlib_on_the_same_inputs() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    for name in ["empty", "one", "random", "text", "zeros", "mixed"] {
+        let raw = std::fs::read(dir.join(format!("{name}.raw"))).unwrap();
+        let zlib1 = std::fs::read(dir.join(format!("{name}-1-def-15.z"))).unwrap().len();
+        let zlib9 = std::fs::read(dir.join(format!("{name}-9-def-15.z"))).unwrap().len();
+        for level in 1..=flate::fast::LEVELS {
+            let z = flate::deflate_zlib(&raw, &flate::Options { fast: level, ..flate::Options::quick() });
+            let back = zlib::unwrap(&z, raw.len() + 1).unwrap_or_else(|e| panic!("{name}, level {level}: {e:?}"));
+            assert!(back.data == raw && back.trailing == 0, "{name}, level {level}");
+            assert!(z.len() <= zlib1, "{name}, level {level}: {} against zlib -1's {zlib1}", z.len());
+            if level >= 8 {
+                assert!(z.len() <= zlib9, "{name}, level {level}: {} against zlib -9's {zlib9}", z.len());
+            }
+        }
+    }
+}
+
+/// The Flate streams of the PDFs in tests/data (page content, fonts, cross-reference streams), decoded and
+/// encoded again by the fast encoder at every level: each gives its data back.
+#[test]
+fn the_fast_encoder_round_trips_the_test_pdfs_streams() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    let mut n = 0;
+    for pdf in ["format-v8.pdf", "enc/base.pdf"] {
+        let d = std::fs::read(dir.join(pdf)).unwrap();
+        let mut at = 0;
+        while let Some(k) = d[at..].windows(6).position(|w| w == b"stream") {
+            at += k + 6;
+            let start = at + if d.get(at) == Some(&b'\r') { 2 } else { 1 };
+            let Ok(u) = zlib::unwrap(&d[start.min(d.len())..], 1 << 24) else { continue };
+            if u.data.is_empty() {
+                continue;
+            }
+            for level in 1..=flate::fast::LEVELS {
+                let z = flate::deflate_zlib(&u.data, &flate::Options { fast: level, ..flate::Options::quick() });
+                let back = zlib::unwrap(&z, u.data.len() + 1).unwrap_or_else(|e| panic!("{pdf}, level {level}: {e:?}"));
+                assert!(back.data == u.data, "{pdf}, level {level}");
+            }
+            n += 1;
+        }
+    }
+    assert!(n >= 5, "{n} streams");
 }
