@@ -97,8 +97,8 @@ fn common(d: &[u8], a: usize, b: usize, skip: usize, max: usize) -> usize {
     // Both sides are cut to `max` once, so the word and byte reads below need no bounds checks.
     let (x, y) = (&d[a..a + max], &d[b..b + max]);
     let mut n = skip;
-    for (u, v) in x[skip..].chunks_exact(8).zip(y[skip..].chunks_exact(8)) {
-        let z = u64::from_le_bytes(u.try_into().unwrap()) ^ u64::from_le_bytes(v.try_into().unwrap());
+    for (u, v) in x[skip..].as_chunks::<8>().0.iter().zip(y[skip..].as_chunks::<8>().0) {
+        let z = u64::from_le_bytes(*u) ^ u64::from_le_bytes(*v);
         if z != 0 {
             return n + (z.trailing_zeros() / 8) as usize;
         }
