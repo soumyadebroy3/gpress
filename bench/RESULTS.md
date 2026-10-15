@@ -362,6 +362,108 @@ NEW has not measured every file of BASE (an unfinished run compares only the fil
 `--scale`) and checks they are caught. Measuring a new build is `benchmark.py time RUN --set all --who ours`;
 `report RUN --with all907-speed-ca8fa92` and `compare` take the competitors from the stored rows.
 
+## Lightweight
+
+### Start-up (the WebAssembly module in Node)
+
+The target: compiling the module, making an instance and optimizing a one-page PDF of a few KB take at most
+50 ms in all. `bench/wasm_startup.mjs` measures it from the module's bytes in memory: compile, instantiate,
+the first `optimize` call, and a second call in the same process (the same work once the code is compiled).
+Each sample is a fresh Node 22.22 process, because V8 reuses compiled code within a process; the modules are
+measured in turn, round after round, and the tables give medians. The PDF is 3,851 bytes, made by
+`crates/gpress-wasm/js/test/onepage.mjs`: a Flate content stream of text in two fonts, and the two fonts with
+their widths and descriptors. It comes out at 2,774 bytes at effort 0 and 2,767 at effort 100, the same bytes
+as the native tool (2,777 at effort 50). CI runs the same measurement in
+`crates/gpress-wasm/js/test/startup.test.mjs`: 7 processes, effort 0 held to 50 ms (`GPRESS_STARTUP_LIMIT_MS`
+raises it), the default effort reported.
+
+The module is today's: every part built in (the web feature set does not exist yet), built with the release
+profile (opt-level 3). "s" and "z" are the same code at those opt-levels, "+Oz" after `wasm-opt -Oz` (binaryen
+108), and "S1" is session 1's unmerged branch (A1, A3 and A4 of the plan, commit 5e37ac6) built the same way.
+Medians in ms of 11 processes on one core (`taskset -c 0`: the other cores were busy with other benchmarks
+for most of this work, so here V8's background compiler shares the core with the work):
+
+| Module | Bytes (gzip) | Effort 0: compile | instantiate | first call | **total** | second call | Effort 100: **total** | second call |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| today (3) | 841,082 (294,455) | 6.6 | 0.5 | 111.5 | **118.7** | 29.6 | **154.4** | 54.0 |
+| s | 846,550 (263,987) | 6.2 | 0.5 | 80.2 | **86.5** | 29.6 | **129.2** | 68.0 |
+| z | 897,443 (256,028) | 5.6 | 0.5 | 109.7 | **116.9** | 63.8 | **211.1** | 149.8 |
+| s +Oz | 573,121 (244,046) | 5.8 | 0.5 | 105.4 | **111.9** | 28.5 | **149.0** | 65.2 |
+| s +Oz, one-caller inlining capped (`-ocimfs 20`) | 576,816 (227,619) | 5.8 | 0.6 | 86.9 | **93.3** | 30.9 | **122.7** | 67.6 |
+| z +Oz | 501,378 (218,201) | 5.1 | 0.5 | 133.5 | **139.2** | 75.0 | **257.0** | 172.5 |
+| S1 (3) | 855,462 (301,977) | 6.8 | 0.5 | 111.3 | **118.1** | 37.8 | **150.5** | 32.0 |
+| S1 s | 855,987 (268,373) | 6.0 | 0.5 | 69.6 | **76.3** | 18.7 | **103.9** | 38.4 |
+| S1 z | 910,876 (261,572) | 5.7 | 0.5 | 76.3 | **82.6** | 28.3 | **115.3** | 54.0 |
+| S1 s +Oz, `-ocimfs 20` | 585,050 (231,454) | 5.8 | 0.5 | 72.6 | **83.5** | 22.5 | **99.0** | 37.1 |
+
+The same on one core with V8's optimizing compiler turned off (`--flags --liftoff-only`), which is close to
+how a machine with idle cores runs the first call (there the optimized code comes too late for most of it):
+
+| Module | Effort 0: first call | **total** | second call | Effort 100: **total** | second call |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| today (3) | 53.7 | **60.6** | 41.5 | **120.8** | 90.0 |
+| s | 57.6 | **63.9** | 45.7 | **120.0** | 114.2 |
+| S1 (3) | 36.2 | **43.6** | 21.7 | **72.8** | 51.8 |
+| S1 s | 34.5 | **41.6** | 24.2 | **74.6** | 58.0 |
+| S1 (3), `package_merge` without `memcmp` (below) | 32.6 | **39.7** | 20.1 | **65.9** | 48.0 |
+
+Early in this work, with three cores idle (the fourth ran the baseline benchmark), 9 processes: today's module
+took 64.5 ms at effort 0 (compile 4.0, instantiate 0.2, first call 59.9, a second call 25.9) and 99.8 ms at
+effort 100 (second call 53.8); session 1's branch 55.3 and 81.8 ms. The native tool takes 32 ms at effort 0
+and 52 ms at effort 100 on the same file (medians of 21 runs on one core, process start included; the
+fastest runs 23 and 44 ms).
+
+Where the time goes, today's module at effort 0:
+
+- **Compile, 4 to 7 ms.** V8 decodes and validates the 717 KB of code; it compiles each function only when it
+  is first called. Making later instances from the compiled `WebAssembly.Module` (`Gpress.compile` once,
+  then `Gpress.load(module)`) costs 0.3 ms each instead; compiling the same bytes again in one process cost 4
+  to 7 ms.
+- **Instantiate, 0.2 to 0.5 ms.** Nothing is built at start-up: 48 KB of data and 17 pages (1.06 MiB) of
+  memory, no constructor; every table of the engine is made when a call needs it.
+- **The first call: 60 ms with idle cores, 112 ms on one core, for work that takes 26 to 30 ms once
+  compiled.** The first call compiles the 217 functions it reaches (242 KB of code) with V8's quick compiler,
+  Liftoff, and touches its memory for the first time: about 12 ms (53.7 against 41.5 ms with Liftoff alone).
+  It then runs in Liftoff's code, 1.4 to 1.7 times slower than optimized code here, while the optimizing
+  compiler (TurboFan) works on the 21 hot functions in the background. V8 switches a function to optimized
+  code only when it is next called, so a large function that runs once runs unoptimized throughout: deflate's
+  per-segment closure (12.8 KB of code, with the parse rounds, the block split and the polish inlined into it)
+  took TurboFan up to 90 ms on a busy machine. On one core that background compiling costs the first call
+  more than it gives back (118.7 ms against 60.6 with Liftoff alone). Smaller functions help: opt-level s
+  starts 27% faster than 3 on one core at effort 0 (16% at effort 100), and `wasm-opt -Oz`, which inlines
+  every function that has one caller, gives that back. Capping that inlining (`-ocimfs 20`) keeps the size
+  (576,816 bytes against 573,121), makes the gzip smaller (227,619 against 244,046) and keeps the start-up of
+  s. With idle cores 3 and s start about alike (Liftoff alone: 60.6 and 63.9 ms). z runs 2.2 to 2.8 times
+  slower than 3 once compiled.
+- **The work is Flate.** In a profile of the two calls at effort 0 (`--cpu-prof`, which names the module's
+  functions) 88% of the time is `deflate_zlib`, for four streams: the content stream, the object stream and
+  two tries of the cross-reference stream. Its fixed costs lead: `header_search` 22%, `estimate_dynamic_bits`
+  15%, `limited_lengths_into` 13%, `optimal_nice` 9%, `fast_lengths` 5%, `find_matches` 3% (session 1's A1,
+  A3 and A4). With session 1's branch, 11% of the time at effort 0 is `memcmp`, called from `package_merge`
+  for `cur[..k] == prev[..k]`: in WebAssembly `memcmp` is a loop over bytes. Comparing the u64 values in a
+  loop takes it out of the profile and the total with Liftoff alone from 43.6 to 39.7 ms.
+
+Tables sized for the largest case: on the optimize path only the match finder's two tables (`head`, 256 KiB,
+and `son`, 512 KiB), which every `find_matches` call allocates and fills with NIL, even for a 60-byte stream.
+Session 1's A4 keeps them per thread, allocated zeroed (fresh pages, no fill), and clears only the entries a
+search reads, so a small stream touches a few KB of them; this branch leaves `matcher.rs` to it. Everything
+else on the path is sized to its input: the parse's cost arrays, the match and symbol lists, the bit writer,
+the inflate output. The archive is not on this path, and its tables are fixed: in the module a compress of
+the same PDF takes about 120 ms and an expand 50 ms, and the memory grows to 12.7 MB. A model holds about
+11.4 MB whatever the input (context tables of at least 2.6 MB, a 4 MiB match table, and a 65,536-context APM
+table of 4.3 MiB that is filled entry by entry with a computed value at every `Model::new`); `Model::new` is
+23 ms of the two calls, and priming the model with its fixed text is most of the rest (`src/cm/`,
+`src/pack/`: the archive briefs).
+
+The target, at effort 0: not met. Today's module takes 64.5 ms with idle cores (14.5 ms over) and 118.7 ms on
+one core. Session 1's branch brings it to 55.3 ms with idle cores, and 43.6 ms with Liftoff alone on one core;
+39.7 ms with the `memcmp` change. On one core opt-level s takes today's 118.7 ms to 86.5, and to 76.3 with
+session 1's branch. The default effort (100) cannot reach 50 ms in the module: the native tool itself takes
+44 to 52 ms; the module takes 99.8 ms today with idle cores and 81.8 ms with session 1's branch. What closes
+the rest at effort 0: session 1's branch with the `memcmp` change, opt-level s for the module (L2), and the
+fast tier (`fast-tier.md`, F1), which replaces the optimal parse and the block search that are most of the
+first call.
+
 ## Security (hostile input)
 
 Every number here comes from `bench/security.py` (run `security`, build main-d86b799, 2026-10-08 17:45:03 UTC), engine at effort 0 with 1 thread, each command its own process measured by bench/measure.c (parent under 1 MB); address-space limit by prlimit. Time bounds apply to the child's CPU time. The bounds: a damaged archive is refused in under 5 s with a peak under 512 MiB; a hostile PDF returns (untouched, or smaller and proven by the engine's own self-check) or gives a clean error in under 30 s plus 5 s per MiB of input, with a peak under 512 MiB or 16 bytes per input byte, whichever is more; a run past 60 s of wall time (2x its bound when that is more) is a hang. The fuzzer runs with a hard 512 MiB address space.
