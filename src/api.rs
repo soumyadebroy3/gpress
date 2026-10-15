@@ -39,10 +39,11 @@ pub const ARCHIVE_VERSION: u8 = pack::VERSION;
 pub const MAX_THREADS: usize = 64;
 
 /// How hard to try, 0 to 100. 0 is the fast path: our fast Flate encoder (a near-optimal parse for page
-/// content and fonts, a lazy one for images), image predictors chosen from an estimate, and only the cheap
-/// steps (object streams, the cross-reference stream, JPEG Huffman tables, JBIG2 for fax images). 1 to 19
-/// bridge to the strong encoder, so that time and size move smoothly; 20 to 100 are the strong encoder's
-/// steps, and 100 is everything the engine knows how to do. A percentage control maps straight onto this.
+/// content and fonts, one pass of it for a stream over 4 MiB, a lazy one for images), image predictors
+/// chosen from an estimate, and only the cheap steps (object streams, the cross-reference stream, JPEG
+/// Huffman tables, JBIG2 for fax images). 1 to 19 bridge to the strong encoder, so that time and size move
+/// smoothly; 20 to 100 are the strong encoder's steps, and 100 is everything the engine knows how to do. A
+/// percentage control maps straight onto this.
 /// See `pdf::rewrite::Options::effort`; the archive's use of effort is `pack::PackOptions::effort`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Effort(u8);
