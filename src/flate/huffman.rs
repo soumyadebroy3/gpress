@@ -13,9 +13,10 @@ pub fn limited_lengths(freqs: &[u32], max_bits: u32) -> Vec<u8> {
 
 pub fn limited_lengths_into(freqs: &[u32], max_bits: u32, lens: &mut [u8]) {
     lens.fill(0);
-    with_scratch(freqs.len(), |keys| {
-        let n = sorted_keys(freqs, keys);
-        limited_sorted(&keys[..n], max_bits, lens);
+    with_scratch(2 * freqs.len(), |s| {
+        let (keys, room) = s.split_at_mut(freqs.len());
+        let n = sorted_keys(freqs, keys, room);
+        limited_sorted(&keys[..n], max_bits, lens, &mut Guide::new());
     });
 }
 
@@ -24,9 +25,10 @@ pub fn limited_lengths_into(freqs: &[u32], max_bits: u32, lens: &mut [u8]) {
 /// `limited_lengths` when it exceeds their limit. `lens` receives one length per symbol (0 for unused symbols).
 pub fn fast_lengths(freqs: &[u32], lens: &mut [u8]) -> u8 {
     lens[..freqs.len()].fill(0);
-    with_scratch(freqs.len(), |keys| {
-        let n = sorted_keys(freqs, keys);
-        with_scratch(n, |work| unlimited_sorted(&keys[..n], work, lens).0)
+    with_scratch(2 * freqs.len(), |s| {
+        let (keys, room) = s.split_at_mut(freqs.len());
+        let n = sorted_keys(freqs, keys, room);
+        unlimited_sorted(&keys[..n], room, lens).0
     })
 }
 
@@ -34,12 +36,13 @@ pub fn fast_lengths(freqs: &[u32], lens: &mut [u8]) -> u8 {
 /// already sorted).
 pub fn lengths_into(freqs: &[u32], max_bits: u32, lens: &mut [u8]) {
     lens[..freqs.len()].fill(0);
-    with_scratch(freqs.len(), |keys| {
-        let n = sorted_keys(freqs, keys);
+    with_scratch(2 * freqs.len(), |s| {
+        let (keys, room) = s.split_at_mut(freqs.len());
+        let n = sorted_keys(freqs, keys, room);
         let keys = &keys[..n];
-        if with_scratch(n, |work| unlimited_sorted(keys, work, lens).0) as u32 > max_bits {
+        if unlimited_sorted(keys, room, lens).0 as u32 > max_bits {
             lens.fill(0);
-            limited_sorted(keys, max_bits, lens);
+            limited_sorted(keys, max_bits, lens, &mut Guide::new());
         }
     })
 }
@@ -49,14 +52,20 @@ pub fn lengths_into(freqs: &[u32], max_bits: u32, lens: &mut [u8]) {
 /// count stayed keep their places and only the others are sorted again. Nothing is allocated for Deflate's
 /// alphabets and limits, and the lengths are those of `lengths_into`.
 pub struct LengthCoder<const N: usize> {
-    /// The keys of the symbols used in the last call, sorted, in `keys[..used]`.
+    /// The keys of the symbols used in the last call, sorted, in `keys[..used]`, and whether each symbol is
+    /// among them.
     keys: [u64; N],
-    used: usize,
-    /// Whether each symbol is among them.
     member: [bool; N],
+    used: usize,
+    /// Room for the keys that moved and for the code tree.
     work: [u64; N],
-    /// The lengths of the last call, one per symbol.
-    pub lens: [u8; N],
+    /// The lengths of the last call, one per symbol; its counts, limit (none before the first) and result.
+    lens: [u8; N],
+    counts: [u32; N],
+    max_bits: Option<u32>,
+    bits: u64,
+    /// What package-merge learnt in its last run here.
+    guide: Guide,
 }
 
 impl<const N: usize> Default for LengthCoder<N> {
@@ -68,16 +77,53 @@ impl<const N: usize> Default for LengthCoder<N> {
 impl<const N: usize> LengthCoder<N> {
     pub const fn new() -> Self {
         const { assert!(N <= 1 << 16, "symbols must fit in 16 bits") };
-        LengthCoder { keys: [0; N], used: 0, member: [false; N], work: [0; N], lens: [0; N] }
+        LengthCoder {
+            keys: [0; N],
+            member: [false; N],
+            used: 0,
+            work: [0; N],
+            lens: [0; N],
+            counts: [0; N],
+            max_bits: None,
+            bits: 0,
+            guide: Guide::new(),
+        }
     }
 
-    /// Sets `lens` to what `lengths_into(freqs, max_bits, ..)` gives and returns the sum of count times
+    /// Sets the lengths to what `lengths_into(freqs, max_bits, ..)` gives and returns the sum of count times
     /// length.
     pub fn lengths(&mut self, freqs: &[u32; N], max_bits: u32) -> u64 {
+        // The same counts as last time give the same lengths; worth checking for small alphabets only (the
+        // distances often stay).
+        if N > 32 {
+            return self.work_out(freqs, max_bits);
+        }
+        if self.max_bits == Some(max_bits) && *freqs == self.counts {
+            return self.bits;
+        }
+        self.bits = self.work_out(freqs, max_bits);
+        (self.counts, self.max_bits) = (*freqs, Some(max_bits));
+        self.bits
+    }
+
+    fn work_out(&mut self, freqs: &[u32; N], max_bits: u32) -> u64 {
+        self.resort(freqs);
+        let keys = &self.keys[..self.used];
+        self.lens.fill(0);
+        let (max, mut bits) = unlimited_sorted(keys, &mut self.work, &mut self.lens);
+        if max as u32 > max_bits {
+            limited_sorted(keys, max_bits, &mut self.lens, &mut self.guide);
+            bits = keys.iter().map(|&k| (k >> 16) * self.lens[(k & 0xffff) as usize] as u64).sum();
+        }
+        bits
+    }
+
+    /// Sorts the keys for `freqs` from those of the last call.
+    fn resort(&mut self, freqs: &[u32; N]) {
         // The symbols used last time whose count stayed keep their order; the others are taken out (the ones
         // still used go to `work`), sorted on their own and merged back, and so are the newly used symbols.
         let (mut kept, mut moved) = (0, 0);
-        for k in 0..self.used {
+        for k in 0..self.used.min(N) {
             let key = self.keys[k];
             let s = (key & 0xffff) as usize;
             let f = freqs[s];
@@ -92,7 +138,7 @@ impl<const N: usize> LengthCoder<N> {
         }
         let added = freqs.iter().filter(|&&f| f != 0).count() - kept - moved;
         // The keys that moved are often still nearly in order.
-        if !insertion_sort(&mut self.work[..moved], 8 * moved) {
+        if !insertion_sort_within(&mut self.work[..moved], 8 * moved) {
             self.work[..moved].sort_unstable();
         }
         merge(&mut self.keys[..kept + moved], kept, &self.work[..moved]);
@@ -109,18 +155,17 @@ impl<const N: usize> LengthCoder<N> {
                     }
                 }
             }
-            sort(&mut self.work[..a]);
+            if !insertion_sort_within(&mut self.work[..a], 8 * a) {
+                self.work[..a].sort_unstable();
+            }
             merge(&mut self.keys[..self.used + a], self.used, &self.work[..a]);
             self.used += a;
         }
-        let keys = &self.keys[..self.used];
-        self.lens.fill(0);
-        let (max, bits) = unlimited_sorted(keys, &mut self.work, &mut self.lens);
-        if max as u32 <= max_bits {
-            return bits;
-        }
-        limited_sorted(keys, max_bits, &mut self.lens);
-        keys.iter().map(|&k| (k >> 16) * self.lens[(k & 0xffff) as usize] as u64).sum()
+    }
+
+    /// The lengths of the last call, one per symbol.
+    pub fn lens(&self) -> &[u8; N] {
+        &self.lens
     }
 
     /// How many symbols had a nonzero count in the last call.
@@ -131,7 +176,7 @@ impl<const N: usize> LengthCoder<N> {
 
 /// Merges the sorted `add` into the sorted first `m` entries of `keys`, which has room for both.
 fn merge(keys: &mut [u64], m: usize, add: &[u64]) {
-    let (mut i, mut j) = (m, add.len());
+    let (mut i, mut j) = (m.min(keys.len()), add.len());
     for out in (0..keys.len()).rev() {
         if j == 0 {
             break;
@@ -146,41 +191,9 @@ fn merge(keys: &mut [u64], m: usize, add: &[u64]) {
     }
 }
 
-/// Runs `f` on a zeroed scratch array of at least `len` entries, on the stack for Deflate's alphabets.
-fn with_scratch<R>(len: usize, f: impl FnOnce(&mut [u64]) -> R) -> R {
-    if len <= 32 {
-        f(&mut [0; 32])
-    } else if len <= 320 {
-        f(&mut [0; 320])
-    } else {
-        f(&mut vec![0; len])
-    }
-}
-
-/// Writes the keys of the used symbols into `keys` (as long as `freqs` at least), sorted, and returns how
-/// many there are.
-fn sorted_keys(freqs: &[u32], keys: &mut [u64]) -> usize {
-    let mut n = 0;
-    for (i, &f) in freqs.iter().enumerate() {
-        keys[n] = ((f as u64) << 16) | i as u64;
-        n += (f > 0) as usize;
-    }
-    sort(&mut keys[..n]);
-    n
-}
-
-/// Sorts keys: by insertion when there are few.
-fn sort(keys: &mut [u64]) {
-    if keys.len() <= 32 {
-        insertion_sort(keys, usize::MAX);
-    } else {
-        keys.sort_unstable();
-    }
-}
-
 /// Sorts `keys` by insertion, which is quick when they are nearly in order. Gives up (returning false, the
 /// keys in some order) once that has moved keys more than `budget` places in all.
-fn insertion_sort(keys: &mut [u64], budget: usize) -> bool {
+fn insertion_sort_within(keys: &mut [u64], budget: usize) -> bool {
     let Some(&first) = keys.first() else { return true };
     // `top` is the largest key so far; a key below it moves back to its place.
     let (mut top, mut moved) = (first, 0usize);
@@ -204,10 +217,80 @@ fn insertion_sort(keys: &mut [u64], budget: usize) -> bool {
     true
 }
 
+/// Runs `f` on a zeroed scratch array of at least `len` entries, on the stack for twice Deflate's largest
+/// alphabet.
+fn with_scratch<R>(len: usize, f: impl FnOnce(&mut [u64]) -> R) -> R {
+    if len <= 64 {
+        f(&mut [0; 64])
+    } else if len <= 640 {
+        f(&mut [0; 640])
+    } else {
+        f(&mut vec![0; len])
+    }
+}
+
+/// Writes the keys of the used symbols into `keys` (as long as `freqs` at least), sorted, and returns how
+/// many there are; `room` (as long) is scratch. A few keys are sorted by insertion, more by their counts'
+/// bytes, the lowest byte first (a radix sort): each pass keeps the order of the keys whose byte is the same,
+/// so the keys of equal counts stay in symbol order.
+fn sorted_keys(freqs: &[u32], keys: &mut [u64], room: &mut [u64]) -> usize {
+    let mut n = 0;
+    for (i, &f) in freqs.iter().enumerate() {
+        keys[n] = ((f as u64) << 16) | i as u64;
+        n += (f > 0) as usize;
+    }
+    if n <= 32 {
+        insertion_sort(&mut keys[..n]);
+        return n;
+    }
+    // As few passes as bytes would take, each on as many bits.
+    let bits = 32 - freqs.iter().fold(0, |a, &f| a | f).leading_zeros() as usize;
+    let passes = bits.div_ceil(8);
+    let digit = bits.div_ceil(passes);
+    let (mut from, mut to) = (&mut keys[..n], &mut room[..n]);
+    for pass in 0..passes {
+        let shift = 16 + digit * pass;
+        let mask = (1 << digit) - 1;
+        let mut at = [0usize; 256];
+        for &k in from.iter() {
+            at[((k >> shift) & mask) as usize] += 1;
+        }
+        let mut p = 0;
+        for a in &mut at[..1 << digit] {
+            (*a, p) = (p, p + *a);
+        }
+        for &k in from.iter() {
+            let d = ((k >> shift) & mask) as usize;
+            to[at[d]] = k;
+            at[d] += 1;
+        }
+        std::mem::swap(&mut from, &mut to);
+    }
+    if passes % 2 == 1 {
+        keys[..n].copy_from_slice(&room[..n]);
+    }
+    n
+}
+
+/// Sorts a few keys by insertion.
+fn insertion_sort(keys: &mut [u64]) {
+    for k in 1..keys.len() {
+        let x = keys[k];
+        let mut p = k;
+        while p > 0 && keys[p - 1] > x {
+            keys[p] = keys[p - 1];
+            p -= 1;
+        }
+        keys[p] = x;
+    }
+}
+
 /// Huffman lengths without a limit for the used symbols, given their sorted keys, by Moffat and Katajainen's
-/// in-place method on `work` (at least as long as `keys`). Writes each used symbol's length into `lens` and
-/// returns the longest and the sum of count times length.
-fn unlimited_sorted(keys: &[u64], work: &mut [u64], lens: &mut [u8]) -> (u8, u64) {
+/// method: `tree` (at least as long as `keys`) holds the internal nodes. Writes each used symbol's length into
+/// `lens` and returns the longest and the sum of count times length. Always inlined, so that the arrays' sizes
+/// are known.
+#[inline(always)]
+fn unlimited_sorted(keys: &[u64], tree: &mut [u64], lens: &mut [u8]) -> (u8, u64) {
     let n = keys.len();
     if n == 0 {
         return (0, 0);
@@ -218,66 +301,127 @@ fn unlimited_sorted(keys: &[u64], work: &mut [u64], lens: &mut [u8]) -> (u8, u64
         }
         return (1, keys.iter().map(|&k| k >> 16).sum());
     }
-    let a = &mut work[..n];
-    for (x, &k) in a.iter_mut().zip(keys) {
-        *x = k >> 16;
+    let w = |i: usize| keys[i] >> 16;
+    let q = &mut tree[..n - 1];
+    // Pass 1: internal node weights in the order they are made; each takes the two lightest of the leaves and
+    // the internal nodes not taken yet, a leaf before an internal node of the same weight. Their sum is the sum
+    // of count times length. A taken internal node's weight makes way for its parent's index.
+    q[0] = w(0) + w(1);
+    let mut bits = q[0];
+    let (mut leaf, mut root, mut next) = (2, 0, 1);
+    // While two leaves are left: both lists are sorted, so the two lightest are the next two leaves, the next
+    // two internal nodes, or one of each. There is always an internal node left, and a node not made yet
+    // (`q[next]`) weighs more than all.
+    while leaf + 1 < n {
+        q[next] = u64::MAX;
+        let s = if w(leaf + 1) <= q[root] {
+            leaf += 2;
+            w(leaf - 2) + w(leaf - 1)
+        } else if q[root + 1] < w(leaf) {
+            let s = q[root] + q[root + 1];
+            q[root] = next as u64;
+            q[root + 1] = next as u64;
+            root += 2;
+            s
+        } else {
+            let s = q[root] + w(leaf);
+            q[root] = next as u64;
+            root += 1;
+            leaf += 1;
+            s
+        };
+        q[next] = s;
+        bits += s;
+        next += 1;
     }
-    // Pass 1: internal node weights, left to right; each takes the lighter of the next leaf and the next
-    // internal node, twice (the leaf when they are equal). Their sum is the sum of count times length.
-    a[0] += a[1];
-    let mut bits = a[0];
-    let (mut root, mut leaf) = (0usize, 2usize);
-    for next in 1..n - 1 {
-        let x = if leaf < n && a[leaf] <= a[root] {
+    // One leaf left at most, taken one item at a time; then internal nodes in pairs.
+    while leaf < n && next < n - 1 {
+        let x = if w(leaf) <= q[root] {
             leaf += 1;
-            a[leaf - 1]
+            w(leaf - 1)
         } else {
-            let w = a[root];
-            a[root] = next as u64;
+            let x = q[root];
+            q[root] = next as u64;
             root += 1;
-            w
+            x
         };
-        let y = if leaf < n && (root >= next || a[leaf] <= a[root]) {
+        let y = if leaf < n && (root >= next || w(leaf) <= q[root]) {
             leaf += 1;
-            a[leaf - 1]
+            w(leaf - 1)
         } else {
-            let w = a[root];
-            a[root] = next as u64;
+            let y = q[root];
+            q[root] = next as u64;
             root += 1;
-            w
+            y
         };
-        a[next] = x + y;
+        q[next] = x + y;
         bits += x + y;
+        next += 1;
     }
-    // Pass 2: internal node depths, right to left.
-    a[n - 2] = 0;
-    for next in (0..n - 2).rev() {
-        a[next] = a[a[next] as usize] + 1;
+    while next < n - 1 {
+        let s = q[root] + q[root + 1];
+        q[root] = next as u64;
+        q[root + 1] = next as u64;
+        root += 2;
+        q[next] = s;
+        bits += s;
+        next += 1;
     }
-    // Pass 3: leaf depths, the heaviest leaf first, straight into the lengths.
-    let (mut avbl, mut used, mut depth) = (1i64, 0i64, 0u64);
-    let (mut root, mut next) = (n as isize - 2, n as isize - 1);
-    while avbl > 0 {
-        while root >= 0 && a[root as usize] == depth {
-            used += 1;
-            root -= 1;
+    // Passes 2 and 3: depths, from the root down. Internal nodes are taken in the order they are made, so their
+    // parents' indices never go down: the nodes no deeper than d (but the root) are those whose parent is above
+    // depth d, which are the nodes from some index on (found by a binary search, or by a step at a time when
+    // there are few). Below the internal nodes of one depth there are twice as many places one level deeper;
+    // those the internal nodes of that depth do not take are leaves, the heaviest leaves first.
+    let parents = &q[..n - 2];
+    let (mut places, mut lo, mut hi, mut next) = (1, n - 2, n - 1, n);
+    let mut depth = 0usize;
+    loop {
+        // The internal nodes of this depth are `lo..hi`.
+        let leaves = places - (hi - lo);
+        let len = depth.min(255) as u8;
+        for &k in &keys[next - leaves..next] {
+            lens[(k & 0xffff) as usize] = len;
         }
-        while avbl > used {
-            lens[(keys[next as usize] & 0xffff) as usize] = depth.min(255) as u8;
-            next -= 1;
-            avbl -= 1;
+        next -= leaves;
+        if lo == hi {
+            // The lightest leaf is the deepest.
+            debug_assert_eq!(next, 0);
+            return (len, bits);
         }
-        avbl = 2 * used;
+        places = 2 * (hi - lo);
+        hi = lo;
+        if lo > 64 {
+            lo = parents[..lo].partition_point(|&p| (p as usize) < hi);
+        } else {
+            while lo > 0 && parents[lo - 1] as usize >= hi {
+                lo -= 1;
+            }
+        }
         depth += 1;
-        used = 0;
     }
-    // The lightest leaf is the deepest.
-    (lens[(keys[0] & 0xffff) as usize], bits)
+}
+
+/// What package-merge learns for a later run on related counts: how many items it took from each level.
+#[derive(Clone, Copy)]
+struct Guide {
+    /// Items taken from each level (level 0 the deepest), out of `cap`, for `levels` levels; no levels for none.
+    want: [usize; 15],
+    cap: usize,
+    levels: usize,
+}
+
+impl Guide {
+    const fn new() -> Guide {
+        Guide { want: [0; 15], cap: 0, levels: 0 }
+    }
 }
 
 /// Package-merge lengths for the used symbols, given their sorted keys; other entries of `lens` are left
-/// alone. The lists live in arrays on the stack for Deflate's alphabets and limits.
-fn limited_sorted(keys: &[u64], max_bits: u32, lens: &mut [u8]) {
+/// alone. The lists live in fixed arrays for Deflate's alphabets and limits: on the stack for up to 128 symbols,
+/// and for more in one heap block made for the call. With a `guide` from a run on related counts, the lists of
+/// many symbols are first built only a little beyond what that run took from them; when that is not enough,
+/// they are built whole.
+fn limited_sorted(keys: &[u64], max_bits: u32, lens: &mut [u8], guide: &mut Guide) {
     let n = keys.len();
     if n <= 2 {
         for &k in keys {
@@ -288,56 +432,115 @@ fn limited_sorted(keys: &[u64], max_bits: u32, lens: &mut [u8]) {
     assert!(1usize.checked_shl(max_bits).is_none_or(|m| n <= m), "too many symbols for {max_bits} bits");
     let levels = (max_bits as usize).min(n - 1);
     let cap = 2 * n - 2;
-    let mut taken = [0usize; 15];
-    if levels <= 15 && n <= 32 {
-        package_merge(keys, levels, &mut [0; 62], &mut [0; 62], &mut [0; 15], &mut taken);
-        assign(keys, &mut taken[..levels], lens);
-    } else if levels <= 15 && n <= 320 {
-        package_merge(keys, levels, &mut [0; 638], &mut [0; 638], &mut [0; 150], &mut taken);
+    if levels <= 15 && n <= 320 {
+        let (mut want, mut taken) = ([0; 15], [0; 15]);
+        // Arrays of a known size let the compiler leave out most index checks. Those for over 128 symbols take
+        // 11 KB: on the heap, made and freed here, so as not to add that much to the stack.
+        fn run<const CUT: bool>(
+            keys: &[u64],
+            levels: usize,
+            limit: &[usize],
+            want: &mut [usize],
+            taken: &mut [usize],
+        ) -> bool {
+            let built = &mut [(0, false); 15];
+            if keys.len() <= 128 {
+                package_merge::<CUT>(
+                    keys,
+                    levels,
+                    limit,
+                    &mut [0; 254],
+                    &mut [0; 254],
+                    &mut [0; 60],
+                    built,
+                    want,
+                    taken,
+                )
+            } else {
+                let (a, b, leaf) = &mut *Box::new(([0; 638], [0; 638], [0; 150]));
+                package_merge::<CUT>(keys, levels, limit, a, b, leaf, built, want, taken)
+            }
+        }
+        // A list must give what this run takes from it and two items at each level below to look ahead, with
+        // some room for the counts that changed. A list nearly whole is made whole: whole lists that repeat the
+        // level below end the building early. Worth it for many symbols only.
+        let mut done = false;
+        if guide.levels == levels && n >= 128 {
+            let mut limit = [cap; 15];
+            for (lvl, l) in limit[..levels].iter_mut().enumerate() {
+                let w = guide.want[lvl] + cap.saturating_sub(guide.cap);
+                let w = w + w / 16 + 2 * (levels - lvl) + 8;
+                *l = if w + cap / 8 < cap { w } else { cap };
+            }
+            done = run::<true>(keys, levels, &limit, &mut want, &mut taken);
+        }
+        if !done {
+            done = run::<false>(keys, levels, &[cap; 15], &mut want, &mut taken);
+        }
+        debug_assert!(done);
+        *guide = Guide { want, cap, levels };
         assign(keys, &mut taken[..levels], lens);
     } else {
-        let mut taken = vec![0; levels];
-        let mut leaf = vec![0; levels * cap.div_ceil(64)];
-        package_merge(keys, levels, &mut vec![0; cap], &mut vec![0; cap], &mut leaf, &mut taken);
+        let (mut want, mut taken) = (vec![0; levels], vec![0; levels]);
+        let leaf = &mut vec![0; levels * cap.div_ceil(64)];
+        let built = &mut vec![(0, false); levels];
+        let (a, b) = (&mut vec![0; cap], &mut vec![0; cap]);
+        package_merge::<false>(keys, levels, &vec![cap; levels], a, b, leaf, built, &mut want, &mut taken);
         assign(keys, &mut taken, lens);
     }
 }
 
 /// Package-merge on n >= 3 leaves given by their sorted keys. Level 0 (the deepest) holds the leaves; each
 /// higher level merges the leaves with pairs ("packages") of the level below, kept sorted and cut at 2n-2
-/// items, a leaf before a package of equal weight. Only the weights of the level below are kept (`prev`,
-/// `cur`: 2n-2 entries each), with one bit per item that says whether it is a leaf (`leaf`: all zero on entry,
-/// level by level, each level's 2n-2 bits in whole words). Returns in `taken[lvl]` how many leaves the items
-/// taken from each level hold.
-fn package_merge<'a>(
+/// items, a leaf before a package of equal weight. Level `lvl` is built up to `limit[lvl]` items, and only as
+/// far as the level below decides it, so every item made is that of the whole list. Only the weights of the
+/// level below are kept (`prev`, `cur`: 2n-2 entries each), with one bit per item that says whether it is a
+/// leaf (`leaf`: level by level, each level's 2n-2 bits in whole words), and in `built`
+/// how many items each level has and whether that is the whole list. Returns in `taken[lvl]` how many leaves
+/// the items taken from each level hold and in `want[lvl]` how many items it took; false (and nothing
+/// returned) when a list was cut short of that. Without `CUT` the limits are all 2n-2 and the lists are all
+/// whole. Always inlined, so that the arrays' sizes are known.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn package_merge<'a, const CUT: bool>(
     keys: &[u64],
     levels: usize,
+    limit: &[usize],
     mut prev: &'a mut [u64],
     mut cur: &'a mut [u64],
     leaf: &mut [u64],
+    built: &mut [(usize, bool)],
+    want: &mut [usize],
     taken: &mut [usize],
-) {
+) -> bool {
     let n = keys.len();
     let cap = 2 * n - 2;
     let words = cap.div_ceil(64);
     for (p, &k) in prev.iter_mut().zip(keys) {
         *p = k >> 16;
     }
-    // While building, `taken[lvl]` holds the length of each level's list. Once a list's weights equal those
-    // of the level below, every level above repeats it: they are not built again.
-    let mut len = n;
-    taken[0] = n;
+    built[0] = (n, true);
+    // Once a whole list's weights equal those of the level below, every level above repeats it: they are not
+    // built again.
     let mut top = levels;
     for lvl in 1..levels {
         let bits = &mut leaf[lvl * words..(lvl + 1) * words];
-        let npk = len / 2;
-        let package = |j: usize| if j < npk { prev[2 * j] + prev[2 * j + 1] } else { u64::MAX };
+        let (below, below_whole) = built[lvl - 1];
+        // Both bounds are within the lists anyway; saying so lets the compiler leave out the index checks.
+        let npk = (below / 2).min(prev.len() / 2);
+        let end = if CUT { limit[lvl].min(cap) } else { cap }.min(cur.len());
+        // A package not made below weighs more than all when the level below is whole, else it is unknown and
+        // ends the list here (weight 0 stops it).
+        let unknown = if !CUT || below_whole { u64::MAX } else { 0 };
+        let package = |j: usize| if j < npk { prev[2 * j] + prev[2 * j + 1] } else { unknown };
+        // The leaf bits are gathered a word at a time.
         let (mut i, mut j, mut k) = (0usize, 0usize, 0usize);
         let mut pw = package(0);
-        while k < cap {
+        let mut word = 0u64;
+        while k < end {
             if i < n && (keys[i] >> 16) <= pw {
                 cur[k] = keys[i] >> 16;
-                bits[k / 64] |= 1 << (k % 64);
+                word |= 1 << (k % 64);
                 i += 1;
             } else if j < npk {
                 cur[k] = pw;
@@ -347,10 +550,17 @@ fn package_merge<'a>(
                 break;
             }
             k += 1;
+            if k % 64 == 0 {
+                bits[k / 64 - 1] = word;
+                word = 0;
+            }
         }
-        let same = k == len && cur[..k] == prev[..k];
-        len = k;
-        taken[lvl] = k;
+        if k % 64 != 0 {
+            bits[k / 64] = word;
+        }
+        let whole = !CUT || k == cap || (i == n && j == npk && below_whole);
+        built[lvl] = (k, whole);
+        let same = whole && below_whole && k == below && cur[..k] == prev[..k];
         std::mem::swap(&mut prev, &mut cur);
         if same {
             top = lvl;
@@ -362,11 +572,17 @@ fn package_merge<'a>(
     let mut m = cap;
     for lvl in (0..levels).rev() {
         let src = lvl.min(top);
-        let take = m.min(taken[src]);
+        let (len, whole) = built[src];
+        if m > len && !whole {
+            return false;
+        }
+        let take = m.min(len);
         let nl = if src == 0 { take } else { count_ones(&leaf[src * words..], take) };
+        want[lvl] = m;
         taken[lvl] = nl;
         m = 2 * (take - nl);
     }
+    true
 }
 
 /// Set bits among the first `count` bits of `bits`.
@@ -856,10 +1072,103 @@ pub(crate) mod tests {
             }
             let bits = c.lengths(&f, max_bits);
             old::lengths_into(&f, max_bits, &mut b);
-            assert_eq!(c.lens, b, "{f:?}");
+            assert_eq!(c.lens(), &b, "{f:?}");
             assert_eq!(bits, cost(&f, &b));
             assert_eq!(c.used(), f.iter().filter(|&&x| x > 0).count());
         }
+    }
+
+    /// Counts most of which are below 256: a few counts many symbols share, some of 256 or more (up to a
+    /// dozen), sometimes counts that make a deep tree, sometimes few symbols.
+    fn small_counts(s: &mut u64, f: &mut [u32]) {
+        let n = f.len() as u64;
+        let used = match rng(s) % 4 {
+            0 => 30 + rng(s) % 30,
+            _ => n / 4 + rng(s) % n,
+        };
+        let top = [4, 16, 64, 256][(rng(s) % 4) as usize];
+        f.fill(0);
+        for _ in 0..used {
+            f[(rng(s) % n) as usize] = 1 + (rng(s) % top) as u32;
+        }
+        for _ in 0..rng(s) % 13 {
+            f[(rng(s) % n) as usize] = 256 + (rng(s) % (1 << (rng(s) % 24))) as u32;
+        }
+        if rng(s).is_multiple_of(4) {
+            let (mut a, mut b) = (1u32, 1u32);
+            for _ in 0..rng(s) % 30 {
+                f[(rng(s) % n) as usize] = a;
+                (a, b) = (b, a + b);
+            }
+        }
+    }
+
+    #[test]
+    fn guided_package_merge_gives_the_lengths_of_before() {
+        // Package-merge with a guide from the last run, from a run on other counts, or made up: the lengths are
+        // those of the whole lists every time.
+        let mut s = 0x9e1d_ed00u64;
+        let mut guide = Guide::new();
+        let (mut a, mut b) = ([0u8; 320], [0u8; 320]);
+        let mut f = [0u32; 320];
+        let (mut guided, mut cut_short) = (0, 0);
+        for round in 0..8000 {
+            let n = [286, 320, 200, 140][round % 4];
+            let f = &mut f[..n];
+            match rng(&mut s) % 4 {
+                0 => {
+                    // Many symbols and a deep tree.
+                    small_counts(&mut s, f);
+                    let (mut x, mut y) = (1u32, 2u32);
+                    for _ in 0..24 {
+                        f[(rng(&mut s) % n as u64) as usize] = x;
+                        (x, y) = (y, x + y);
+                    }
+                }
+                1 => walk(&mut s, f),
+                2 => {
+                    guide.want.iter_mut().for_each(|w| *w = (rng(&mut s) % 700) as usize);
+                    guide.cap = (rng(&mut s) % 700) as usize;
+                }
+                _ => {}
+            }
+            let mut keys = [0u64; 320];
+            let mut room = [0u64; 320];
+            let used = sorted_keys(f, &mut keys, &mut room);
+            let max_bits = [15, 15, 12, 9][round % 4];
+            if used < 3 || used > 1 << max_bits {
+                continue;
+            }
+            guided += (guide.levels == max_bits as usize && used >= 128) as usize;
+            a[..n].fill(0);
+            limited_sorted(&keys[..used], max_bits, &mut a, &mut guide);
+            old::limited_lengths_into(f, max_bits, &mut b[..n]);
+            assert_eq!(a[..n], b[..n], "{max_bits} {f:?}");
+            // Lists cut too short say so, and long enough ones give the lengths of before.
+            let (levels, cap) = (max_bits as usize, 2 * used - 2);
+            let limit = [8 + (rng(&mut s) % cap as u64) as usize; 15];
+            let (mut want, mut taken) = ([0; 15], [0; 15]);
+            let built = &mut [(0, false); 15];
+            let keys = &keys[..used];
+            if package_merge::<true>(
+                keys,
+                levels,
+                &limit,
+                &mut [0; 638],
+                &mut [0; 638],
+                &mut [0; 150],
+                built,
+                &mut want,
+                &mut taken,
+            ) {
+                a[..n].fill(0);
+                assign(keys, &mut taken[..levels], &mut a);
+                assert_eq!(a[..n], b[..n], "{max_bits} {f:?}");
+            } else {
+                cut_short += 1;
+            }
+        }
+        assert!(guided > 1000 && cut_short > 1000, "{guided} {cut_short}");
     }
 
     #[test]

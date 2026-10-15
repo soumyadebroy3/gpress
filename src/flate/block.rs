@@ -384,13 +384,17 @@ impl Coders {
             bits += c as u64 * e as u64;
         }
         // The patches give lengths to unused symbols only, so the data bits stay. For the distances this is
-        // `patch_distances` without its allocation.
-        if self.ll.used() == 1 {
-            patch_litlen(&mut self.ll.lens);
-        }
-        let used_d = self.d.used();
-        let d = &mut self.d.lens;
-        match used_d {
+        // `patch_distances` on a copy of the coder's lengths, which keep their values as they were.
+        let mut ll_patched;
+        let ll = if self.ll.used() == 1 {
+            ll_patched = *self.ll.lens();
+            patch_litlen(&mut ll_patched);
+            &ll_patched
+        } else {
+            self.ll.lens()
+        };
+        let mut d = *self.d.lens();
+        match self.d.used() {
             0 => {
                 d[0] = 1;
                 d[1] = 1;
@@ -399,7 +403,7 @@ impl Coders {
             1 => d[0] = 1,
             _ => {}
         }
-        bits + fast_header_bits(&self.ll.lens, &self.d.lens, &mut self.header)
+        bits + fast_header_bits(ll, &d, &mut self.header)
     }
 }
 
@@ -481,7 +485,7 @@ fn header_size(seq: &[u8], clc: &mut LengthCoder<19>, last: &mut Option<([u32; 1
         }
     }
     clc.lengths(&f, 7);
-    let cl = &mut clc.lens;
+    let mut cl = *clc.lens();
     if cl.iter().filter(|&&x| x != 0).count() == 1 {
         cl[16] = 1;
     }
