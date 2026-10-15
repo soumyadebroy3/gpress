@@ -154,7 +154,8 @@ fn residuals(px: &[u8], row: usize, bpp: usize, r: usize, t: u8, out: &mut [u8])
     }
 }
 
-/// The type `Choice::MinSum` picks for row `r` (the first of equal sums), its residuals left in `cand`.
+/// The type `Choice::MinSum` picks for row `r` (the first of equal sums). `cand` is scratch: it is left with
+/// the last type's residuals, not the chosen one's.
 fn min_sum_type(px: &[u8], row: usize, bpp: usize, r: usize, cand: &mut [u8]) -> u8 {
     let mut best = (u64::MAX, 0u8);
     for t in 0..5u8 {
@@ -210,7 +211,9 @@ pub fn estimate_choice(px: &[u8], row: usize, bpp: usize, bpc: usize, bands: &[(
                     counts[t as usize][x as usize] += 1;
                 }
             }
-            counts[5][min_sum_type(px, row, bpp, r, &mut cand) as usize] += 1;
+            let t = min_sum_type(px, row, bpp, r, &mut cand);
+            residuals(px, row, bpp, r, t, &mut cand);
+            counts[5][t as usize] += 1;
             for &x in &cand {
                 counts[5][x as usize] += 1;
             }
@@ -272,6 +275,36 @@ mod tests {
     }
 
     #[test]
+    fn the_estimate_scores_the_minimum_sum_with_its_own_residuals() {
+        // Every 4 rows: random, the same again, a ramp, the same again. Per row the best type changes (Up on the
+        // copies, Sub on the ramp), so the minimum sum beats every fixed type. Scored with the last type's
+        // residuals (Paeth's) instead of the chosen ones it only ties with Paeth, and Paeth would win.
+        let (row, bpp) = (64usize, 1usize);
+        let mut s = 0x9e37_79b9_7f4a_7c15u64;
+        let mut px = Vec::new();
+        for k in 0..16u8 {
+            let random: Vec<u8> = (0..row)
+                .map(|_| {
+                    s ^= s << 13;
+                    s ^= s >> 7;
+                    s ^= s << 17;
+                    s as u8
+                })
+                .collect();
+            let ramp: Vec<u8> = (0..row).map(|i| k.wrapping_mul(17).wrapping_add(3 * i as u8)).collect();
+            for r in [&random, &random, &ramp, &ramp] {
+                px.extend_from_slice(r);
+            }
+        }
+        let nrows = px.len() / row;
+        assert_eq!(estimate_choice(&px, row, bpp, 8, &[(0, nrows)]), Some(Choice::MinSum));
+        // In a row of 100s under a row of 1s, the minimum sum is Sub (1, 0, 0, ...), not Paeth (157, 0, ...).
+        let two: Vec<u8> = [vec![100u8; 16], vec![1u8; 16]].concat();
+        let mut cand = vec![0u8; 16];
+        assert_eq!(min_sum_type(&two, 16, 1, 1, &mut cand), 1);
+    }
+
+    #[test]
     fn geometry_is_the_same_on_every_target() {
         let resolve = |o: &Obj| Some(o.clone());
         let image = |w: i64, bpc: i64, cs: Obj| {
@@ -301,9 +334,13 @@ mod tests {
         // A smooth gradient: a predictor leaves almost nothing.
         let smooth: Vec<u8> = (0..row * rows).map(|i| ((i % row) + (i / row) * 2) as u8).collect();
         assert!(estimate_choice(&smooth, row, 3, 8, &all).is_some());
-        // Identical rows: Up leaves only zeros below the first row (the minimum sum also takes Up there).
+        // Identical rows: Up leaves only zeros below the first row, and so do Paeth (on identical rows it predicts
+        // the row above) and the minimum sum; Paeth also takes the first row as Sub does, which suits this one.
         let stripes: Vec<u8> = (0..row * rows).map(|i| ((i % row) * 37 % 251) as u8).collect();
-        assert!(matches!(estimate_choice(&stripes, row, 3, 8, &all), Some(Choice::Fixed(2) | Choice::MinSum)));
+        assert!(matches!(
+            estimate_choice(&stripes, row, 3, 8, &all),
+            Some(Choice::Fixed(2) | Choice::Fixed(4) | Choice::MinSum)
+        ));
         // Noise: the residuals are noise as well, and the type bytes cost extra.
         let mut s = 9u64;
         let noise: Vec<u8> = (0..row * rows)
