@@ -1789,6 +1789,27 @@ mod estimate_tests {
             assert_eq!(token_counts(seq, &single), old_token_counts(seq), "{seq:?}");
         }
     }
+
+    #[test]
+    fn fixed_bits_of_a_difference() {
+        // The fixed code's size of the symbols between two prefixes is the difference of the prefixes' sizes
+        // and the end-of-block's, as the block-split search takes it (checked against the size of before).
+        let mut s = 0xf1ed_u64;
+        let syms = random_syms(&mut s, 20_000);
+        let mut pref = vec![Hist { ll: [0; LITLEN_SYMS], d: [0; DIST_SYMS] }];
+        for c in syms.chunks(100) {
+            let mut h = pref.last().unwrap().clone();
+            c.iter().for_each(|x| h.add(x));
+            pref.push(h);
+        }
+        let end_of_block = fixed_bits(&Hist::empty());
+        for j in 0..pref.len() {
+            for i in 0..=j {
+                let want = before::fixed_bits(&Hist::diff(&pref[j], &pref[i]));
+                assert_eq!(fixed_bits(&pref[j]) - fixed_bits(&pref[i]) + end_of_block, want);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -538,12 +538,16 @@ fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>) -> Vec<Plan> {
         pref.push(h.clone());
     }
     let span_limit = 96usize;
-    // One estimator for all pairs: for a given j, the histograms of i and i + 1 differ by one block.
+    // One estimator for all pairs: for a given j, the histograms of i and i + 1 differ by one block. The fixed
+    // code's size is a sum over the counts, so that of a pair is the difference of the prefixes' (which have no
+    // end-of-block) plus the end-of-block's.
     let mut es = Estimator::new();
+    let fixed: Vec<u64> = pref.iter().map(fixed_bits).collect();
+    let end_of_block = fixed_bits(&Hist::empty());
     let mut est = |i: usize, j: usize| -> u64 {
         let hh = Hist::diff(&pref[j], &pref[i]);
         let nbytes = pos[j] - pos[i];
-        3 + es.bits(&hh).min(fixed_bits(&hh)).min(8 * nbytes as u64 + 40)
+        3 + es.bits(&hh).min(fixed[j] - fixed[i] + end_of_block).min(8 * nbytes as u64 + 40)
     };
     let mut best = vec![u64::MAX; k];
     let mut from = vec![0usize; k];
