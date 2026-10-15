@@ -49,6 +49,18 @@ const GROUP: usize = 16;
 /// An empty table entry: as a position it is always out of reach.
 const NIL: u32 = u32::MAX;
 
+/// How far back position `c`, read from a table, lies from `p`. An empty entry (`NIL`) gives `usize::MAX`, so
+/// the window test rejects it whatever the width of usize: on a 32-bit target (WebAssembly) `p - NIL` wraps
+/// round to `p + 1` and would pass for a match.
+#[inline(always)]
+fn back(p: usize, c: usize) -> usize {
+    if c == NIL as usize {
+        usize::MAX
+    } else {
+        p.wrapping_sub(c)
+    }
+}
+
 /// How a level chooses between literals and matches.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mode {
@@ -629,7 +641,7 @@ impl Chains {
             let h = hash3(x, self.shift3);
             let c = self.head3[h] as usize;
             self.head3[h] = p as u32;
-            let d = p.wrapping_sub(c);
+            let d = back(p, c);
             if best < 3 && d.wrapping_sub(1) < MAX_DIST && (load4(buf, c) ^ x) << 8 == 0 {
                 best = 3;
                 dist = d;
@@ -645,7 +657,7 @@ impl Chains {
         }
         let mut left = depth;
         loop {
-            let d = p.wrapping_sub(c);
+            let d = back(p, c);
             if d.wrapping_sub(1) >= MAX_DIST {
                 break;
             }
@@ -895,7 +907,7 @@ impl Tree {
         let c3 = self.head3[h3] as usize;
         self.head3[h3] = p as u32;
         if RECORD {
-            let d = p.wrapping_sub(c3);
+            let d = back(p, c3);
             if d.wrapping_sub(1) < MAX_DIST && (load4(buf, c3) ^ x) << 8 == 0 {
                 out.push((3, d as u16));
                 best = 3;
@@ -915,7 +927,7 @@ impl Tree {
         let (mut lt_len, mut gt_len) = (0usize, 0usize);
         let mut left = depth;
         loop {
-            let d = p.wrapping_sub(c);
+            let d = back(p, c);
             if d.wrapping_sub(1) >= MAX_DIST || left == 0 {
                 self.son[lt] = NIL;
                 self.son[gt] = NIL;
