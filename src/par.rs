@@ -28,8 +28,18 @@ impl Pool {
     }
 
     fn take(&self) -> bool {
-        !self.refused.load(Ordering::Relaxed)
-            && self.free.fetch_update(Ordering::AcqRel, Ordering::Acquire, |f| f.checked_sub(1)).is_ok()
+        if self.refused.load(Ordering::Relaxed) {
+            return false;
+        }
+        // One slot less, unless none is free (a plain compare-and-swap loop).
+        let mut free = self.free.load(Ordering::Acquire);
+        while free > 0 {
+            match self.free.compare_exchange_weak(free, free - 1, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return true,
+                Err(now) => free = now,
+            }
+        }
+        false
     }
 
     fn give(&self) {
@@ -223,12 +233,12 @@ impl<K: std::hash::Hash + Eq + Clone, V: Clone> Default for Memo<K, V> {
 pub fn hash64(d: &[u8]) -> u64 {
     const M: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut h = (d.len() as u64).wrapping_mul(M) ^ 0x2545_F491_4F6C_DD1D;
-    let mut chunks = d.chunks_exact(8);
-    for c in &mut chunks {
-        let v = u64::from_le_bytes(c.try_into().unwrap());
+    let (chunks, rest) = d.as_chunks::<8>();
+    for c in chunks {
+        let v = u64::from_le_bytes(*c);
         h = (h ^ v).wrapping_mul(M).rotate_left(29);
     }
-    for &b in chunks.remainder() {
+    for &b in rest {
         h = (h ^ b as u64).wrapping_mul(M).rotate_left(29);
     }
     h ^= h >> 32;
