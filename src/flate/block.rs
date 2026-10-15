@@ -1,7 +1,7 @@
 //! Block costs and block writing: dynamic Huffman blocks with an optimised header, fixed blocks, stored blocks.
 
 use super::bits::BitWriter;
-use super::huffman::{canonical_codes, limited_lengths, limited_lengths_into, LengthCoder};
+use super::huffman::{canonical_codes, fast_lengths, limited_lengths_into, LengthCoder};
 use super::lz::{d_extra, ll_extra, Hist, Sym};
 use super::tables::*;
 
@@ -26,44 +26,69 @@ pub struct Header {
     pub bits: u64,
 }
 
-/// Data bits for a histogram under given lengths (end-of-block included via the histogram).
+/// The extra bits after each literal/length symbol (none after literals and end-of-block).
+const LL_EXTRA_BITS: [u8; LITLEN_SYMS] = {
+    let mut t = [0u8; LITLEN_SYMS];
+    let mut s = 257;
+    while s < LITLEN_SYMS {
+        t[s] = LEN_EXTRA[s - 257];
+        s += 1;
+    }
+    t
+};
+
+/// Bits per symbol in the fixed codes, extra bits included (the lengths of `fixed_litlen_lengths` and
+/// `fixed_dist_lengths`).
+const FIXED_LL_BITS: [u8; LITLEN_SYMS] = {
+    let mut t = [0u8; LITLEN_SYMS];
+    let mut s = 0;
+    while s < LITLEN_SYMS {
+        let len = match s {
+            0..=143 => 8,
+            144..=255 => 9,
+            256..=279 => 7,
+            _ => 8,
+        };
+        t[s] = len + LL_EXTRA_BITS[s];
+        s += 1;
+    }
+    t
+};
+const FIXED_D_BITS: [u8; DIST_SYMS] = {
+    let mut t = [0u8; DIST_SYMS];
+    let mut s = 0;
+    while s < DIST_SYMS {
+        t[s] = 5 + DIST_EXTRA[s];
+        s += 1;
+    }
+    t
+};
+
+/// The sum of count times bits. Unused symbols add nothing, so no symbol needs a test.
+fn weighted(counts: &[u32], bits: &[u8]) -> u64 {
+    counts.iter().zip(bits).map(|(&c, &b)| c as u64 * b as u64).sum()
+}
+
+/// Data bits for a histogram under given lengths (end-of-block included via the histogram). A symbol past
+/// the end of `ll` or `d` counts as length 0, so a short slice never panics.
 pub fn data_bits(h: &Hist, ll: &[u8], d: &[u8]) -> u64 {
-    let mut bits = 0u64;
-    for s in 0..LITLEN_SYMS {
-        if h.ll[s] != 0 {
-            bits += h.ll[s] as u64 * (ll[s] as u64 + ll_extra(s) as u64);
-        }
-    }
-    for s in 0..DIST_SYMS {
-        if h.d[s] != 0 {
-            bits += h.d[s] as u64 * (d[s] as u64 + d_extra(s) as u64);
-        }
-    }
-    bits
+    weighted(&h.ll, ll) + weighted(&h.ll, &LL_EXTRA_BITS) + weighted(&h.d, d) + weighted(&h.d, &DIST_EXTRA)
 }
 
 pub fn fixed_bits(h: &Hist) -> u64 {
-    let ll = fixed_litlen_lengths();
-    let d = fixed_dist_lengths();
-    data_bits(h, &ll[..LITLEN_SYMS], &d[..DIST_SYMS])
+    weighted(&h.ll, &FIXED_LL_BITS) + weighted(&h.d, &FIXED_D_BITS)
 }
 
 /// Some decoders (zlib 1.2.1 and older, some phones) fail with fewer than two distance codes. Two codes of
 /// length 1 keep the code complete and cost nothing when no match uses them.
 pub fn patch_distances(d: &mut [u8]) {
-    let used: Vec<usize> = (0..d.len()).filter(|&i| d[i] != 0).collect();
-    match used.len() {
+    match d.iter().filter(|&&l| l != 0).count() {
         0 => {
             d[0] = 1;
             d[1] = 1;
         }
-        1 => {
-            if used[0] == 0 {
-                d[1] = 1;
-            } else {
-                d[0] = 1;
-            }
-        }
+        1 if d[0] != 0 => d[1] = 1,
+        1 => d[0] = 1,
         _ => {}
     }
 }
@@ -81,9 +106,9 @@ fn patch_litlen(ll: &mut [u8]) {
 }
 
 /// Smooths counts so that the code lengths form longer runs (cheaper header), at a small data cost.
-/// Runs of similar counts become equal; counts of zero stay zero.
-fn smooth(counts: &[u32], tolerance: f64) -> Vec<u32> {
-    let mut out = counts.to_vec();
+/// Runs of similar counts become equal; counts of zero stay zero. The smoothed counts go to `out`.
+fn smooth(counts: &[u32], tolerance: f64, out: &mut [u32]) {
+    out.copy_from_slice(counts);
     let n = counts.len();
     let mut i = 0;
     while i < n {
@@ -93,12 +118,17 @@ fn smooth(counts: &[u32], tolerance: f64) -> Vec<u32> {
         }
         let mut j = i + 1;
         let mut sum = counts[i] as u64;
+        // A run grows while all its counts are close to its average. The distance from the average (as
+        // rounded) is largest at the smallest or the largest count, so only those two are checked.
+        let (mut lo, mut hi) = (counts[i], counts[i]);
         while j < n && counts[j] != 0 {
             let avg = (sum + counts[j] as u64) as f64 / (j - i + 1) as f64;
-            let ok = (i..=j).all(|k| ((counts[k] as f64) - avg).abs() <= tolerance * avg.max(1.0));
-            if !ok {
+            let near = |c: u32| ((c as f64) - avg).abs() <= tolerance * avg.max(1.0);
+            let (l, h) = (lo.min(counts[j]), hi.max(counts[j]));
+            if !(near(l) && near(h)) {
                 break;
             }
+            (lo, hi) = (l, h);
             sum += counts[j] as u64;
             j += 1;
         }
@@ -110,52 +140,161 @@ fn smooth(counts: &[u32], tolerance: f64) -> Vec<u32> {
         }
         i = j;
     }
-    out
 }
 
 /// The cheapest dynamic code we can find for a histogram, with its exact size.
 pub fn best_dynamic(h: &Hist) -> DynCode {
-    dynamic_search(h, &[(None, 15), (Some(0.25), 15), (Some(0.5), 15), (None, 12), (None, 10), (Some(1.0), 15)], true)
+    dynamic_search(h, Search::Best)
 }
 
 /// A cheaper search for comparing parses: fewer code variants and header strategies.
 pub fn good_dynamic(h: &Hist) -> DynCode {
-    dynamic_search(h, &[(None, 15), (Some(0.25), 15)], false)
+    dynamic_search(h, Search::Good)
 }
 
-fn dynamic_search(h: &Hist, variants: &[(Option<f64>, u32)], thorough: bool) -> DynCode {
-    let mut best: Option<DynCode> = None;
-    for &(tol, maxb) in variants {
-        let llc = match tol {
-            None => h.ll.to_vec(),
-            Some(t) => smooth(&h.ll, t),
-        };
-        let dc = match tol {
-            None => h.d.to_vec(),
-            Some(t) => smooth(&h.d, t),
-        };
-        let used_ll = llc.iter().filter(|&&c| c > 0).count();
-        if used_ll > (1usize << maxb) {
-            continue;
+/// The two searches for a dynamic code. Each tries its code variants (how much the counts are smoothed,
+/// the longest code) in order, and looks for the header with its own strategies.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Search {
+    Good,
+    Best,
+}
+
+const GOOD_VARIANTS: [(Option<f64>, u32); 2] = [(None, 15), (Some(0.25), 15)];
+const BEST_VARIANTS: [(Option<f64>, u32); 6] =
+    [(None, 15), (Some(0.25), 15), (Some(0.5), 15), (None, 12), (None, 10), (Some(1.0), 15)];
+const MAX_VARIANTS: usize = BEST_VARIANTS.len();
+
+/// Whether every limit leaves room for all the literal/length symbols, so that every variant can be tried.
+const fn room_for_all(variants: &[(Option<f64>, u32)]) -> bool {
+    let mut k = 0;
+    while k < variants.len() {
+        if LITLEN_SYMS > 1 << variants[k].1 {
+            return false;
         }
-        let mut ll = limited_lengths(&llc, maxb);
-        let mut d = limited_lengths(&dc, maxb.min(15));
+        k += 1;
+    }
+    true
+}
+const _: () = assert!(room_for_all(&GOOD_VARIANTS) && room_for_all(&BEST_VARIANTS));
+const _: () = assert!(GOOD_VARIANTS.len() <= MAX_VARIANTS);
+
+impl Search {
+    fn variants(self) -> &'static [(Option<f64>, u32)] {
+        match self {
+            Search::Good => &GOOD_VARIANTS,
+            Search::Best => &BEST_VARIANTS,
+        }
+    }
+
+    fn header(self, ll: &[u8], d: &[u8]) -> Header {
+        match self {
+            Search::Good => quick_header(ll, d),
+            Search::Best => best_header(ll, d),
+        }
+    }
+}
+
+/// What a code search keeps, some 13 KB: on the heap, made and freed by the search, so that it needs little
+/// stack.
+struct Variants {
+    lit: Alphabet<LITLEN_SYMS>,
+    dist: Alphabet<DIST_SYMS>,
+    /// The lengths of the variants tried. A variant with the same lengths as one before gives the same code
+    /// and size, which can't win over the first, so it is skipped.
+    tried: [([u8; LITLEN_SYMS], [u8; DIST_SYMS]); MAX_VARIANTS],
+}
+
+/// Tries the variants of `search` in order and keeps the first code of the fewest bits.
+fn dynamic_search(h: &Hist, search: Search) -> DynCode {
+    // A constant, so that it is copied straight to the heap.
+    const NEW: Variants =
+        Variants { lit: Alphabet::NEW, dist: Alphabet::NEW, tried: [([0; LITLEN_SYMS], [0; DIST_SYMS]); MAX_VARIANTS] };
+    let mut v = Box::new(NEW);
+    v.lit.find_or_add(&h.ll);
+    v.dist.find_or_add(&h.d);
+    let mut ntried = 0;
+    // The best so far: its bits, which variant tried, and its header.
+    let mut best: Option<(u64, usize, Header)> = None;
+    for &(tol, maxb) in search.variants() {
+        let mut ll = v.lit.lengths(tol, maxb);
+        let mut d = v.dist.lengths(tol, maxb.min(15));
         patch_litlen(&mut ll);
         patch_distances(&mut d);
+        if v.tried[..ntried].iter().any(|t| t.0 == ll && t.1 == d) {
+            continue;
+        }
+        v.tried[ntried] = (ll, d);
+        ntried += 1;
         let data = data_bits(h, &ll, &d);
-        if let Some(b) = &best {
+        if let Some((bits, ..)) = best {
             // The header costs at least 14 bits; skip variants that cannot win.
-            if data + 14 >= b.bits {
+            if data + 14 >= bits {
                 continue;
             }
         }
-        let header = if thorough { best_header(&ll, &d) } else { quick_header(&ll, &d) };
+        let header = search.header(&ll, &d);
         let bits = header.bits + data;
-        if best.as_ref().is_none_or(|b| bits < b.bits) {
-            best = Some(DynCode { ll, d, header, bits });
+        if best.as_ref().is_none_or(|b| bits < b.0) {
+            best = Some((bits, ntried - 1, header));
         }
     }
-    best.unwrap()
+    // The first variant is always tried.
+    let (bits, k, header) = best.unwrap();
+    DynCode { ll: v.tried[k].0.to_vec(), d: v.tried[k].1.to_vec(), header, bits }
+}
+
+/// One alphabet's counts under the smoothings of a search and their code lengths, each worked out once.
+struct Alphabet<const N: usize> {
+    /// The distinct counts met so far (the plain counts first, then at most one more per variant), their
+    /// lengths without a limit, and the longest of those.
+    counts: [[u32; N]; MAX_VARIANTS + 1],
+    lens: [[u8; N]; MAX_VARIANTS + 1],
+    longest: [u8; MAX_VARIANTS + 1],
+    n: usize,
+}
+
+impl<const N: usize> Alphabet<N> {
+    /// Nothing met yet; the plain counts are to be added first.
+    const NEW: Self = Alphabet {
+        counts: [[0; N]; MAX_VARIANTS + 1],
+        lens: [[0; N]; MAX_VARIANTS + 1],
+        longest: [0; MAX_VARIANTS + 1],
+        n: 0,
+    };
+
+    /// The index of these counts, added if new.
+    fn find_or_add(&mut self, counts: &[u32; N]) -> usize {
+        if let Some(k) = self.counts[..self.n].iter().position(|c| c == counts) {
+            return k;
+        }
+        let k = self.n;
+        self.counts[k] = *counts;
+        self.longest[k] = fast_lengths(counts, &mut self.lens[k]);
+        self.n += 1;
+        k
+    }
+
+    /// What `limited_lengths` gives for a variant's counts and longest code.
+    fn lengths(&mut self, tolerance: Option<f64>, max_bits: u32) -> [u8; N] {
+        let k = match tolerance {
+            None => 0,
+            Some(t) => {
+                let mut c = [0; N];
+                smooth(&self.counts[0], t, &mut c);
+                self.find_or_add(&c)
+            }
+        };
+        // Package-merge gives the Huffman lengths whenever they fit the limit (see the test
+        // `package_merge_with_room_gives_the_huffman_lengths`), so it only runs when the limit binds.
+        if self.longest[k] as u32 <= max_bits {
+            self.lens[k]
+        } else {
+            let mut l = [0; N];
+            limited_lengths_into(&self.counts[k], max_bits, &mut l);
+            l
+        }
+    }
 }
 
 /// Very fast estimate for choosing block boundaries: Shannon cost of the symbols, their extra bits, and a
@@ -890,6 +1029,7 @@ pub fn write_stored(w: &mut BitWriter, bytes: &[u8], last: bool) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::huffman::limited_lengths;
     use super::*;
 
     /// The header search as it was before it worked in fixed buffers and skipped repeated work (a518968), on the
@@ -1275,8 +1415,11 @@ mod tests {
                         *c = (rng(s) % top) as u32;
                     }
                 }
-                let (lc, dc) =
-                    if k % 6 == 1 { (smooth(&h.ll, 0.5), smooth(&h.d, 0.5)) } else { (h.ll.to_vec(), h.d.to_vec()) };
+                let (mut lc, mut dc) = (h.ll.to_vec(), h.d.to_vec());
+                if k % 6 == 1 {
+                    smooth(&h.ll, 0.5, &mut lc);
+                    smooth(&h.d, 0.5, &mut dc);
+                }
                 let maxb = [15, 12, 10, 9][(rng(s) % 4) as usize];
                 ll = limited_lengths(&lc, maxb);
                 d = limited_lengths(&dc, maxb);
@@ -1415,17 +1558,18 @@ mod tests {
 #[cfg(test)]
 mod estimate_tests {
     use super::super::huffman::{old, tests::walk};
+    use super::search_tests::old as before;
     use super::*;
 
-    /// The estimate as it was before `Estimator`, on the old length code.
+    /// The estimate as it was before `Estimator`, on the length code, the patches and the bits of then.
     fn old_estimate_dynamic_bits(h: &Hist) -> u64 {
         let mut ll = [0u8; LITLEN_SYMS];
         let mut d = [0u8; DIST_SYMS];
         old::lengths_into(&h.ll, 15, &mut ll);
         old::lengths_into(&h.d, 15, &mut d);
-        patch_litlen(&mut ll);
-        patch_distances(&mut d);
-        data_bits(h, &ll, &d) + old_fast_header_bits(&ll, &d)
+        before::patch_litlen(&mut ll);
+        before::patch_distances(&mut d);
+        before::data_bits(h, &ll, &d) + old_fast_header_bits(&ll, &d)
     }
 
     fn old_fast_header_bits(ll: &[u8], d: &[u8]) -> u64 {
@@ -1547,6 +1691,374 @@ mod estimate_tests {
             if k % 16 == 0 {
                 assert_eq!(estimate_dynamic_bits(&h), want);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::super::huffman;
+    use super::*;
+
+    /// The code search as it was before it skipped repeated variants (a518968), on the package-merge and the
+    /// header search of then, kept to show that the codes are unchanged.
+    pub(super) mod old {
+        use super::super::super::huffman::old::limited_lengths;
+        use super::super::tests::old::{best_header, quick_header};
+        use super::super::*;
+
+        /// Data bits for a histogram under given lengths (end-of-block included via the histogram).
+        pub fn data_bits(h: &Hist, ll: &[u8], d: &[u8]) -> u64 {
+            let mut bits = 0u64;
+            for s in 0..LITLEN_SYMS {
+                if h.ll[s] != 0 {
+                    bits += h.ll[s] as u64 * (ll[s] as u64 + ll_extra(s) as u64);
+                }
+            }
+            for s in 0..DIST_SYMS {
+                if h.d[s] != 0 {
+                    bits += h.d[s] as u64 * (d[s] as u64 + d_extra(s) as u64);
+                }
+            }
+            bits
+        }
+
+        pub fn fixed_bits(h: &Hist) -> u64 {
+            let ll = fixed_litlen_lengths();
+            let d = fixed_dist_lengths();
+            data_bits(h, &ll[..LITLEN_SYMS], &d[..DIST_SYMS])
+        }
+
+        /// Some decoders (zlib 1.2.1 and older, some phones) fail with fewer than two distance codes. Two codes of
+        /// length 1 keep the code complete and cost nothing when no match uses them.
+        pub fn patch_distances(d: &mut [u8]) {
+            let used: Vec<usize> = (0..d.len()).filter(|&i| d[i] != 0).collect();
+            match used.len() {
+                0 => {
+                    d[0] = 1;
+                    d[1] = 1;
+                }
+                1 => {
+                    if used[0] == 0 {
+                        d[1] = 1;
+                    } else {
+                        d[0] = 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        /// A literal/length code with a single symbol (only end-of-block) is incomplete; give it a partner.
+        pub fn patch_litlen(ll: &mut [u8]) {
+            let used = ll.iter().filter(|&&l| l != 0).count();
+            if used == 1 {
+                if ll[0] == 0 {
+                    ll[0] = 1;
+                } else {
+                    ll[1] = 1;
+                }
+            }
+        }
+
+        /// Smooths counts so that the code lengths form longer runs (cheaper header), at a small data cost.
+        /// Runs of similar counts become equal; counts of zero stay zero.
+        pub fn smooth(counts: &[u32], tolerance: f64) -> Vec<u32> {
+            let mut out = counts.to_vec();
+            let n = counts.len();
+            let mut i = 0;
+            while i < n {
+                if counts[i] == 0 {
+                    i += 1;
+                    continue;
+                }
+                let mut j = i + 1;
+                let mut sum = counts[i] as u64;
+                while j < n && counts[j] != 0 {
+                    let avg = (sum + counts[j] as u64) as f64 / (j - i + 1) as f64;
+                    let ok = (i..=j).all(|k| ((counts[k] as f64) - avg).abs() <= tolerance * avg.max(1.0));
+                    if !ok {
+                        break;
+                    }
+                    sum += counts[j] as u64;
+                    j += 1;
+                }
+                if j - i >= 4 {
+                    let avg = ((sum as f64) / (j - i) as f64).round().max(1.0) as u32;
+                    for v in out[i..j].iter_mut() {
+                        *v = avg;
+                    }
+                }
+                i = j;
+            }
+            out
+        }
+
+        /// The cheapest dynamic code we can find for a histogram, with its exact size.
+        pub fn best_dynamic(h: &Hist) -> DynCode {
+            dynamic_search(
+                h,
+                &[(None, 15), (Some(0.25), 15), (Some(0.5), 15), (None, 12), (None, 10), (Some(1.0), 15)],
+                true,
+            )
+        }
+
+        /// A cheaper search for comparing parses: fewer code variants and header strategies.
+        pub fn good_dynamic(h: &Hist) -> DynCode {
+            dynamic_search(h, &[(None, 15), (Some(0.25), 15)], false)
+        }
+
+        pub fn dynamic_search(h: &Hist, variants: &[(Option<f64>, u32)], thorough: bool) -> DynCode {
+            let mut best: Option<DynCode> = None;
+            for &(tol, maxb) in variants {
+                let llc = match tol {
+                    None => h.ll.to_vec(),
+                    Some(t) => smooth(&h.ll, t),
+                };
+                let dc = match tol {
+                    None => h.d.to_vec(),
+                    Some(t) => smooth(&h.d, t),
+                };
+                let used_ll = llc.iter().filter(|&&c| c > 0).count();
+                if used_ll > (1usize << maxb) {
+                    continue;
+                }
+                let mut ll = limited_lengths(&llc, maxb);
+                let mut d = limited_lengths(&dc, maxb.min(15));
+                patch_litlen(&mut ll);
+                patch_distances(&mut d);
+                let data = data_bits(h, &ll, &d);
+                if let Some(b) = &best {
+                    // The header costs at least 14 bits; skip variants that cannot win.
+                    if data + 14 >= b.bits {
+                        continue;
+                    }
+                }
+                let header = if thorough { best_header(&ll, &d) } else { quick_header(&ll, &d) };
+                let bits = header.bits + data;
+                if best.as_ref().is_none_or(|b| bits < b.bits) {
+                    best = Some(DynCode { ll, d, header, bits });
+                }
+            }
+            best.unwrap()
+        }
+    }
+
+    fn rng(s: &mut u64) -> u64 {
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
+        *s
+    }
+
+    /// Counts of the kinds that decide the lengths and their ties: few values (many equal counts), a wide
+    /// range, few used symbols, runs of close counts (which smoothing evens out) or equal ones (which it
+    /// leaves), Fibonacci counts (codes longer than every limit) and counts up to 2^31.
+    fn counts(s: &mut u64, f: &mut [u32]) {
+        let n = f.len() as u64;
+        f.fill(0);
+        match rng(s) % 8 {
+            0 => f.iter_mut().for_each(|c| *c = if rng(s).is_multiple_of(3) { 0 } else { 1 + (rng(s) % 3) as u32 }),
+            1 => {
+                let bits = rng(s) % 32;
+                f.iter_mut()
+                    .for_each(|c| *c = if rng(s).is_multiple_of(4) { 0 } else { (rng(s) % (1u64 << bits)) as u32 + 1 });
+            }
+            2 => {
+                for _ in 0..rng(s) % 4 {
+                    f[(rng(s) % n) as usize] = 1 + (rng(s) % 1000) as u32;
+                }
+            }
+            3 | 4 => {
+                let mut i = 0;
+                while i < f.len() {
+                    let end = (i + 1 + (rng(s) % 30) as usize).min(f.len());
+                    let level = 1 + rng(s) % [4, 100, 10_000, 1 << 31][(rng(s) % 4) as usize];
+                    let (spread, zero) = (rng(s) % 4, rng(s).is_multiple_of(4));
+                    for c in f[i..end].iter_mut() {
+                        *c = if zero {
+                            0
+                        } else {
+                            (level + rng(s) % (1 + level * spread / 8)).min(u32::MAX as u64) as u32
+                        };
+                    }
+                    i = end;
+                }
+            }
+            5 => {
+                let (mut a, mut b) = (1u32, 1u32);
+                for _ in 0..2 + rng(s) % 45 {
+                    f[(rng(s) % n) as usize] = a;
+                    (a, b) = (b, a.saturating_add(b).min(1 << 31));
+                }
+            }
+            6 => f
+                .iter_mut()
+                .for_each(|c| *c = if rng(s).is_multiple_of(2) { 0 } else { (1 << 31) - (rng(s) % 4) as u32 }),
+            _ => f.iter_mut().for_each(|c| *c = if rng(s).is_multiple_of(3) { 0 } else { 1 << (rng(s) % 20) }),
+        }
+    }
+
+    /// A histogram for case `k`: of a random symbol stream, or of random counts, with the end-of-block
+    /// counted once (most cases) or not at all, no distance or a single one now and then, or nothing but the
+    /// end-of-block.
+    fn histogram(s: &mut u64, k: usize) -> Hist {
+        let mut h = Hist::empty();
+        if k.is_multiple_of(4) {
+            let (lits, far) = (1 + rng(s) % 256, 1 + rng(s) % 32768);
+            for _ in 0..1 + rng(s) % 3000 {
+                if rng(s).is_multiple_of(3) {
+                    let len = 3 + rng(s) % (1 + rng(s) % 256);
+                    h.add(&Sym::mat(len as usize, 1 + (rng(s) % far) as usize));
+                } else {
+                    h.add(&Sym::lit((rng(s) % lits) as u8));
+                }
+            }
+            return h;
+        }
+        counts(s, &mut h.ll);
+        counts(s, &mut h.d);
+        h.ll[END_OF_BLOCK] = if k % 16 == 15 { 0 } else { h.ll[END_OF_BLOCK].max(1) };
+        match rng(s) % 8 {
+            0 => h.d.fill(0),
+            1 => {
+                h.d.fill(0);
+                h.d[(rng(s) % 2 * (rng(s) % DIST_SYMS as u64)) as usize] = 1 + (rng(s) % 9) as u32;
+            }
+            _ => {}
+        }
+        if rng(s).is_multiple_of(16) {
+            h.ll.fill(0);
+            h.ll[END_OF_BLOCK] = 1;
+        }
+        h
+    }
+
+    /// The new code and the old one, field by field.
+    fn assert_same(new: &DynCode, old: &DynCode, what: &str, h: &Hist) {
+        let (a, b) = (&new.header, &old.header);
+        assert_eq!(
+            (&new.ll, &new.d, new.bits, a.hlit, a.hdist, a.hclen, a.cl, a.bits, &a.tokens),
+            (&old.ll, &old.d, old.bits, b.hlit, b.hdist, b.hclen, b.cl, b.bits, &b.tokens),
+            "{what}: {:?} {:?}",
+            h.ll,
+            h.d
+        );
+    }
+
+    #[test]
+    fn codes_are_those_of_before() {
+        let mut s = 0xc0de_5eedu64;
+        for k in 0..3000 {
+            let h = histogram(&mut s, k);
+            assert_same(&best_dynamic(&h), &old::best_dynamic(&h), &format!("best, case {k}"), &h);
+            assert_same(&good_dynamic(&h), &old::good_dynamic(&h), &format!("good, case {k}"), &h);
+        }
+    }
+
+    /// The search takes the Huffman lengths for package-merge's when they fit the limit. Why they are the same:
+    /// Huffman's method (a leaf first among equal weights) takes the 2n-2 items below the root in a sorted
+    /// order S of the leaves and the nodes it makes, node j being items 2j and 2j+1 of S. Each list of
+    /// package-merge (a leaf first among equal weights too) agrees with S up to the first item of S taller
+    /// than its level: no package is lighter than the node in its place in S, so none comes in between. Depth
+    /// falls along S, so the k-th level from the top takes the items of S at depth k + 1 or more, a first part
+    /// of S no taller than that level when there are as many levels as the longest Huffman length (or more);
+    /// each leaf is then taken at as many levels as its depth. Shown here for the code of before and of now,
+    /// on counts of every kind.
+    #[test]
+    fn package_merge_with_room_gives_the_huffman_lengths() {
+        let mut s = 0x009a_3e77u64;
+        let mut f = [0u32; 320];
+        let (mut a, mut b, mut c) = ([0u8; 320], [0u8; 320], [0u8; 320]);
+        for round in 0..60_000 {
+            let n = match round % 4 {
+                0 => 19,
+                1 => 30,
+                2 => 286,
+                _ => 1 + (rng(&mut s) % 320) as usize,
+            };
+            let (f, a, b, c) = (&mut f[..n], &mut a[..n], &mut b[..n], &mut c[..n]);
+            counts(&mut s, f);
+            let longest = huffman::old::fast_lengths(f, a);
+            assert_eq!(fast_lengths(f, b), longest);
+            assert_eq!(a, b);
+            for max_bits in [longest as u32, longest as u32 + 1 + (rng(&mut s) % 4) as u32, 15.max(longest as u32)] {
+                c.fill(9);
+                limited_lengths_into(f, max_bits, c);
+                assert_eq!(a, c, "{max_bits} {f:?}");
+                // The old package-merge is slow on large alphabets: those now and then.
+                if n <= 32 || round % 8 < 2 {
+                    c.fill(9);
+                    huffman::old::limited_lengths_into(f, max_bits, c);
+                    assert_eq!(a, c, "{max_bits} {f:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bits_are_those_of_before() {
+        let mut s = 0xb175u64;
+        let (fl, fd) = (fixed_litlen_lengths(), fixed_dist_lengths());
+        for s in 0..LITLEN_SYMS {
+            assert_eq!((LL_EXTRA_BITS[s] as u32, FIXED_LL_BITS[s] as u32), (ll_extra(s), fl[s] as u32 + ll_extra(s)));
+        }
+        for s in 0..DIST_SYMS {
+            assert_eq!(FIXED_D_BITS[s] as u32, fd[s] as u32 + d_extra(s));
+        }
+        for k in 0..20_000 {
+            let mut h = histogram(&mut s, k);
+            if k % 5 == 1 {
+                h.ll.iter_mut().chain(h.d.iter_mut()).for_each(|c| *c = rng(&mut s) as u32);
+            }
+            let mut ll = [0u8; LITLEN_SYMS];
+            let mut d = [0u8; DIST_SYMS];
+            for l in ll.iter_mut().chain(d.iter_mut()) {
+                *l = if k % 7 == 0 { rng(&mut s) as u8 } else { (rng(&mut s) % 16) as u8 };
+            }
+            assert_eq!(data_bits(&h, &ll, &d), old::data_bits(&h, &ll, &d), "{k}");
+            assert_eq!(data_bits(&h, &fl, &fd), old::data_bits(&h, &fl, &fd), "{k}");
+            assert_eq!(fixed_bits(&h), old::fixed_bits(&h), "{k}");
+            // Slices that end after the last used symbol give the same bits; shorter ones don't panic.
+            let ll_end = h.ll.iter().rposition(|&c| c != 0).map_or(0, |s| s + 1);
+            let d_end = h.d.iter().rposition(|&c| c != 0).map_or(0, |s| s + 1);
+            let (ll_cut, d_cut) = (&ll[..ll_end], &d[..d_end]);
+            assert_eq!(data_bits(&h, ll_cut, d_cut), old::data_bits(&h, ll_cut, d_cut), "{k}");
+            let (a, b) = ((rng(&mut s) % 300) as usize, (rng(&mut s) % 40) as usize);
+            data_bits(&h, &ll[..a.min(LITLEN_SYMS)], &d[..b.min(DIST_SYMS)]);
+        }
+    }
+
+    #[test]
+    fn smoothing_is_that_of_before() {
+        let mut s = 0x0530_07e5u64;
+        let mut out = [0u32; 320];
+        for round in 0..20_000 {
+            let n = [DIST_SYMS, LITLEN_SYMS, 1 + (rng(&mut s) % 320) as usize][round % 3];
+            let mut f = vec![0u32; n];
+            counts(&mut s, &mut f);
+            let tolerance = [0.25, 0.5, 1.0, 0.0, 0.1, 3.0, (rng(&mut s) % 1000) as f64 / 250.0][round % 7];
+            smooth(&f, tolerance, &mut out[..n]);
+            assert_eq!(&out[..n], &old::smooth(&f, tolerance)[..], "{tolerance} {f:?}");
+        }
+    }
+
+    #[test]
+    fn patches_are_those_of_before() {
+        let mut s = 3u64;
+        for round in 0..5000 {
+            let mut d = [0u8; DIST_SYMS];
+            let mut ll = [0u8; LITLEN_SYMS];
+            for _ in 0..round % 4 {
+                d[(rng(&mut s) % DIST_SYMS as u64) as usize] = 1 + (rng(&mut s) % 15) as u8;
+                ll[(rng(&mut s) % if round % 8 < 4 { 3 } else { LITLEN_SYMS as u64 }) as usize] = 1;
+            }
+            let (mut d2, mut ll2) = (d, ll);
+            patch_distances(&mut d);
+            old::patch_distances(&mut d2);
+            patch_litlen(&mut ll);
+            old::patch_litlen(&mut ll2);
+            assert_eq!((d, ll), (d2, ll2));
         }
     }
 }
