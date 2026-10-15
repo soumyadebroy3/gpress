@@ -1,7 +1,7 @@
 {
   "name": "cheap-route",
   "version": "0.1.0",
-  "description": "Sends read-only subagent and workflow-agent tasks (lookups, summaries, status checks) to a cheaper model; anything that writes code or needs judgement keeps the session's model.",
+  "description": "Sends read-only subagent and workflow-agent tasks to a cheaper model and switches a task up to the session model when it needs to write, gets stuck or is unsure.",
   "author": {
     "name": "Soumya"
   },
@@ -27,6 +27,12 @@
       "title": "Longest easy prompt",
       "description": "A task prompt longer than this many characters is never treated as easy.",
       "default": 2000
+    },
+    "maxCheapSteps": {
+      "type": "number",
+      "title": "Most cheap steps",
+      "description": "A cheap subagent that needs more model requests than this switches to the session model.",
+      "default": 20
     }
   }
 }

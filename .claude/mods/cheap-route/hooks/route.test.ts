@@ -61,5 +61,5 @@ test('off means no routing', { options: { enabled: false } }, async ($, on) => {
 test('the command reports what was routed', async ($, on) => {
   await spawnWith($, on, { prompt: 'List the files in docs/tasks.' })
   const out = await $.command.run({ command: 'cheap-route', args: '' } as any)
-  expect(JSON.stringify(out)).toContain('1 easy task(s) sent to haiku')
+  expect(JSON.stringify(out)).toContain('1 read-only task(s) sent to haiku')
 })
