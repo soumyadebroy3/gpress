@@ -362,6 +362,90 @@ NEW has not measured every file of BASE (an unfinished run compares only the fil
 `--scale`) and checks they are caught. Measuring a new build is `benchmark.py time RUN --set all --who ours`;
 `report RUN --with all907-speed-ca8fa92` and `compare` take the competitors from the stored rows.
 
+## Lightweight
+
+The download and the start-up are part of the time a person waits (`docs/tasks/lightweight.md`). Measured on
+a 4-core cloud machine in October 2026 with Rust 1.97.0, binaryen's wasm-opt 108 and Node 22.22.
+
+### Sizes
+
+`python3 -I bench/sizes.py measure [--features SET]` builds each part and records its size in
+`bench/sizes.json`: the native tool and the C library with the release profile, the WebAssembly module the
+way the npm package builds it (cargo's `wasm` profile, opt-level "s", then `wasm-opt -O1`; see below). Gzip is
+level 9. A feature set is the cargo features a build has: "default" is a plain build, today every part of the
+engine; "existing" adds Lepton. "Before" is commit 066b65e, where the module was built with the release
+profile (opt-level 3, symbol names kept, no wasm-opt). The release profile is unchanged, so the native builds
+are the same as before.
+
+| Build | Feature set | Raw bytes | Gzip bytes | Before: raw, gzip | Gzip change |
+| --- | --- | ---: | ---: | ---: | ---: |
+| WebAssembly module | default (stands in for "web") | 600,115 | 228,746 | 841,082, 293,702 | -22.1% |
+| WebAssembly module | existing | 929,946 | 335,916 | 1,341,753, 441,872 | -24.0% |
+| Native tool `gpress` | default | 1,673,032 | 758,174 | the same | 0 |
+| Native tool `gpress` | existing | 2,306,528 | 1,001,956 | the same | 0 |
+| C library, shared (`libgpress_c.so`) | default | 1,484,760 | 674,616 | the same | 0 |
+| C library, shared (`libgpress_c.so`) | existing | 2,117,816 | 917,393 | the same | 0 |
+| C library, static (`libgpress_c.a`) | default | 10,079,928 | 2,153,351 | the same | 0 |
+| C library, static (`libgpress_c.a`) | existing | 11,184,280 | 2,429,958 | the same | 0 |
+
+The target for the web module is 400 KB gzip (400,000 bytes). The "web" feature set does not exist yet, so the
+module with every part of the engine stands in for it: 228,746 bytes, 171,254 bytes (43%) under the target.
+Lepton adds 107,170 bytes of gzip to the module. The static library carries Rust's standard library whole, so
+it is far larger than what a program linked with it gets.
+
+The budget: CI's WebAssembly job runs `python3 -I bench/sizes.py check`, which builds the module as the
+package does and fails when its gzip size is more than 5% over the recorded one (240,183 bytes today) or over
+400,000 bytes. A growth that is wanted is recorded with `measure`. When the module is more than 5% under the
+record (under 217,308 bytes today), the check passes with a warning to record the new size, since the 5% is
+counted from the record and would otherwise allow more. When the web feature set exists,
+`WEB = 'web'` in `bench/sizes.py` and `measure --features web` move the check to it, and its rows join this
+table.
+
+### Choosing the module's build
+
+Every build of the module in Node (`bench/wasm_speed.mjs`): one process per run, pinned to one core, two runs at
+a time on two cores in a rotating order, three runs of each build; the CPU time of the optimize calls, median of
+the three. Effort 0 on all 120 files of the sample, effort 50 on the 30 files of
+`bench/sets/sample120-size30.txt` (the sample sorted by size, every fourth file: 657 B to 6.3 MB). Opt-level 3
+is the `wasm` profile at opt-level 3 (symbols stripped). The effort-0 cells of the -O1 rows come from a later
+batch that measured opt-level 3 and "s" again beside them (245.6 s and 257.6 s, +4.9%), and their "vs 3" is
+against that batch's 245.6 s; -O1 of "z" was not run at effort 0. "First call": from the module's bytes to the
+first optimized PDF (one page, 3.8 KB, effort 0) in a fresh Node process, median of 21 processes, on two cores,
+measured with `bench/wasm_startup.mjs`. That script comes with the start-up work (item L4 of
+`docs/tasks/lightweight.md`, branch `wip/l4-startup` until it merges), not with this section's commits.
+
+| opt-level | wasm-opt | Raw bytes | Gzip bytes | Effort 0, CPU s | vs 3 | Effort 50, CPU s | vs 3 | First call, ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 3, before (release profile) | none | 841,082 | 293,702 | | | | | 79.7 |
+| 3 | none | 766,709 | 279,771 | 261.1 | | 83.4 | | 79.5 |
+| 3 | -O1 | 711,712 | 272,498 | 247.7 | +0.8% | 82.0 | -1.7% | 80.4 |
+| 3 | -Os | 697,417 | 275,292 | 251.6 | -3.6% | 85.9 | +3.0% | 79.9 |
+| 3 | -Oz | 692,060 | 274,932 | 267.4 | +2.4% | 88.5 | +6.1% | 78.8 |
+| s | none | 652,516 | 235,380 | 268.5 | +2.8% | 87.6 | +5.0% | 68.1 |
+| **s** | **-O1** | **600,115** | **228,746** | **256.9** | **+4.6%** | **86.7** | **+3.9%** | **71.8** |
+| s | -Os | 579,983 | 244,594 | 273.6 | +4.8% | 90.6 | +8.6% | 71.9 |
+| s | -Oz | 572,933 | 244,364 | 273.9 | +4.9% | 88.1 | +5.6% | 76.1 |
+| z | none | 587,289 | 212,192 | 476.3 | +82.4% | 140.6 | +68.5% | 116.9 |
+| z | -O1 | 530,236 | 204,651 | | | 134.2 | +60.8% | 95.1 |
+| z | -Os | 508,982 | 218,570 | 464.5 | +77.9% | 133.4 | +59.8% | 103.4 |
+| z | -Oz | 501,190 | 218,626 | 538.9 | +106.4% | 148.4 | +77.8% | 128.1 |
+
+Every output of every run was byte-identical to the native tool's at 066b65e (the hashes of the baseline
+benchmark run, `--features existing`, one thread): the 120 files at effort 0 and the 30 at effort 50, three
+times over for each build.
+
+- opt-level "z" is 10% smaller than "s" but 1.8 times slower at effort 0 (1.7 at effort 50). "s" is 3% to 5%
+  slower than opt-level 3 at effort 0 (two batches) and 5% at effort 50, inside the 10% the brief allows, and
+  its first call comes 10 to 15 ms sooner (less code to compile). The profile uses "s".
+- wasm-opt: -Oz and -Os take 11% to 12% off the raw bytes of the "s" build but add 4% to its gzip size, which is
+  what a browser downloads, and the first call with -Oz took 4 to 8 ms longer than with -O1 in three batches
+  (the table's, and two more of 31 processes for the "s" builds: 73.1 against 65.0 ms, 77.2 against 71.8). -O1
+  takes 8% off the raw bytes and 3% off the gzip size at the same speed, so the package build runs -O1 (the
+  brief named -Oz; it is one word in `crates/gpress-wasm/js/build-wasm.mjs`). Without wasm-opt on PATH the
+  build uses cargo's module as it is and says so.
+- For scale: the native tool takes 208.6 s of CPU for the same 120 files at effort 0 (the baseline run, one
+  process per file), so the module takes about 1.2 to 1.3 times the native time.
+
 ## Security (hostile input)
 
 Every number here comes from `bench/security.py` (run `security`, build main-d86b799, 2026-10-08 17:45:03 UTC), engine at effort 0 with 1 thread, each command its own process measured by bench/measure.c (parent under 1 MB); address-space limit by prlimit. Time bounds apply to the child's CPU time. The bounds: a damaged archive is refused in under 5 s with a peak under 512 MiB; a hostile PDF returns (untouched, or smaller and proven by the engine's own self-check) or gives a clean error in under 30 s plus 5 s per MiB of input, with a peak under 512 MiB or 16 bytes per input byte, whichever is more; a run past 60 s of wall time (2x its bound when that is more) is a hang. The fuzzer runs with a hard 512 MiB address space.

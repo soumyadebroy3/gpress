@@ -1,0 +1,70 @@
+{
+  "about": "Sizes in bytes of the builds of each feature set, written by `python3 -I bench/sizes.py measure`; `check` compares the web module with them.",
+  "web": "default",
+  "builds": {
+    "default": {
+      "cargo_arguments": {
+        "gpress": [],
+        "gpress-c": [],
+        "gpress-wasm": []
+      },
+      "tool": {
+        "raw": 1673032,
+        "gzip": 758174
+      },
+      "c_shared": {
+        "raw": 1484760,
+        "gzip": 674616
+      },
+      "c_static": {
+        "raw": 10079928,
+        "gzip": 2153351
+      },
+      "wasm": {
+        "raw": 600115,
+        "gzip": 228746
+      },
+      "wasm_opt": "wasm-opt version 108",
+      "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+      "date": "2026-10-15"
+    },
+    "existing": {
+      "cargo_arguments": {
+        "gpress": [
+          "--no-default-features",
+          "--features",
+          "existing"
+        ],
+        "gpress-c": [
+          "--no-default-features",
+          "--features",
+          "existing"
+        ],
+        "gpress-wasm": [
+          "--no-default-features",
+          "--features",
+          "existing"
+        ]
+      },
+      "tool": {
+        "raw": 2306528,
+        "gzip": 1001956
+      },
+      "c_shared": {
+        "raw": 2117816,
+        "gzip": 917393
+      },
+      "c_static": {
+        "raw": 11184280,
+        "gzip": 2429958
+      },
+      "wasm": {
+        "raw": 929946,
+        "gzip": 335916
+      },
+      "wasm_opt": "wasm-opt version 108",
+      "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+      "date": "2026-10-15"
+    }
+  }
+}
