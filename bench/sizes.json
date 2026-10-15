@@ -3,7 +3,11 @@
   "web": "default",
   "builds": {
     "default": {
-      "cargo_arguments": [],
+      "cargo_arguments": {
+        "gpress": [],
+        "gpress-c": [],
+        "gpress-wasm": []
+      },
       "tool": {
         "raw": 1673032,
         "gzip": 758174
@@ -25,11 +29,23 @@
       "date": "2026-10-15"
     },
     "existing": {
-      "cargo_arguments": [
-        "--no-default-features",
-        "--features",
-        "existing"
-      ],
+      "cargo_arguments": {
+        "gpress": [
+          "--no-default-features",
+          "--features",
+          "existing"
+        ],
+        "gpress-c": [
+          "--no-default-features",
+          "--features",
+          "existing"
+        ],
+        "gpress-wasm": [
+          "--no-default-features",
+          "--features",
+          "existing"
+        ]
+      },
       "tool": {
         "raw": 2306528,
         "gzip": 1001956

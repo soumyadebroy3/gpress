@@ -6,8 +6,10 @@
                                                          5% over the recorded one, or over the 400 KB target
 
 SET is a feature set: "default" (a plain build) or the cargo features to build with, separated by commas
-(built with --no-default-features, so the set is exactly what is named). Without --features both commands
-use the web module's set, WEB below. Each set is recorded on its own, so measuring one leaves the others.
+(built with --no-default-features, so the set is exactly what is named). Each package is built with its own
+feature of a name when it has one and with the engine's (gpress/NAME) when it does not, so a set that only the
+engine knows still builds all three. Without --features both commands use the web module's set, WEB below.
+Each set is recorded on its own, so measuring one leaves the others.
 
 Sizes are in bytes, raw and gzip at level 9 (Python's gzip module, with no name or time in its header). The
 module is built the way the npm package builds it (crates/gpress-wasm/js/build-wasm.mjs: cargo's "wasm"
@@ -42,8 +44,24 @@ def say(msg):
     print(f'sizes: {msg}', file=sys.stderr, flush=True)
 
 
-def cargo_features(fset):
-    return [] if fset == 'default' else ['--no-default-features', '--features', fset]
+def declared_features():
+    """The features each package of the workspace declares, by package name."""
+    p = subprocess.run(['cargo', 'metadata', '--no-deps', '--format-version', '1'], cwd=ROOT,
+                       stdout=subprocess.PIPE, text=True, check=False)
+    if p.returncode != 0:
+        sys.exit('sizes: cargo metadata failed')
+    return {pkg['name']: set(pkg['features']) for pkg in json.loads(p.stdout)['packages']}
+
+
+def cargo_features(fset, package, declared):
+    """The cargo arguments that build one package with a feature set. A name the package does not declare is
+    taken from the engine (gpress/NAME), so the C library and the module do not need to forward every set."""
+    if fset == 'default':
+        return []
+    own = declared.get(package, set())
+    names = [n.strip() for n in fset.split(',') if n.strip()]
+    names = [n if '/' in n or n in own or package == 'gpress' else f'gpress/{n}' for n in names]
+    return ['--no-default-features', '--features', ','.join(names)]
 
 
 def gz(path):
@@ -80,23 +98,24 @@ def cargo_artifacts(args):
     return files
 
 
-def build_module(fset, out):
+def build_module(cargo_args, out):
     if shutil.which('node') is None:
         sys.exit('sizes: node is needed to build the module the way the package does')
-    p = subprocess.run(['node', BUILD_WASM, '--out', out] + cargo_features(fset), cwd=ROOT, check=False)
+    p = subprocess.run(['node', BUILD_WASM, '--out', out] + cargo_args, cwd=ROOT, check=False)
     if p.returncode != 0:
         sys.exit('sizes: building the module failed')
     return size(out)
 
 
 def measure(fset):
-    feats = cargo_features(fset)
-    entry = {'cargo_arguments': feats}
+    declared = declared_features()
+    args = {pkg: cargo_features(fset, pkg, declared) for pkg in ('gpress', 'gpress-c', 'gpress-wasm')}
+    entry = {'cargo_arguments': args}
     say(f'building the native tool ({fset})')
-    tool = [f for f in cargo_artifacts(['--release', '-p', 'gpress', '--bin', 'gpress'] + feats)
+    tool = [f for f in cargo_artifacts(['--release', '-p', 'gpress', '--bin', 'gpress'] + args['gpress'])
             if os.path.basename(f) in ('gpress', 'gpress.exe')]
     say(f'building the C library ({fset})')
-    clib = cargo_artifacts(['--release', '-p', 'gpress-c'] + feats)
+    clib = cargo_artifacts(['--release', '-p', 'gpress-c'] + args['gpress-c'])
     shared = [f for f in clib if f.endswith(('.so', '.dylib', '.dll'))]
     static = [f for f in clib if f.endswith(('.a', '.lib')) and not f.endswith('.dll.lib')]
     if not (tool and shared and static):
@@ -106,7 +125,7 @@ def measure(fset):
     entry['c_static'] = size(static[0])
     say(f'building the WebAssembly module ({fset})')
     with tempfile.TemporaryDirectory() as tmp:
-        entry['wasm'] = build_module(fset, os.path.join(tmp, 'gpress.wasm'))
+        entry['wasm'] = build_module(args['gpress-wasm'], os.path.join(tmp, 'gpress.wasm'))
     entry['wasm_opt'] = tool_version(['wasm-opt', '--version'])
     entry['rustc'] = tool_version(['rustc', '--version'])
     entry['date'] = datetime.date.today().isoformat()
@@ -139,8 +158,9 @@ def check(fset):
     entry = (record or {}).get('builds', {}).get(fset)
     if entry is None:
         sys.exit(f'sizes: no recorded size for the feature set "{fset}"; run `bench/sizes.py measure --features {fset}`')
+    module_args = cargo_features(fset, 'gpress-wasm', declared_features())
     with tempfile.TemporaryDirectory() as tmp:
-        now = build_module(fset, os.path.join(tmp, 'gpress.wasm'))
+        now = build_module(module_args, os.path.join(tmp, 'gpress.wasm'))
     was = entry['wasm']
     limit = int(was['gzip'] * GROWTH)
     wasm_opt = tool_version(['wasm-opt', '--version'])
