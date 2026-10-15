@@ -1,9 +1,12 @@
-// Decides from a subagent's prompt whether the task is easy enough for a
-// cheaper model. Hard signals always win, so a mixed task stays put.
+// Decides from a subagent's prompt whether the task is read-only enough for a
+// cheaper model. Only lookups, summaries, status checks and reads qualify: any
+// sign of writing (code, tests, docs, commits) or judgement keeps the session's
+// model, and so does a prompt with no clear read-only signal.
 
 export type Verdict = { easy: boolean; reason: string }
 
 const HARD: Array<[RegExp, string]> = [
+  [/\b(edit|modify|change|update|rename|fix|typo|bump|write|add|create|delete|remove|replace|insert|apply|patch|commit|push|merge|rebase|move|format|reformat)\w*/i, 'changes files'],
   [/\b(implement|build|design|architect|prototype)\w*/i, 'builds something'],
   [/\b(debug|root[- ]cause|diagnos\w*|investigat\w*|why does|why is|race condition|deadlock)\b/i, 'debugging'],
   [/\bfix(es|ing)?\b.*\b(bug|crash|fail\w*|regression|leak|error)\b/i, 'fixes a bug'],
@@ -20,7 +23,6 @@ const EASY: Array<[RegExp, string]> = [
   [/\b(summari[sz]e|summary of|tl;?dr|skim)\b/i, 'summary'],
   [/\b(check|report) (the )?(status|whether|if|state)\b/i, 'status check'],
   [/\b(git (status|log|diff --stat)|ci status|is .* (green|passing|merged))\b/i, 'status check'],
-  [/\b(rename|typo|reformat|format the|bump (the )?version|update (the )?(changelog|readme|docs?|comment))\b/i, 'mechanical edit'],
   [/\b(read|open|print|show|fetch|extract) (the |all |every )?(file|files|contents?|lines?|log|output|value)\b/i, 'read'],
   [/\b(which files?|where is|what (is|are) the (name|path|version|value))\b/i, 'lookup'],
 ]

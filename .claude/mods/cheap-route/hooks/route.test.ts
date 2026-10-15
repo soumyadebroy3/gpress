@@ -30,6 +30,22 @@ test('a bug fix stays even when it starts with find', async ($, on) => {
   expect(await spawnWith($, on, { prompt: 'Find and fix the bug that makes the object stream writer crash.' })).toBeUndefined()
 })
 
+test('a rename stays on the session model', async ($, on) => {
+  expect(await spawnWith($, on, { prompt: 'Rename parse_xref to read_xref across the crate.' })).toBeUndefined()
+})
+
+test('a changelog edit stays on the session model', async ($, on) => {
+  expect(await spawnWith($, on, { prompt: 'Update the changelog with the fast-tier numbers.' })).toBeUndefined()
+})
+
+test('a lookup that ends in a commit stays on the session model', async ($, on) => {
+  expect(await spawnWith($, on, { prompt: 'List the stale bench files and delete them, then commit.' })).toBeUndefined()
+})
+
+test('an unclear task stays on the session model', async ($, on) => {
+  expect(await spawnWith($, on, { prompt: 'Handle the qpdf comparison for the sample120 set.' })).toBeUndefined()
+})
+
 test('an explicit model choice is kept', async ($, on) => {
   expect(await spawnWith($, on, { prompt: 'List the files in docs/tasks.', model: 'opus' })).toBe('opus')
 })

@@ -2,7 +2,7 @@
 
 ## cheap-route
 
-Sends easy subagent tasks (lookups, summaries, status checks, reading files, mechanical edits, Explore searches) to Haiku, and keeps anything that implements, debugs, fixes, optimizes, benchmarks, refactors, reviews, writes tests or plans on the session's model. It covers the Agent tool and workflow `agent()` calls. A task that already names a model, forks, resumes and prompts over 2000 characters are left alone. `/cheap-route` lists recent decisions; `/config` turns it off or switches the cheap model to Sonnet.
+Sends read-only subagent tasks (lookups, summaries, status checks, reading files or logs, Explore searches) to Haiku. Anything that writes (code, tests, docs, renames, typo fixes, version bumps, changelog edits, commits) or needs judgement (implementing, debugging, optimizing, benchmarking, reviewing, planning) stays on the session's model, and so does any task with no clear read-only signal, so code quality is unchanged. It covers the Agent tool and workflow `agent()` calls. A task that already names a model, forks, resumes and prompts over 2000 characters are left alone. `/cheap-route` lists recent decisions; `/config` turns it off or switches the cheap model to Sonnet.
 
 ### Turning it on
 

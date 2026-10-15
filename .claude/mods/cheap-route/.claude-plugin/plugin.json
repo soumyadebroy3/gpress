@@ -1,7 +1,7 @@
 {
   "name": "cheap-route",
   "version": "0.1.0",
-  "description": "Sends easy subagent and workflow-agent tasks (lookups, summaries, status checks, mechanical edits) to a cheaper model; hard work keeps the session's model.",
+  "description": "Sends read-only subagent and workflow-agent tasks (lookups, summaries, status checks) to a cheaper model; anything that writes code or needs judgement keeps the session's model.",
   "author": {
     "name": "Soumya"
   },
