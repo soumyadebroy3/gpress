@@ -3,17 +3,20 @@
 // compiled code within a process. Runs against dist/ after `npm run build`. bench/wasm_startup.mjs makes
 // the same measurement for any module file, with more detail.
 //
-// The target is a median of at most 50 ms at effort 0. GPRESS_STARTUP_LIMIT_MS raises it: CI machines vary
-// (a busy shared runner can be two or three times slower than a quiet one, and most of the first call runs
-// before V8's optimizing compiler has finished in the background), so CI may set a looser number that still
-// catches a large step back.
+// The target is a median of at most 50 ms at effort 0. GPRESS_STARTUP_LIMIT_MS raises the limit (a smaller
+// number is ignored), because machines vary: most of the first call runs while V8's optimizing compiler
+// works in the background, so a machine with fewer cores, or a busy one, is much slower (bench/RESULTS.md,
+// Start-up). CI sets a looser limit that still catches a large step back, and the test prints the distance
+// to the target either way. The default effort (100) does about one and a half times the work of effort 0
+// on this PDF and is held to twice the limit.
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { onePagePdf } from "./onepage.mjs";
 
 const RUNS = 7;
-const LIMIT_MS = Number(process.env.GPRESS_STARTUP_LIMIT_MS) || 50;
+const TARGET_MS = 50;
+const LIMIT_MS = Math.max(TARGET_MS, Number(process.env.GPRESS_STARTUP_LIMIT_MS) || 0);
 const wasm = new URL("../dist/gpress.wasm", import.meta.url);
 
 /** One sample, in this (fresh) process: the times in ms and what came out. */
@@ -64,12 +67,11 @@ if (process.argv[2] === "--sample") {
     assert.deepEqual(b.optimize(pdf, { effort: 0 }).data, r.data);
   });
 
-  // The target is for effort 0, the setting for a quick first result. The default effort (100) is measured
-  // and reported too, without a limit: it does several times the work and is far from 50 ms (see the
-  // Start-up part of bench/RESULTS.md).
-  for (const [effort, limit] of [["0", LIMIT_MS], ["default", Infinity]]) {
-    const what = limit === Infinity ? "measured" : `at most ${limit} ms`;
-    test(`start-up at effort ${effort}: median of ${RUNS} fresh processes ${what}`, (t) => {
+  // The target is for effort 0, the setting for a quick first result. The default effort is what a plain
+  // optimize(pdf) runs; it is far from 50 ms (see the Start-up part of bench/RESULTS.md) but held to a
+  // looser limit, so a large step back there fails too.
+  for (const [effort, limit] of [["0", LIMIT_MS], ["default", 2 * LIMIT_MS]]) {
+    test(`start-up at effort ${effort}: median of ${RUNS} fresh processes at most ${limit} ms`, (t) => {
       const runs = [];
       for (let k = 0; k < RUNS; k++) {
         runs.push(JSON.parse(execFileSync(process.execPath, [self, "--sample", effort], { encoding: "utf8" })));
@@ -84,6 +86,10 @@ if (process.argv[2] === "--sample") {
           `${m("instantiate").toFixed(1)}, first optimize ${m("optimize").toFixed(1)}, total ${m("total").toFixed(1)} ` +
           `(runs: ${runs.map((r) => r.total.toFixed(0)).join(" ")})`,
       );
+      if (effort === "0") {
+        const over = m("total") - TARGET_MS;
+        t.diagnostic(`target ${TARGET_MS} ms: ${over <= 0 ? "met" : `not met, ${over.toFixed(1)} ms over`}`);
+      }
       assert.ok(m("total") <= limit, `start-up median ${m("total").toFixed(1)} ms is over ${limit} ms`);
     });
   }
