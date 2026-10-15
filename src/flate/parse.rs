@@ -2,7 +2,7 @@
 //! over byte positions).
 
 use super::lz::{d_extra, ll_extra, Hist, Sym};
-use super::matcher::{Matches, Step};
+use super::matcher::{Matches, Step, CANDIDATES};
 use super::tables::*;
 
 /// Bits charged for each choice. `len[l]` includes the length symbol and its extra bits; `dist[c]` the
@@ -319,21 +319,21 @@ fn parse(
             k += 1;
             continue;
         }
-        // The first 32 steps the walk found (nearly always all of them), sorted by length, shortest first (of
-        // equal lengths, the later one first), packed as length << 16 | distance. Sorted as length << 16 |
-        // !distance, an order that does not depend on the order the steps come in.
+        // The first `CANDIDATES` (32) steps the walk found (nearly always all of them), sorted by length,
+        // shortest first (of equal lengths, the later one first), packed as length << 16 | distance. Sorted as
+        // length << 16 | !distance, an order that does not depend on the order the steps come in.
         let key = |s: &Step| {
             let (ml, d) = s.get();
             (ml as u32) << 16 | !d as u32
         };
-        let mut cand = [0u32; 32];
-        let cnt = steps.len().min(32);
+        let mut cand = [0u32; CANDIDATES];
+        let cnt = steps.len().min(CANDIDATES);
         if far.is_empty() {
             // The chain alone, already in order.
             for (e, s) in cand.iter_mut().zip(chain) {
                 *e = key(s) ^ 0xffff;
             }
-        } else if steps.len() <= 32 {
+        } else if steps.len() <= CANDIDATES {
             // The chain and the farther steps (which the matcher puts in this order too), merged.
             let (mut x, mut y) = (0, 0);
             for e in &mut cand[..cnt] {
@@ -351,7 +351,7 @@ fn parse(
             // The walk found them in order of distance: the chain and the farther steps merged by distance,
             // each sorted in.
             let (mut x, mut y) = (0, 0);
-            for i in 0..32 {
+            for i in 0..CANDIDATES {
                 let s = if y == far.len() || (x < chain.len() && chain[x].get().1 < far[y].get().1) {
                     x += 1;
                     &chain[x - 1]
@@ -857,6 +857,57 @@ mod tests {
                 got.clear();
                 optimal_nice(&data, a, b, &m, &c, alt, nice, &mut sc, &mut got);
                 check(&sc, &got, "dispatched");
+            }
+        }
+    }
+
+    #[test]
+    fn long_walks_match_the_reference() {
+        // Deep searches in repetitive data, where walks find more than `CANDIDATES` steps with alternatives
+        // among them: the parse merges the first ones by distance there.
+        let mut r = Rng(0x2545_f491_4f6c_dd1d);
+        let mut sc = ParseScratch::default();
+        for case in 0..8 {
+            // Blocks of copies of one random string, each copy cut short by a changed byte, and then the string
+            // itself. Walking back from it: a few long matches, then shorter ones growing with the distance (the
+            // alternatives), then ever longer ones (the chain again), more than `CANDIDATES` in all.
+            let mut data = Vec::new();
+            for _ in 0..2 + r.below(3) {
+                let s: Vec<u8> = (0..200).map(|_| r.next() as u8).collect();
+                let (far, mid) = (10 + r.below(20), 10 + r.below(20));
+                let cuts = (0..far)
+                    .map(|k| 60 + 3 * (far - 1 - k))
+                    .chain((0..mid).map(|k| 5 + mid - 1 - k))
+                    .chain((0..3).map(|k| 50 + 3 * (2 - k)));
+                for at in cuts {
+                    let mut c = s.clone();
+                    c[at] ^= 1 + r.below(255) as u8;
+                    data.extend_from_slice(&c);
+                }
+                data.extend_from_slice(&s);
+                (0..r.below(3000)).for_each(|_| data.push(r.next() as u8));
+            }
+            let len = data.len();
+            let (from, to) = (r.below(len / 4), len);
+            let m = find_matches(&data, from, to, 8192, true);
+            let all = find_matches_keeping_all(&data, from, to, 8192);
+            let c = if case % 3 == 0 { Costs::fixed() } else { costs(&mut r) };
+            let (a, b) = (from, to);
+            let (cost, choice, want) = reference(&data, a, b, &all, &c, true, MAX_MATCH + 1);
+            // The plain build, then the dispatching entry (the AVX2 build where the processor has it).
+            for dispatched in [false, true] {
+                let mut got = Vec::new();
+                if dispatched {
+                    optimal_nice(&data, a, b, &m, &c, true, MAX_MATCH + 1, &mut sc, &mut got);
+                } else {
+                    parse(&data, a, b, &m, &c, true, MAX_MATCH + 1, &mut sc, &mut got);
+                }
+                assert_eq!(got, want, "case {case}, dispatched {dispatched}");
+                for k in 0..=b - a {
+                    let (gc, gh) = (sc.done.costs[k / 8].0[k % 8], sc.done.choices[k / 8].0[k % 8]);
+                    assert_eq!(gc.to_bits(), cost[k].to_bits(), "cost at {k}, case {case}, dispatched {dispatched}");
+                    assert_eq!(gh, choice[k], "choice at {k}, case {case}, dispatched {dispatched}");
+                }
             }
         }
     }
