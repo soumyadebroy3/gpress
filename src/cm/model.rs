@@ -233,7 +233,7 @@ fn num_class(v: i32) -> u32 {
 }
 
 pub struct Model {
-    pub hist: Vec<u8>,
+    hist: Vec<u8>,
     /// For residual-coded images: the residuals (byte less its prediction) of the last positions before
     /// `rh_end`, in the current segment only (a residual is never read across a segment boundary, nor more than
     /// a row and a pixel back). A ring: position `p` is at `(p - seg_start) & rmask`, and `rmask + 1` is a power
@@ -1420,6 +1420,17 @@ impl Model {
         for i in 0..NCTX {
             self.hashes[i] = k ^ hs[i];
         }
+    }
+
+    /// The number of bytes coded so far: the history's length.
+    pub fn hist_len(&self) -> usize {
+        self.hist.len()
+    }
+
+    /// `n` bytes of the history from `at`, or None when it doesn't hold them. Every byte coded is added to the
+    /// history once, in order, and nothing else changes it, so this reads back exactly what was coded.
+    pub fn history(&self, at: usize, n: usize) -> Option<&[u8]> {
+        self.hist.get(at..at.checked_add(n)?)
     }
 }
 

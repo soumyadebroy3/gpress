@@ -143,12 +143,16 @@ with `Options::check` saying whether the engine accepts a set; nothing is read f
 
 Memory while expanding follows these three: at most about `max_len` for the output, `max_len + max_decoded`
 for the model's history (one byte per byte it codes, and while an image part is coded a ring of its residuals:
-about a row and a pixel, never more than the part), twice the largest part (a decoded stream, at most
-`max_decoded` and 2 GiB) while it is decoded and its zlib stream re-created, and the model's tables (up to
-164 MiB for files over 4 MiB). Compress holds the input, the same history and the same per-part buffers; the
-restore check every pack ends with is an expand as above, after the encoder with one thread and beside it with
-two; the planner keeps no decoded data (a stream is inflated again when its turn comes), only each stream's
-zlib settings and Lepton data. The security suite runs every pack and unpack with `max_decoded` at 64 MiB and
+about a row and a pixel, never more than the part), and the model's tables (up to 164 MiB for files over
+4 MiB). A decoded stream is not kept beside the history: its zlib stream is made again from there, with one
+copy of the part only for PNG or TIFF predictor rows or a JPEG, and up to three while a Type 1 font is closed
+again (each at most `max_decoded` and 2 GiB). Compress holds the input and its archive. Its encoder holds the
+same history and tables and no copy of the file: a stream is inflated again as it is coded, a Deflate block at
+a time (a Type 1 font whole; for PNG predictor rows also their row types, a byte a row, and about 64 KiB of
+rows, or one row if longer). The planner keeps no decoded Flate data, only each stream's zlib settings and
+Lepton data, a fax stream's image and an encrypted stream's decrypted bytes. Every pack ends with a restore
+check, which is an expand as above: after the encoder with one thread, beside it with two (two histories and
+two sets of tables at once). The security suite runs every pack and unpack with `max_decoded` at 64 MiB and
 holds them to 512 MiB.
 
 Three kinds of constants stay in the code: the ones that define the file formats (a decoder must agree with
