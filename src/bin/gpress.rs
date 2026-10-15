@@ -17,8 +17,10 @@
 //! Measuring tools (the engine's own modules, for the benchmarks): deflate, inflate, batch, pdf-batch,
 //! repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info, fax-decode, fax-encode, fax-scan,
 //! fax-model, jbig2-encode, claim-archive (the security suite's crafted archive). `--iter`, `--exact`, `--chain`, `--nice`, `--nosplit`, `--noalt`, `--nomulti`
-//! and `--nopolish` fine-tune the Flate settings of the deflate tools below the effort; `--fast N` (1 to
-//! `flate::fast::LEVELS`) uses the fast encoder at level N instead.
+//! and `--nopolish` fine-tune the strong encoder's settings for the effort in the deflate tools; below effort
+//! 20, where the fast encoder runs, any of them selects the strong encoder (its quick settings, fine-tuned).
+//! `--fast N` (1 to `flate::fast::LEVELS`) uses the fast encoder at level N instead, and `--fast 0` the
+//! strong encoder.
 //!
 //! Exit status: 0 done; a library error exits with its code (1 input too large, 2 not an archive or damaged,
 //! 3 archive version, 4 internal error (a caught panic: a bug), 5 invalid options, 6 time budget, 7 declared
@@ -73,6 +75,9 @@ const WITH_VALUE: &[&str] = &[
     "--objects-per-stream",
     "--time-budget",
 ];
+
+/// The flags that fine-tune the strong encoder's settings in the deflate tools.
+const TUNING: [&str; 8] = ["--iter", "--exact", "--chain", "--nice", "--nosplit", "--noalt", "--nomulti", "--nopolish"];
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -157,6 +162,10 @@ fn main() {
     }
     if flag("--nopolish") {
         opt.polish = false;
+    }
+    // Those flags tune the strong encoder: below effort 20 they select it.
+    if TUNING.iter().any(|f| flag(f)) {
+        opt.fast = 0;
     }
     if let Some(v) = num("--fast") {
         opt.fast = v.min(255) as u8;
