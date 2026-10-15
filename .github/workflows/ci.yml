@@ -48,6 +48,12 @@ jobs:
   wasm:
     name: WebAssembly package
     runs-on: ubuntu-latest
+    env:
+      # The start-up test's target is a median of 50 ms at effort 0 (bench/RESULTS.md, Start-up). A runner with
+      # two cores, as GitHub gives a private repository, takes 70 to 95 ms with today's module; the limit here
+      # is well above that, so a slow runner passes, and a step back to twice as slow fails. The test prints
+      # the median and its distance to 50 ms either way.
+      GPRESS_STARTUP_LIMIT_MS: "150"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
