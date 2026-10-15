@@ -365,7 +365,9 @@ NEW has not measured every file of BASE (an unfinished run compares only the fil
 ## Lightweight
 
 The download and the start-up are part of the time a person waits (`docs/tasks/lightweight.md`). Measured on
-a 4-core cloud machine in October 2026 with Rust 1.97.0, binaryen's wasm-opt 108 and Node 22.22.
+a 4-core cloud machine in October 2026 with binaryen's wasm-opt 108 and Node 22.22: the sizes with Rust 1.99.1,
+the compiler CI uses, and the choice of the module's build and its start-up with Rust 1.97.0, on the code of
+066b65e and 4a60e08.
 
 ### Sizes
 
@@ -373,30 +375,31 @@ a 4-core cloud machine in October 2026 with Rust 1.97.0, binaryen's wasm-opt 108
 `bench/sizes.json`: the native tool and the C library with the release profile, the WebAssembly module the
 way the npm package builds it (cargo's `wasm` profile, opt-level "s", then `wasm-opt -O1`; see below). Gzip is
 level 9. A feature set is the cargo features a build has: "default" is a plain build, today every part of the
-engine; "existing" adds Lepton. "Before" is commit 066b65e, where the module was built with the release
-profile (opt-level 3, symbol names kept, no wasm-opt). The release profile is unchanged, so the native builds
-are the same as before.
+engine; "existing" adds Lepton. The sizes are of main at 1a8aee1 with this work; "Before" is the same code
+with the module built the way the package built it until now, with the release profile (opt-level 3, symbol
+names kept, no wasm-opt). The release profile is unchanged, so the native builds are the same as before.
 
 | Build | Feature set | Raw bytes | Gzip bytes | Before: raw, gzip | Gzip change |
 | --- | --- | ---: | ---: | ---: | ---: |
-| WebAssembly module | default (stands in for "web") | 600,115 | 228,746 | 841,082, 293,702 | -22.1% |
-| WebAssembly module | existing | 929,946 | 335,916 | 1,341,753, 441,872 | -24.0% |
-| Native tool `gpress` | default | 1,673,032 | 758,174 | the same | 0 |
-| Native tool `gpress` | existing | 2,306,528 | 1,001,956 | the same | 0 |
-| C library, shared (`libgpress_c.so`) | default | 1,484,760 | 674,616 | the same | 0 |
-| C library, shared (`libgpress_c.so`) | existing | 2,117,816 | 917,393 | the same | 0 |
-| C library, static (`libgpress_c.a`) | default | 10,079,928 | 2,153,351 | the same | 0 |
-| C library, static (`libgpress_c.a`) | existing | 11,184,280 | 2,429,958 | the same | 0 |
+| WebAssembly module | default (stands in for "web") | 614,252 | 233,730 | 905,778, 312,697 | -25.3% |
+| WebAssembly module | existing | 945,114 | 341,277 | 1,405,707, 459,129 | -25.7% |
+| Native tool `gpress` | default | 1,700,424 | 770,376 | the same | 0 |
+| Native tool `gpress` | existing | 2,327,568 | 1,012,831 | the same | 0 |
+| C library, shared (`libgpress_c.so`) | default | 1,512,864 | 685,128 | the same | 0 |
+| C library, shared (`libgpress_c.so`) | existing | 2,139,736 | 926,018 | the same | 0 |
+| C library, static (`libgpress_c.a`) | default | 10,178,304 | 2,189,875 | the same | 0 |
+| C library, static (`libgpress_c.a`) | existing | 11,275,648 | 2,464,402 | the same | 0 |
 
 The target for the web module is 400 KB gzip (400,000 bytes). The "web" feature set does not exist yet, so the
-module with every part of the engine stands in for it: 228,746 bytes, 171,254 bytes (43%) under the target.
-Lepton adds 107,170 bytes of gzip to the module. The static library carries Rust's standard library whole, so
-it is far larger than what a program linked with it gets.
+module with every part of the engine stands in for it: 233,730 bytes, 166,270 bytes (42%) under the target.
+Lepton adds 107,547 bytes of gzip to the module. The static library carries Rust's standard library whole, so
+it is far larger than what a program linked with it gets. Main's Flate lists (A5, A6, B3, at 1a8aee1) made
+the module 16,191 bytes larger raw and 4,472 bytes larger gzip (598,061 and 229,258 bytes at 4a60e08).
 
 The budget: CI's WebAssembly job runs `python3 -I bench/sizes.py check`, which builds the module as the
-package does and fails when its gzip size is more than 5% over the recorded one (240,183 bytes today) or over
+package does and fails when its gzip size is more than 5% over the recorded one (245,416 bytes today) or over
 400,000 bytes. A growth that is wanted is recorded with `measure`. When the module is more than 5% under the
-record (under 217,308 bytes today), the check passes with a warning to record the new size, since the 5% is
+record (under 222,043 bytes today), the check passes with a warning to record the new size, since the 5% is
 counted from the record and would otherwise allow more. When the web feature set exists,
 `WEB = 'web'` in `bench/sizes.py` and `measure --features web` move the check to it, and its rows join this
 table.
@@ -504,13 +507,14 @@ instead of two. Session 1's branch gains little there (two sessions of 11 proces
 | today (3) | **71.9**, **81.4** | 24.2, 26.1 | **104.7**, **104.9** | 51.7, 52.9 |
 | S1 (3) | **70.9**, **69.9** | 18.5, 18.2 | **88.9**, **92.0** | 33.0, 31.3 |
 
-`npm test` as CI runs it (two cores, `GPRESS_STARTUP_LIMIT_MS=150`) passed 3 runs of 3 with today's module:
-start-up medians 73.7, 81.5 and 93.6 ms at effort 0 (limit 150) and 98.1 to 115.4 ms at the default effort
-(limit 300). Session 1's module at the plain 50 ms limit failed 3 runs of 3 there (68.0 to 76.7 ms). Node runs
-one test file fewer than the cores at a time, so on two cores one at a time; on three cores the start-up test
-shares them with the round-trip tests, and it took 70 to 87 ms at effort 0 in four runs with today's module,
-against 59 to 70 ms with `--test-concurrency=1`. For clean numbers on a machine with three or four cores, run
-`node --test --test-concurrency=1 test/*.test.mjs`.
+`npm test` runs the test files one at a time (`--test-concurrency=1`): on three cores the start-up test
+otherwise shares them with the round-trip tests, and it took 70 to 87 ms at effort 0 in four runs with today's
+module, against 59 to 70 ms alone. Run on two cores here (`taskset -c 0,2`) with today's module it passed 3
+runs of 3 at the 150 ms limit, with medians of 73.7, 81.5 and 93.6 ms at effort 0 and 98.1 to 115.4 ms at the
+default effort; session 1's module failed 3 runs of 3 there at a 50 ms limit (68.0 to 76.7 ms). GitHub's
+two-core runner is slower: the first CI run of the test, with main's Flate lists merged (below), took 135,
+152, 141, 133, 114, 100 and 97 ms at effort 0 (median 132.8) and a median of 147.2 ms at the default effort.
+Its first processes were the slowest, so the test now starts one process first that it does not count.
 
 On one core (`taskset -c 0 node bench/wasm_startup.mjs --runs 11`) the first call is much slower, because V8's
 optimizing compiler then shares the core with the work; `--liftoff-only` turns that compiler off:
@@ -536,6 +540,12 @@ The package's build, opt-level s with `wasm-opt -O1` (600,066 bytes), measured l
 the same rounds on one idle core (`taskset -c 3 node bench/wasm_startup.mjs --runs 11 --quiet 3`, built from
 main 4a60e08): 89.0 ms at effort 0 (second call 30.5) and 117.6 ms at effort 100 (68.6), against 137.3 and
 154.4 ms for today's module (27.3 and 55.0). It starts 35% sooner at effort 0 on one core, like s alone.
+
+Main's Flate lists (A5, A6 and B3 of the plan, merged at 1a8aee1) slow the module down. Built the package's
+way from this branch before and after merging them (Rust 1.97.0, outputs byte-identical), start-up on one idle
+core went from 85.7 to 110.5 ms at effort 0 and from 125.7 to 158.0 ms at effort 100 (second calls 31.1 to
+34.7 and 64.6 to 81.7 ms), and `bench/wasm_speed.mjs` on the 30 files of `sample120-size30` at effort 0 from
+38.4 and 37.8 s of CPU to 41.5 and 41.2 s (+9%). The other tables here were measured before that merge.
 
 Where the time goes, today's module at effort 0:
 
@@ -599,8 +609,8 @@ its medians were 46.7 to 47.9 ms in three sessions here (42.5 in an earlier one)
 of 6 (medians 51.2 and 55.0 ms). Without that branch it is 5 to 10 ms short (54.5 to 59.8 ms). On two cores,
 as CI's runner has, neither meets it: 72 to 81 ms today and about 70 with session 1's branch; on one core 119
 to 131 ms today and 76 to 80 with session 1's branch at opt-level s. So in CI's Node test the target is not
-met, with or without session 1's branch: the test prints the distance, and CI holds the median only to 150 ms,
-to catch a large step back. Real one-page files that embed a font program are further from it: 46 to 120 ms
+met, with or without session 1's branch (GitHub's two-core runner took a median of 133 ms): the test prints
+the distance, and fails only above 150 ms, to catch a large step back. Real one-page files that embed a font program are further from it: 46 to 120 ms
 with session 1's branch on three idle cores. The default effort (100) does not reach 50 ms: 85.5 ms today and
 68.7 with session 1's branch on idle cores, when the native tool itself takes about 49 ms on this file. The
 fast tier (`fast-tier.md`, F1), which replaces the optimal parse and the block search that are most of the
