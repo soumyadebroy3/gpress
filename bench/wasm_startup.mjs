@@ -11,6 +11,7 @@
 // Node flags given with --flags go to every sample process (for example --cpu-prof to see where the time goes).
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { onePagePdf } from "../crates/gpress-wasm/js/test/onepage.mjs";
 
 function optimize(ex, input, effort) {
@@ -69,7 +70,7 @@ if (args[0] === "--sample") {
     console.error("usage: node bench/wasm_startup.mjs [--runs N] [--efforts 0,100] [--flags \"...\"] LABEL=module.wasm ...");
     process.exit(2);
   }
-  const self = new URL(import.meta.url).pathname;
+  const self = fileURLToPath(import.meta.url);
   const rows = new Map();
   for (let r = 0; r < runs; r++) {
     for (const [label, path] of modules) {

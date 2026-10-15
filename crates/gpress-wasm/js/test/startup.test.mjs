@@ -9,6 +9,7 @@
 // catches a large step back.
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { onePagePdf } from "./onepage.mjs";
 
 const RUNS = 7;
@@ -44,7 +45,7 @@ if (process.argv[2] === "--sample") {
   const { test } = await import("node:test");
   const assert = (await import("node:assert/strict")).default;
   const { Gpress } = await import("../dist/gpress.js");
-  const self = new URL(import.meta.url).pathname;
+  const self = fileURLToPath(import.meta.url);
 
   test("one compiled module makes independent instances", async () => {
     const module = await Gpress.compile(wasm);
