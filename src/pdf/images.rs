@@ -71,8 +71,11 @@ pub fn geometry(d: &Dict, resolve: &dyn Fn(&Obj) -> Option<Obj>) -> Option<Geome
     if !(1..=MAX_COLUMNS).contains(&w) || ![1, 2, 4, 8, 16].contains(&bpc) || colors == 0 || colors > 32 {
         return None;
     }
-    // At most 2^24 x 32 x 16 bits: fits a usize on 64-bit targets; checked for the others.
-    colors.checked_mul(bpc as usize)?.checked_mul(w as usize)?;
+    // A row of at most u32::MAX bits (512 MiB) on every target, so 32-bit and 64-bit builds agree on which
+    // images they work on (the limits above allow 2^24 x 32 x 16 bits, which only a 64-bit usize holds).
+    if colors as u64 * bpc as u64 * w as u64 > u32::MAX as u64 {
+        return None;
+    }
     Some(Geometry { colors, bpc: bpc as usize, columns: w as usize })
 }
 
@@ -266,6 +269,29 @@ mod tests {
             let f = png_filter(&px, row, bpp, how);
             assert_eq!(png_unfilter(&f, row, bpp).unwrap(), px);
         }
+    }
+
+    #[test]
+    fn geometry_is_the_same_on_every_target() {
+        let resolve = |o: &Obj| Some(o.clone());
+        let image = |w: i64, bpc: i64, cs: Obj| {
+            let mut d = Dict::default();
+            d.set(b"Subtype", Obj::Name(b"Image".to_vec()));
+            d.set(b"Width", Obj::Int(w));
+            d.set(b"BitsPerComponent", Obj::Int(bpc));
+            d.set(b"ColorSpace", cs);
+            d
+        };
+        let names = |n: usize| Obj::Array((0..n).map(|k| Obj::Name(format!("C{k}").into_bytes())).collect());
+        let devicen =
+            |n: usize| Obj::Array(vec![Obj::Name(b"DeviceN".to_vec()), names(n), Obj::Name(b"DeviceRGB".to_vec())]);
+        // 2^24 x 32 x 16 bits per row: refused everywhere (a 32-bit usize can't hold the bit count).
+        assert_eq!(geometry(&image(1 << 24, 16, devicen(32)), &resolve), None);
+        // Just over and just under u32::MAX bits.
+        assert_eq!(geometry(&image(1 << 24, 16, devicen(16)), &resolve), None);
+        let g = geometry(&image((1 << 24) - 1, 16, devicen(16)), &resolve).unwrap();
+        assert_eq!(g.row(), (((1usize << 24) - 1) * 16 * 16).div_ceil(8));
+        assert!(geometry(&image(4000, 8, Obj::Name(b"DeviceRGB".to_vec())), &resolve).is_some());
     }
 
     #[test]
