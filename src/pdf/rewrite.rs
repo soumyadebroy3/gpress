@@ -24,8 +24,9 @@ pub struct Options {
     /// Largest decoded stream we re-encode.
     pub max_stream: usize,
     /// How hard to try, 0 to 100. Below 20 (`FAST_BELOW`) the fast encoder (`flate::fast`): effort 0 is the
-    /// fast path, with the fast encoder's near-optimal top level for page content, fonts and the rest, a lazy
-    /// level for images (`IMAGE_LEVEL`), image predictors chosen from an estimate and only the cheap steps.
+    /// fast path, with the fast encoder's near-optimal top level for page content, fonts and the rest (a faster
+    /// near-optimal level for one that decodes to more than 4 MiB, `BIG_STREAM`), a lazy level for images
+    /// (`IMAGE_LEVEL`), image predictors chosen from an estimate and only the cheap steps.
     /// 1 to 19 bridge to the strong encoder: images get closer parses and from 10 (`STRONG_FROM`) the streams
     /// that take the most room get the strong encoder's quick settings within a budget that doubles every
     /// point, except a Flate stream that effort 0's settings can't shrink, which is kept as it is. From
@@ -749,6 +750,18 @@ fn bridge_budget(effort: u8, input_len: usize) -> f64 {
 const IMAGE_LEVEL: [u8; FAST_BELOW as usize] =
     [7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12];
 
+/// A stream other than an image that decodes to more than this gets at most `big_level` below `FAST_BELOW`.
+/// The top level parses about 6 MB a second on one thread, so this much takes about 0.65 s: past it, one
+/// stream would hold the whole file up (a 10 MB CJK font took 1.5 s of a 5.5 MB file's 1.8 s).
+const BIG_STREAM: usize = 4 << 20;
+
+/// The fast encoder's level for a stream over `BIG_STREAM` below `FAST_BELOW`: level 9 (one pass of the
+/// near-optimal parse, 40% faster than the top level, 0.2% larger on fonts and 1.4% on page content) up to
+/// effort 5, then as images, so the top level again from 10.
+fn big_level(effort: u8) -> u8 {
+    image_level(effort).max(9)
+}
+
 /// Bytes the general filters of a stream decode to (the stored size when they don't decode).
 fn decoded_len(s: &Stream, limit: usize) -> usize {
     let Some(stages) = chain(&s.dict) else { return s.data.len() };
@@ -808,7 +821,7 @@ fn effort_plan(
     let mut floor = quick_budget(opt.effort, input_len);
     let mut out = vec![None; unique.len()];
     // The fast path: every stream gets the effort's own settings while its decoded bytes fit, images a faster
-    // level of the fast encoder. From `STRONG_FROM` on, the streams that take the most room get the strong
+    // level of the fast encoder, and so does a stream over `BIG_STREAM` up to effort 9. From `STRONG_FROM` on, the streams that take the most room get the strong
     // encoder's quick settings instead (what effort 0 was before the fast path) while their decoded bytes fit
     // in `bridge_budget`, so the time and the size go on smoothly to 20. A stream whose filters don't decode
     // within `max_stream` is kept as it is (`reencode` would find the same).
@@ -844,6 +857,8 @@ fn effort_plan(
             let mut o = opt.clone();
             if s.dict.name(b"Subtype") == Some(b"Image") {
                 o.flate.fast = image_level(opt.effort);
+            } else if n > BIG_STREAM && o.flate.fast > big_level(opt.effort) {
+                o.flate.fast = big_level(opt.effort);
             }
             out[u] = Some(o);
         }
@@ -1475,6 +1490,23 @@ mod effort_tests {
         assert_eq!(levels(19, 10_000), vec![0, 0]);
         assert!(bridge_budget(9, 1000) == 0.0 && bridge_budget(20, 1000) == 0.0);
         assert!((STRONG_FROM..19).all(|e| bridge_budget(e + 1, 1000) == 2.0 * bridge_budget(e, 1000)));
+        // A page that decodes to more than BIG_STREAM gets one pass of the near-optimal parse at effort 0, then
+        // closer parses as images do, and the top level from STRONG_FROM until the bridge takes it (at 17 in a
+        // 1 MB file).
+        let mut d = Dict::default();
+        d.set(b"Filter", Obj::Name(b"FlateDecode".to_vec()));
+        let big_text: Vec<u8> = text.iter().copied().cycle().take(BIG_STREAM + 1).collect();
+        let fast1 = flate::Options { fast: 1, ..flate::Options::quick() };
+        let big = Stream { dict: d, data: flate::deflate_zlib(&big_text, &fast1) };
+        let streams: Vec<(u32, &Stream)> = vec![(1, &big)];
+        let big_levels: Vec<u8> = (0..FAST_BELOW)
+            .map(|e| effort_plan(&streams, &[0], &Options::effort(e), 1_000_000, None)[0].as_ref().unwrap().flate.fast)
+            .collect();
+        assert_eq!(big_levels[0], 9);
+        assert!((0..STRONG_FROM).all(|e| big_levels[e as usize] == big_level(e)), "{big_levels:?}");
+        assert!(big_levels.windows(2).take(16).all(|w| w[0] <= w[1]), "{big_levels:?}");
+        assert_eq!(big_levels[STRONG_FROM as usize], flate::fast::LEVELS);
+        assert_eq!(big_levels[16..], [flate::fast::LEVELS, 0, 0, 0]);
     }
 
     #[test]
