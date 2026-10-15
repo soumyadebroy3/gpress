@@ -408,8 +408,9 @@ the three. Effort 0 on all 120 files of the sample, effort 50 on the 30 files of
 is the `wasm` profile at opt-level 3 (symbols stripped). The effort-0 cells of the -O1 rows come from a later
 batch that measured opt-level 3 and "s" again beside them (245.6 s and 257.6 s, +4.9%), and their "vs 3" is
 against that batch's 245.6 s; -O1 of "z" was not run at effort 0. "First call": from the module's bytes to the
-first optimized PDF (one page, 3.8 KB, effort 0) in a fresh Node process, median of 21 processes, on two cores
-(`bench/wasm_startup.mjs` of the start-up work).
+first optimized PDF (one page, 3.8 KB, effort 0) in a fresh Node process, median of 21 processes, on two cores,
+measured with `bench/wasm_startup.mjs`. That script comes with the start-up work (item L4 of
+`docs/tasks/lightweight.md`, branch `wip/l4-startup` until it merges), not with this section's commits.
 
 | opt-level | wasm-opt | Raw bytes | Gzip bytes | Effort 0, CPU s | vs 3 | Effort 50, CPU s | vs 3 | First call, ms |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
