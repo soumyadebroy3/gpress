@@ -460,8 +460,9 @@ same bytes as the native tool. CI runs the same measurement in `crates/gpress-wa
 limit is 50 ms at effort 0 and twice that at the default effort; `GPRESS_STARTUP_LIMIT_MS` raises it, and CI
 sets it to 150 ms (300 at the default effort) because its runner has two cores (below).
 
-The module is today's: every part built in (the web feature set does not exist yet), built with the release
-profile (opt-level 3). "s" and "z" are the same code at those opt-levels, "+Oz" after `wasm-opt -Oz` (binaryen
+"today (3)" is the module as main built it before this change: every part built in (the web feature set does not
+exist yet), the release profile (opt-level 3). The package now builds opt-level s with `wasm-opt -O1` (Sizes,
+above); its numbers on one core are below the one-core table. "s" and "z" are the same code at those opt-levels, "+Oz" after `wasm-opt -Oz` (binaryen
 108), and "S1" is session 1's unmerged branch (A1, A3 and A4 of the plan, commit 5e37ac6) built the same way.
 Medians in ms of 11 processes on three idle cores of the 4-core machine (the fourth was kept for the baseline
 benchmark), from `taskset -c 0-2 node bench/wasm_startup.mjs --runs 11 --quiet 0-2 LABEL=module.wasm ...`.
@@ -530,6 +531,11 @@ optimizing compiler then shares the core with the work; `--liftoff-only` turns t
 
 One core gives the widest spread: a second session (`--quiet 0`) gave 131.1 ms at effort 0 for today's module,
 86.0 for s, 118.9 for S1 (3) and 80.2 for S1 s.
+
+The package's build, opt-level s with `wasm-opt -O1` (600,066 bytes), measured later beside today's module in
+the same rounds on one idle core (`taskset -c 3 node bench/wasm_startup.mjs --runs 11 --quiet 3`, built from
+main 4a60e08): 89.0 ms at effort 0 (second call 30.5) and 117.6 ms at effort 100 (68.6), against 137.3 and
+154.4 ms for today's module (27.3 and 55.0). It starts 35% sooner at effort 0 on one core, like s alone.
 
 Where the time goes, today's module at effort 0:
 
