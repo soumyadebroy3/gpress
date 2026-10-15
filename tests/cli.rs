@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Text with numbers and repeats, so that the levels give different outputs.
-fn input() -> Vec<u8> {
+fn input(len: usize) -> Vec<u8> {
     let mut s = 7u32;
     let mut out = Vec::new();
-    while out.len() < 300_000 {
+    while out.len() < len {
         s = s.wrapping_mul(1_103_515_245).wrapping_add(12_345);
         out.extend_from_slice(
             format!("{} {} m {} {} l S\n", s % 600, s / 7 % 800, s / 11 % 600, s / 13 % 800).as_bytes(),
@@ -41,7 +41,7 @@ fn scratch() -> PathBuf {
 #[test]
 fn the_flate_flags_mean_what_the_library_means() {
     let dir = scratch();
-    let data = input();
+    let data = input(300_000);
     let lib = |o: Options| flate::deflate_zlib(&data, &o);
     // --fast N: the fast encoder at level N, whatever the effort.
     for level in [1u8, 7, 12] {
@@ -63,10 +63,13 @@ fn the_flate_flags_mean_what_the_library_means() {
             == lib(Options { fast: 5, ..tuned })
     );
     assert!(deflate_cli(&dir, &data, &["--effort", "0", "--fast", "0", "--threads", "1"]) == lib(Options::quick()));
-    // The thread count never changes the output.
-    let one = deflate_cli(&dir, &data, &["--effort", "0", "--threads", "1"]);
-    for t in ["0", "2", "4"] {
-        assert!(deflate_cli(&dir, &data, &["--effort", "0", "--threads", t]) == one, "--threads {t}");
+    // The thread count never changes the output: an input of more than two of the fast encoder's 1 MiB
+    // segments, so that threads take part (the deflate tools use a pool from --threads 1 on).
+    let big = input(flate::fast::SEGMENT * 5 / 2);
+    let one = deflate_cli(&dir, &big, &["--effort", "0", "--threads", "1"]);
+    assert!(one == flate::deflate_zlib(&big, &Options::effort(0)));
+    for t in ["2", "3", "4"] {
+        assert!(deflate_cli(&dir, &big, &["--effort", "0", "--threads", t]) == one, "--threads {t}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
