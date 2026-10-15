@@ -107,7 +107,8 @@ need `'wasm-unsafe-eval'` in their Content Security Policy's `script-src`.
 Compiling is most of the cost of a first load. `Gpress.compile(source)` returns the compiled module, and
 `Gpress.load(module)` makes an instance from it without compiling again: compile once, then make one
 instance per worker (a module can be posted to a Web Worker) or a fresh one after a trap. Serve the file as
-`application/wasm` so that it compiles while it downloads.
+`application/wasm`, with no parameters, so that it compiles while it downloads (with any other type it is
+compiled once it has arrived).
 
 ### Command line
 
