@@ -1056,9 +1056,6 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         uses[slot[i]] += 1;
     }
 
-    // The JBIG2 data written for fax images, which their converter has decoded back already (see
-    // `verified_jbig2`).
-    let mut jbig2: HashMap<u32, Vec<u8>> = HashMap::new();
     // Every stream gets a direct /Length.
     let mut direct: BTreeMap<u32, (u16, Vec<u8>)> = BTreeMap::new(); // serialised indirect objects
     let mut packable: Vec<(u32, &Obj)> = Vec::new();
@@ -1076,9 +1073,6 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
                         stats.streams_reencoded += 1;
                         stats.jpegs_retabled += change.jpeg_retabled as usize;
                         stats.fax_to_jbig2 += change.fax_to_jbig2 as usize;
-                        if change.fax_to_jbig2 {
-                            jbig2.insert(n, z.clone());
-                        }
                         (d, z)
                     }
                     None => {
@@ -1262,7 +1256,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     out.extend_from_slice(format!("startxref\n{xref_off}\n%%EOF\n").as_bytes());
 
     // Read our own output back and compare everything reachable.
-    self_check(&objs, &out, &doc.trailer, crypt, pool, &jbig2)?;
+    self_check(&objs, &out, &doc.trailer, crypt, pool)?;
     // Anything written after the deadline passed (object streams, say) went out stored and is not an
     // output of these settings: a rewrite either finishes in time or gives nothing.
     if opt.deadline.passed() {
@@ -1323,22 +1317,12 @@ fn same_except_encoding(a: &Dict, b: &Dict) -> bool {
     strip(a) == strip(b)
 }
 
-/// A fax image the rewrite wrote as JBIG2 (`jbig2`: the data written for each object number): its converter
-/// decoded these very bytes back to the image's pixels (`fax::pdf::jbig2_candidate`), so the output holding the
-/// same bytes under that one filter needs no second decode (the bytes and the dictionary are still compared).
-fn verified_jbig2(jbig2: &HashMap<u32, Vec<u8>>, n: u32, s: &Stream) -> bool {
-    jbig2.get(&n).is_some_and(|z| *z == s.data)
-        && s.dict.get(b"Filter") == Some(&Obj::Name(b"JBIG2Decode".to_vec()))
-        && !s.dict.has(b"DecodeParms")
-}
-
 fn self_check(
     objs: &BTreeMap<u32, (u16, Obj)>,
     out: &[u8],
     trailer: &Dict,
     crypt: Option<&Crypt>,
     pool: Option<&par::Pool>,
-    jbig2: &HashMap<u32, Vec<u8>>,
 ) -> Result<(), String> {
     let doc2 = xref::open(out).map_err(|e| format!("self-check: output unreadable: {e:?}"))?;
     // It opens the same way: the same encryption dictionary and object, file key and methods. Objects are then
@@ -1389,9 +1373,6 @@ fn self_check(
                     && s1.dict.get(b"Filter") == s2.dict.get(b"Filter")
                     && s1.dict.get(b"DecodeParms") == s2.dict.get(b"DecodeParms")
                 {
-                    return Some(Ok(()));
-                }
-                if verified_jbig2(jbig2, *n, s2) {
                     return Some(Ok(()));
                 }
                 let full = limit == 1 << 30;
@@ -1798,28 +1779,6 @@ mod effort_tests {
     }
 
     #[test]
-    fn only_the_jbig2_bytes_written_are_taken_as_decoded_already() {
-        let z = vec![1u8, 2, 3, 4];
-        let jbig2: HashMap<u32, Vec<u8>> = [(4, z.clone())].into_iter().collect();
-        let mut d = Dict::default();
-        d.set(b"Filter", Obj::Name(b"JBIG2Decode".to_vec()));
-        assert!(verified_jbig2(&jbig2, 4, &Stream { dict: d.clone(), data: z.clone() }));
-        // Another object, other bytes, the filter in an array, decode parameters or another filter: compared
-        // in full.
-        assert!(!verified_jbig2(&jbig2, 5, &Stream { dict: d.clone(), data: z.clone() }));
-        assert!(!verified_jbig2(&jbig2, 4, &Stream { dict: d.clone(), data: vec![1, 2, 3] }));
-        let mut e = d.clone();
-        e.set(b"Filter", Obj::Array(vec![Obj::Name(b"JBIG2Decode".to_vec())]));
-        assert!(!verified_jbig2(&jbig2, 4, &Stream { dict: e, data: z.clone() }));
-        let mut f = d.clone();
-        f.set(b"DecodeParms", Obj::Dict(Dict::default()));
-        assert!(!verified_jbig2(&jbig2, 4, &Stream { dict: f, data: z.clone() }));
-        let mut g = d;
-        g.set(b"Filter", Obj::Name(b"FlateDecode".to_vec()));
-        assert!(!verified_jbig2(&jbig2, 4, &Stream { dict: g, data: z }));
-    }
-
-    #[test]
     fn the_self_check_finds_a_wrong_stream_on_the_pool_and_after_it() {
         // One content stream below the bytes a comparison may take on the pool, one above (compared after the
         // pool, one at a time). Each is checked against the output of a file that differs in one byte of it.
@@ -1842,8 +1801,8 @@ mod effort_tests {
                 let (out_a, out_b) = (optimize(&a, &opt), optimize(&b, &opt));
                 assert!(matches!(out_a.outcome, Outcome::Smaller(_)), "{size}: {:?}", out_a.outcome);
                 let pool = par::Pool::new(threads);
-                assert_eq!(self_check(&objs, &out_a.data, &doc.trailer, None, Some(&pool), &HashMap::new()), Ok(()));
-                let wrong = self_check(&objs, &out_b.data, &doc.trailer, None, Some(&pool), &HashMap::new());
+                assert_eq!(self_check(&objs, &out_a.data, &doc.trailer, None, Some(&pool)), Ok(()));
+                let wrong = self_check(&objs, &out_b.data, &doc.trailer, None, Some(&pool));
                 assert_eq!(
                     wrong,
                     Err("self-check: content of stream 4 differs".to_string()),
