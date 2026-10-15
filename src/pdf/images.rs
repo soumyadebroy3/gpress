@@ -194,6 +194,25 @@ pub fn estimate_choice(px: &[u8], row: usize, bpp: usize, bpc: usize, bands: &[(
     if bpc < 8 || row == 0 {
         return None;
     }
+    let bits = candidate_bits(px, row, bpp, bands);
+    let mut best = (bits[0], None);
+    for (k, how) in [
+        (1, Choice::Fixed(1)),
+        (2, Choice::Fixed(2)),
+        (3, Choice::Fixed(3)),
+        (4, Choice::Fixed(4)),
+        (5, Choice::MinSum),
+    ] {
+        if bits[k] < best.0 {
+            best = (bits[k], Some(how));
+        }
+    }
+    best.1
+}
+
+/// The order-0 cost of the rows in `bands` stored as they are, with PNG types 1 to 4, and with the minimum sum
+/// (type bytes counted), in 1/65536 bits.
+fn candidate_bits(px: &[u8], row: usize, bpp: usize, bands: &[(usize, usize)]) -> [u64; 6] {
     let rows = px.len() / row;
     // Counts for: as they are, PNG types 1 to 4, minimum sum.
     let mut counts = [[0u32; 256]; 6];
@@ -219,20 +238,7 @@ pub fn estimate_choice(px: &[u8], row: usize, bpp: usize, bpc: usize, bands: &[(
             }
         }
     }
-    let mut best = (entropy_bits(&counts[0]), None);
-    for (k, how) in [
-        (1, Choice::Fixed(1)),
-        (2, Choice::Fixed(2)),
-        (3, Choice::Fixed(3)),
-        (4, Choice::Fixed(4)),
-        (5, Choice::MinSum),
-    ] {
-        let bits = entropy_bits(&counts[k]);
-        if bits < best.0 {
-            best = (bits, Some(how));
-        }
-    }
-    best.1
+    counts.map(|c| entropy_bits(&c))
 }
 
 /// Order-0 entropy of byte counts, in 1/65536 bits, with integer arithmetic only (so the choice is the same on
@@ -275,33 +281,51 @@ mod tests {
     }
 
     #[test]
-    fn the_estimate_scores_the_minimum_sum_with_its_own_residuals() {
-        // Every 4 rows: random, the same again, a ramp, the same again. Per row the best type changes (Up on the
-        // copies, Sub on the ramp), so the minimum sum beats every fixed type. Scored with the last type's
-        // residuals (Paeth's) instead of the chosen ones it only ties with Paeth, and Paeth would win.
-        let (row, bpp) = (64usize, 1usize);
-        let mut s = 0x9e37_79b9_7f4a_7c15u64;
-        let mut px = Vec::new();
-        for k in 0..16u8 {
-            let random: Vec<u8> = (0..row)
-                .map(|_| {
-                    s ^= s << 13;
-                    s ^= s >> 7;
-                    s ^= s << 17;
-                    s as u8
-                })
-                .collect();
-            let ramp: Vec<u8> = (0..row).map(|i| k.wrapping_mul(17).wrapping_add(3 * i as u8)).collect();
-            for r in [&random, &random, &ramp, &ramp] {
-                px.extend_from_slice(r);
+    fn each_candidate_is_scored_on_the_bytes_its_filter_writes() {
+        // Every candidate's cost is the order-0 entropy of exactly what png_filter writes for it (type bytes and
+        // residuals) on the rows sampled: the minimum sum too, which was once scored with the last type's
+        // (Paeth's) residuals instead of the chosen ones'.
+        let (row, bpp) = (48usize, 3usize);
+        for seed in [1u64, 2, 3, 0x1234_5678, 0xdead_beef] {
+            let mut s = seed;
+            let mut rnd = move || {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                s as u8
+            };
+            let mut px = Vec::new();
+            for k in 0..24u8 {
+                let random: Vec<u8> = (0..row).map(|_| rnd()).collect();
+                let ramp: Vec<u8> = (0..row).map(|i| k.wrapping_mul(17).wrapping_add(3 * i as u8)).collect();
+                let noisy: Vec<u8> = ramp.iter().map(|&x| x.wrapping_add(rnd() % 3)).collect();
+                for r in [&random, &random, &ramp, &noisy] {
+                    px.extend_from_slice(r);
+                }
+            }
+            let nrows = px.len() / row;
+            for bands in [vec![(0, nrows)], vec![(3, 11), (40, 52), (90, 96)]] {
+                let bits = candidate_bits(&px, row, bpp, &bands);
+                let written = |how: Option<Choice>| -> u64 {
+                    let (data, stride) = match how {
+                        None => (px.clone(), row),
+                        Some(h) => (png_filter(&px, row, bpp, h), row + 1),
+                    };
+                    let mut c = [0u32; 256];
+                    for &(a, b) in &bands {
+                        for &x in &data[a * stride..b * stride] {
+                            c[x as usize] += 1;
+                        }
+                    }
+                    entropy_bits(&c)
+                };
+                assert_eq!(bits[0], written(None), "seed {seed}");
+                for t in 1..5u8 {
+                    assert_eq!(bits[t as usize], written(Some(Choice::Fixed(t))), "seed {seed}, type {t}");
+                }
+                assert_eq!(bits[5], written(Some(Choice::MinSum)), "seed {seed}, minimum sum");
             }
         }
-        let nrows = px.len() / row;
-        assert_eq!(estimate_choice(&px, row, bpp, 8, &[(0, nrows)]), Some(Choice::MinSum));
-        // In a row of 100s under a row of 1s, the minimum sum is Sub (1, 0, 0, ...), not Paeth (157, 0, ...).
-        let two: Vec<u8> = [vec![100u8; 16], vec![1u8; 16]].concat();
-        let mut cand = vec![0u8; 16];
-        assert_eq!(min_sum_type(&two, 16, 1, 1, &mut cand), 1);
     }
 
     #[test]
