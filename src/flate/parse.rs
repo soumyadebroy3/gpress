@@ -2,7 +2,7 @@
 //! over byte positions).
 
 use super::lz::{d_extra, ll_extra, Hist, Sym};
-use super::matcher::Matches;
+use super::matcher::{Matches, Step};
 use super::tables::*;
 
 /// Bits charged for each choice. `len[l]` includes the length symbol and its extra bits; `dist[c]` the
@@ -61,6 +61,32 @@ fn entropy_bits(counts: &[u32]) -> Vec<f32> {
 #[derive(Default)]
 pub struct ParseScratch {
     cells: Vec<Cell>,
+    done: Finished,
+}
+
+/// What the finished groups of a parse leave behind.
+#[derive(Default)]
+struct Finished {
+    choices: Vec<Lanes<u32>>,
+    /// Their costs too, for the tests.
+    #[cfg(test)]
+    costs: Vec<Lanes<f32>>,
+}
+
+impl Finished {
+    fn clear(&mut self, groups: usize) {
+        self.choices.clear();
+        self.choices.reserve(groups);
+        #[cfg(test)]
+        self.costs.clear();
+    }
+
+    #[inline(always)]
+    fn take(&mut self, cells: &[Cell]) {
+        self.choices.extend(cells.iter().map(|c| c.choice));
+        #[cfg(test)]
+        self.costs.extend(cells.iter().map(|c| c.cost));
+    }
 }
 
 /// Eight neighbouring entries (positions `8g..8g + 8`), aligned so that each group is one vector load or store.
@@ -90,6 +116,9 @@ struct Shift {
 
 /// Groups in the window of one position: the position's own group and every length up to `MAX_MATCH` from it.
 const WG: usize = MAX_MATCH.div_ceil(8) + 1;
+
+/// Groups a parse keeps at a time (the window of the current position, and room to slide it).
+const RING: usize = 8 * WG;
 
 /// Cheapest parse of `data[a..b]` (positions inside the range covered by `m`). Matches are cut at `b`.
 /// With `alt`, every length may use any candidate distance long enough (the cheapest); without it, each
@@ -165,13 +194,18 @@ fn parse(
     out: &mut Vec<Sym>,
 ) {
     let n = b - a;
-    // Position `k` is lane `k % 8` of group `k / 8`; the groups go on past `n` so that every position has a
-    // full window. Matches are relaxed whole, even where they run past `n`: nothing reads those entries.
-    let groups = n / 8 + WG + 1;
+    // Position `k` is lane `k % 8` of group `k / 8`. At most `RING` groups are kept, from group `base` on
+    // (group `g` is `cells[g - base]`): a position writes at most `MAX_MATCH` ahead and never behind, so the
+    // groups before its own are finished, and leave their choices in `done`. Matches are relaxed whole, even
+    // where they run past `n`: nothing reads those entries.
+    let fresh = Cell { cost: Lanes([f32::INFINITY; 8]), choice: Lanes([0; 8]) };
+    let ring = (n / 8 + WG + 1).min(RING);
     sc.cells.clear();
-    sc.cells.resize(groups, Cell { cost: Lanes([f32::INFINITY; 8]), choice: Lanes([0; 8]) });
-    let cells = &mut sc.cells[..];
+    sc.cells.resize(ring, fresh);
+    let (cells, done) = (&mut sc.cells[..ring], &mut sc.done);
+    done.clear(n / 8 + 1);
     cells[0].cost.0[0] = 0.0;
+    let mut base = 0;
     let run_cost = c.len[MAX_MATCH] + c.dist[0];
     // The positions with 258 bytes on either side: `MAX_MATCH < k && k + MAX_MATCH <= n`, as one comparison.
     let run_span = n.saturating_sub(2 * MAX_MATCH);
@@ -183,17 +217,25 @@ fn parse(
     let data = &data[a..b];
     let from = a - m.from;
     let same = &m.same[from..][..n];
-    let (chain_start, chains) = m.chain_lists();
-    let chain_start = &chain_start[from..][..=n];
-    let (all_start, all) = (&m.start[from..][..=n], &m.steps[..]);
+    let (start, all) = (&m.start[from..][..=n], &m.steps[..]);
+    // How many of each position's steps are alternatives (after its chain); none without them.
+    let farther: &[u8] = if m.alternatives { &m.farther[from..][..n] } else { &[] };
     // The literal step from the position before into this one, relaxed here rather than there: that position
     // was the last to relax this one, so this is the same as relaxing it there. Infinity when there is none.
     let mut lit = f32::INFINITY;
     let mut k = 0;
     while k < n {
         let (w, o) = (k / 8, k % 8);
+        let mut i = w - base;
+        if i > ring - WG {
+            // Slide the groups up to this one (a step moves at most `MAX_MATCH`, so it is still kept).
+            done.take(&cells[..i]);
+            cells.copy_within(i.., 0);
+            cells[ring - i..].fill(fresh);
+            (base, i) = (w, 0);
+        }
         // Length `l` of this position is lane `(o + l) % 8` of group `(o + l) / 8` in these windows.
-        let win: &mut [Cell; WG] = (&mut cells[w..w + WG]).try_into().unwrap();
+        let win: &mut [Cell; WG] = (&mut cells[i..i + WG]).try_into().unwrap();
         let mut c0 = win[0].cost.0[o];
         if lit < c0 {
             c0 = lit;
@@ -207,19 +249,13 @@ fn parse(
             continue;
         }
         // Deep inside a long run of one byte (more than 2 x 258 left, and 258 back still inside it), the only
-        // sensible step is a 258-byte match at distance 1; skip the full pricing there.
-        if same[k] as usize > 2 * MAX_MATCH
-            && k.wrapping_sub(MAX_MATCH + 1) < run_span
-            && same[k - MAX_MATCH] as usize > MAX_MATCH
-        {
+        // sensible step is a 258-byte match at distance 1; skip the full pricing there. (`same` counts the
+        // lengths of `RUNS` a run is longer than: 258, 258 + 7, 2 x 258, 2 x 258 + 7.)
+        if same[k] >= 3 && k.wrapping_sub(MAX_MATCH + 1) < run_span && same[k - MAX_MATCH] >= 1 {
             // At the start of a group with all eight positions that deep in the run (each run is one byte
             // repeated, so 7 more of it covers the next 7 positions), the whole group at once: each position
             // only writes 258 ahead, where none of the others reads.
-            if o == 0
-                && same[k] as usize > 2 * MAX_MATCH + 7
-                && k + MAX_MATCH + 7 <= n
-                && same[k - MAX_MATCH] as usize > MAX_MATCH + 7
-            {
+            if o == 0 && same[k] >= 4 && k + MAX_MATCH + 7 <= n && same[k - MAX_MATCH] >= 2 {
                 let c0s = win[0].cost.0;
                 for (i, c0) in c0s.into_iter().enumerate() {
                     let v = c0 + run_cost;
@@ -242,9 +278,11 @@ fn parse(
             continue;
         }
         lit = c0 + c.lit[data[k] as usize];
-        // Steps longer than every closer one (the rest only matter with `alt`).
-        let chain = &chains[chain_start[k] as usize..chain_start[k + 1] as usize];
-        let Some(&(ml, _)) = chain.last() else {
+        // Every step of this position: the chain (steps longer than every closer one), then with alternatives
+        // the farther ones, which only matter with `alt`.
+        let steps = &all[start[k] as usize..start[k + 1] as usize];
+        let (chain, far) = steps.split_at(steps.len().saturating_sub(farther.get(k).map_or(0, |&f| f as usize)));
+        let Some((ml, _)) = chain.last().map(|s| s.get()) else {
             k += 1;
             continue;
         };
@@ -259,7 +297,7 @@ fn parse(
             lit = f32::INFINITY;
             let longest = (ml as usize).min(n - k);
             // The smallest distance reaching that length.
-            let d = chain.iter().find(|s| s.0 as usize >= longest).map(|s| s.1).unwrap();
+            let d = chain.iter().map(|s| s.get()).find(|s| s.0 as usize >= longest).map(|s| s.1).unwrap();
             let v = c0 + price[dist_slot(d)] + c.len[longest];
             let (g, j) = ((o + longest) / 8, (o + longest) % 8);
             if v < win[g].cost.0[j] {
@@ -273,23 +311,65 @@ fn parse(
         let shift = &shifts[o];
         if !alt {
             // The smallest-distance chain: steps whose length beats every earlier (closer) one.
-            let steps = chain.iter().map(|&(ml, d)| (ml as usize, c0 + price[dist_slot(d)], (d as u32) << 16));
+            let steps = chain.iter().map(|s| {
+                let (ml, d) = s.get();
+                (ml as usize, c0 + price[dist_slot(d)], (d as u32) << 16)
+            });
             relax_matches(win, shift, o, steps);
             k += 1;
             continue;
         }
-        // Candidates sorted by length, shortest first (of equal lengths, the later one first), packed as
-        // length << 16 | distance.
+        // The first 32 steps the walk found (nearly always all of them), sorted by length, shortest first (of
+        // equal lengths, the later one first), packed as length << 16 | distance. Sorted as length << 16 |
+        // !distance, an order that does not depend on the order the steps come in.
+        let key = |s: &Step| {
+            let (ml, d) = s.get();
+            (ml as u32) << 16 | !d as u32
+        };
         let mut cand = [0u32; 32];
-        let mut cnt = 0;
-        for (i, &(ml, d)) in (0..32).zip(&all[all_start[k] as usize..all_start[k + 1] as usize]) {
-            let mut j = i;
-            while j > 0 && cand[j - 1] >> 16 >= ml as u32 {
-                cand[j] = cand[j - 1];
-                j -= 1;
+        let cnt = steps.len().min(32);
+        if far.is_empty() {
+            // The chain alone, already in order.
+            for (e, s) in cand.iter_mut().zip(chain) {
+                *e = key(s) ^ 0xffff;
             }
-            cand[j] = (ml as u32) << 16 | d as u32;
-            cnt = i + 1;
+        } else if steps.len() <= 32 {
+            // The chain and the farther steps (which the matcher puts in this order too), merged.
+            let (mut x, mut y) = (0, 0);
+            for e in &mut cand[..cnt] {
+                let kc = chain.get(x).map_or(u32::MAX, key);
+                let kf = far.get(y).map_or(u32::MAX, key);
+                if kc < kf {
+                    *e = kc ^ 0xffff;
+                    x += 1;
+                } else {
+                    *e = kf ^ 0xffff;
+                    y += 1;
+                }
+            }
+        } else {
+            // The walk found them in order of distance: the chain and the farther steps merged by distance,
+            // each sorted in.
+            let (mut x, mut y) = (0, 0);
+            for i in 0..32 {
+                let s = if y == far.len() || (x < chain.len() && chain[x].get().1 < far[y].get().1) {
+                    x += 1;
+                    &chain[x - 1]
+                } else {
+                    y += 1;
+                    &far[y - 1]
+                };
+                let v = key(s);
+                let mut j = i;
+                while j > 0 && cand[j - 1] > v {
+                    cand[j] = cand[j - 1];
+                    j -= 1;
+                }
+                cand[j] = v;
+            }
+            for e in &mut cand {
+                *e ^= 0xffff;
+            }
         }
         let Some(&e) = cand[..cnt].last() else {
             k += 1;
@@ -319,16 +399,18 @@ fn parse(
         k += 1;
     }
     // The last literal, into the end.
-    let end = &mut cells[n / 8];
+    let end = &mut cells[n / 8 - base];
     if lit < end.cost.0[n % 8] {
         end.cost.0[n % 8] = lit;
         end.choice.0[n % 8] = pack(1, 0);
     }
+    done.take(&cells[..=n / 8 - base]);
     // Walk back from the end.
+    let choices = &done.choices[..];
     let first = out.len();
     let mut k = n;
     while k > 0 {
-        let ch = cells[k / 8].choice.0[k % 8];
+        let ch = choices[k / 8].0[k % 8];
         let (l, d) = (ch & 0xffff, ch >> 16);
         if d == 0 {
             out.push(Sym::lit(data[k - 1]));
@@ -513,7 +595,8 @@ pub fn greedy(data: &[u8], a: usize, b: usize, m: &Matches, out: &mut Vec<Sym>) 
         let maxl = (b - i).min(MAX_MATCH);
         let mut best: Option<(usize, usize)> = None;
         if maxl >= MIN_MATCH {
-            for &(ml, d) in m.chain_at(i) {
+            // Every step: an alternative is never longer than an earlier step, so the chain's choice wins.
+            for (ml, d) in m.at(i).iter().map(|s| s.get()) {
                 let l = (ml as usize).min(maxl);
                 if l >= MIN_MATCH && best.is_none_or(|(bl, _)| l > bl) {
                     best = Some((l, d as usize));
@@ -535,7 +618,7 @@ pub fn greedy(data: &[u8], a: usize, b: usize, m: &Matches, out: &mut Vec<Sym>) 
 
 #[cfg(test)]
 mod tests {
-    use super::super::matcher::find_matches;
+    use super::super::matcher::{find_matches, find_matches_keeping_all};
     use super::*;
 
     /// The parse as it was before the windows: one range of lengths at a time, through the accessors.
@@ -564,11 +647,7 @@ mod tests {
                 continue;
             }
             let i = a + k;
-            if k > MAX_MATCH
-                && i + MAX_MATCH <= b
-                && m.same_at(i) > 2 * MAX_MATCH
-                && m.same_at(i - MAX_MATCH) > MAX_MATCH
-            {
+            if k > MAX_MATCH && i + MAX_MATCH <= b && m.same_at(i) >= 3 && m.same_at(i - MAX_MATCH) >= 1 {
                 let v = c0 + run_cost;
                 if v < cost[k + MAX_MATCH] {
                     cost[k + MAX_MATCH] = v;
@@ -585,7 +664,7 @@ mod tests {
             if maxl < MIN_MATCH {
                 continue;
             }
-            let chain = m.chain_at(i);
+            let chain = crate::flate::matcher::pairs(m.chain_at(i));
             if chain.is_empty() {
                 continue;
             }
@@ -605,7 +684,7 @@ mod tests {
             let (cost_k, choice_k) = (&mut cost[k..], &mut choice[k..]);
             if !alt {
                 let mut lo = MIN_MATCH;
-                for &(ml, d) in chain {
+                for &(ml, d) in &chain {
                     let hi = (ml as usize).min(maxl);
                     relax(cost_k, choice_k, &c.len, lo, hi, c0 + c.dist[dist_code(d as usize)], d);
                     lo = hi + 1;
@@ -617,7 +696,7 @@ mod tests {
             }
             let mut cand = [(0u16, 0f32, 0u16); 32];
             let mut cnt = 0;
-            for &(ml, d) in m.at(i).iter().take(32) {
+            for &(ml, d) in m.walk_at(i).iter().take(32) {
                 let e = (ml, c.dist[dist_code(d as usize)], d);
                 let mut j = cnt;
                 while j > 0 && cand[j - 1].0 < ml {
@@ -744,7 +823,10 @@ mod tests {
             let from = if r.below(2) == 0 { 0 } else { r.below(len / 3) };
             let to = len - if r.below(2) == 0 { 0 } else { r.below(len / 3) };
             let alternatives = r.below(2) == 0;
-            let m = find_matches(&data, from, to, [16, 64, 400][r.below(3)], alternatives);
+            let depth = [16, 64, 400][r.below(3)];
+            let m = find_matches(&data, from, to, depth, alternatives);
+            // The reference reads every alternative the walk found, the parse only those that can win.
+            let all = if alternatives { find_matches_keeping_all(&data, from, to, depth) } else { m.clone() };
             let c = match r.below(4) {
                 0 => Costs::fixed(),
                 _ => costs(&mut r),
@@ -758,12 +840,12 @@ mod tests {
                 };
                 let alt = r.below(2) == 0;
                 let nice = [MAX_MATCH + 1, MAX_MATCH, 2, 3, 16, 64][r.below(6)];
-                let (cost, choice, want) = reference(&data, a, b, &m, &c, alt, nice);
+                let (cost, choice, want) = reference(&data, a, b, &all, &c, alt, nice);
                 let at = format!("case {case}: {a}..{b} of {from}..{to}, alt {alt}, nice {nice}");
                 let check = |sc: &ParseScratch, got: &[Sym], which: &str| {
                     assert_eq!(got, &want[..], "{which} symbols, {at}");
                     for k in 0..=b - a {
-                        let (gc, gh) = (sc.cells[k / 8].cost.0[k % 8], sc.cells[k / 8].choice.0[k % 8]);
+                        let (gc, gh) = (sc.done.costs[k / 8].0[k % 8], sc.done.choices[k / 8].0[k % 8]);
                         assert_eq!(gc.to_bits(), cost[k].to_bits(), "{which} cost at {k}, {at}");
                         assert_eq!(gh, choice[k], "{which} choice at {k}, {at}");
                     }
