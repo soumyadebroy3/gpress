@@ -717,11 +717,14 @@ fn identical_streams(streams: &[(u32, &Stream)]) -> (Vec<usize>, Vec<usize>) {
     (same, unique)
 }
 
-/// Bytes the general filters of a stream decode to; None when they don't decode within `limit`.
-fn decoded_size(s: &Stream, limit: usize) -> Option<usize> {
+/// Bytes the general filters of a stream decode to; None when they don't decode within `limit`, or the last of
+/// them not within `last` (where a caller can stop early: an earlier stage, hex text say, can be the larger).
+fn decoded_size(s: &Stream, limit: usize, last: usize) -> Option<usize> {
     let Some(stages) = chain(&s.dict) else { return Some(s.data.len()) };
+    let general = stages.iter().take_while(|st| is_general(&st.name)).count();
     let mut data: std::borrow::Cow<[u8]> = std::borrow::Cow::Borrowed(&s.data);
-    for st in stages.iter().take_while(|st| is_general(&st.name)) {
+    for (i, st) in stages[..general].iter().enumerate() {
+        let limit = if i + 1 == general { limit.min(last) } else { limit };
         data = std::borrow::Cow::Owned(decode_stage(st, &data, limit).ok()?);
     }
     Some(data.len())
@@ -826,12 +829,16 @@ fn effort_plan(
     // in `bridge_budget`, so the time and the size go on smoothly to 20. A stream whose filters don't decode
     // within `max_stream` is kept as it is (`reencode` would find the same).
     if opt.effort < FAST_BELOW {
-        // Out of time: nothing more is decoded (the whole rewrite is given up after the plan).
+        // Out of time: nothing more is decoded (the whole rewrite is given up after the plan). A stream that
+        // decodes to more than the whole budget is kept whatever comes before it, so its decoding stops there
+        // (a 450 KB image of 243 MB in a 1.1 MB file took 0.2 s to decode as far as `max_stream`, only to be
+        // kept).
+        let whole = floor as usize;
         let sizes = par::map(pool, unique.len(), None, |u| {
             if opt.deadline.passed() {
                 return None;
             }
-            decoded_size(streams[unique[u]].1, opt.max_stream)
+            decoded_size(streams[unique[u]].1, opt.max_stream, whole)
         });
         let strong = Options {
             flate: flate::Options {
@@ -1507,6 +1514,27 @@ mod effort_tests {
         assert!(big_levels.windows(2).take(16).all(|w| w[0] <= w[1]), "{big_levels:?}");
         assert_eq!(big_levels[STRONG_FROM as usize], flate::fast::LEVELS);
         assert_eq!(big_levels[16..], [flate::fast::LEVELS, 0, 0, 0]);
+    }
+
+    #[test]
+    fn the_size_pass_stops_at_the_budget_but_not_inside_a_chain() {
+        let text: Vec<u8> = (0..50_000u32).map(|i| b"0 0 m 10 10 l S\n"[(i % 16) as usize]).collect();
+        let plain = flate_stream(&text, &[]);
+        assert_eq!(decoded_size(&plain, 64 << 20, 50_000), Some(50_000));
+        assert_eq!(decoded_size(&plain, 64 << 20, 49_999), None);
+        assert_eq!(decoded_size(&plain, 49_999, usize::MAX), None);
+        // Flate, then hex: the hex text is twice what the last stage gives, and only the last stage stops at
+        // `last`, so the size is the same as with no stop at all.
+        let mut hex: Vec<u8> = text.iter().flat_map(|b| format!("{b:02X}").into_bytes()).collect();
+        hex.push(b'>');
+        let mut d = Dict::default();
+        d.set(b"Filter", Obj::Array(vec![Obj::Name(b"FlateDecode".to_vec()), Obj::Name(b"ASCIIHexDecode".to_vec())]));
+        let chained = Stream { dict: d, data: flate::deflate_zlib(&hex, &flate::Options::quick()) };
+        assert_eq!(decoded_size(&chained, 64 << 20, 50_000), Some(50_000));
+        assert_eq!(decoded_size(&chained, 64 << 20, 50_000), decoded_size(&chained, 64 << 20, usize::MAX));
+        // No general filter: the stored bytes.
+        let raw = Stream { dict: Dict::default(), data: text };
+        assert_eq!(decoded_size(&raw, 10, 10), Some(50_000));
     }
 
     #[test]
