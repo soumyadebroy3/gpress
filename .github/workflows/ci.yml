@@ -66,6 +66,10 @@ jobs:
           npm run build
       - working-directory: crates/gpress-wasm/js
         run: npm test
+      # The size budget, whenever the package built: fails when the web module's gzip size is more than 5% over
+      # bench/sizes.json, or over the 400 KB target. A wanted growth is recorded with `bench/sizes.py measure`.
+      - if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: python3 -I bench/sizes.py check
       - uses: actions/upload-artifact@v4
         with:
           name: gpress-wasm
