@@ -48,14 +48,21 @@ pub fn lengths_into(freqs: &[u32], max_bits: u32, lens: &mut [u8]) {
 }
 
 /// Code lengths for one alphabet, worked out again and again for counts that change a little from one call
-/// to the next (the block-split search). The used symbols' order is kept from the last call: the symbols whose
-/// count stayed keep their places and only the others are sorted again. Nothing is allocated for Deflate's
-/// alphabets and limits, and the lengths are those of `lengths_into`.
+/// to the next (the block-split search); the lengths are those of `lengths_into`. Counts below 256 but for a
+/// few, the usual case for the literal/length code there, are worked out by runs of equal counts (`Runs`).
+/// Otherwise the used symbols' order is kept from the last call: the symbols whose count stayed keep their
+/// places and only the others are sorted again. All is of a fixed size, and nothing is allocated for
+/// Deflate's alphabets and limits but the runs (some 27 KB, once) and package-merge's lists for more than 128
+/// symbols (for the call).
 pub struct LengthCoder<const N: usize> {
+    /// For alphabets of `RUN_MIN` to `RUN_SYMS` symbols, made at the first call; whether the lengths are from it.
+    runs: Option<Box<Runs>>,
+    from_runs: bool,
     /// The keys of the symbols used in the last call, sorted, in `keys[..used]`, and whether each symbol is
-    /// among them.
+    /// among them; only when `sorted` (the last call did not use `runs`).
     keys: [u64; N],
     member: [bool; N],
+    sorted: bool,
     used: usize,
     /// Room for the keys that moved and for the code tree.
     work: [u64; N],
@@ -78,8 +85,11 @@ impl<const N: usize> LengthCoder<N> {
     pub const fn new() -> Self {
         const { assert!(N <= 1 << 16, "symbols must fit in 16 bits") };
         LengthCoder {
+            runs: None,
+            from_runs: false,
             keys: [0; N],
             member: [false; N],
+            sorted: true,
             used: 0,
             work: [0; N],
             lens: [0; N],
@@ -107,10 +117,47 @@ impl<const N: usize> LengthCoder<N> {
     }
 
     fn work_out(&mut self, freqs: &[u32; N], max_bits: u32) -> u64 {
-        self.resort(freqs);
+        // Runs take few counts of 256 or more and 48 symbols or more: not worth trying while the last call (which
+        // then did not use them) had more large counts (its keys are sorted, so those are the last), nor when
+        // the last call and this one have few symbols (counted once, for `resort` too).
+        let mut used = None;
+        let skip = self.sorted
+            && (self.used > RUN_BIG && self.keys[self.used - RUN_BIG - 1] >> 16 >= 256
+                || self.used < RUN_MIN && *used.insert(freqs.iter().filter(|&&f| f != 0).count()) < RUN_MIN);
+        let (mut keyed, mut deep) = (false, false);
+        if (RUN_MIN..=RUN_SYMS).contains(&N) && !skip {
+            let runs = self.runs.get_or_insert_with(|| Box::new(Runs::new()));
+            if let Some((bits, used)) = runs.lengths(freqs, max_bits, &mut self.lens, self.from_runs) {
+                self.used = used;
+                self.sorted = false;
+                self.from_runs = true;
+                return bits;
+            }
+            // The runs have this call's keys in order (and know when the lengths are too long).
+            if runs.current {
+                self.used = runs.keys_into(&mut self.keys);
+                for (m, &f) in self.member.iter_mut().zip(freqs) {
+                    *m = f != 0;
+                }
+                (keyed, deep) = (true, runs.deep);
+            }
+        }
+        self.from_runs = false;
+        if !keyed && self.sorted {
+            self.resort(freqs, used);
+        } else if !keyed {
+            self.used = sorted_keys(freqs, &mut self.keys, &mut self.work);
+            for (m, &f) in self.member.iter_mut().zip(freqs) {
+                *m = f != 0;
+            }
+        }
+        self.sorted = true;
         let keys = &self.keys[..self.used];
         self.lens.fill(0);
-        let (max, mut bits) = unlimited_sorted(keys, &mut self.work, &mut self.lens);
+        let (max, mut bits) = match deep {
+            true => (u8::MAX, 0),
+            false => unlimited_sorted(keys, &mut self.work, &mut self.lens),
+        };
         if max as u32 > max_bits {
             limited_sorted(keys, max_bits, &mut self.lens, &mut self.guide);
             bits = keys.iter().map(|&k| (k >> 16) * self.lens[(k & 0xffff) as usize] as u64).sum();
@@ -118,8 +165,8 @@ impl<const N: usize> LengthCoder<N> {
         bits
     }
 
-    /// Sorts the keys for `freqs` from those of the last call.
-    fn resort(&mut self, freqs: &[u32; N]) {
+    /// Sorts the keys for `freqs` from those of the last call; `used` is how many counts are not 0, when known.
+    fn resort(&mut self, freqs: &[u32; N], used: Option<usize>) {
         // The symbols used last time whose count stayed keep their order; the others are taken out (the ones
         // still used go to `work`), sorted on their own and merged back, and so are the newly used symbols.
         let (mut kept, mut moved) = (0, 0);
@@ -136,7 +183,7 @@ impl<const N: usize> LengthCoder<N> {
                 self.member[s] = false;
             }
         }
-        let added = freqs.iter().filter(|&&f| f != 0).count() - kept - moved;
+        let added = used.unwrap_or_else(|| freqs.iter().filter(|&&f| f != 0).count()) - kept - moved;
         // The keys that moved are often still nearly in order.
         if !insertion_sort_within(&mut self.work[..moved], 8 * moved) {
             self.work[..moved].sort_unstable();
@@ -215,6 +262,376 @@ fn insertion_sort_within(keys: &mut [u64], budget: usize) -> bool {
         }
     }
     true
+}
+
+/// Most symbols `Runs` takes, room for a set of them (a bit each), most counts of 256 or more it takes and
+/// fewest symbols it is used for.
+const RUN_SYMS: usize = 320;
+const RUN_WORDS: usize = 8;
+const RUN_BIG: usize = 8;
+const RUN_MIN: usize = 48;
+
+/// Moffat and Katajainen's method worked on runs of equal weights, for alphabets of up to 320 symbols whose
+/// counts are below 256 but for a few. Such counts often repeat (a few dozen different counts among a few
+/// hundred symbols), and then there are far fewer runs than leaves; the counts need no sorting either, only
+/// tallying (the few larger ones are sorted). The lengths are those of `unlimited_sorted` on the sorted keys:
+/// the same internal nodes are made in the same order, so the tree has the same shape, and a symbol's length
+/// depends only on its rank. The tallies are kept from one call to the next and mended where the counts
+/// changed, and so are the lengths.
+struct Runs {
+    /// The counts the tallies are of (once `synced`).
+    count: [u32; RUN_SYMS],
+    synced: bool,
+    /// How many symbols have each count below 256, the counts from 1 on that some symbol has (a bit each, and
+    /// maybe some no symbol has any more), the symbols that have each count (a bit each), and those whose count
+    /// is 256 or more.
+    tally: [u16; 256],
+    seen: [u64; 4],
+    set: [[u64; RUN_WORDS]; 256],
+    big: [u64; RUN_WORDS],
+    /// The length of the symbols of each count below 256 used in the last lengths given (255 when they do
+    /// not all have the same length); 0 for count 0.
+    depth: [u8; 256],
+    /// The symbols whose count changed in this call, and the sorted keys of those with counts of 256 or more.
+    changed: [u16; RUN_SYMS],
+    big_keys: [u64; RUN_BIG],
+    /// The counts used, lightest first, and how many symbols have each; then a weight above all.
+    leaf_w: [u64; 256 + RUN_BIG + 1],
+    leaf_k: [u16; 256 + RUN_BIG + 1],
+    /// The internal nodes in the order they are made, as runs of equal weight: weight (then one above all),
+    /// how many, the index of the first, how many leaves are taken before them and the place of the last
+    /// (arrays of one length, so that an index is checked once for all).
+    node_w: [u64; RUN_SYMS + 1],
+    node_k: [u16; RUN_SYMS + 1],
+    node_first: [u16; RUN_SYMS + 1],
+    node_taken: [u16; RUN_SYMS + 1],
+    node_last: [u16; RUN_SYMS + 1],
+    /// How many leaves are at each depth; whether the tallies are of the counts of this call and whether it
+    /// failed because the longest length was over the limit.
+    bl: [u16; 64],
+    current: bool,
+    deep: bool,
+}
+
+impl Runs {
+    fn new() -> Runs {
+        Runs {
+            count: [0; RUN_SYMS],
+            synced: false,
+            tally: [0; 256],
+            seen: [0; 4],
+            set: [[0; RUN_WORDS]; 256],
+            big: [0; RUN_WORDS],
+            depth: [0; 256],
+            changed: [0; RUN_SYMS],
+            big_keys: [0; RUN_BIG],
+            leaf_w: [0; 256 + RUN_BIG + 1],
+            leaf_k: [0; 256 + RUN_BIG + 1],
+            node_w: [0; RUN_SYMS + 1],
+            node_k: [0; RUN_SYMS + 1],
+            node_first: [0; RUN_SYMS + 1],
+            node_taken: [0; RUN_SYMS + 1],
+            node_last: [0; RUN_SYMS + 1],
+            bl: [0; 64],
+            current: false,
+            deep: false,
+        }
+    }
+
+    /// Takes symbol `s` (in word `w` of a set) from the tallies of count `old` to those of count `new`.
+    #[inline(always)]
+    fn move_symbol(&mut self, s: usize, w: usize, old: u32, new: u32) {
+        let bit = 1 << (s % 64);
+        if old < 256 {
+            let old = old as usize;
+            self.tally[old] -= 1;
+            self.set[old][w] &= !bit;
+        } else {
+            self.big[w] &= !bit;
+        }
+        if new < 256 {
+            let new = new as usize;
+            self.tally[new] += 1;
+            self.seen[new / 64] |= 1 << (new % 64);
+            self.set[new][w] |= bit;
+        } else {
+            self.big[w] |= bit;
+        }
+    }
+
+    /// The lengths and the sum of count times length of `unlimited_sorted`, and how many symbols are used.
+    /// None (and `lens` left alone) when there are few symbols or too many, more than `RUN_BIG` counts of 256
+    /// or more, or the longest length is over `max_bits` (then package-merge decides). `fresh` says that `lens`
+    /// holds the lengths this gave last; then only those that change are written.
+    fn lengths(&mut self, freqs: &[u32], max_bits: u32, lens: &mut [u8], fresh: bool) -> Option<(u64, usize)> {
+        let len = freqs.len();
+        (self.current, self.deep) = (false, false);
+        if !(RUN_MIN..=RUN_SYMS).contains(&len) || max_bits == 0 {
+            return None;
+        }
+        let mut fresh = fresh && self.synced;
+        let mut nch = 0;
+        if self.synced {
+            // Mend the tallies where the counts changed: first which ones did (a bit each, found eight at a
+            // time), then each of those.
+            let mut flag = [0u8; RUN_SYMS];
+            for ((g, &f), &c) in flag.iter_mut().zip(freqs).zip(&self.count) {
+                *g = (f != c) as u8;
+            }
+            let mut diff = [0u64; RUN_WORDS];
+            for (k, g8) in flag.as_chunks::<8>().0.iter().enumerate() {
+                let b = u64::from_le_bytes(*g8);
+                diff[(k / 8) & 7] |= (b.wrapping_mul(0x0102_0408_1020_4080) >> 56) << (8 * (k % 8));
+            }
+            for (w, &word) in diff.iter().enumerate() {
+                let mut m = word;
+                while m != 0 {
+                    let s = 64 * w + m.trailing_zeros() as usize;
+                    m &= m - 1;
+                    let (old, new) = (self.count[s], freqs[s]);
+                    self.count[s] = new;
+                    self.move_symbol(s, w, old, new);
+                    self.changed[nch] = s as u16;
+                    nch += 1;
+                }
+            }
+        } else {
+            self.tally = [0; 256];
+            self.seen = [0; 4];
+            self.set = [[0; RUN_WORDS]; 256];
+            self.big = [0; RUN_WORDS];
+            self.tally[0] = len as u16;
+            self.count = [0; RUN_SYMS];
+            for (s, &f) in freqs.iter().enumerate() {
+                self.count[s] = f;
+                self.move_symbol(s, s / 64, 0, f);
+            }
+            self.synced = true;
+            fresh = false;
+        }
+        self.current = true;
+        let nbig: usize = self.big.iter().map(|w| w.count_ones() as usize).sum();
+        let used = len - self.tally[0] as usize;
+        if nbig > RUN_BIG || used < RUN_MIN {
+            return None;
+        }
+        let (mut ra, mut n) = (0, 0);
+        for i in 0..4 {
+            let mut b = if i == 0 { self.seen[0] & !1 } else { self.seen[i] };
+            while b != 0 {
+                let c = 64 * i + b.trailing_zeros() as usize;
+                b &= b - 1;
+                let k = self.tally[c];
+                if k == 0 {
+                    self.seen[i] &= !(1 << (c % 64));
+                    continue;
+                }
+                (self.leaf_w[ra], self.leaf_k[ra]) = (c as u64, k);
+                ra += 1;
+                n += k as usize;
+            }
+        }
+        // The few larger counts, sorted, after the others.
+        let small = ra;
+        let mut nb = 0;
+        for (w, &word) in self.big.iter().enumerate() {
+            let mut b = word;
+            while b != 0 {
+                let s = 64 * w + b.trailing_zeros() as usize;
+                b &= b - 1;
+                self.big_keys[nb] = (self.count[s] as u64) << 16 | s as u64;
+                nb += 1;
+            }
+        }
+        insertion_sort(&mut self.big_keys[..nb]);
+        for &key in &self.big_keys[..nb] {
+            if ra > small && self.leaf_w[ra - 1] == key >> 16 {
+                self.leaf_k[ra - 1] += 1;
+            } else {
+                (self.leaf_w[ra], self.leaf_k[ra]) = (key >> 16, 1);
+                ra += 1;
+            }
+        }
+        n += nb;
+        let Some((max, bits)) = self.tree(ra, n, max_bits) else {
+            self.deep = true;
+            return None;
+        };
+        // The leaves of a depth are those of a range of ranks, the deepest the lightest, and the symbols of a
+        // count have the ranks of a range, in symbol order.
+        let mut depth_of_rank = [0u8; RUN_SYMS];
+        let (mut r0, mut d) = (0, max as usize);
+        for &k in self.bl[..=d].iter().rev() {
+            depth_of_rank[r0..r0 + k as usize].fill(d as u8);
+            r0 += k as usize;
+            d = d.saturating_sub(1);
+        }
+        // A count's symbols are written again when their length changed, or when they do not all have the
+        // same length; the symbols whose count changed get the length of their new count. Those of the larger
+        // counts are written each time.
+        let mut rank = 0;
+        for (&c, &k) in self.leaf_w[..small].iter().zip(&self.leaf_k[..small]) {
+            let c = c as usize & 255;
+            let (d, e) = (depth_of_rank[rank], depth_of_rank[rank + k as usize - 1]);
+            let depth = if d == e { d } else { 255 };
+            if depth == 255 || depth != self.depth[c] || !fresh {
+                self.depth[c] = depth;
+                if depth == 255 || fresh {
+                    let mut r = rank;
+                    for (i, &word) in self.set[c].iter().enumerate() {
+                        let mut b = word;
+                        while b != 0 {
+                            lens[64 * i + b.trailing_zeros() as usize] = depth_of_rank[r];
+                            b &= b - 1;
+                            r += 1;
+                        }
+                    }
+                }
+            }
+            rank += k as usize;
+        }
+        if fresh {
+            for &s in &self.changed[..nch] {
+                let s = s as usize;
+                let c = self.count[s];
+                if c < 256 && self.depth[c as usize] != 255 {
+                    lens[s] = self.depth[c as usize];
+                }
+            }
+        } else {
+            self.depth[0] = 0;
+            for (l, &f) in lens.iter_mut().zip(freqs) {
+                let depth = self.depth[f as usize & 255];
+                if f < 256 && depth != 255 {
+                    *l = depth;
+                }
+            }
+        }
+        for (&key, &d) in self.big_keys[..nb].iter().zip(&depth_of_rank[rank..]) {
+            lens[(key & 0xffff) as usize] = d;
+        }
+        Some((bits, n))
+    }
+
+    /// Makes `k` internal nodes of weight `w`, joined to the last run when that has the same weight and is not
+    /// taken yet (the first `b` are); returns their weight.
+    #[inline(always)]
+    fn make(&mut self, w: u64, k: usize, b: usize, nb: &mut usize, made: &mut usize) -> u64 {
+        if *nb > b && self.node_w[*nb - 1] == w {
+            self.node_k[*nb - 1] += k as u16;
+        } else {
+            (self.node_w[*nb], self.node_k[*nb], self.node_first[*nb]) = (w, k as u16, *made as u16);
+            *nb += 1;
+            self.node_w[*nb] = u64::MAX;
+        }
+        *made += k;
+        w * k as u64
+    }
+
+    /// The sorted keys of the used symbols of the counts the tallies are of, into `keys`; returns how many.
+    fn keys_into(&self, keys: &mut [u64]) -> usize {
+        let mut n = 0;
+        for (i, &word) in self.seen.iter().enumerate() {
+            let mut b = if i == 0 { word & !1 } else { word };
+            while b != 0 {
+                let c = 64 * i + b.trailing_zeros() as usize;
+                b &= b - 1;
+                for (w, &symbols) in self.set[c].iter().enumerate() {
+                    let mut m = symbols;
+                    while m != 0 {
+                        keys[n] = (c as u64) << 16 | (64 * w + m.trailing_zeros() as usize) as u64;
+                        m &= m - 1;
+                        n += 1;
+                    }
+                }
+            }
+        }
+        let small = n;
+        for (w, &word) in self.big.iter().enumerate() {
+            let mut b = word;
+            while b != 0 {
+                let s = 64 * w + b.trailing_zeros() as usize;
+                b &= b - 1;
+                keys[n] = (self.count[s] as u64) << 16 | s as u64;
+                n += 1;
+            }
+        }
+        if n - small <= 32 {
+            insertion_sort(&mut keys[small..n]);
+        } else {
+            keys[small..n].sort_unstable();
+        }
+        n
+    }
+
+    /// Moffat and Katajainen's passes on the `ra` runs of leaves (`n` of them, at least 48): the leaves at
+    /// each depth go into `bl`. Returns the longest length and the sum of count times length, or None when the
+    /// longest length is over `max_bits`.
+    fn tree(&mut self, ra: usize, n: usize, max_bits: u32) -> Option<(u8, u64)> {
+        // Pass 1: each step takes a whole run of the lightest items, leaves before internal nodes of the same
+        // weight; the nodes made meanwhile are all heavier, so nothing comes in between. Items taken one after
+        // the other make the internal nodes pairwise, beginning with the one left over from the step before
+        // (`left`, its weight; weights are at least 1). After the leaves and after the nodes made comes a
+        // weight above all.
+        self.leaf_w[ra] = u64::MAX;
+        self.node_w[0] = u64::MAX;
+        let (mut a, mut b, mut nb, mut made, mut taken) = (0, 0, 0, 0, 0);
+        let mut left = 0;
+        let mut bits = 0u64;
+        while made < n - 1 {
+            let (x, mut c);
+            if self.leaf_w[a] <= self.node_w[b] {
+                if a == ra {
+                    return None;
+                }
+                (x, c) = (self.leaf_w[a], self.leaf_k[a] as usize);
+                a += 1;
+                taken += c;
+            } else {
+                (x, c) = (self.node_w[b], self.node_k[b] as usize);
+                self.node_taken[b] = taken as u16;
+                self.node_last[b] = (self.node_first[b] as usize + c - 1 + taken) as u16;
+                b += 1;
+            }
+            if left != 0 {
+                bits += self.make(left + x, 1, b, &mut nb, &mut made);
+                c -= 1;
+                left = 0;
+            }
+            if c >= 2 {
+                bits += self.make(2 * x, c / 2, b, &mut nb, &mut made);
+            }
+            if c % 2 == 1 {
+                left = x;
+            }
+        }
+        // Passes 2 and 3: node t (not the root) is the item taken at place t + (the leaves taken before it), and
+        // the items at places 2s and 2s + 1 make node s. Those places only grow with t, so the nodes no deeper
+        // than d + 1 are those from some index on: the first whose place reaches twice the first node of depth
+        // d. Below the internal nodes of one depth there are twice as many places one level deeper; those the
+        // internal nodes of that depth do not take are leaves.
+        self.node_taken[nb - 1] = n as u16;
+        let (mut lo, mut hi, mut places, mut j, mut d) = (n - 2, n - 1, 1usize, nb - 1, 0);
+        loop {
+            let inner = hi - lo;
+            *self.bl.get_mut(d)? = places.checked_sub(inner)? as u16;
+            if inner == 0 {
+                break;
+            }
+            places = 2 * inner;
+            let target = 2 * lo;
+            while j > 0 && self.node_last[j - 1] as usize >= target {
+                j -= 1;
+            }
+            let (first, taken) = (self.node_first[j] as usize, self.node_taken[j] as usize);
+            (hi, lo) = (lo, first.max(target.saturating_sub(taken)).min(lo));
+            d += 1;
+        }
+        if d > max_bits as usize {
+            return None;
+        }
+        Some((d as u8, bits))
+    }
 }
 
 /// Runs `f` on a zeroed scratch array of at least `len` entries, on the stack for twice Deflate's largest
@@ -1078,8 +1495,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// Counts most of which are below 256: a few counts many symbols share, some of 256 or more (up to a
-    /// dozen), sometimes counts that make a deep tree, sometimes few symbols.
+    /// Counts most of which are below 256, as `Runs` takes them: a few counts many symbols share, some of 256
+    /// or more (up to a dozen, around `RUN_BIG`), sometimes counts that make a deep tree, sometimes few symbols.
     fn small_counts(s: &mut u64, f: &mut [u32]) {
         let n = f.len() as u64;
         let used = match rng(s) % 4 {
@@ -1101,6 +1518,79 @@ pub(crate) mod tests {
                 (a, b) = (b, a + b);
             }
         }
+    }
+
+    /// The block-split search's walk: the sums of runs of blocks `i..j`, `i` going up for each `j`.
+    fn split_walk<const N: usize>(seed: u64, blocks: usize, max_bits: u32) {
+        let mut s = seed;
+        let mut c = LengthCoder::<N>::new();
+        let mut pref = vec![[0u32; N]];
+        for _ in 0..blocks {
+            let mut block = [0u32; N];
+            small_counts(&mut s, &mut block);
+            for x in block.iter_mut() {
+                *x /= 1 + (rng(&mut s) % 16) as u32;
+            }
+            let mut sum = *pref.last().unwrap();
+            sum.iter_mut().zip(&block).for_each(|(a, b)| *a += b);
+            pref.push(sum);
+        }
+        let mut b = [0u8; N];
+        for j in 1..pref.len() {
+            for i in j.saturating_sub(24)..j {
+                let mut f = pref[j];
+                f.iter_mut().zip(&pref[i]).for_each(|(a, b)| *a -= b);
+                if f.iter().filter(|&&x| x > 0).count() > 1 << max_bits {
+                    continue;
+                }
+                let bits = c.lengths(&f, max_bits);
+                old::lengths_into(&f, max_bits, &mut b);
+                assert_eq!(c.lens(), &b, "{f:?}");
+                assert_eq!(bits, cost(&f, &b));
+            }
+        }
+    }
+
+    #[test]
+    fn length_coder_by_runs_keeps_the_lengths_of_before() {
+        // Walks mostly in the runs' range: few counts many symbols share, some large counts, now and then a
+        // deep tree or few symbols, so that the runs, the sorted keys and package-merge take turns.
+        for (seed, max_bits) in [(11, 15), (12, 15), (13, 9), (14, 12)] {
+            let mut s = seed;
+            let mut c = LengthCoder::<286>::new();
+            let mut f = [0u32; 286];
+            let mut b = [0u8; 286];
+            for step in 0..20_000 {
+                match rng(&mut s) % 32 {
+                    0 => small_counts(&mut s, &mut f),
+                    1 => random_counts(&mut s, &mut f),
+                    _ => walk(&mut s, &mut f),
+                }
+                if step % 3 == 0 {
+                    // Back towards small counts, as the walk adds more than it takes away.
+                    for x in f.iter_mut().filter(|x| **x > 300) {
+                        *x /= 2;
+                    }
+                }
+                let bits = c.lengths(&f, max_bits);
+                old::lengths_into(&f, max_bits, &mut b);
+                assert_eq!(c.lens(), &b, "{max_bits} {f:?}");
+                assert_eq!(bits, cost(&f, &b));
+                assert_eq!(c.used(), f.iter().filter(|&&x| x > 0).count());
+            }
+        }
+        split_walk::<286>(21, 300, 15);
+        split_walk::<286>(22, 300, 10);
+        split_walk::<320>(23, 200, 15);
+        split_walk::<48>(24, 300, 15);
+        split_walk::<64>(25, 300, 7);
+        split_walk::<30>(26, 300, 15);
+        split_walk::<19>(27, 300, 7);
+    }
+
+    #[test]
+    fn runs_are_as_small_as_the_coder_says() {
+        assert!(std::mem::size_of::<Runs>() < 28 << 10, "{}", std::mem::size_of::<Runs>());
     }
 
     #[test]
@@ -1181,5 +1671,46 @@ pub(crate) mod tests {
         length_coder_walk::<1>(6, 100, 15);
         length_coder_walk::<2>(7, 100, 15);
         length_coder_walk::<3>(8, 1_000, 2);
+    }
+
+    #[test]
+    fn length_coder_follows_the_limit_from_call_to_call() {
+        // The limit changes from one call to the next, down to 0 (for at most two symbols), also right after
+        // calls the runs answered: nothing of an earlier call is taken for this one.
+        fn steps<const N: usize>(seed: u64, steps: usize) {
+            let mut s = seed;
+            let mut c = LengthCoder::<N>::new();
+            let (mut f, mut b) = ([0u32; N], [0u8; N]);
+            for _ in 0..steps {
+                let max_bits = [0, 1, 2, 7, 15, 15, 15, 15][(rng(&mut s) % 8) as usize];
+                let most = (1usize << max_bits).max(2);
+                match rng(&mut s) % 2 {
+                    _ if max_bits <= 2 => {
+                        f.fill(0);
+                        for _ in 0..rng(&mut s) % (most as u64 + 1) {
+                            f[(rng(&mut s) % N as u64) as usize] = 1 + (rng(&mut s) % 300) as u32;
+                        }
+                    }
+                    0 => small_counts(&mut s, &mut f),
+                    _ => walk(&mut s, &mut f),
+                }
+                if f.iter().filter(|&&x| x > 0).count() > most {
+                    continue;
+                }
+                let bits = c.lengths(&f, max_bits);
+                old::lengths_into(&f, max_bits, &mut b);
+                assert_eq!(c.lens(), &b, "{max_bits} {f:?}");
+                assert_eq!(bits, cost(&f, &b));
+                assert_eq!(c.used(), f.iter().filter(|&&x| x > 0).count());
+            }
+            // The runs are not made for alphabets too large for them.
+            assert!(N <= RUN_SYMS || c.runs.is_none());
+        }
+        steps::<286>(31, 6_000);
+        steps::<320>(32, 3_000);
+        steps::<48>(33, 6_000);
+        steps::<30>(34, 6_000);
+        steps::<19>(35, 6_000);
+        steps::<400>(36, 1_000);
     }
 }

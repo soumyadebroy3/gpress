@@ -327,8 +327,9 @@ pub fn estimate_dynamic_bits(h: &Hist) -> u64 {
 
 /// `estimate_dynamic_bits` for many histograms in a row, as the block-split search asks: each code keeps its
 /// symbols' order from one histogram to the next, which is quick to repair when the counts changed a little.
-/// The estimates are the same. What it keeps (several KB) is on the heap, made with it and freed with it, so
-/// that a search that holds two of them needs little stack.
+/// The estimates are the same. What it keeps (about 9 KB, and 27 KB more for the literal/length code's runs
+/// once they are used) is on the heap, made with it and freed with it, so that a search that holds two of them
+/// needs little stack.
 pub struct Estimator {
     coders: Box<Coders>,
 }
