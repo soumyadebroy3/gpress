@@ -28,7 +28,7 @@ pub struct Options {
     /// level for images (`IMAGE_LEVEL`), image predictors chosen from an estimate and only the cheap steps.
     /// 1 to 19 bridge to the strong encoder: images get closer parses and from 10 (`STRONG_FROM`) the streams
     /// that take the most room get the strong encoder's quick settings within a budget that doubles every
-    /// point; a stream already compressed by Flate that effort 0's settings can't shrink is kept as it is. From
+    /// point, except a Flate stream that effort 0's settings can't shrink, which is kept as it is. From
     /// 20 on the strong encoder: at 100 every stream gets `flate` and the full predictor search; below, the
     /// streams that take the most room come first and get `flate`, or a cheaper step of 20, while the work
     /// stays within a budget proportional to the file's size, the others get the quick settings, and image
@@ -376,10 +376,13 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
         None
     };
     let rest = &stages[k..];
-    // Below 20, what won't shrink is left alone: a stream other than an image, already compressed by Flate,
-    // whose re-encode at effort 0's settings is not smaller is kept as it is, and no slower settings are
-    // spent on it. Decided from sizes alone. (An image goes on: a predictor may still make it smaller.)
-    if opt.effort < FAST_BELOW
+    // On the bridge to 20, what won't shrink is left alone: a stream the plan gives the strong encoder (from
+    // `STRONG_FROM`), other than an image and already compressed by Flate, whose re-encode at effort 0's
+    // settings is not smaller is kept as it is, and the strong encoder is not spent on it. Decided from sizes
+    // alone. (An image goes on: a predictor may still make it smaller.) The quick settings the plans of 20 and
+    // above give carry effort 0, so the range test keeps them exactly as they were.
+    if opt.flate.fast == 0
+        && (STRONG_FROM..FAST_BELOW).contains(&opt.effort)
         && rest.is_empty()
         && carried.is_none()
         && stages[..k].iter().any(|st| st.name == b"FlateDecode")
@@ -1458,11 +1461,25 @@ mod effort_tests {
         d.set(b"Filter", Obj::Name(b"FlateDecode".to_vec()));
         // Stored with the strongest settings already: effort 0's re-encode is larger, so a bridge effort spends
         // nothing more on it, while effort 20 still tries the strong encoder.
-        let s = Stream { dict: d, data: flate::deflate_zlib(&text, &flate::Options::max()) };
+        let s = Stream { dict: d.clone(), data: flate::deflate_zlib(&text, &flate::Options::max()) };
         assert!(flate::deflate_zlib(&text, &flate::Options::effort(0)).len() >= s.data.len());
         let strong = |e: u8| Options { flate: flate::Options::quick(), ..Options::effort(e) };
         assert!(reencode(&s, &strong(15), &resolve).is_none());
         assert!(reencode(&s, &Options::effort(0), &resolve).is_none());
+        // Stored with effort 0's settings: the strong encoder's quick settings still shrink it. The bridge
+        // leaves it alone, but the quick settings the plans of 20 and above give (effort 0, the strong
+        // encoder) must try it exactly as before the fast path.
+        let page: Vec<u8> = (0..1500u32)
+            .flat_map(|i| {
+                format!("{} {} {} {} re f q {} 0 0 1 {} cm Q\n", i % 97, i * 7 % 513, i % 41, i % 19, i % 5, i * 3 % 89)
+                    .into_bytes()
+            })
+            .collect();
+        let s = Stream { dict: d, data: flate::deflate_zlib(&page, &flate::Options::effort(0)) };
+        assert!(flate::deflate_zlib(&page, &flate::Options::quick()).len() < s.data.len());
+        assert!(reencode(&s, &strong(15), &resolve).is_none());
+        let legacy_quick = Options { flate: flate::Options::quick(), effort: 0, ..Options::effort(50) };
+        assert!(reencode(&s, &legacy_quick, &resolve).is_some());
     }
 
     #[test]
