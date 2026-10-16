@@ -777,24 +777,41 @@ fn short_image(s: &Stream, resolve: &dyn Fn(&Obj) -> Option<Obj>, content: Optio
     }
 }
 
+/// What a stream's encoders start from: its data, /Filter and /DecodeParms.
+type Input<'a> = (&'a [u8], Option<&'a Obj>, Option<&'a Obj>);
+
 /// For each stream, the index of the first stream with the same dictionary and data (itself when there is
-/// none), and the list of those first ones. Identical streams are re-encoded once.
-fn identical_streams(streams: &[(u32, &Stream)]) -> (Vec<usize>, Vec<usize>) {
-    let mut by_hash: HashMap<(u64, usize), Vec<usize>> = HashMap::new();
+/// none); the list of those first ones; and for each first one, whether another first one has the same
+/// encoder input (data, /Filter and /DecodeParms) under another dictionary. Identical streams are re-encoded
+/// once.
+///
+/// Streams are found by value in two maps, so the time is linear whatever the data: an id for each encoder
+/// input, then the first stream of each (input, dictionary), which is exactly stream equality. The maps are
+/// only looked up, never walked, so their random hash keys can't reach the output.
+fn identical_streams(streams: &[(u32, &Stream)]) -> (Vec<usize>, Vec<usize>, Vec<bool>) {
+    let mut inputs: HashMap<Input, usize> = HashMap::new();
+    let mut firsts: HashMap<(usize, &Dict), usize> = HashMap::new();
     let mut same = Vec::with_capacity(streams.len());
     let mut unique = Vec::new();
+    // For each first stream, its input's id; for each input, how many first streams have it.
+    let mut input_of = Vec::new();
+    let mut count: Vec<usize> = Vec::new();
     for (i, (_, s)) in streams.iter().enumerate() {
-        let firsts = by_hash.entry((par::hash64(&s.data), s.data.len())).or_default();
-        match firsts.iter().copied().find(|&j| streams[j].1 == *s) {
-            Some(j) => same.push(j),
-            None => {
-                firsts.push(i);
-                same.push(i);
-                unique.push(i);
-            }
+        let next = inputs.len();
+        let id = *inputs.entry((s.data.as_slice(), s.dict.get(b"Filter"), s.dict.get(b"DecodeParms"))).or_insert(next);
+        if id == count.len() {
+            count.push(0);
         }
+        let first = *firsts.entry((id, &s.dict)).or_insert(i);
+        if first == i {
+            unique.push(i);
+            input_of.push(id);
+            count[id] += 1;
+        }
+        same.push(first);
     }
-    (same, unique)
+    let shares = input_of.iter().map(|&id| count[id] > 1).collect();
+    (same, unique, shares)
 }
 
 /// Bytes the general filters of a stream decode to; None when they don't decode within `limit`, or the last of
@@ -1076,7 +1093,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     // used in object order below, so the output doesn't depend on the number of threads.
     let streams: Vec<(u32, &Stream)> =
         objs.iter().filter_map(|(&n, (_, o))| if let Obj::Stream(s) = o { Some((n, &**s)) } else { None }).collect();
-    let (same, unique) = identical_streams(&streams);
+    let (same, unique, shares) = identical_streams(&streams);
     let settings = effort_plan(&streams, &unique, opt, input.len(), pool);
     let mut order: Vec<usize> = (0..unique.len()).collect();
     order.sort_by_key(|&u| (std::cmp::Reverse(streams[unique[u]].1.data.len()), u));
@@ -1143,6 +1160,12 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     }
     if dbg && unique.len() < streams.len() {
         eprintln!("{} streams identical to an earlier one, encoded once", streams.len() - unique.len());
+    }
+    if dbg {
+        let sharing = shares.iter().filter(|&&x| x).count();
+        if sharing > 0 {
+            eprintln!("{sharing} streams encoded have the encoder input of another (under another dictionary)");
+        }
     }
     let slot: HashMap<usize, usize> = unique.iter().enumerate().map(|(u, &i)| (i, u)).collect();
     // Each result is moved out at the last stream that uses it (identical streams share one), so it is not
@@ -2187,9 +2210,83 @@ mod effort_tests {
         let c = flate_stream(b"same bytes", &[(b"Length1", Obj::Int(3))]);
         let d = flate_stream(b"other bytes", &[]);
         let streams: Vec<(u32, &Stream)> = vec![(1, &a), (2, &c), (3, &b), (4, &d), (5, &a)];
-        let (same, unique) = identical_streams(&streams);
+        let (same, unique, shares) = identical_streams(&streams);
         assert_eq!(same, vec![0, 1, 0, 3, 0]);
         assert_eq!(unique, vec![0, 1, 3]);
+        // a and c have the same data and filters under other dictionaries.
+        assert_eq!(shares, vec![true, true, false]);
+    }
+
+    #[test]
+    fn identical_streams_match_the_pairwise_reference() {
+        // Two 16-byte inputs with the same hash64: the second block cancels the difference of the first.
+        let m = 0x9E37_79B9_7F4A_7C15u64;
+        let step = |h: u64, v: u64| (h ^ v).wrapping_mul(m).rotate_left(29);
+        let h0 = 16u64.wrapping_mul(m) ^ 0x2545_F491_4F6C_DD1D;
+        let (v1, w1, v2) = (1u64, 2u64, 7u64);
+        let w2 = v2 ^ step(h0, v1) ^ step(h0, w1);
+        let x = [v1.to_le_bytes(), v2.to_le_bytes()].concat();
+        let y = [w1.to_le_bytes(), w2.to_le_bytes()].concat();
+        assert!(x != y && par::hash64(&x) == par::hash64(&y), "a planted collision");
+        let data = [x, y, b"other data, 16 b".to_vec()];
+        // The O(n^2) answer: the first equal stream, the firsts, and whether another first has the same data,
+        // /Filter and /DecodeParms.
+        let reference = |streams: &[(u32, &Stream)]| {
+            let same: Vec<usize> =
+                (0..streams.len()).map(|i| (0..=i).find(|&j| streams[j].1 == streams[i].1).unwrap()).collect();
+            let unique: Vec<usize> = (0..streams.len()).filter(|&i| same[i] == i).collect();
+            let input =
+                |s: &Stream| (s.data.clone(), s.dict.get(b"Filter").cloned(), s.dict.get(b"DecodeParms").cloned());
+            let shares: Vec<bool> = unique
+                .iter()
+                .map(|&i| unique.iter().any(|&j| j != i && input(streams[j].1) == input(streams[i].1)))
+                .collect();
+            (same, unique, shares)
+        };
+        let mut r = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move |k: u64| {
+            r ^= r << 13;
+            r ^= r >> 7;
+            r ^= r << 17;
+            (r % k) as usize
+        };
+        let (mut merged, mut shared) = (0, 0);
+        for _ in 0..300 {
+            let n = 1 + next(40);
+            let set: Vec<Stream> = (0..n)
+                .map(|_| {
+                    let mut d = Dict::default();
+                    let length = [Some(Obj::Int(16)), Some(Obj::Ref(9, 0)), None][next(3)].clone();
+                    let filter = [None, Some(Obj::Name(b"FlateDecode".to_vec()))][next(2)].clone();
+                    let mut p = Dict::default();
+                    p.set(b"Predictor", Obj::Int(12));
+                    let parms = [None, Some(Obj::Dict(p))][next(2)].clone();
+                    // The same entries in another order make another dictionary.
+                    let length_first = next(2) == 0;
+                    if let (Some(l), true) = (&length, length_first) {
+                        d.set(b"Length", l.clone());
+                    }
+                    if let Some(f) = filter {
+                        d.set(b"Filter", f);
+                    }
+                    if let Some(p) = parms {
+                        d.set(b"DecodeParms", p);
+                    }
+                    if let (Some(l), false) = (length, length_first) {
+                        d.set(b"Length", l);
+                    }
+                    Stream { dict: d, data: data[next(3)].clone() }
+                })
+                .collect();
+            let streams: Vec<(u32, &Stream)> = set.iter().enumerate().map(|(k, s)| (k as u32 + 1, s)).collect();
+            let got = identical_streams(&streams);
+            assert_eq!(got, reference(&streams), "{streams:?}");
+            // Never merged across the planted collision.
+            assert!(got.0.iter().enumerate().all(|(i, &j)| streams[j].1.data == streams[i].1.data));
+            merged += n - got.1.len();
+            shared += got.2.iter().filter(|&&x| x).count();
+        }
+        assert!(merged > 1000 && shared > 1000, "{merged} merged, {shared} sharing");
     }
 }
 

@@ -1,7 +1,8 @@
 //! PDF objects and their compact serialisation.
 
-/// A PDF object. Numbers keep their written form so they are written back exactly as they were.
-#[derive(Clone, Debug, PartialEq)]
+/// A PDF object. Numbers keep their written form so they are written back exactly as they were; a real is
+/// also compared and hashed as written, so equality is exact.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Obj {
     Null,
     Bool(bool),
@@ -19,10 +20,10 @@ pub enum Obj {
 }
 
 /// A dictionary, keys in their original order.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub struct Dict(pub Vec<(Vec<u8>, Obj)>);
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Stream {
     pub dict: Dict,
     /// The stream's bytes as stored (still encoded by its filters).
