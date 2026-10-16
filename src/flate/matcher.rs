@@ -249,12 +249,23 @@ fn search<const ALT: bool>(data: &[u8], from: usize, to: usize, max_depth: usize
             steps.extend(
                 farther.drain(..).filter(|&(_, beaten)| keep_all || !beaten || walk > CANDIDATES).map(|(s, _)| s),
             );
-            if walk <= CANDIDATES && steps.len() - before > 1 {
+            if walk <= CANDIDATES {
                 // In the order the parse sorts its candidates in: by length, of equal lengths the farther first.
-                steps[before..].sort_unstable_by_key(|s| {
+                // At most 24 steps, each distance once: sorted in one by one (the library's sort, built for
+                // any length, is 6 KB of the WebAssembly module).
+                let key = |s: &Step| {
                     let (len, dist) = s.get();
                     (len, !dist)
-                });
+                };
+                let far = &mut steps[before..];
+                for i in 1..far.len() {
+                    let (s, mut j) = (far[i], i);
+                    while j > 0 && key(&far[j - 1]) > key(&s) {
+                        far[j] = far[j - 1];
+                        j -= 1;
+                    }
+                    far[j] = s;
+                }
             }
             // At most 24 alternatives.
             farther_count[i - from] = (steps.len() - before) as u8;
