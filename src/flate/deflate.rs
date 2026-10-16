@@ -190,6 +190,7 @@ pub fn deflate(data: &[u8], opt: &Options) -> Vec<u8> {
     // output is the same whatever the number of threads. A group has a segment per thread of the pool (up to
     // SEGMENTS_AT_ONCE), so with one thread each plan is written before the next segment is optimised.
     let at_once = pool.map_or(1, |p| p.threads()).clamp(1, SEGMENTS_AT_ONCE);
+    let mut held = Vec::new();
     for group in bounds.chunks(at_once) {
         let plans = par::map(pool, group.len(), None, |k| {
             let (a, b) = group[k];
@@ -226,7 +227,14 @@ pub fn deflate(data: &[u8], opt: &Options) -> Vec<u8> {
                 None => write_stored(&mut w, &data[a..b], last_segment),
             }
         }
+        // With one thread, a plan is let go only once the next segment's is made: freed at once, its memory
+        // and the segment's tables went back to the system and were faulted in again for the next segment
+        // (4% more time on issue12841_reduced at the quick settings). With more, they are let go here.
+        if at_once == 1 {
+            held = plans;
+        }
     }
+    drop(held);
     w.finish()
 }
 
