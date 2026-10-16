@@ -422,6 +422,12 @@ impl<'a> Doc<'a> {
         self.load_depth(n, 0)
     }
 
+    /// Frees the decoded object streams kept for loading their objects (each up to 256 MiB). A later load
+    /// decodes its object stream again, with the same result.
+    pub fn drop_cache(&self) {
+        self.objstm_cache.take();
+    }
+
     fn load_depth(&self, n: u32, depth: usize) -> Result<(u16, Obj), LoadError> {
         if depth > 8 {
             return Err(LoadError::BadObject(n, "reference chain too deep"));
@@ -516,5 +522,29 @@ impl<'a> Doc<'a> {
                 Ok((0, o))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn objects_in_object_streams_load_again_after_the_cache_is_dropped() {
+        // Our own output keeps the small objects in object streams.
+        let pdf = include_bytes!("../../tests/data/format-v8.pdf");
+        let out = super::super::rewrite::optimize(pdf, &super::super::rewrite::Options::effort(0)).data;
+        let doc = open(&out).unwrap();
+        let packed: Vec<u32> =
+            doc.entries.iter().filter(|(_, e)| matches!(e, Entry::InStream(..))).map(|(&n, _)| n).collect();
+        assert!(packed.len() >= 3, "{packed:?}");
+        let first: Vec<(u16, Obj)> = packed.iter().map(|&n| doc.load(n).unwrap()).collect();
+        assert!(!doc.objstm_cache.borrow().is_empty());
+        doc.drop_cache();
+        assert!(doc.objstm_cache.borrow().is_empty());
+        let again: Vec<(u16, Obj)> = packed.iter().map(|&n| doc.load(n).unwrap()).collect();
+        assert_eq!(first, again);
+        doc.drop_cache();
+        assert_eq!(packed.iter().rev().map(|&n| doc.load(n).unwrap()).rev().collect::<Vec<_>>(), first);
     }
 }

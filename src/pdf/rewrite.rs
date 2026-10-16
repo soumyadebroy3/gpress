@@ -970,6 +970,8 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     let crypt = doc.crypt.as_ref().and_then(|c| c.as_ref().ok());
     let objs = load_reachable(&doc)?;
     gate(&doc, &objs, opt.respect_conformance)?;
+    // Every object the rewrite uses is loaded: the decoded object streams can go.
+    doc.drop_cache();
     let mut stats = Stats {
         objects: objs.len(),
         dropped_unreachable: doc
