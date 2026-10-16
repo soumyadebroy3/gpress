@@ -184,6 +184,20 @@ pub fn png_filter(px: &[u8], row: usize, bpp: usize, how: Choice) -> Vec<u8> {
     out
 }
 
+/// What `png_filter` gives for the rows of `bands` only (ranges of whole rows, in order): row `a` of a band
+/// reads row `a - 1` as the row above, as it does in the whole image. Exact, since a filtered row depends on
+/// that row and the one above only (`MinSum` too chooses for each row alone).
+pub fn filter_rows(px: &[u8], row: usize, bpp: usize, how: Choice, bands: &[(usize, usize)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bands.iter().map(|&(a, b)| (b - a) * (row + 1)).sum());
+    for &(a, b) in bands {
+        // From the row above the band, whose own filtered row is left out.
+        let from = a.saturating_sub(1);
+        let f = png_filter(&px[from * row..b * row], row, bpp, how);
+        out.extend_from_slice(&f[(a - from) * (row + 1)..]);
+    }
+    out
+}
+
 /// The predictor to store the samples with on the fast path, chosen without encoding: None (as they are),
 /// one of the PNG types for every row, or the per-row minimum sum (libpng's heuristic), whichever costs the
 /// fewest bits under an order-0 entropy estimate of the rows in `bands` (`(first, end)` pairs; the first of
@@ -387,5 +401,48 @@ mod tests {
         c[1] = 1000;
         c[2] = 1000;
         assert_eq!(entropy_bits(&c), 2000 << 16);
+    }
+
+    #[test]
+    fn filter_rows_is_png_filter_then_slicing() {
+        let mut s = 7u64;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let every =
+            [Choice::Fixed(0), Choice::Fixed(1), Choice::Fixed(2), Choice::Fixed(3), Choice::Fixed(4), Choice::MinSum];
+        for bpp in [1usize, 3, 4, 6] {
+            let row = bpp * 9;
+            for nrows in [1usize, 2, 12] {
+                // Smooth with some noise, so every filter type gets chosen somewhere.
+                let px: Vec<u8> = (0..row * nrows)
+                    .map(|i| {
+                        ((i % row) * 5 + (i / row) * 3) as u8 ^ if next() % 3 == 0 { (next() % 64) as u8 } else { 0 }
+                    })
+                    .collect();
+                let mut cases: Vec<Vec<(usize, usize)>> =
+                    vec![vec![(0, nrows)], vec![(0, 1)], vec![(nrows - 1, nrows)]];
+                if nrows == 12 {
+                    // At row 0, in the middle and at the end; one-row bands; touching bands.
+                    cases.extend([
+                        vec![(0, 2), (5, 7), (10, 12)],
+                        vec![(3, 4), (4, 5), (8, 9)],
+                        vec![(1, 6), (6, 12)],
+                        vec![(0, 1), (11, 12)],
+                    ]);
+                }
+                for how in every {
+                    let whole = png_filter(&px, row, bpp, how);
+                    for bands in &cases {
+                        let want: Vec<u8> =
+                            bands.iter().flat_map(|&(a, b)| &whole[a * (row + 1)..b * (row + 1)]).copied().collect();
+                        assert_eq!(filter_rows(&px, row, bpp, how, bands), want, "{how:?}, bpp {bpp}, {bands:?}");
+                    }
+                }
+            }
+        }
     }
 }
