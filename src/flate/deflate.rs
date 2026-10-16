@@ -218,7 +218,9 @@ pub fn deflate(data: &[u8], opt: &Options) -> Vec<u8> {
 /// this input.
 pub fn deflate_zlib(data: &[u8], opt: &Options) -> Vec<u8> {
     let encode = || super::zlib::wrap(&deflate(data, opt), data);
-    match opt.shared.as_ref().and_then(|sh| sh.memo.as_ref()) {
+    // Only an input of one segment is remembered: a memo's compute runs on its own thread (see `par::Memo`),
+    // and one segment is one piece of work anyway.
+    match opt.shared.as_ref().and_then(|sh| sh.memo.as_ref()).filter(|_| data.len() <= opt.segment.max(1)) {
         None => encode(),
         Some(memo) => {
             let key = (par::hash64(data), data.len(), opt.fingerprint());
