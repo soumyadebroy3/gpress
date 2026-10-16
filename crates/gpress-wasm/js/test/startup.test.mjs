@@ -13,6 +13,7 @@
 // tests too.
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { availableParallelism, loadavg } from "node:os";
 import { fileURLToPath } from "node:url";
 import { onePagePdf } from "./onepage.mjs";
 
@@ -107,7 +108,13 @@ if (process.argv[2] === "--sample") {
         const over = m("total") - TARGET_MS;
         t.diagnostic(`target ${TARGET_MS} ms: ${over <= 0 ? "met" : `not met, ${over.toFixed(1)} ms over`}`);
       }
-      assert.ok(m("total") <= limit, `start-up median ${m("total").toFixed(1)} ms is over ${limit} ms`);
+      assert.ok(
+        m("total") <= limit,
+        `start-up median ${m("total").toFixed(1)} ms is over ${limit} ms. A busy machine (load average ` +
+          `${loadavg()[0].toFixed(1)} on ${availableParallelism()} cores here now) or one with fewer cores is slower; ` +
+          `CI's run is the one that counts, and GPRESS_STARTUP_LIMIT_MS=N raises the limit on this machine ` +
+          `(effort 0's to N ms, the default effort's to twice N)`,
+      );
     });
   }
 }
