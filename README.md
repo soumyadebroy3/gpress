@@ -314,8 +314,9 @@ CI (`.github/workflows/ci.yml`) runs formatting, clippy with warnings as errors 
 test suites, clippy and the tests again for the builds that leave parts out (none of them, the web set, and
 every part but one), the C example against the shared library, the licence and advisory gate, the
 WebAssembly package with the tests on both modules and the web module's size budget, and a short fuzzing run
-of the three decoders. `tests/features.rs` checks each part's absence in the builds without it;
-`tests/api.rs` proves that every option changes what the engine does; `tests/interaction.rs` runs every
+of the three decoders. `tests/features.rs` checks each part's absence in the builds without it, and the other
+test files run in every build each test whose parts it has (`tests/bounds.rs`, `speed.rs` and `memory.rs` test
+the normal PDF in the web build too); `tests/api.rs` proves that every option changes what the engine does; `tests/interaction.rs` runs every
 feature on one encrypted file (a JPEG, a fax image, a Type 1 font and a zlib stream) in both outputs;
 `tests/pack_format.rs` keeps an archive made by the first build of the format version
 (`tests/data/format-v8.*`), which must still restore and pack to the same bytes.

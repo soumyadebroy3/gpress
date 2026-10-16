@@ -14,23 +14,16 @@ path = "src/lib.rs"
 name = "gpress"
 path = "src/bin/gpress.rs"
 
-# The tests and the example that use a part a build may leave out (see [features]) run only when it has it;
-# tests/features.rs runs in every build.
+# A test that uses a part a build may leave out (see [features]) runs only when the build has it: the files
+# below need the part for every test (api.rs and interaction.rs: for the mixed test document), the others mark
+# such tests one by one. tests/features.rs checks each part's absence.
 [[test]]
 name = "api"
-required-features = ["archive", "jpeg", "fax", "encryption"]
+required-features = ["fax", "encryption"]
 
 [[test]]
 name = "interaction"
-required-features = ["archive", "jpeg", "fax", "encryption"]
-
-[[test]]
-name = "bounds"
-required-features = ["archive"]
-
-[[test]]
-name = "memory"
-required-features = ["archive"]
+required-features = ["jpeg", "fax", "encryption"]
 
 [[test]]
 name = "pack_format"
@@ -39,10 +32,6 @@ required-features = ["archive"]
 [[test]]
 name = "pack_kinds"
 required-features = ["archive", "fax", "encryption"]
-
-[[test]]
-name = "speed"
-required-features = ["archive"]
 
 [[test]]
 name = "type1_fonts"

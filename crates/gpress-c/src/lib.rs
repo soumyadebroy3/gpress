@@ -311,23 +311,19 @@ mod tests {
         assert!(include_str!("../include/gpress.h").contains(&format!("GPRESS_ERR_NEEDS_FEATURE = {code}")));
     }
 
-    /// Without the archive, compress and expand (which return the library's error as it is) give that code,
-    /// with a message that names the feature.
-    #[test]
+    /// zlib's own stream of `text`, which the archive rebuilds: only a build with the archive has its encoder,
+    /// and the test below uses it only in such a build.
+    #[cfg(feature = "archive")]
+    fn zlib_of(text: &[u8]) -> Vec<u8> {
+        use gpress::flate::zlibexact::{zlib_stream, Params};
+        zlib_stream(text, Params { level: 6, window_bits: 15, mem_level: 8, filtered: false })
+    }
     #[cfg(not(feature = "archive"))]
-    fn the_archive_calls_say_they_need_the_archive() {
-        let opt = options_from(None);
-        let input = b"%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n";
-        for r in [gpress::compress(input, &opt).map(|_| ()), gpress::expand(input, &opt).map(|_| ())] {
-            let e = r.unwrap_err();
-            assert_eq!(e.code(), 10);
-            assert!(e.to_string().contains("`archive`"), "{e}");
-        }
-        assert!(gpress::optimize(input, &opt).is_ok());
+    fn zlib_of(_text: &[u8]) -> Vec<u8> {
+        unreachable!("used only with the archive")
     }
 
     #[test]
-    #[cfg(feature = "archive")]
     fn round_trip_through_the_c_surface() {
         let input = b"%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n".to_vec();
         // SAFETY: a zeroed options struct is plain data; gpress_options_default then fills it.
@@ -335,6 +331,23 @@ mod tests {
         unsafe {
             gpress_options_default(&mut o);
             assert_eq!((o.effort, o.jbig2, o.decrypt, o.max_len, o.max_decoded), (100, 1, 1, 1 << 30, 256 << 20));
+            // Without the archive: compress and expand give GPRESS_ERR_NEEDS_FEATURE, a message that names the
+            // feature and no output; optimize works.
+            if !cfg!(feature = "archive") {
+                for mut r in
+                    [gpress_compress(input.as_ptr(), input.len(), &o), gpress_expand(input.as_ptr(), input.len(), &o)]
+                {
+                    assert_eq!(r.code, 10);
+                    assert!(r.output.data.is_null() && !r.message.is_null());
+                    let msg = std::ffi::CStr::from_ptr(r.message).to_string_lossy().into_owned();
+                    assert!(msg.contains("`archive`"), "{msg}");
+                    gpress_result_free(&mut r);
+                }
+                let mut p = gpress_optimize(input.as_ptr(), input.len(), &o);
+                assert_eq!(p.code, 0);
+                gpress_result_free(&mut p);
+                return;
+            }
             let mut c = gpress_compress(input.as_ptr(), input.len(), &o);
             assert_eq!(c.code, 0);
             let archive = std::slice::from_raw_parts(c.output.data, c.output.len).to_vec();
@@ -389,10 +402,7 @@ mod tests {
             let text: Vec<u8> = (0..4000)
                 .flat_map(|i| format!("BT /F1 12 Tf 72 {} Td (Line {i}) Tj ET\n", i % 60 * 11).into_bytes())
                 .collect();
-            let z = gpress::flate::zlibexact::zlib_stream(
-                &text,
-                gpress::flate::zlibexact::Params { level: 6, window_bits: 15, mem_level: 8, filtered: false },
-            );
+            let z = zlib_of(&text);
             let mut pdf =
                 format!("%PDF-1.4\n1 0 obj\n<< /Filter /FlateDecode /Length {} >>\nstream\n", z.len()).into_bytes();
             pdf.extend_from_slice(&z);

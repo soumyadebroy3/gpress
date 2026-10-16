@@ -1,12 +1,14 @@
 //! The library boundary: every knob of `gpress::Options` reaches the engine and changes what it does,
 //! proven one knob at a time on the mixed test document (a JPEG, a fax image, a Type 1 font, a zlib
 //! content stream; plain and encrypted). The output never depends on the thread count or on a time budget
-//! that doesn't run out.
+//! that doesn't run out. A build without the archive or the JPEG step runs the tests that don't need it.
 
 mod common;
 
 use common::*;
-use gpress::{compress, expand, optimize, Compressed, Error, Options, Outcome, Report};
+#[cfg(feature = "archive")]
+use gpress::Compressed;
+use gpress::{compress, expand, optimize, Error, Options, Outcome, Report};
 use std::time::Duration;
 
 fn base() -> Options {
@@ -28,6 +30,7 @@ fn untouched<'a>(r: &'a gpress::Optimized, input: &[u8]) -> &'a str {
     }
 }
 
+#[cfg(feature = "archive")]
 fn pack(input: &[u8], opt: &Options) -> Compressed {
     let c = compress(input, opt).unwrap();
     assert_eq!(expand(&c.data, opt).unwrap(), input, "every archive restores exactly");
@@ -44,15 +47,18 @@ fn effort_changes_the_work_and_every_level_restores() {
     assert!(full.data.len() < pdf.len() && quick.data.len() < pdf.len());
     // The archive: below effort 50, data that looks compressed already (a stream of random bytes here) is
     // coded plainly, so the bytes differ; both restore.
-    let mut seed = 0x9E37_79B9u32;
-    let random: Vec<u8> = (0..100_000).map(|_| next(&mut seed) as u8).collect();
-    let mut objs = objects();
-    objs.push((12, "/Type /XObject /Subtype /Image /Width 400 /Height 250 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode".into(), Some(random)));
-    let doc = rebuild(&objs);
-    let a = pack(&doc, &base().effort(0));
-    let b = pack(&doc, &base().effort(100));
-    assert_ne!(a.data, b.data);
-    assert!(b.data.len() < doc.len());
+    #[cfg(feature = "archive")]
+    {
+        let mut seed = 0x9E37_79B9u32;
+        let random: Vec<u8> = (0..100_000).map(|_| next(&mut seed) as u8).collect();
+        let mut objs = objects();
+        objs.push((12, "/Type /XObject /Subtype /Image /Width 400 /Height 250 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode".into(), Some(random)));
+        let doc = rebuild(&objs);
+        let a = pack(&doc, &base().effort(0));
+        let b = pack(&doc, &base().effort(100));
+        assert_ne!(a.data, b.data);
+        assert!(b.data.len() < doc.len());
+    }
 }
 
 #[test]
@@ -62,9 +68,8 @@ fn threads_never_change_the_output() {
     let two = optimize(&pdf, &base().threads(2)).unwrap().data;
     let auto = optimize(&pdf, &base().threads(0)).unwrap().data;
     assert!(one == two && one == auto);
-    let one = pack(&pdf, &base().threads(1)).data;
-    let two = pack(&pdf, &base().threads(2)).data;
-    assert_eq!(one, two);
+    #[cfg(feature = "archive")]
+    assert_eq!(pack(&pdf, &base().threads(1)).data, pack(&pdf, &base().threads(2)).data);
     assert!(matches!(optimize(&pdf, &base().threads(65)), Err(Error::InvalidOptions(_))));
     assert!(optimize(&pdf, &base().threads(64)).is_ok());
 }
@@ -93,6 +98,7 @@ fn max_stream_keeps_the_streams_over_it() {
 }
 
 #[test]
+#[cfg(feature = "archive")]
 fn max_stream_archive_stores_the_streams_over_it_as_they_are() {
     let pdf = plain_pdf();
     let all = pack(&pdf, &base());
@@ -104,6 +110,7 @@ fn max_stream_archive_stores_the_streams_over_it_as_they_are() {
 }
 
 #[test]
+#[cfg(feature = "archive")]
 fn max_len_refuses_a_declared_length_before_decoding() {
     let pdf = plain_pdf();
     let c = pack(&pdf, &base());
@@ -121,6 +128,7 @@ fn max_len_refuses_a_declared_length_before_decoding() {
 }
 
 #[test]
+#[cfg(feature = "archive")]
 fn max_decoded_bounds_both_sides() {
     // The mixed document's streams decode to about 70 KB in all. A budget below that stores some of
     // them as they are (in file order; the archive is larger and still restores); the header declares the
@@ -175,6 +183,7 @@ fn respect_conformance_leaves_pdfa_alone_unless_told_otherwise() {
 }
 
 #[test]
+#[cfg(feature = "jpeg")]
 fn flate_over_jpeg_is_a_choice() {
     // A JPEG with a 4 KB comment of one letter: Flate in front of it saves far more than 1%.
     let mut jpeg = JPEG[..2].to_vec();
@@ -226,6 +235,7 @@ fn rebuild(objs: &[(u32, String, Option<Vec<u8>>)]) -> Vec<u8> {
 }
 
 #[test]
+#[cfg(feature = "jpeg")]
 fn jpeg_tables_and_jbig2_each_have_a_switch_and_a_count() {
     let pdf = plain_pdf();
     let all = optimize(&pdf, &base()).unwrap();
@@ -250,15 +260,19 @@ fn rewrite_encrypted_and_decrypt_each_have_a_switch() {
     let rewritten = optimize(&pdf, &base()).unwrap();
     assert_eq!(report(&rewritten).encryption, "R3/RC4");
     assert!(rewritten.data.len() < pdf.len());
-    let decrypted = pack(&pdf, &base());
-    let as_stored = pack(&pdf, &base().decrypt(false));
-    assert!(decrypted.streams_decrypted > 0, "{decrypted:?}");
-    assert_eq!(as_stored.streams_decrypted, 0, "{as_stored:?}");
-    assert!(decrypted.data.len() < as_stored.data.len());
-    assert!(decrypted.type1_fonts == 1 && decrypted.fax_images == 1, "{decrypted:?}");
+    #[cfg(feature = "archive")]
+    {
+        let decrypted = pack(&pdf, &base());
+        let as_stored = pack(&pdf, &base().decrypt(false));
+        assert!(decrypted.streams_decrypted > 0, "{decrypted:?}");
+        assert_eq!(as_stored.streams_decrypted, 0, "{as_stored:?}");
+        assert!(decrypted.data.len() < as_stored.data.len());
+        assert!(decrypted.type1_fonts == 1 && decrypted.fax_images == 1, "{decrypted:?}");
+    }
 }
 
 #[test]
+#[cfg(feature = "archive")]
 fn use_existing_libraries_is_a_switch_when_the_build_has_them() {
     let pdf = plain_pdf();
     let with = pack(&pdf, &base());
@@ -281,18 +295,22 @@ fn a_time_budget_stops_the_work_and_changes_no_output() {
     let e = optimize(&pdf, &tiny).unwrap_err();
     assert!(matches!(e, Error::TimeBudget(_)), "{e}");
     assert_eq!(e.code(), 6);
-    let e = compress(&pdf, &tiny).unwrap_err();
-    assert!(matches!(e, Error::TimeBudget(_)), "{e}");
     // A budget that doesn't run out: the same bytes as without one.
     let ample = base().time_budget(Some(Duration::from_secs(600)));
     assert_eq!(optimize(&pdf, &ample).unwrap().data, optimize(&pdf, &base()).unwrap().data);
-    assert_eq!(compress(&pdf, &ample).unwrap().data, compress(&pdf, &base()).unwrap().data);
-    // Expand too: a budget that has passed gives the error and no file, an ample one the same bytes.
-    let c = compress(&pdf, &base()).unwrap();
-    let e = expand(&c.data, &tiny).unwrap_err();
-    assert!(matches!(e, Error::TimeBudget(_)), "{e}");
-    assert_eq!(expand(&c.data, &ample).unwrap(), pdf);
     assert!(matches!(optimize(&pdf, &base().time_budget(Some(Duration::ZERO))), Err(Error::InvalidOptions(_))));
+    // The archive the same way, and expand too: a budget that has passed gives the error and no file, an
+    // ample one the same bytes.
+    #[cfg(feature = "archive")]
+    {
+        let e = compress(&pdf, &tiny).unwrap_err();
+        assert!(matches!(e, Error::TimeBudget(_)), "{e}");
+        assert_eq!(compress(&pdf, &ample).unwrap().data, compress(&pdf, &base()).unwrap().data);
+        let c = compress(&pdf, &base()).unwrap();
+        let e = expand(&c.data, &tiny).unwrap_err();
+        assert!(matches!(e, Error::TimeBudget(_)), "{e}");
+        assert_eq!(expand(&c.data, &ample).unwrap(), pdf);
+    }
 }
 
 /// Cut-off files and the bare header: every prefix of a small PDF, and of the mixed document in steps, goes
@@ -332,6 +350,7 @@ fn every_prefix_is_handled_without_a_bug() {
 }
 
 #[test]
+#[cfg(feature = "archive")]
 fn a_damaged_archive_is_an_error_with_a_message_and_never_a_file() {
     let pdf = plain_pdf();
     let c = pack(&pdf, &base());
