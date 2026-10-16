@@ -485,29 +485,48 @@ fn exact(
     let mut best_bits = price(&Hist::of(&start), b - a);
     let mut best = start;
     let mut cur = Vec::with_capacity(best.len());
-    for _ in 0..opt.exact_rounds {
+    // The prices (and `alt`) of this round's parses and the last round's, by round parity and variant. The
+    // same again give the same parse, which was priced then and so cannot beat `best_bits` now: it is not
+    // made again. Without alternatives the third variant is the first, and a round whose code is the last
+    // round's repeats it whole. Kept on the stack.
+    let mut tried: [Option<(bool, Costs)>; 6] = Default::default();
+    for round in 0..opt.exact_rounds {
         let h = Hist::of(&best);
         let code = best_dynamic(&h);
         let maxlen = *code.ll.iter().max().unwrap_or(&15) as f32;
         let mut improved = false;
-        for (missing, alt) in [(maxlen + 1.0, false), (maxlen + 4.0, false), (maxlen + 1.0, opt.alternatives)] {
+        let variants = [(maxlen + 1.0, false), (maxlen + 4.0, false), (maxlen + 1.0, opt.alternatives)];
+        for (k, (missing, alt)) in variants.into_iter().enumerate() {
             if !alt && missing > maxlen + 1.0 && opt.alternatives {
                 // keep the variety small when alternatives are tried
             }
+            let costs = Costs::lengths(&code.ll, &code.d, missing);
+            if tried.iter().flatten().any(|t| t.0 == alt && same_costs(&t.1, &costs)) {
+                continue;
+            }
             cur.clear();
-            optimal_nice(data, a, b, m, &Costs::lengths(&code.ll, &code.d, missing), alt, opt.nice, sc, &mut cur);
+            optimal_nice(data, a, b, m, &costs, alt, opt.nice, sc, &mut cur);
             let bits = price(&Hist::of(&cur), b - a);
             if bits < best_bits {
                 best_bits = bits;
                 best.clone_from(&cur);
                 improved = true;
             }
+            tried[round % 2 * 3 + k] = Some((alt, costs));
         }
         if !improved {
             break;
         }
     }
     best
+}
+
+/// Whether two sets of prices are the same bit for bit (then a parse gives the same symbols under either).
+fn same_costs(x: &Costs, y: &Costs) -> bool {
+    fn bits(c: &Costs) -> impl Iterator<Item = u32> + '_ {
+        c.lit.iter().chain(&c.len).chain(&c.dist).map(|v| v.to_bits())
+    }
+    bits(x).eq(bits(y))
 }
 
 /// Chooses block boundaries by dynamic programming over candidate split points.
@@ -613,4 +632,104 @@ fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>) -> Vec<Plan> {
     debug_assert_eq!(byte, b);
     let _ = data;
     plans
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `exact` with every variant of every round parsed afresh, and how many of those parses had the prices
+    /// and `alt` of an earlier one in the same call (checked to give the same symbols).
+    fn exact_every_parse(
+        data: &[u8],
+        a: usize,
+        b: usize,
+        m: &Matches,
+        opt: &Options,
+        start: Vec<Sym>,
+    ) -> (Vec<Sym>, usize) {
+        let mut sc = ParseScratch::default();
+        let mut best_bits = price(&Hist::of(&start), b - a);
+        let mut best = start;
+        let mut made: Vec<(bool, Costs, Vec<Sym>)> = Vec::new();
+        let mut repeats = 0;
+        for _ in 0..opt.exact_rounds {
+            let code = best_dynamic(&Hist::of(&best));
+            let maxlen = *code.ll.iter().max().unwrap_or(&15) as f32;
+            let mut improved = false;
+            for (missing, alt) in [(maxlen + 1.0, false), (maxlen + 4.0, false), (maxlen + 1.0, opt.alternatives)] {
+                let costs = Costs::lengths(&code.ll, &code.d, missing);
+                let mut cur = Vec::new();
+                optimal_nice(data, a, b, m, &costs, alt, opt.nice, &mut sc, &mut cur);
+                if let Some(e) = made.iter().find(|e| e.0 == alt && same_costs(&e.1, &costs)) {
+                    assert!(e.2 == cur, "the same prices gave another parse");
+                    repeats += 1;
+                }
+                let bits = price(&Hist::of(&cur), b - a);
+                if bits < best_bits {
+                    best_bits = bits;
+                    best.clone_from(&cur);
+                    improved = true;
+                }
+                made.push((alt, costs, cur));
+            }
+            if !improved {
+                break;
+            }
+        }
+        (best, repeats)
+    }
+
+    fn samples() -> Vec<Vec<u8>> {
+        let mut s = 7u64;
+        let mut rng = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let text = b"BT /F1 12 Tf 72 712 Td [(Hello)-250(World)]TJ ET q 0.5 0 0 0.5 0 0 cm /Im1 Do Q\n".repeat(60);
+        let mut mixed = Vec::new();
+        for k in 0..30_000usize {
+            let v = rng();
+            mixed.push(if k % 1000 < 600 { (v % 5) as u8 + b'a' } else { (v >> 8) as u8 % 40 });
+        }
+        let mut rows = Vec::new();
+        for y in 0..120u32 {
+            for x in 0..200u32 {
+                rows.push(((x * x + y * 3) / 7 % 256) as u8 ^ (rng() % 3) as u8);
+            }
+        }
+        vec![b"abcabcabd".to_vec(), text, mixed, rows]
+    }
+
+    #[test]
+    fn exact_skips_only_parses_it_has_made() {
+        let opts = [
+            Options::quick(),
+            Options::effort(50),
+            Options::effort(60),
+            Options::max(),
+            Options { exact_rounds: 6, alternatives: false, ..Options::max() },
+        ];
+        let mut repeats = [0usize; 2];
+        for opt in &opts {
+            for data in samples() {
+                let n = data.len();
+                let m = find_matches(&data, 0, n, opt.max_chain, opt.alternatives);
+                for (a, b) in [(0, n), (0, n / 2), (n / 3, n)] {
+                    let mut sc = ParseScratch::default();
+                    let mut first = Vec::new();
+                    optimal_nice(&data, a, b, &m, &Costs::fixed(), false, opt.nice, &mut sc, &mut first);
+                    let start = refine(&data, a, b, &m, opt, first, &mut sc);
+                    let got = exact(&data, a, b, &m, opt, start.clone(), &mut sc);
+                    let (want, r) = exact_every_parse(&data, a, b, &m, opt, start);
+                    assert!(got == want, "{opt:?} on {a}..{b} of {n} bytes");
+                    repeats[opt.alternatives as usize] += r;
+                }
+            }
+        }
+        // Parses were skipped both without alternatives and with them.
+        assert!(repeats[0] > 0 && repeats[1] > 0, "{repeats:?}");
+    }
 }
