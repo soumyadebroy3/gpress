@@ -364,7 +364,8 @@ pub fn ascii85_decode(data: &[u8]) -> Result<Vec<u8>, FilterError> {
 }
 
 pub fn run_length_decode(data: &[u8], limit: usize) -> Result<Vec<u8>, FilterError> {
-    let mut out = Vec::new();
+    // Sized first, so the output is made once at its size, and nothing is made for data that fails.
+    let mut out = Vec::with_capacity(run_length_len(data, limit)?);
     let mut i = 0;
     while i < data.len() {
         let l = data[i] as usize;
@@ -391,6 +392,37 @@ pub fn run_length_decode(data: &[u8], limit: usize) -> Result<Vec<u8>, FilterErr
     Ok(out)
 }
 
+/// The length `run_length_decode` gives, or its error, without decoding: the same walk over the runs.
+fn run_length_len(data: &[u8], limit: usize) -> Result<usize, FilterError> {
+    let mut n = 0usize;
+    let mut i = 0;
+    while i < data.len() {
+        let l = data[i] as usize;
+        i += 1;
+        if l == 128 {
+            break;
+        }
+        if l < 128 {
+            let end = i + l + 1;
+            if end > data.len() {
+                return Err(FilterError::Bad("RunLength literal past the end"));
+            }
+            n += l + 1;
+            i = end;
+        } else {
+            if i >= data.len() {
+                return Err(FilterError::Bad("RunLength repeat past the end"));
+            }
+            i += 1;
+            n += 257 - l;
+        }
+        if n > limit {
+            return Err(FilterError::TooLarge);
+        }
+    }
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,6 +437,26 @@ mod tests {
     fn hex_and_runlength() {
         assert_eq!(ascii_hex_decode(b"48 65 6C6c 6F7>").unwrap(), b"Hellop".to_vec());
         assert_eq!(run_length_decode(&[2, b'a', b'b', b'c', 254, b'x', 128], 100).unwrap(), b"abcxxx".to_vec());
+    }
+
+    #[test]
+    fn run_length_sizes_agree_with_the_decoder() {
+        // Random runs: literals and repeats, some cut short, with and without the end marker.
+        let mut s = 3u64;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        for _ in 0..2000 {
+            let len = (next() % 40) as usize;
+            let data: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            for limit in [usize::MAX, 300, 50, 0] {
+                let full = run_length_decode(&data, limit).map(|d| d.len());
+                assert_eq!(run_length_len(&data, limit), full);
+            }
+        }
     }
 
     #[test]
