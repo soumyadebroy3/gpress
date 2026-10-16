@@ -80,9 +80,10 @@ impl Default for Effort {
 pub struct Options {
     /// Effort for both outputs, 0 to 100 (see [`Effort`]).
     pub effort: Effort,
-    /// Worker threads for independent work: 0 = every core the machine offers, up to [`MAX_THREADS`]; else at
-    /// most [`MAX_THREADS`]. Output is identical whatever the count; this only changes speed. A thread the
-    /// system refuses is no loss: the calling thread does the work.
+    /// Worker threads for independent work: 0 = every core the machine offers, at most 8 for now (each thread
+    /// holds a stream of its own, so memory grows with them); else at most [`MAX_THREADS`]. Output is identical
+    /// whatever the count; this only changes speed. A thread the system refuses is no loss: the calling thread
+    /// does the work.
     pub threads: usize,
     /// Largest input accepted, in bytes. Inputs over this return [`Error::TooLarge`] at once.
     pub max_input: usize,

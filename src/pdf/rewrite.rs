@@ -37,7 +37,7 @@ pub struct Options {
     /// budget too (16 per byte of the file at effort 0, twice as much every 10 points, at least 4 MiB): a
     /// stream beyond it is kept as it is. Decided from sizes only, never from time, so the output is repeatable.
     pub effort: u8,
-    /// Threads to use (0: every core the machine offers, at most 64). Never changes the output.
+    /// Threads to use (0: every core the machine offers, at most 8; at most 64). Never changes the output.
     pub threads: usize,
     /// Leave files that claim a conformance or carry a signature untouched: PDF/A, PDF/X, signed, certified,
     /// usage rights (the safe default). With `false` every object's value is still kept, but those
