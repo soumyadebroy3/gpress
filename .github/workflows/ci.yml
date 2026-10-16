@@ -7,9 +7,11 @@ on:
 permissions:
   contents: read
 
+# A runner has two cores, so the checks are spread over jobs that run at the same time: the test suites by feature
+# set and by target, and the fuzzing by decoder. Every command and every test of the one job before is still run.
 jobs:
-  test:
-    name: Build and test (Linux)
+  lint:
+    name: Format, clippy and the C example
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,14 +22,46 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy --workspace --all-targets --features existing -- -D warnings
-      - run: cargo test --release --workspace
-      - run: cargo test --release --workspace --features existing
       - name: C example against the shared library
         run: |
           cargo build --release -p gpress-c
           gcc -O2 -Wall -Wextra -Icrates/gpress-c/include crates/gpress-c/examples/roundtrip.c -Ltarget/release -lgpress_c -lpthread -ldl -lm -o roundtrip
           printf '%%PDF-1.4\n%%%%EOF\n' > t.pdf
           LD_LIBRARY_PATH=target/release ./roundtrip t.pdf
+
+  # `cargo test --release --workspace` (and the same with `--features existing`) in two halves that each build only
+  # what they run. Together they are what it runs: the libraries' unit tests and their doc tests in one; the
+  # binary's unit tests, every integration test (`--test '*'`, with the binary they call) and the examples, which
+  # `cargo test` only builds, in the other.
+  test:
+    name: Tests, ${{ matrix.features }} features (${{ matrix.part }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: [default, existing]
+        part: [library and doc tests, integration tests]
+        include:
+          - features: default
+            flags: ''
+          - features: existing
+            flags: --features existing
+    env:
+      FLAGS: ${{ matrix.flags }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.features }}-${{ matrix.part }}
+      - if: matrix.part == 'library and doc tests'
+        run: |
+          cargo test --release --workspace --lib $FLAGS
+          cargo test --release --workspace --doc $FLAGS
+      - if: matrix.part == 'integration tests'
+        run: |
+          cargo test --release --workspace --bins --test '*' $FLAGS
+          cargo build --release --workspace --examples $FLAGS
 
   licences:
     name: Licence and advisory gate (cargo deny)
@@ -70,13 +104,16 @@ jobs:
           path: crates/gpress-wasm/js/dist/
 
   fuzz:
-    name: Fuzz the decoders (short run)
+    name: Fuzz the decoders (short run, ${{ matrix.target }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [expand, inflate, pdf_optimize]
+    env:
+      TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
       - run: cargo install cargo-fuzz --locked
-      - run: |
-          for t in expand inflate pdf_optimize; do
-            cargo fuzz run $t -- -max_total_time=120 -rss_limit_mb=2048
-          done
+      - run: cargo fuzz run "$TARGET" -- -max_total_time=120 -rss_limit_mb=2048
