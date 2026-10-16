@@ -9,6 +9,11 @@
 //! reason). The engine reads no clock here (so there is no time budget: the host bounds the work by
 //! running it in a worker).
 //!
+//! Features: the module may be built without parts of the engine (the crate's Cargo features; the npm
+//! package ships the whole module and the web one, without the archive). `gpress_features` gives the parts it
+//! has as bits, and after a call that returned 10 (a part it leaves out) `gpress_needed_feature` gives that
+//! part's bit; the wrapper turns the pair into a `GpressFeatureError` naming the part.
+//!
 //! Panics: `wasm32-unknown-unknown` builds with `panic = "abort"`, so there is no unwinding and the panic
 //! guards here and in the library catch nothing. A bug in the engine therefore traps the module
 //! (`WebAssembly.RuntimeError` in the host, like a failed memory growth) instead of returning code 4; the
@@ -28,6 +33,7 @@ thread_local! {
     static OUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static MSG: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static OUTCOME: RefCell<i32> = const { RefCell::new(0) };
+    static NEEDED: RefCell<u32> = const { RefCell::new(0) };
 }
 
 fn set_out(v: Vec<u8>) {
@@ -38,6 +44,9 @@ fn set_msg(s: &str) {
 }
 fn set_outcome(v: i32) {
     OUTCOME.with(|o| *o.borrow_mut() = v);
+}
+fn set_needed(bit: u32) {
+    NEEDED.with(|n| *n.borrow_mut() = bit);
 }
 
 /// Switches in the `flags` argument: a set bit turns the step off (the defaults are all on).
@@ -90,6 +99,7 @@ fn run(f: impl FnOnce() -> Result<(Vec<u8>, i32, String), gpress::Error>) -> i32
     set_out(Vec::new());
     set_msg("");
     set_outcome(0);
+    set_needed(0);
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(Ok((data, outcome, msg))) => {
             set_out(data);
@@ -99,6 +109,9 @@ fn run(f: impl FnOnce() -> Result<(Vec<u8>, i32, String), gpress::Error>) -> i32
         }
         Ok(Err(e)) => {
             set_msg(&e.to_string());
+            if let gpress::Error::NeedsFeature(f) = e {
+                set_needed(f.bit());
+            }
             e.code()
         }
         Err(_) => {
@@ -244,10 +257,26 @@ pub extern "C" fn gpress_version_number() -> u32 {
     let (a, b, c) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0));
     a * 1_000_000 + b * 1000 + c
 }
-/// The archive format version this module writes and reads.
+/// The archive format version this module writes and reads, 0 for a module without the archive.
 #[no_mangle]
 pub extern "C" fn gpress_archive_version() -> u32 {
-    gpress::api::ARCHIVE_VERSION as u32
+    if gpress::Feature::Archive.enabled() {
+        gpress::api::ARCHIVE_VERSION as u32
+    } else {
+        0
+    }
+}
+/// The parts of the engine this module has, one bit each (`gpress::Feature::bit`: archive 1, jpeg 2, fax 4,
+/// encryption 8, existing 16).
+#[no_mangle]
+pub extern "C" fn gpress_features() -> u32 {
+    gpress::feature::enabled_bits()
+}
+/// After a call that returned 10 (a part of the engine this module leaves out): that part's bit, as in
+/// `gpress_features`; 0 after any other result.
+#[no_mangle]
+pub extern "C" fn gpress_needed_feature() -> u32 {
+    NEEDED.with(|n| *n.borrow())
 }
 
 #[cfg(test)]
@@ -255,6 +284,24 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(not(feature = "archive"))]
+    fn without_the_archive_compress_and_expand_name_the_feature() {
+        assert_eq!(gpress_features() & gpress::Feature::Archive.bit(), 0);
+        assert_eq!(gpress_archive_version(), 0);
+        // The calls as gpress_compress and gpress_expand make them, through `run`.
+        let (input, opt) = (b"%PDF-1.4\n%%EOF\n", options(100, 0, 0, 0, 0));
+        assert_eq!(run(|| Ok((gpress::compress(input, &opt)?.data, 1, String::new()))), 10);
+        assert_eq!(gpress_needed_feature(), gpress::Feature::Archive.bit());
+        assert!(gpress_message_len() > 0 && gpress_out_len() == 0);
+        assert_eq!(run(|| Ok((gpress::expand(input, &opt)?, 0, String::new()))), 10);
+        assert_eq!(gpress_needed_feature(), gpress::Feature::Archive.bit());
+        // Any other result clears it.
+        assert_eq!(run(|| Ok((gpress::optimize(input, &opt)?.data, 1, String::new()))), 0);
+        assert_eq!(gpress_needed_feature(), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "archive")]
     fn protocol_round_trip_on_native() {
         let input = b"%PDF-1.4\n%%EOF\n";
         unsafe {
@@ -286,6 +333,8 @@ mod tests {
             gpress_free_input(r, 5);
         }
         assert_eq!(gpress_archive_version(), 8);
+        assert_eq!(gpress_features(), gpress::feature::enabled_bits());
+        assert_ne!(gpress_features() & gpress::Feature::Archive.bit(), 0);
     }
 
     #[test]

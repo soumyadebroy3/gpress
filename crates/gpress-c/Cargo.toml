@@ -14,7 +14,7 @@ crate-type = ["cdylib", "staticlib"]
 gpress = { path = "../..", default-features = false }
 
 # The parts of the engine, as in gpress's Cargo.toml: all but "existing" on by default, so a plain build is the
-# whole library.
+# whole library. A part left out returns GPRESS_ERR_NEEDS_FEATURE from the calls that need it.
 [features]
 default = ["archive", "jpeg", "fax", "encryption"]
 archive = ["gpress/archive"]

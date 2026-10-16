@@ -304,7 +304,30 @@ pub unsafe extern "C" fn gpress_result_free(res: *mut GpressResult) {
 mod tests {
     use super::*;
 
+    /// The header's code for a part this build leaves out is the library's.
     #[test]
+    fn the_header_has_the_code_for_a_missing_feature() {
+        let code = gpress::Error::NeedsFeature(gpress::Feature::Archive).code();
+        assert!(include_str!("../include/gpress.h").contains(&format!("GPRESS_ERR_NEEDS_FEATURE = {code}")));
+    }
+
+    /// Without the archive, compress and expand (which return the library's error as it is) give that code,
+    /// with a message that names the feature.
+    #[test]
+    #[cfg(not(feature = "archive"))]
+    fn the_archive_calls_say_they_need_the_archive() {
+        let opt = options_from(None);
+        let input = b"%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n";
+        for r in [gpress::compress(input, &opt).map(|_| ()), gpress::expand(input, &opt).map(|_| ())] {
+            let e = r.unwrap_err();
+            assert_eq!(e.code(), 10);
+            assert!(e.to_string().contains("`archive`"), "{e}");
+        }
+        assert!(gpress::optimize(input, &opt).is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "archive")]
     fn round_trip_through_the_c_surface() {
         let input = b"%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n".to_vec();
         // SAFETY: a zeroed options struct is plain data; gpress_options_default then fills it.
