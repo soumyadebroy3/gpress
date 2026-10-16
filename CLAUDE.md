@@ -23,27 +23,21 @@ Pull request descriptions keep their attribution block.
 
 ## The history rewrite of 2026-10-16
 
-On 2026-10-16 every branch was rewritten to take Claude's name and the Claude trailers off every commit. File contents
-did not change, but every commit id did: the first commit `2ef1abe` became `3eeb57c`, and main's `c1f07e1` became
-`d093ab4`. `git for-each-ref --contains 2ef1abe refs/heads` lists the local branches that still have old ids; in a
-clone made after the rewrite 2ef1abe does not exist, so the command fails and there is nothing to move. Move them by
-what they hold, whoever made it:
+On 2026-10-16 every branch on GitHub was rewritten to take Claude's name and the Claude trailers off every commit.
+Files, dates and merges did not change, but every commit id did: the first commit `2ef1abe` became `3eeb57c`, and
+main's `c1f07e1` became `d093ab4`.
 
-1. `git fetch origin`. Below, `origin/<branch>` is the GitHub branch that `<branch>` tracks, usually of the same name,
-   or `origin/main` for a branch that is not on GitHub; right after the fetch, `origin/<branch>@{1}` is its old tip.
-2. If `git status --porcelain` prints anything, `git stash push -u` puts it aside; note the branch you are on.
-3. For each listed branch: if `git log --oneline origin/<branch>@{1}..<branch>` prints nothing, `git branch -f <branch>
-   origin/<branch>`, or `git reset --hard origin/<branch>` for the branch checked out. Otherwise check the branch out
-   and move its commits onto the new tip, taking Claude's name and the trailers off as they go:
+Before every push, `git merge-base --is-ancestor 3eeb57c HEAD` must succeed. If it fails, the clone is shallow (run
+`git fetch --unshallow origin` and check again) or the branch still has the old ids. Never push old ids, and don't
+reset, rebase or force-push anything to get rid of them. Move the whole clone with the same rewrite instead:
 
-   ```sh
-   STRIP='git log -1 --format=%B | grep -viE "^(co-authored-by: *claude|claude-session:)" | git commit -q --amend --allow-empty --reset-author -F -'
-   git rebase --exec "$STRIP" --onto origin/<branch> origin/<branch>@{1}
-   git log origin/<branch>..HEAD --format='%an <%ae> | %cn <%ce>%n%B'
-   ```
+```sh
+git fetch origin main
+git show origin/main:.claude/history-rewrite-2026-10-16.py | python3 -
+git fetch --prune origin
+```
 
-   If the rebase stops, `git rebase --abort` puts the branch back as it was; ask the owner before going further.
-4. If you stashed in step 2, check that branch out again and `git stash pop`.
-
-Before every push, `git merge-base --is-ancestor 2ef1abe HEAD` must fail. Never push a commit whose history has the old
-ids, and never force-push a branch to get rid of them.
+The script gives every commit GitHub had the id GitHub gave it. It takes Claude's name and the trailers off the commits
+GitHub never had, and lists them. It moves refs only, so uncommitted and staged changes, merges and dates stay as they
+are, in every worktree. If a push is then refused because GitHub's branch moved on, `git pull --rebase` puts the listed
+commits on top of it; if they include a merge, ask the owner instead.
