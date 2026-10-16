@@ -414,15 +414,16 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
         }
         _ => None,
     };
-    if let Some(j) = &jpeg {
-        if j.len() < best_len {
-            let mut d = s.dict.clone();
-            set_chain(&mut d, rest);
+    // When that JPEG alone is the smallest so far, it stays in `jpeg` (not copied while Flate is tried over it)
+    // and becomes `best` at the end if nothing smaller comes after it.
+    let jpeg_alone = match &jpeg {
+        Some(j) if j.len() < best_len => {
             best_len = j.len();
-            best = Some((d, j.clone()));
             best_retabled = true;
+            true
         }
-    }
+        _ => false,
+    };
     // Some readers decide how to read JPEG 2000 and JBIG2 images from the first filter's name (pdf.js reads
     // a JPEG 2000 image's colour and depth from the image data only when JPXDecode comes first). So for
     // those the chain keeps its shape: a lone codec stays alone, a codec behind general filters stays behind
@@ -483,6 +484,12 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
                 best_retabled = false;
             }
         }
+    }
+    // Every later candidate that won went into `best`, so with none the JPEG alone is the smallest.
+    if jpeg_alone && best.is_none() {
+        let mut d = s.dict.clone();
+        set_chain(&mut d, rest);
+        best = jpeg.map(|j| (d, j));
     }
     best.map(|(d, z)| (d, z, Change { jpeg_retabled: best_retabled, ..Change::default() }))
 }
