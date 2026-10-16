@@ -536,7 +536,7 @@ fn samples<'a>(
             }
         }),
     };
-    if px.is_empty() || px.len() % row != 0 || px.len() < 1024 {
+    if px.is_empty() || !px.len().is_multiple_of(row) || px.len() < 1024 {
         return None;
     }
     Some((g, px))
