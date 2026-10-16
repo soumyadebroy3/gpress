@@ -3,6 +3,7 @@
 pub mod bits;
 pub mod block;
 pub mod deflate;
+pub mod fast;
 pub mod huffman;
 pub mod inflate;
 pub mod lz;
@@ -64,6 +65,7 @@ mod tests {
                 polish: true,
                 shared: None,
                 deadline: crate::clock::Deadline::NONE,
+                fast: 0,
             },
         ] {
             for d in samples() {

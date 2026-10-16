@@ -52,8 +52,8 @@ enum {
  * zeroed struct is not the defaults (it means effort 0 and every switch off), though a size left at 0
  * means its default. */
 typedef struct gpress_options {
-  uint8_t effort;                 /* 0..100: 0 quick, 100 everything the engine knows (default 100) */
-  uint32_t threads;               /* worker threads; 0 = what the machine offers (at most 8), at most 64.
+  uint8_t effort;                 /* 0..100: 0 fastest, 100 everything the engine knows (default 100) */
+  uint32_t threads;               /* worker threads; 0 = every core the machine offers, at most 64.
                                      The output never depends on it */
   uint64_t max_input;             /* largest accepted input in bytes; 0 = 1 GiB */
   uint64_t max_stream;            /* normal PDF: largest decoded stream re-encoded; 0 = 64 MiB */

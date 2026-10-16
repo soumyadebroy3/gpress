@@ -22,7 +22,7 @@
 export type Outcome = "smaller" | "untouched";
 
 export interface GpressOptions {
-  /** 0..100: 0 quick, 100 everything the engine knows (default 100). */
+  /** 0..100: 0 fastest, 100 everything the engine knows (default 100). */
   effort?: number;
   /** Largest accepted input in MiB (default 1024). */
   maxInputMiB?: number;
