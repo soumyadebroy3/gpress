@@ -120,6 +120,11 @@ const WG: usize = MAX_MATCH.div_ceil(8) + 1;
 /// Groups a parse keeps at a time (the window of the current position, and room to slide it).
 const RING: usize = 8 * WG;
 
+/// Targets where eight lanes at a time are eight times the work of one, done again for every step that touches
+/// a group (WebAssembly without its vector instructions, as the package builds it). The parse relaxes only the
+/// lengths of each step there, one by one as it did before the windows: in Node, half the time or less.
+const NO_VECTORS: bool = cfg!(all(target_arch = "wasm32", not(target_feature = "simd128")));
+
 /// Cheapest parse of `data[a..b]` (positions inside the range covered by `m`). Matches are cut at `b`.
 /// With `alt`, every length may use any candidate distance long enough (the cheapest); without it, each
 /// length uses the smallest distance that reaches it.
@@ -160,7 +165,7 @@ pub fn optimal_nice(
             return unsafe { parse_avx2(data, a, b, m, c, alt, nice, sc, out) };
         }
     }
-    parse(data, a, b, m, c, alt, nice, sc, out)
+    parse::<NO_VECTORS>(data, a, b, m, c, alt, nice, sc, out)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -177,12 +182,12 @@ unsafe fn parse_avx2(
     sc: &mut ParseScratch,
     out: &mut Vec<Sym>,
 ) {
-    parse(data, a, b, m, c, alt, nice, sc, out)
+    parse::<false>(data, a, b, m, c, alt, nice, sc, out)
 }
 
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn parse(
+fn parse<const EACH: bool>(
     data: &[u8],
     a: usize,
     b: usize,
@@ -315,7 +320,7 @@ fn parse(
                 let (ml, d) = s.get();
                 (ml as usize, c0 + price[dist_slot(d)], (d as u32) << 16)
             });
-            relax_matches(win, shift, o, steps);
+            relax_matches::<EACH>(win, shift, o, steps);
             k += 1;
             continue;
         }
@@ -395,7 +400,7 @@ fn parse(
         let steps = cand[cnt - 1 - ns..cnt]
             .iter()
             .map(|&s| ((s >> 16) as usize, c0 + price[dist_slot(s as u16)], (s & 0xffff) << 16));
-        relax_matches(win, shift, o, steps);
+        relax_matches::<EACH>(win, shift, o, steps);
         k += 1;
     }
     // The last literal, into the end.
@@ -474,13 +479,18 @@ fn shifts(c: &Costs) -> [[Shift; WG]; 8] {
 /// chosen as `l | tag`. Each length is relaxed once, exactly as `if v < cost[l] { cost[l] = v; choice[l] =
 /// l | tag }`, so the order among lengths does not matter: this goes group by group, through the steps that
 /// touch a group (each lane takes its own) and then through the groups that lie wholly inside a step.
+///
+/// With `EACH`, one length at a time instead (`relax_each`).
 #[inline(always)]
-fn relax_matches(
+fn relax_matches<const EACH: bool>(
     win: &mut [Cell; WG],
     shift: &[Shift; WG],
     o: usize,
     mut steps: impl Iterator<Item = (usize, f32, u32)>,
 ) {
+    if EACH {
+        return relax_each(win, shift, o, steps);
+    }
     let Some((mut hi, mut base, mut tag)) = steps.next() else {
         return;
     };
@@ -535,6 +545,46 @@ fn relax_matches(
         g = end;
         last += 8 * whole;
     }
+}
+
+/// `relax_matches` for targets without vector instructions (`NO_VECTORS`): only the lengths of each step, group
+/// by group, each with the same addition and comparison (and without a branch, which long steps would mispredict).
+#[inline(always)]
+fn relax_each(win: &mut [Cell; WG], shift: &[Shift; WG], o: usize, steps: impl Iterator<Item = (usize, f32, u32)>) {
+    let mut lo = MIN_MATCH;
+    for (hi, base, tag) in steps {
+        // Window entries `o + lo..=o + hi`, group by group.
+        let (mut p, end) = (o + lo, o + hi);
+        while p <= end {
+            let g = p / 8;
+            let (j, k) = (p % 8, (end - 8 * g).min(7));
+            let (cell, shift) = (&mut win[g], &shift[g]);
+            if j == 0 && k == 7 {
+                // A whole group: along a long step few lengths improve, often none, and then nothing is written.
+                if (0..8).any(|j| base + shift.len.0[j] < cell.cost.0[j]) {
+                    for j in 0..8 {
+                        relax_one(cell, shift, j, base, tag);
+                    }
+                }
+            } else {
+                for j in j..=k {
+                    relax_one(cell, shift, j, base, tag);
+                }
+            }
+            p = 8 * g + 8;
+        }
+        lo = hi + 1;
+    }
+}
+
+/// Lane `j` of a group: `cost = base + len` and `choice = lane | tag` where that is lower than `cost`.
+#[inline(always)]
+fn relax_one(cell: &mut Cell, shift: &Shift, j: usize, base: f32, tag: u32) {
+    let (c, v) = (cell.cost.0[j], base + shift.len.0[j]);
+    let better = v < c;
+    cell.cost.0[j] = if better { v } else { c };
+    let h = cell.choice.0[j];
+    cell.choice.0[j] = if better { shift.lane.0[j] as u32 | tag } else { h };
 }
 
 /// The lanes from length `lo` on belong to a new step. (Picked with bit masks rather than `if`: written so,
@@ -850,10 +900,14 @@ mod tests {
                         assert_eq!(gh, choice[k], "{which} choice at {k}, {at}");
                     }
                 };
-                // The plain build, then the dispatching entry (the AVX2 build where the processor has it).
+                // The plain build, one length at a time, then the dispatching entry (the AVX2 build where the
+                // processor has it).
                 let mut got = Vec::new();
-                parse(&data, a, b, &m, &c, alt, nice, &mut sc, &mut got);
+                parse::<false>(&data, a, b, &m, &c, alt, nice, &mut sc, &mut got);
                 check(&sc, &got, "plain");
+                got.clear();
+                parse::<true>(&data, a, b, &m, &c, alt, nice, &mut sc, &mut got);
+                check(&sc, &got, "each");
                 got.clear();
                 optimal_nice(&data, a, b, &m, &c, alt, nice, &mut sc, &mut got);
                 check(&sc, &got, "dispatched");
@@ -894,19 +948,20 @@ mod tests {
             let c = if case % 3 == 0 { Costs::fixed() } else { costs(&mut r) };
             let (a, b) = (from, to);
             let (cost, choice, want) = reference(&data, a, b, &all, &c, true, MAX_MATCH + 1);
-            // The plain build, then the dispatching entry (the AVX2 build where the processor has it).
-            for dispatched in [false, true] {
+            // The plain build, one length at a time, then the dispatching entry (the AVX2 build where the processor
+            // has it).
+            for which in ["plain", "each", "dispatched"] {
                 let mut got = Vec::new();
-                if dispatched {
-                    optimal_nice(&data, a, b, &m, &c, true, MAX_MATCH + 1, &mut sc, &mut got);
-                } else {
-                    parse(&data, a, b, &m, &c, true, MAX_MATCH + 1, &mut sc, &mut got);
+                match which {
+                    "plain" => parse::<false>(&data, a, b, &m, &c, true, MAX_MATCH + 1, &mut sc, &mut got),
+                    "each" => parse::<true>(&data, a, b, &m, &c, true, MAX_MATCH + 1, &mut sc, &mut got),
+                    _ => optimal_nice(&data, a, b, &m, &c, true, MAX_MATCH + 1, &mut sc, &mut got),
                 }
-                assert_eq!(got, want, "case {case}, dispatched {dispatched}");
+                assert_eq!(got, want, "case {case}, {which}");
                 for k in 0..=b - a {
                     let (gc, gh) = (sc.done.costs[k / 8].0[k % 8], sc.done.choices[k / 8].0[k % 8]);
-                    assert_eq!(gc.to_bits(), cost[k].to_bits(), "cost at {k}, case {case}, dispatched {dispatched}");
-                    assert_eq!(gh, choice[k], "choice at {k}, case {case}, dispatched {dispatched}");
+                    assert_eq!(gc.to_bits(), cost[k].to_bits(), "cost at {k}, case {case}, {which}");
+                    assert_eq!(gh, choice[k], "choice at {k}, case {case}, {which}");
                 }
             }
         }
