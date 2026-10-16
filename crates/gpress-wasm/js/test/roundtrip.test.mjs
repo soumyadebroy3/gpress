@@ -83,6 +83,36 @@ test("a /Length that wraps to an earlier endstream on 32 bits is not trusted", (
   assert.deepEqual(g.expand(c.data), pdf);
 });
 
+test("an image row past 2^32 bits packs as on 64 bits", () => {
+  // 32 DeviceN components of 16 bits, 8,388,609 pixels wide: width x components x bits is 2^32 + 512, which the
+  // 32-bit module's row length once wrapped to 512, so it took 100 rows of 64 bytes and wrote an archive the
+  // native library refuses. The stream is zlib's level 9 of 6,400 bytes (i * 7919 % 251); `native` is the
+  // native library's archive of the file.
+  const enc = new TextEncoder();
+  const z = Buffer.from(
+    "eNpj6JJcbLTH+2rKu1qeaarr7U6EPyz41SmxyHC315XktzXcU1XW2R4Pe5D/s0N8ocEuz8tJb6q5piivtTkWej/vR7vYAv2dHpcSX1dx" +
+    "TlZaY3005F7u9zbR+Xo73C8mvKrkmKS42upI8N2cb60i83S3u12If1nBPlFhleXhoDvZX1uE5+pscz0f96KcbYL8SotDgbezvjQLzdHe" +
+    "6nIu9nkZa7/cCvODAbcyPzcJztba4nw25lkpS5/scrMD/jczPjUKzNLc7HQm+mkJc6/MMtP9fjfSPzbwz9TY5Hg66kkxU4/0UpN9vtfT" +
+    "PtTzzVDf6HAq8nERY7fUEuO9PtdS39fxTlfbYH8y4lEhw6jXR70+6vVRr496fdTro14f9fqo10e9Pur1Ua+Pen3U66NeH/X6qNdHvT7q" +
+    "9VGvj3p91OujXh+eXgcA3Qs2Zg==",
+    "base64");
+  const native = new Uint8Array(Buffer.from(
+    "iUdQWgjMBYAyBENBpi9DdDhPGJOUIHBd+//eKHN3mebmY6fk0OE2Ym5ZeHz1mO6U6sMaa2pMtt8eOtjgM4mJoG9w6QBKczEKkr+qe4y/" +
+    "mrw6gTSre6PXak51dccCXDpCJSnPKcv8cwROxwfURAFk5OSANAVK0/kuEatnfWgJUXXcujXOOLbTw9kws/af77XVpMM6941/b9NdgV43" +
+    "G/Xx/ZrLvDpTu9t2vIgzTS5je7+/uQc9bcgyjKl9R35X5mSUWBq88D1qJ/pQo2OpUWciag4OjzMxiRlLnRvIQjNO9XSuDHhu4pWnxeRu" +
+    "HA6SHU+6VNBYJ5NtD/JVlSirRil/u9xtyn6apGoA29mnGT0yRhhIMjLxr8UA",
+    "base64"));
+  const names = Array.from({ length: 32 }, (_, i) => `/C${i}`).join(" ");
+  const head = enc.encode("%PDF-1.4\n1 0 obj\n<< /Type /XObject /Subtype /Image /Width 8388609 /Height 100 " +
+    `/ColorSpace [/DeviceN [${names}] /DeviceGray 2 0 R] /BitsPerComponent 16 /Filter /FlateDecode ` +
+    `/Length ${z.length} >>\nstream\n`);
+  const tail = enc.encode("\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
+  const pdf = new Uint8Array(head.length + z.length + tail.length);
+  pdf.set(head, 0); pdf.set(z, head.length); pdf.set(tail, head.length + z.length);
+  assert.deepEqual(g.compress(pdf).data, native);
+  assert.deepEqual(g.expand(native), pdf);
+});
+
 test("optimize makes a page smaller at every effort, the fast path too", () => {
   // The fast encoder (efforts below 20) once trapped in this 32-bit module: an empty hash table entry passed
   // for a match. A page with a content stream stored by zlib's fastest level leaves room to gain.
