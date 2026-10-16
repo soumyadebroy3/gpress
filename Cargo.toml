@@ -14,41 +14,11 @@ path = "src/lib.rs"
 name = "gpress"
 path = "src/bin/gpress.rs"
 
-# A test that uses a part a build may leave out (see [features]) runs only when the build has it: the files
-# below need the part for every test (api.rs and interaction.rs: for the mixed test document), the others mark
-# such tests one by one. tests/features.rs checks each part's absence.
-[[test]]
-name = "api"
-required-features = ["fax", "encryption"]
-
-[[test]]
-name = "interaction"
-required-features = ["jpeg", "fax", "encryption"]
-
-[[test]]
-name = "pack_format"
-required-features = ["archive"]
-
-[[test]]
-name = "pack_kinds"
-required-features = ["archive", "fax", "encryption"]
-
-[[test]]
-name = "type1_fonts"
-required-features = ["archive"]
-
-[[test]]
-name = "jpeg"
-required-features = ["jpeg"]
-
-[[test]]
-name = "fax"
-required-features = ["fax"]
-
-[[test]]
-name = "encryption"
-required-features = ["encryption"]
-
+# A test file that uses a part a build may leave out (see [features]) says so itself, with `#![cfg(...)]` for a
+# file whose every test needs the part and `#[cfg(...)]` on each test otherwise; tests/features.rs checks each
+# part's absence. Not with required-features here: CI runs the integration tests with `--test '*'`, which
+# refuses such a target in a build without its features (bench/check_test_split.py). The example is only
+# built, and `--examples` leaves it out of a build without the archive.
 [[example]]
 name = "type1_fonts"
 required-features = ["archive"]

@@ -4,6 +4,9 @@
 //! restores every byte. Both give the same bytes for any thread count. A build without the archive runs the
 //! normal-PDF tests.
 
+// Only in a build with the jpeg, fax and encryption features (Cargo.toml, [features]).
+#![cfg(all(feature = "jpeg", feature = "fax", feature = "encryption"))]
+
 mod common;
 
 use common::*;

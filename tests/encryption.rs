@@ -5,6 +5,9 @@
 //! restore exactly from the gpress archive. Files that need a password, files readers disagree on and damaged
 //! files are left untouched, and still pack and restore exactly.
 
+// Only in a build with the encryption feature (Cargo.toml, [features]).
+#![cfg(feature = "encryption")]
+
 use gpress::flate;
 #[cfg(feature = "archive")]
 use gpress::pack::{pack, unpack};

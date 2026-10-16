@@ -1,6 +1,9 @@
 //! Type 1 fonts in the gpress archive: opened (both encryption layers removed), restored byte for byte, and
 //! left as they are when they can't be written back exactly. Damaged packs are refused, never restored wrong.
 
+// Only in a build with the archive (Cargo.toml, [features]).
+#![cfg(feature = "archive")]
+
 use gpress::flate::zlibexact::{zlib_stream, Params};
 use gpress::pack::type1::encrypt;
 use gpress::pack::{pack, pack_with, unpack, PackOptions};

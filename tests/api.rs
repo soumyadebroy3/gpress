@@ -3,6 +3,9 @@
 //! content stream; plain and encrypted). The output never depends on the thread count or on a time budget
 //! that doesn't run out. A build without the archive or the JPEG step runs the tests that don't need it.
 
+// Only in a build with the fax and encryption features, for the mixed test document (Cargo.toml, [features]).
+#![cfg(all(feature = "fax", feature = "encryption"))]
+
 mod common;
 
 use common::*;

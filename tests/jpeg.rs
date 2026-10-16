@@ -4,6 +4,9 @@
 //! versions: libjpeg decoded the original to coefficients and wrote them again, so if our reading of the
 //! original gives the same symbols as our reading of libjpeg's file, we read JPEG as libjpeg does.
 
+// Only in a build with the jpeg feature (Cargo.toml, [features]).
+#![cfg(feature = "jpeg")]
+
 use gpress::jpeg::{equivalent, optimize, same_coded_data, Refused};
 use gpress::pdf::filters::{chain, decode_stage, is_general};
 use gpress::pdf::object::Obj;

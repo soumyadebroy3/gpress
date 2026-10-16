@@ -1,6 +1,9 @@
 //! Fax images in both outputs, on small PDFs made here: JBIG2 in normal PDFs only when nothing is uncertain
 //! (same pixels, every other case left alone), and the gpress archive restoring every CCITT layout exactly.
 
+// Only in a build with the fax feature (Cargo.toml, [features]).
+#![cfg(feature = "fax")]
+
 use gpress::fax::ccitt::{self, row_changes, Gap, Image, Layout, Rule, Scheme};
 use gpress::fax::jbig2;
 #[cfg(feature = "archive")]

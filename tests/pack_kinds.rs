@@ -4,8 +4,15 @@
 //! files. Each restores exactly, and its bytes are pinned: a change meant to keep the format (memory, speed)
 //! must give the very same archives.
 
+// Only in a build with the archive (Cargo.toml, [features]). The document with a part of every kind is made from
+// the mixed test document's parts (`common`), which need the fax and encryption features too; the image tests
+// run without them.
+#![cfg(feature = "archive")]
+
+#[cfg(all(feature = "fax", feature = "encryption"))]
 mod common;
 
+#[cfg(all(feature = "fax", feature = "encryption"))]
 use common::*;
 use gpress::flate::zlibexact::{zlib_stream, Params};
 use gpress::pack::{pack_with, sha256, unpack, PackOptions};
@@ -15,6 +22,16 @@ fn z(d: &[u8], mem_level: u8) -> Vec<u8> {
     zlib_stream(d, Params { level: 6, window_bits: 15, mem_level, filtered: false })
 }
 
+/// The test files' random numbers, as `common::next` makes them, in a build without the mixed test document.
+#[cfg(not(all(feature = "fax", feature = "encryption")))]
+fn next(seed: &mut u32) -> u32 {
+    *seed ^= *seed << 13;
+    *seed ^= *seed >> 17;
+    *seed ^= *seed << 5;
+    *seed
+}
+
+#[cfg(all(feature = "fax", feature = "encryption"))]
 fn noise(n: usize, seed: u32) -> Vec<u8> {
     let mut s = seed;
     (0..n).map(|_| next(&mut s) as u8).collect()
@@ -89,6 +106,7 @@ const TIFF: &str = "/Filter /FlateDecode /DecodeParms << /Predictor 2 /Colors 3 
 
 /// A document with a part of every kind the archive has (see the module notes). The zlib streams are made
 /// with small memory levels, so they have many Deflate blocks and image rows cross block ends.
+#[cfg(all(feature = "fax", feature = "encryption"))]
 fn every_kind() -> Vec<u8> {
     let (font, l1, l2, l3) = type1_font(40);
     let lengths = format!("/Length1 {l1} /Length2 {l2} /Length3 {l3}");
@@ -152,12 +170,14 @@ fn hex(b: &[u8]) -> String {
 
 /// The archives' SHA-256, measured before the encoder stopped building its restored copy: (document, effort,
 /// hash), for a build without and with the existing library.
+#[cfg(all(feature = "fax", feature = "encryption"))]
 const PINNED: [(&str, u8, &str); 4] = [
     ("every kind", 100, "d681059e102278ccbc783738c4323d2b8ab501d40629241ad6d43c88388b6f31"),
     ("every kind", 0, "ef468383de3cf2ff3f5ff91d3fa4f8da88ba95890e51cfeb105e2cb76906f6e2"),
     ("encrypted RC4", 100, "24391f712443cd366bb346271b899cccb2504154873eb7c758c0d98fd27e42b4"),
     ("encrypted AES", 100, "33942533ff293ae637209b657b9ebd4d0d632954a2c78acf39cccd2dd207a707"),
 ];
+#[cfg(all(feature = "fax", feature = "encryption"))]
 const PINNED_EXISTING: [(&str, u8, &str); 4] = [
     ("every kind", 100, "9a63213f5bb64ea7536220b62b446ffcf347d35cea936c56074c1f3888cad54a"),
     ("every kind", 0, "b67813c4f7a1bb10e99d9f12c6d4325b8a0b37bc48991fe8eda5249b31355e55"),
@@ -166,6 +186,7 @@ const PINNED_EXISTING: [(&str, u8, &str); 4] = [
 ];
 
 #[test]
+#[cfg(all(feature = "fax", feature = "encryption"))]
 fn every_part_kind_restores_and_packs_to_the_pinned_bytes() {
     let pinned = if cfg!(feature = "existing") { PINNED_EXISTING } else { PINNED };
     for (name, effort, want) in pinned {
