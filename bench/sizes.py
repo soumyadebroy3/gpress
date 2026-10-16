@@ -3,8 +3,9 @@
 
     python3 -I bench/sizes.py measure [--features SET]   build all three and record their sizes in bench/sizes.json
     python3 -I bench/sizes.py check   [--features SET]   build the module and fail when its gzip size is more than
-                                                         5% over the recorded one, or over the 400 KB target;
-                                                         warn when it is more than 5% under the recorded one
+                                                         5% over the recorded one, or over the 400 KB target, or
+                                                         when wasm-opt is missing (below); warn when it is more
+                                                         than 5% under the recorded one
 
 SET is a feature set: "default" (a plain build) or the cargo features to build with, separated by commas
 (built with --no-default-features, so the set is exactly what is named). Each package is built with its own
@@ -14,11 +15,14 @@ Each set is recorded on its own, so measuring one leaves the others.
 
 Sizes are in bytes, raw and gzip at level 9 (Python's gzip module, with no name or time in its header). The
 module is built the way the npm package builds it (crates/gpress-wasm/js/build-wasm.mjs: cargo's "wasm"
-profile, then wasm-opt when it is on PATH), so it needs node; the native tool and the C library are
-built with the release profile. Builds use cargo's usual target directory and settings (CARGO_BUILD_JOBS
-and the like). `measure` also prints the set's rows for the Sizes table in bench/RESULTS.md, in its columns,
-with the sizes it replaced in the "Before" cells (empty for a set measured the first time); the rows now in
-the table give commit 066b65e there instead.
+profile, then binaryen's wasm-opt), so it needs node and wasm-opt; the native tool and the C library are
+built with the release profile. Without wasm-opt on PATH build-wasm.mjs ships the module as cargo built it,
+which is not the package's module (about 3% more gzip, still inside the 5% budget), so `measure` refuses to
+record without wasm-opt and `check` fails without it when the record was made with it (the record names the
+wasm-opt version, and CI installs binaryen); a different wasm-opt or rustc version is only noted. Builds use
+cargo's usual target directory and settings (CARGO_BUILD_JOBS and the like). `measure` also prints the set's
+rows for the Sizes table in bench/RESULTS.md, in its columns, with the sizes it replaced in the "Before"
+cells (empty for a set measured the first time); the rows now in the table give commit 066b65e there instead.
 """
 import argparse
 import datetime
@@ -102,6 +106,15 @@ def cargo_artifacts(args):
     return files
 
 
+def wasm_opt_version():
+    """wasm-opt's version line, or None when it is not on PATH (build-wasm.mjs looks for it the same way)."""
+    return tool_version(['wasm-opt', '--version'])
+
+
+NO_WASM_OPT = ('wasm-opt is not on PATH, so build-wasm.mjs would use the module as cargo built it, which is not the '
+               "package's module (about 3% more gzip). Install binaryen, which has wasm-opt")
+
+
 def build_module(cargo_args, out):
     if shutil.which('node') is None:
         sys.exit('sizes: node is needed to build the module the way the package does')
@@ -112,6 +125,11 @@ def build_module(cargo_args, out):
 
 
 def measure(fset):
+    # The record is the package's module, so it is made with wasm-opt (CI has it); checked first, before the
+    # long native builds.
+    wasm_opt = wasm_opt_version()
+    if wasm_opt is None:
+        sys.exit(f'sizes: {NO_WASM_OPT}, and measure again.')
     declared = declared_features()
     args = {pkg: cargo_features(fset, pkg, declared) for pkg in ('gpress', 'gpress-c', 'gpress-wasm')}
     entry = {'cargo_arguments': args}
@@ -130,7 +148,7 @@ def measure(fset):
     say(f'building the WebAssembly module ({fset})')
     with tempfile.TemporaryDirectory() as tmp:
         entry['wasm'] = build_module(args['gpress-wasm'], os.path.join(tmp, 'gpress.wasm'))
-    entry['wasm_opt'] = tool_version(['wasm-opt', '--version'])
+    entry['wasm_opt'] = wasm_opt
     entry['rustc'] = tool_version(['rustc', '--version'])
     entry['date'] = datetime.date.today().isoformat()
 
@@ -184,13 +202,17 @@ def check(fset):
     entry = (record or {}).get('builds', {}).get(fset)
     if entry is None:
         sys.exit(f'sizes: no recorded size for the feature set "{fset}"; run `bench/sizes.py measure --features {fset}`')
+    wasm_opt = wasm_opt_version()
+    if wasm_opt is None and entry.get('wasm_opt'):
+        # The module built here would not be the one the record measures (nor the one the package ships).
+        print(f'FAIL: the size was recorded with {entry["wasm_opt"]}, and {NO_WASM_OPT}, and check again.')
+        return 1
     module_args = cargo_features(fset, 'gpress-wasm', declared_features())
     with tempfile.TemporaryDirectory() as tmp:
         now = build_module(module_args, os.path.join(tmp, 'gpress.wasm'))
     was = entry['wasm']
     limit = int(was['gzip'] * GROWTH)
     floor = int(was['gzip'] * SHRINK)
-    wasm_opt = tool_version(['wasm-opt', '--version'])
     target = f'; target {TARGET_GZIP:,}' if fset == WEB else ''
     print(f'WebAssembly module, feature set "{fset}": {now["raw"]:,} bytes raw, {now["gzip"]:,} gzip '
           f'(recorded {was["raw"]:,} and {was["gzip"]:,}, {100 * (now["gzip"] / was["gzip"] - 1):+.1f}% gzip; '
