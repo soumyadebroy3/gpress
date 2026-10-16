@@ -95,7 +95,7 @@ fn opts(effort: u8, threads: usize) -> Options {
 #[test]
 fn the_thread_count_never_changes_the_output() {
     let pdf = sample_pdf();
-    for effort in [0u8, 40, 100] {
+    for effort in [0u8, 10, 19, 40, 100] {
         let one = optimize(&pdf, &opts(effort, 1));
         assert!(matches!(one.outcome, Outcome::Smaller(_)), "effort {effort}: {:?}", one.outcome);
         for threads in [2, 3, 8] {
@@ -109,7 +109,7 @@ fn the_thread_count_never_changes_the_output() {
 fn every_effort_gives_a_checked_smaller_file() {
     let pdf = sample_pdf();
     let mut sizes = Vec::new();
-    for effort in [0u8, 1, 25, 50, 75, 99, 100] {
+    for effort in [0u8, 1, 5, 10, 15, 19, 20, 25, 50, 75, 99, 100] {
         let r = optimize(&pdf, &opts(effort, 2));
         match r.outcome {
             // The writer reads its output back and compares every object before returning it.
@@ -123,7 +123,28 @@ fn every_effort_gives_a_checked_smaller_file() {
         sizes.push(r.data.len());
     }
     // The strongest setting is never beaten by the quick one on this file.
-    assert!(sizes[6] <= sizes[0], "{sizes:?}");
+    assert!(sizes[11] <= sizes[0], "{sizes:?}");
+}
+
+#[test]
+fn the_fast_path_keeps_the_time_budget() {
+    use gpress::clock::Deadline;
+    use std::time::Duration;
+    let pdf = sample_pdf();
+    for effort in [0u8, 10] {
+        for threads in [1, 3] {
+            let free = optimize(&pdf, &opts(effort, threads));
+            // A deadline that has passed: nothing is returned (the input comes back as it was).
+            let gone = Options { deadline: Deadline::after(Duration::from_nanos(1)), ..opts(effort, threads) };
+            std::thread::sleep(Duration::from_millis(1));
+            let r = optimize(&pdf, &gone);
+            assert!(matches!(r.outcome, Outcome::TimedOut), "effort {effort}: {:?}", r.outcome);
+            assert_eq!(r.data, pdf);
+            // One that doesn't run out: the same bytes as without one.
+            let ample = Options { deadline: Deadline::after(Duration::from_secs(600)), ..opts(effort, threads) };
+            assert!(optimize(&pdf, &ample).data == free.data, "effort {effort}, {threads} threads");
+        }
+    }
 }
 
 #[test]

@@ -16,7 +16,7 @@ use std::time::Duration;
 pub struct GpressOptions {
     /// 0..=100
     pub effort: u8,
-    /// Worker threads (0 = what the machine offers, at most 8; at most 64).
+    /// Worker threads (0 = every core the machine offers; at most 64).
     pub threads: u32,
     /// Largest accepted input in bytes (0 = 1 GiB).
     pub max_input: u64,

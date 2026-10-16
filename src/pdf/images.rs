@@ -71,8 +71,11 @@ pub fn geometry(d: &Dict, resolve: &dyn Fn(&Obj) -> Option<Obj>) -> Option<Geome
     if !(1..=MAX_COLUMNS).contains(&w) || ![1, 2, 4, 8, 16].contains(&bpc) || colors == 0 || colors > 32 {
         return None;
     }
-    // At most 2^24 x 32 x 16 bits: fits a usize on 64-bit targets; checked for the others.
-    colors.checked_mul(bpc as usize)?.checked_mul(w as usize)?;
+    // A row of at most u32::MAX bits (512 MiB) on every target, so 32-bit and 64-bit builds agree on which
+    // images they work on (the limits above allow 2^24 x 32 x 16 bits, which only a 64-bit usize holds).
+    if colors as u64 * bpc as u64 * w as u64 > u32::MAX as u64 {
+        return None;
+    }
     Some(Geometry { colors, bpc: bpc as usize, columns: w as usize })
 }
 
@@ -132,10 +135,37 @@ pub fn tiff_unfilter(data: &[u8], row: usize, bpp: usize) -> Vec<u8> {
     out
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Choice {
     Fixed(u8),
     /// Per row, the type with the smallest sum of absolute (signed) residuals.
     MinSum,
+}
+
+/// Row `r` of `px` stored with PNG predictor type `t`, into `out` (one byte per sample byte).
+fn residuals(px: &[u8], row: usize, bpp: usize, r: usize, t: u8, out: &mut [u8]) {
+    let cur = &px[r * row..(r + 1) * row];
+    let prev = if r > 0 { Some(&px[(r - 1) * row..r * row]) } else { None };
+    for i in 0..row {
+        let a = if i >= bpp { cur[i - bpp] } else { 0 };
+        let b = prev.map_or(0, |p| p[i]);
+        let c = if i >= bpp { prev.map_or(0, |p| p[i - bpp]) } else { 0 };
+        out[i] = cur[i].wrapping_sub(predict(t, a, b, c));
+    }
+}
+
+/// The type `Choice::MinSum` picks for row `r` (the first of equal sums). `cand` is scratch: it is left with
+/// the last type's residuals, not the chosen one's.
+fn min_sum_type(px: &[u8], row: usize, bpp: usize, r: usize, cand: &mut [u8]) -> u8 {
+    let mut best = (u64::MAX, 0u8);
+    for t in 0..5u8 {
+        residuals(px, row, bpp, r, t, cand);
+        let s: u64 = cand.iter().map(|&x| (x as i8).unsigned_abs() as u64).sum();
+        if s < best.0 {
+            best = (s, t);
+        }
+    }
+    best.1
 }
 
 pub fn png_filter(px: &[u8], row: usize, bpp: usize, how: Choice) -> Vec<u8> {
@@ -143,35 +173,87 @@ pub fn png_filter(px: &[u8], row: usize, bpp: usize, how: Choice) -> Vec<u8> {
     let mut out = Vec::with_capacity(rows * (row + 1));
     let mut cand = vec![0u8; row];
     for r in 0..rows {
-        let cur = &px[r * row..(r + 1) * row];
-        let prev = if r > 0 { Some(&px[(r - 1) * row..r * row]) } else { None };
-        let residuals = |t: u8, out: &mut [u8]| {
-            for i in 0..row {
-                let a = if i >= bpp { cur[i - bpp] } else { 0 };
-                let b = prev.map_or(0, |p| p[i]);
-                let c = if i >= bpp { prev.map_or(0, |p| p[i - bpp]) } else { 0 };
-                out[i] = cur[i].wrapping_sub(predict(t, a, b, c));
-            }
-        };
         let t = match how {
             Choice::Fixed(t) => t,
-            Choice::MinSum => {
-                let mut best = (u64::MAX, 0u8);
-                for t in 0..5u8 {
-                    residuals(t, &mut cand);
-                    let s: u64 = cand.iter().map(|&x| (x as i8).unsigned_abs() as u64).sum();
-                    if s < best.0 {
-                        best = (s, t);
-                    }
-                }
-                best.1
-            }
+            Choice::MinSum => min_sum_type(px, row, bpp, r, &mut cand),
         };
         out.push(t);
-        residuals(t, &mut cand);
+        residuals(px, row, bpp, r, t, &mut cand);
         out.extend_from_slice(&cand);
     }
     out
+}
+
+/// The predictor to store the samples with on the fast path, chosen without encoding: None (as they are),
+/// one of the PNG types for every row, or the per-row minimum sum (libpng's heuristic), whichever costs the
+/// fewest bits under an order-0 entropy estimate of the rows in `bands` (`(first, end)` pairs; the first of
+/// equal costs wins). Below 8 bits per component always None: a predictor works on whole bytes, so it mixes
+/// neighbouring samples (on the sample's 44 such images it never paid). The caller keeps the samples as they
+/// are when the chosen predictor's encode is not smaller, so a wrong guess costs time, never size.
+pub fn estimate_choice(px: &[u8], row: usize, bpp: usize, bpc: usize, bands: &[(usize, usize)]) -> Option<Choice> {
+    if bpc < 8 || row == 0 {
+        return None;
+    }
+    let bits = candidate_bits(px, row, bpp, bands);
+    let mut best = (bits[0], None);
+    for (k, how) in [
+        (1, Choice::Fixed(1)),
+        (2, Choice::Fixed(2)),
+        (3, Choice::Fixed(3)),
+        (4, Choice::Fixed(4)),
+        (5, Choice::MinSum),
+    ] {
+        if bits[k] < best.0 {
+            best = (bits[k], Some(how));
+        }
+    }
+    best.1
+}
+
+/// The order-0 cost of the rows in `bands` stored as they are, with PNG types 1 to 4, and with the minimum sum
+/// (type bytes counted), in 1/65536 bits.
+fn candidate_bits(px: &[u8], row: usize, bpp: usize, bands: &[(usize, usize)]) -> [u64; 6] {
+    let rows = px.len() / row;
+    // Counts for: as they are, PNG types 1 to 4, minimum sum.
+    let mut counts = [[0u32; 256]; 6];
+    let mut cand = vec![0u8; row];
+    for &(a, b) in bands {
+        for r in a..b.min(rows) {
+            for &x in &px[r * row..(r + 1) * row] {
+                counts[0][x as usize] += 1;
+            }
+            for t in 1..5u8 {
+                residuals(px, row, bpp, r, t, &mut cand);
+                // The type byte is stored in front of every row.
+                counts[t as usize][t as usize] += 1;
+                for &x in &cand {
+                    counts[t as usize][x as usize] += 1;
+                }
+            }
+            let t = min_sum_type(px, row, bpp, r, &mut cand);
+            residuals(px, row, bpp, r, t, &mut cand);
+            counts[5][t as usize] += 1;
+            for &x in &cand {
+                counts[5][x as usize] += 1;
+            }
+        }
+    }
+    counts.map(|c| entropy_bits(&c))
+}
+
+/// Order-0 entropy of byte counts, in 1/65536 bits, with integer arithmetic only (so the choice is the same on
+/// every machine): the sum of c * (log2 n - log2 c) with a piecewise-linear log2.
+fn entropy_bits(counts: &[u32; 256]) -> u64 {
+    fn log2(x: u64) -> u64 {
+        let k = 63 - x.leading_zeros() as u64;
+        (k << 16) + (((x - (1 << k)) << 16) >> k)
+    }
+    let n: u64 = counts.iter().map(|&c| c as u64).sum();
+    if n == 0 {
+        return 0;
+    }
+    let ln = log2(n);
+    counts.iter().filter(|&&c| c > 0).map(|&c| c as u64 * (ln - log2(c as u64))).sum()
 }
 
 #[cfg(test)]
@@ -196,5 +278,114 @@ mod tests {
             let f = png_filter(&px, row, bpp, how);
             assert_eq!(png_unfilter(&f, row, bpp).unwrap(), px);
         }
+    }
+
+    #[test]
+    fn each_candidate_is_scored_on_the_bytes_its_filter_writes() {
+        // Every candidate's cost is the order-0 entropy of exactly what png_filter writes for it (type bytes and
+        // residuals) on the rows sampled: the minimum sum too, which was once scored with the last type's
+        // (Paeth's) residuals instead of the chosen ones'.
+        let (row, bpp) = (48usize, 3usize);
+        for seed in [1u64, 2, 3, 0x1234_5678, 0xdead_beef] {
+            let mut s = seed;
+            let mut rnd = move || {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                s as u8
+            };
+            let mut px = Vec::new();
+            for k in 0..24u8 {
+                let random: Vec<u8> = (0..row).map(|_| rnd()).collect();
+                let ramp: Vec<u8> = (0..row).map(|i| k.wrapping_mul(17).wrapping_add(3 * i as u8)).collect();
+                let noisy: Vec<u8> = ramp.iter().map(|&x| x.wrapping_add(rnd() % 3)).collect();
+                for r in [&random, &random, &ramp, &noisy] {
+                    px.extend_from_slice(r);
+                }
+            }
+            let nrows = px.len() / row;
+            for bands in [vec![(0, nrows)], vec![(3, 11), (40, 52), (90, 96)]] {
+                let bits = candidate_bits(&px, row, bpp, &bands);
+                let written = |how: Option<Choice>| -> u64 {
+                    let (data, stride) = match how {
+                        None => (px.clone(), row),
+                        Some(h) => (png_filter(&px, row, bpp, h), row + 1),
+                    };
+                    let mut c = [0u32; 256];
+                    for &(a, b) in &bands {
+                        for &x in &data[a * stride..b * stride] {
+                            c[x as usize] += 1;
+                        }
+                    }
+                    entropy_bits(&c)
+                };
+                assert_eq!(bits[0], written(None), "seed {seed}");
+                for t in 1..5u8 {
+                    assert_eq!(bits[t as usize], written(Some(Choice::Fixed(t))), "seed {seed}, type {t}");
+                }
+                assert_eq!(bits[5], written(Some(Choice::MinSum)), "seed {seed}, minimum sum");
+            }
+        }
+    }
+
+    #[test]
+    fn geometry_is_the_same_on_every_target() {
+        let resolve = |o: &Obj| Some(o.clone());
+        let image = |w: i64, bpc: i64, cs: Obj| {
+            let mut d = Dict::default();
+            d.set(b"Subtype", Obj::Name(b"Image".to_vec()));
+            d.set(b"Width", Obj::Int(w));
+            d.set(b"BitsPerComponent", Obj::Int(bpc));
+            d.set(b"ColorSpace", cs);
+            d
+        };
+        let names = |n: usize| Obj::Array((0..n).map(|k| Obj::Name(format!("C{k}").into_bytes())).collect());
+        let devicen =
+            |n: usize| Obj::Array(vec![Obj::Name(b"DeviceN".to_vec()), names(n), Obj::Name(b"DeviceRGB".to_vec())]);
+        // 2^24 x 32 x 16 bits per row: refused everywhere (a 32-bit usize can't hold the bit count).
+        assert_eq!(geometry(&image(1 << 24, 16, devicen(32)), &resolve), None);
+        // Just over and just under u32::MAX bits.
+        assert_eq!(geometry(&image(1 << 24, 16, devicen(16)), &resolve), None);
+        let g = geometry(&image((1 << 24) - 1, 16, devicen(16)), &resolve).unwrap();
+        assert_eq!(g.row(), (((1usize << 24) - 1) * 16 * 16).div_ceil(8));
+        assert!(geometry(&image(4000, 8, Obj::Name(b"DeviceRGB".to_vec())), &resolve).is_some());
+    }
+
+    #[test]
+    fn the_estimate_wants_a_predictor_only_where_it_helps() {
+        let (row, rows) = (300usize, 200usize);
+        let all = [(0usize, rows)];
+        // A smooth gradient: a predictor leaves almost nothing.
+        let smooth: Vec<u8> = (0..row * rows).map(|i| ((i % row) + (i / row) * 2) as u8).collect();
+        assert!(estimate_choice(&smooth, row, 3, 8, &all).is_some());
+        // Identical rows: Up leaves only zeros below the first row, and so do Paeth (on identical rows it predicts
+        // the row above) and the minimum sum; Paeth also takes the first row as Sub does, which suits this one.
+        let stripes: Vec<u8> = (0..row * rows).map(|i| ((i % row) * 37 % 251) as u8).collect();
+        assert!(matches!(
+            estimate_choice(&stripes, row, 3, 8, &all),
+            Some(Choice::Fixed(2) | Choice::Fixed(4) | Choice::MinSum)
+        ));
+        // Noise: the residuals are noise as well, and the type bytes cost extra.
+        let mut s = 9u64;
+        let noise: Vec<u8> = (0..row * rows)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                s as u8
+            })
+            .collect();
+        assert_eq!(estimate_choice(&noise, row, 3, 8, &all), None);
+        // Below 8 bits per component never; nor for a blank image (nothing to gain).
+        assert_eq!(estimate_choice(&smooth, row, 1, 4, &all), None);
+        assert_eq!(estimate_choice(&vec![255u8; row * rows], row, 1, 8, &all), None);
+        // Bands past the end are cut, and an empty band list wants nothing.
+        assert!(estimate_choice(&smooth, row, 3, 8, &[(0, 10), (150, 1000)]).is_some());
+        assert_eq!(estimate_choice(&smooth, row, 3, 8, &[]), None);
+        // The integer entropy: two equally likely bytes cost one bit each.
+        let mut c = [0u32; 256];
+        c[1] = 1000;
+        c[2] = 1000;
+        assert_eq!(entropy_bits(&c), 2000 << 16);
     }
 }

@@ -6,7 +6,7 @@
 //!   gpress unpack IN OUT [options]     the original from an archive; a damaged archive is an error
 //!
 //! Options (the library's `Options`, the same defaults): --effort N (0 fast .. 100 smallest, default 100;
-//! --quick = 0), --threads N (0: what the machine offers, at most 8), --max-input BYTES, --max-stream BYTES
+//! --quick = 0), --threads N (0: every core the machine offers, at most 64), --max-input BYTES, --max-stream BYTES
 //! (normal PDF), --max-stream-archive BYTES, --max-decoded BYTES (the archive's decoded-bytes budget, for pack
 //! and unpack), --max-len BYTES (unpack: a file declaring more is refused),
 //! --objects-per-stream N, --time-budget MS (give up after that long), --ignore-conformance,
@@ -16,8 +16,12 @@
 //!
 //! Measuring tools (the engine's own modules, for the benchmarks): deflate, inflate, batch, pdf-batch,
 //! repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info, fax-decode, fax-encode, fax-scan,
-//! fax-model, jbig2-encode, claim-archive (the security suite's crafted archive). `--iter`, `--exact`, `--chain`, `--nice`, `--nosplit`, `--noalt`, `--nomulti`
-//! and `--nopolish` fine-tune the Flate settings of the deflate tools below the effort.
+//! fax-model, jbig2-encode, claim-archive (the security suite's crafted archive). `--iter`, `--exact`,
+//! `--chain`, `--nice`, `--nosplit`, `--noalt`, `--nomulti` and `--nopolish` fine-tune the strong encoder's
+//! settings for the effort in the deflate tools; below effort 20, where the fast encoder runs, any of them
+//! selects the strong encoder (its quick settings, fine-tuned). `--fast N` (1 to `flate::fast::LEVELS`) uses
+//! the fast encoder at level N instead, and `--fast 0` the strong encoder. The deflate tools work on a thread
+//! pool only with `--threads N` above 0.
 //!
 //! Exit status: 0 done; a library error exits with its code (1 input too large, 2 not an archive or damaged,
 //! 3 archive version, 4 internal error (a caught panic: a bug), 5 invalid options, 6 time budget, 7 declared
@@ -46,7 +50,7 @@ usage: gpress optimize IN OUT [options]   a smaller PDF that any reader opens (o
        gpress pack IN OUT [options]       the gpress archive of IN (any file)
        gpress unpack IN OUT [options]     the original from an archive (a damaged archive is an error)
 
-options: --effort N (0 fast .. 100 smallest, default 100; --quick = 0)   --threads N (0: the machine's, at most 8)
+options: --effort N (0 fast .. 100 smallest, default 100; --quick = 0)   --threads N (0: every core, at most 64)
          --max-input BYTES   --max-stream BYTES (normal PDF)   --max-stream-archive BYTES   --max-decoded BYTES (archive,
          pack and unpack)   --max-len BYTES (unpack)   --objects-per-stream N   --time-budget MS   --ignore-conformance
          --no-flate-over-jpeg   --no-jpeg-tables   --no-jbig2   --keep-encrypted (normal PDF)   --no-decrypt (archive)
@@ -61,6 +65,7 @@ const WITH_VALUE: &[&str] = &[
     "--exact",
     "--chain",
     "--nice",
+    "--fast",
     "--threads",
     "--effort",
     "--max-input",
@@ -71,6 +76,9 @@ const WITH_VALUE: &[&str] = &[
     "--objects-per-stream",
     "--time-budget",
 ];
+
+/// The flags that fine-tune the strong encoder's settings in the deflate tools.
+const TUNING: [&str; 8] = ["--iter", "--exact", "--chain", "--nice", "--nosplit", "--noalt", "--nomulti", "--nopolish"];
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -155,6 +163,13 @@ fn main() {
     }
     if flag("--nopolish") {
         opt.polish = false;
+    }
+    // Those flags tune the strong encoder: below effort 20 they select it.
+    if TUNING.iter().any(|f| flag(f)) {
+        opt.fast = 0;
+    }
+    if let Some(v) = num("--fast") {
+        opt.fast = v.min(255) as u8;
     }
     if threads > 0 {
         opt.shared = Some(flate::deflate::Shared::new(threads));

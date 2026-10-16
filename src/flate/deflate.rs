@@ -42,6 +42,8 @@ pub struct Options {
     /// Once this has passed, the segments still to do are written stored (cheap) so the job ends soon; the
     /// caller checks the deadline afterwards and never uses such an output. Never changes a finished output.
     pub deadline: Deadline,
+    /// 0: the encoder above; 1 to `fast::LEVELS`: the fast encoder (`fast.rs`) at that level instead.
+    pub fast: u8,
 }
 
 impl Options {
@@ -59,6 +61,7 @@ impl Options {
             polish: true,
             shared: None,
             deadline: Deadline::NONE,
+            fast: 0,
         }
     }
     /// Fast but still optimal-parsed.
@@ -75,12 +78,15 @@ impl Options {
             polish: false,
             shared: None,
             deadline: Deadline::NONE,
+            fast: 0,
         }
     }
 
-    /// Settings for an effort from 0 (`quick`) to 100 (`max`), in steps of 20. Measured on 92 sampled PDF
-    /// streams (3.4 MB) and on 6 large images (14.9 MB), against `max` (CPU time; bytes):
-    ///   0: 0.34x, 0.23x; +0.47%, +1.75%      20: 0.43x, 0.39x; +0.15%, +0.10%
+    /// Settings for an effort from 0 to 100. Below 20 the fast encoder (`fast.rs`) at its near-optimal top
+    /// level (`FAST_LEVEL`; the PDF plan gives images faster levels and, from 10, some streams `quick`); from
+    /// 20 the encoder above in steps of 20 up to `max` at 100. Measured on 92 sampled PDF streams (3.4 MB) and
+    /// on 6 large images (14.9 MB), against `max` (CPU time; bytes):
+    ///   quick: 0.34x, 0.23x; +0.47%, +1.75%      20: 0.43x, 0.39x; +0.15%, +0.10%
     ///  40: 0.47x, 0.45x; +0.13%, +0.09%      60: 0.77x, 0.71x; +0.03%, +0.00%      80: 0.93x, 0.90x; +0.01%, +0.00%
     pub fn effort(effort: u8) -> Options {
         let o = |iterations, exact_rounds, max_chain, alternatives, polish| Options {
@@ -95,9 +101,10 @@ impl Options {
             polish,
             shared: None,
             deadline: Deadline::NONE,
+            fast: 0,
         };
         match effort {
-            0..=19 => Options::quick(),
+            0..=19 => Options { fast: FAST_LEVEL, ..Options::quick() },
             20..=39 => o(2, 1, 1024, false, false),
             40..=59 => o(3, 1, 1024, false, false),
             60..=79 => o(4, 2, 2048, true, true),
@@ -112,7 +119,7 @@ impl Options {
     }
 
     /// The settings that decide the output (everything but `shared` and `deadline`).
-    fn fingerprint(&self) -> [usize; 9] {
+    fn fingerprint(&self) -> [usize; 10] {
         [
             self.iterations,
             self.exact_rounds,
@@ -123,9 +130,14 @@ impl Options {
             self.multi_start_limit,
             self.nice,
             self.polish as usize,
+            self.fast as usize,
         ]
     }
 }
+
+/// The fast encoder's level for efforts 0 to 19: its near-optimal top level (images get a faster one, see
+/// `pdf::rewrite`).
+const FAST_LEVEL: u8 = super::fast::LEVELS;
 
 /// What the encodes of one job share: a pool of threads, and (optionally) the output for inputs already
 /// encoded with the same settings, so that an input is encoded once. Neither changes any output.
@@ -136,7 +148,7 @@ pub struct Shared {
 }
 
 /// What an encoded input is remembered by: the hash and length of the data and the settings that matter.
-type MemoKey = (u64, usize, [usize; 9]);
+type MemoKey = (u64, usize, [usize; 10]);
 
 impl Shared {
     /// A new pool of `threads` threads, remembering every output.
@@ -162,6 +174,9 @@ const SEGMENTS_AT_ONCE: usize = 8;
 
 /// Raw Deflate data for `data`.
 pub fn deflate(data: &[u8], opt: &Options) -> Vec<u8> {
+    if opt.fast > 0 {
+        return super::fast::deflate(data, opt.fast, opt.shared.as_ref().map(|s| &*s.pool), opt.deadline);
+    }
     let mut w = BitWriter::with_capacity(data.len() / 2 + 64);
     if data.is_empty() {
         write_fixed(&mut w, &[], true);
