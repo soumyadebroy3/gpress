@@ -1,6 +1,6 @@
 {
   "about": "Sizes in bytes of the builds of each feature set, written by `python3 -I bench/sizes.py measure`; `check` compares the web module with them.",
-  "web": "default",
+  "web": "web",
   "builds": {
     "default": {
       "cargo_arguments": {

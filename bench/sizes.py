@@ -22,7 +22,7 @@ record without wasm-opt and `check` fails without it when the record was made wi
 wasm-opt version, and CI installs binaryen); a different wasm-opt or rustc version is only noted. Builds use
 cargo's usual target directory and settings (CARGO_BUILD_JOBS and the like). `measure` also prints the set's
 rows for the Sizes table in bench/RESULTS.md, in its columns, with the sizes it replaced in the "Before"
-cells (empty for a set measured the first time); the rows now in the table give commit 066b65e there instead.
+cells (empty for a set measured the first time).
 """
 import argparse
 import datetime
@@ -39,9 +39,9 @@ ROOT = os.path.dirname(HERE)
 RECORD = os.path.join(HERE, 'sizes.json')
 BUILD_WASM = os.path.join(ROOT, 'crates', 'gpress-wasm', 'js', 'build-wasm.mjs')
 
-# The feature set of the web module, the one `check` guards. Until the "web" feature set exists, the module
-# built with the default features (every part of the engine) stands in for it; then this becomes WEB = 'web'.
-WEB = 'default'
+# The feature set of the web module, the one `check` guards: the "web" feature (Cargo.toml), what a normal PDF
+# uses, without the archive. The npm package builds it as dist/gpress-web.wasm.
+WEB = 'web'
 
 GROWTH = 1.05            # check: at most 5% over the recorded gzip size
 SHRINK = 0.95            # check: a warning more than 5% under it, since the budget is counted from the record
@@ -178,7 +178,6 @@ def table_rows(fset, entry, was, names):
     rows = []
     for key, build in builds:
         now, before = entry[key], (was or {}).get(key)
-        label = f'{fset} (stands in for "web")' if key == 'wasm' and fset == WEB != 'web' else fset
         if before is None:
             then, change = '', ''
         elif before == now:
@@ -186,7 +185,7 @@ def table_rows(fset, entry, was, names):
         else:
             then = f'{before["raw"]:,}, {before["gzip"]:,}'
             change = f'{100 * (now["gzip"] / before["gzip"] - 1):+.1f}%'
-        rows.append(f'| {build} | {label} | {now["raw"]:,} | {now["gzip"]:,} | {then} | {change} |')
+        rows.append(f'| {build} | {fset} | {now["raw"]:,} | {now["gzip"]:,} | {then} | {change} |')
     return rows
 
 
