@@ -995,7 +995,7 @@ impl Model {
         let lo = self.seg_start;
         let (s, bpp) = (self.geom.stride, self.geom.bpp);
         // Those more than a row and a pixel back are never read: a longer gap is skipped.
-        self.rh_end = self.rh_end.max(pos.saturating_sub(s + bpp).max(lo));
+        self.rh_end = self.rh_end.max(pos.saturating_sub(s.saturating_add(bpp)).max(lo));
         self.grow_ring(pos - lo);
         let mut p = self.rh_end;
         // One division per fill.
@@ -1973,6 +1973,32 @@ mod tests {
                             let want = m.hist[p].wrapping_sub(eager_pred(&m.hist, lo, stride, bpp, p));
                             assert_eq!(m.resid_at(p), want, "row length {stride}, {bpp} bytes per pixel, byte {k}");
                         }
+                    }
+                }
+            }
+        }
+        assert!(m.bypassed > 0);
+    }
+
+    #[test]
+    fn a_row_length_at_the_top_of_usize_reads_the_eager_residuals() {
+        // `pack` caps the row length at 2^30, but the model takes any: the gap a fill skips is a row and a pixel
+        // back, and that sum must not wrap, or the residuals of long repeats and plain bytes are never stored.
+        let mut r = Rng(5);
+        let mut m = Model::new(12);
+        let mut n = Null;
+        for (stride, bpp) in [(usize::MAX - 15, 64usize), (usize::MAX, 1)] {
+            m.set_kind(Kind::Image, Geom { stride, bpp, exact: false }, 0);
+            for k in 0..3000usize {
+                m.set_flat(k % 1100 >= 1000);
+                let b = if k % 700 < 400 { (k % 5) as u8 } else { r.byte() };
+                m.code_byte(&mut n, Some(b));
+                if k % 50 == 49 && !m.ctx_dirty {
+                    // Every byte is in the first row, so the contexts may read back to the segment's start.
+                    let (pos, lo) = (m.hist.len(), m.seg_start);
+                    for p in lo..pos {
+                        let want = m.hist[p].wrapping_sub(eager_pred(&m.hist, lo, stride, bpp, p));
+                        assert_eq!(m.resid_at(p), want, "row length {stride}, {bpp} bytes per pixel, byte {k}");
                     }
                 }
             }

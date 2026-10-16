@@ -478,18 +478,21 @@ mod tests {
         let mut s = 3u64;
         let noise: Vec<u8> = (0..70_000).map(|_| rng(&mut s) as u8).collect();
         // Stored blocks, then a fixed block whose match reaches back exactly 32 KiB (distance code 29 with
-        // all 13 extra bits set), after the window has moved: restored the same both ways.
-        let mut w = BitWriter::new();
-        stored(&mut w, &noise);
-        w.put(0b011, 3);
-        fixed(&mut w, 285);
-        code(&mut w, 29, 5);
-        w.put(8191, 13);
-        fixed(&mut w, 256);
-        let far = w.finish();
-        let out = same(&far, usize::MAX).unwrap().data;
-        assert_eq!(&out[70_000..], &noise[70_000 - 32_768..70_000 - 32_768 + 258]);
-        same(&far, 70_000 + 257).unwrap_err();
+        // all 13 extra bits set), before the window moves, just as it moves (at 64 KiB) and after: restored
+        // the same both ways.
+        for n in [32_768, 65_533, 65_534, 65_535, 65_536, 65_537, 65_538, 70_000] {
+            let mut w = BitWriter::new();
+            stored(&mut w, &noise[..n]);
+            w.put(0b011, 3);
+            fixed(&mut w, 285);
+            code(&mut w, 29, 5);
+            w.put(8191, 13);
+            fixed(&mut w, 256);
+            let far = w.finish();
+            let out = same(&far, usize::MAX).unwrap().data;
+            assert_eq!(&out[n..], &noise[n - 32_768..n - 32_768 + 258], "{n} stored bytes");
+            same(&far, n + 257).unwrap_err();
+        }
         // A literal, then a match two bytes back: too far.
         let mut w = BitWriter::new();
         w.put(0b011, 3);
