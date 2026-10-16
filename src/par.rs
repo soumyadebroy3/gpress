@@ -65,15 +65,20 @@ impl Pool {
     }
 }
 
-/// The default thread count: every core the machine offers, at most `api::MAX_THREADS` (what a caller may
-/// ask for; memory grows with the threads, each working on a decoded stream of its own).
+/// The most threads the default gives. Memory grows with the threads, each working on a decoded stream of its
+/// own, and nothing yet bounds what the pool's items hold at once, so the default stops at 8. This cap goes
+/// once a byte budget on pool items exists; the default is then every core, up to `api::MAX_THREADS`. A count
+/// the caller gives can be anything up to `api::MAX_THREADS`.
+pub const DEFAULT_MAX: usize = 8;
+
+/// The default thread count: every core the machine offers, at most `DEFAULT_MAX`.
 pub fn default_threads() -> usize {
     threads_for(std::thread::available_parallelism().ok().map(|n| n.get()))
 }
 
-/// The thread count for a machine that offers `cores` (unknown: 1), within 1 to `api::MAX_THREADS`.
+/// The thread count for a machine that offers `cores` (unknown: 1), within 1 to `DEFAULT_MAX`.
 fn threads_for(cores: Option<usize>) -> usize {
-    cores.unwrap_or(1).clamp(1, crate::api::MAX_THREADS)
+    cores.unwrap_or(1).clamp(1, DEFAULT_MAX)
 }
 
 /// Starts `f` on a new thread of scope `s`. None when the system refuses one (thread or process limits);
@@ -335,17 +340,18 @@ pub(crate) mod tests {
 
     #[test]
     fn the_default_is_every_core_within_the_limit() {
-        use crate::api::MAX_THREADS;
         assert_eq!(threads_for(Some(4)), 4);
-        assert_eq!(threads_for(Some(MAX_THREADS)), MAX_THREADS);
-        assert_eq!(threads_for(Some(MAX_THREADS + 1)), MAX_THREADS);
-        assert_eq!(threads_for(Some(1024)), MAX_THREADS);
+        assert_eq!(threads_for(Some(DEFAULT_MAX)), DEFAULT_MAX);
+        assert_eq!(threads_for(Some(DEFAULT_MAX + 1)), DEFAULT_MAX);
+        assert_eq!(threads_for(Some(1024)), DEFAULT_MAX);
         assert_eq!(threads_for(None), 1);
         assert_eq!(threads_for(Some(0)), 1);
-        // On this machine: every core it offers, as many as the options accept.
+        // On this machine: every core it offers, at most 8, which the options accept; a count given can be
+        // more, up to MAX_THREADS.
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-        assert_eq!(default_threads(), cores.min(MAX_THREADS));
+        assert_eq!(default_threads(), cores.min(DEFAULT_MAX));
         assert!(crate::Options::new().threads(default_threads()).check().is_ok());
+        assert!(crate::Options::new().threads(crate::api::MAX_THREADS).check().is_ok());
     }
 
     #[test]
