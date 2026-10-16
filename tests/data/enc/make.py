@@ -5,6 +5,8 @@ as they are. Needs qpdf 11 and the Python package 'cryptography'.
 - base.pdf: a small one-page document (text, a font, an image, a note, document information, XMP metadata).
 - qpdf encrypts it with the empty user password in every standard mode (r2_rc4_40 ... r6_objstm), and once
   with a user password (needs_password.pdf). keys.txt holds the file key qpdf derives for each.
+  r4_aes_cleartext_md_plain has its streams stored decoded, so that a rewrite saves enough to put each object in
+  an object stream of its own (qpdf keeps the catalog out of object streams).
 - Hand-made files for cases readers disagree on, which the engine must leave as they are. They are built here
   with RC4, MD5 and AES code independent of the engine's.
 """
@@ -74,6 +76,8 @@ QPDF = {
     'r4_rc4_128': ['--allow-weak-crypto', '--encrypt', '', 'owner', '128', '--use-aes=n', '--force-V4', '--'],
     'r4_aes_128': ['--encrypt', '', 'owner', '128', '--use-aes=y', '--'],
     'r4_aes_cleartext_md': ['--encrypt', '', 'owner', '128', '--use-aes=y', '--cleartext-metadata', '--'],
+    'r4_aes_cleartext_md_plain': ['--decode-level=generalized', '--compress-streams=n', '--encrypt', '', 'owner', '128',
+                                  '--use-aes=y', '--cleartext-metadata', '--'],
     'r5_aes_256': ['--encrypt', '', 'owner', '256', '--force-R5', '--'],
     'r6_aes_256': ['--encrypt', '', 'owner', '256', '--'],
     'r6_restricted': ['--encrypt', '', 'owner', '256', '--print=none', '--modify=none', '--extract=n', '--'],
