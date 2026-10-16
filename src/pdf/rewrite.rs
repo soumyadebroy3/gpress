@@ -15,7 +15,10 @@ use crate::clock::{self, Deadline};
 use crate::flate;
 use crate::par;
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::cell::RefCell;
+use std::collections::{hash_map, BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -475,14 +478,14 @@ fn reencode(
         with_flate.extend_from_slice(rest);
         let mut d = s.dict.clone();
         set_chain(&mut d, &with_flate);
-        let z = flate::deflate_zlib(jpeg.as_ref().unwrap_or(&data), &opt.flate);
+        let z = job_encode(jpeg.as_ref().unwrap_or(&data), &opt.flate);
         flate_len = jpeg.is_none().then_some(z.len());
         let again = opt.effort >= 100
             && jpeg.as_ref().is_some_and(|j| z.len() * 10 <= j.len() * 9 && j.len() * 10 <= data.len() * 9);
         // The first candidate is Flate over the JPEG with its new tables (when there is one), the second
         // over the original bytes.
         for (z, retabled) in
-            std::iter::once((z, jpeg.is_some())).chain(again.then(|| (flate::deflate_zlib(&data, &opt.flate), false)))
+            std::iter::once((z, jpeg.is_some())).chain(again.then(|| (job_encode(&data, &opt.flate), false)))
         {
             let limit = if adds_layer { best_len.min(bare_len - bare_len / 100) } else { best_len };
             if z.len() < limit {
@@ -544,7 +547,7 @@ fn reencode_xmp(s: &Stream, opt: &Options) -> Option<Reencoded> {
     for st in &stages {
         data = decode_stage(st, &data, opt.max_stream).ok()?;
     }
-    let z = flate::deflate_zlib(&data, &opt.flate);
+    let z = job_encode(&data, &opt.flate);
     if z.len() >= s.data.len() {
         return None;
     }
@@ -623,7 +626,7 @@ fn repredict_fast(
     };
     let mut d = s.dict.clone();
     set_chain(&mut d, &[Stage { name: b"FlateDecode".to_vec(), parms }]);
-    let z = flate::deflate_zlib(&bytes, &opt.flate);
+    let z = job_encode(&bytes, &opt.flate);
     (z.len() + to_bytes(&Obj::Dict(d.clone())).len() < plain).then_some((d, z))
 }
 
@@ -709,7 +712,7 @@ fn repredict(
     if bytes == data {
         return None;
     }
-    let z = flate::deflate_zlib(&bytes, &opt.flate);
+    let z = job_encode(&bytes, &opt.flate);
     // Without a predictor before, `data` is the plain samples: a predictor that saves fewer bytes than its
     // parameters take is not kept.
     if parms.is_some() && carried.is_none() && z.len() + dict_len(&parms) >= flate_len + dict_len(&None) {
@@ -1051,6 +1054,162 @@ fn kind_key(o: &Obj) -> (u8, Vec<u8>, Vec<u8>) {
     }
 }
 
+/// What a stream job is given: its stream (borrowed, never copied), its settings and the few objects its
+/// encoders look up. Never the object table, the encryption or another job's stream.
+struct Job<'a> {
+    n: u32,
+    s: &'a Stream,
+    /// From `effort_plan`; None: the stream is kept as it is.
+    settings: Option<Options>,
+    /// An encrypted XMP stream (see `reencode_xmp`), decided while planning (that needs the encryption).
+    xmp: bool,
+    /// Another job has the same encoder input (see `identical_streams`).
+    shares: bool,
+    /// The only objects it may look up (see `job_refs`).
+    refs: Vec<(u32, Looked<'a>)>,
+}
+
+/// An object a job may look up; of a stream, only its dictionary.
+enum Looked<'a> {
+    Obj(&'a Obj),
+    Dict(&'a Dict),
+}
+
+impl Job<'_> {
+    /// What the object table gives for `o`: a reference followed once, anything else as it is. Only the
+    /// objects in `refs` are there, as if every other were missing; a stream comes with its dictionary and no
+    /// data.
+    fn resolve(&self, o: &Obj) -> Option<Obj> {
+        let Obj::Ref(n, _) = o else { return Some(o.clone()) };
+        self.refs.iter().find(|r| r.0 == *n).map(|(_, l)| match l {
+            Looked::Obj(o) => (*o).clone(),
+            Looked::Dict(d) => Obj::Stream(Box::new(Stream { dict: (*d).clone(), data: Vec::new() })),
+        })
+    }
+}
+
+/// The objects a stream's encoders may look up: what Width, Height and ColorSpace refer to (a fax image reads
+/// Width and Height through them, `images::components` the colour space), and when the colour space, direct
+/// or looked up, is an array, what its element 1 refers to (an ICC profile, whose /N it reads). A reference
+/// to a missing object is left out, so the job finds it missing too.
+fn job_refs<'a>(d: &'a Dict, objs: &'a BTreeMap<u32, (u16, Obj)>) -> Vec<(u32, Looked<'a>)> {
+    let mut refs: Vec<(u32, Looked<'a>)> = Vec::new();
+    let mut look = |o: &'a Obj| -> Option<&'a Obj> {
+        let Obj::Ref(n, _) = o else { return Some(o) };
+        let (_, t) = objs.get(n)?;
+        if !refs.iter().any(|r| r.0 == *n) {
+            refs.push((*n, if let Obj::Stream(s) = t { Looked::Dict(&s.dict) } else { Looked::Obj(t) }));
+        }
+        Some(t)
+    };
+    for k in [&b"Width"[..], b"Height"] {
+        if let Some(v) = d.get(k) {
+            look(v);
+        }
+    }
+    if let Some(Obj::Array(a)) = d.get(b"ColorSpace").and_then(&mut look) {
+        if let Some(e) = a.get(1) {
+            look(e);
+        }
+    }
+    refs
+}
+
+/// What a stream job's memory of its encodes has answered (see `job_encode`).
+#[derive(Default)]
+struct MemoSeen {
+    /// The SHA-256 of the first input of each hash64 and length.
+    first: HashMap<(u64, usize), [u8; 32]>,
+    hits: usize,
+}
+
+thread_local! {
+    /// Under PDFE_DEBUG, while a stream job runs on this thread: what its memory has answered.
+    static MEMO_SEEN: RefCell<Option<MemoSeen>> = const { RefCell::new(None) };
+}
+
+/// Our Flate over `data` with a stream job's settings, whose `shared` remembers the job's outputs. Under
+/// PDFE_DEBUG this also counts the encodes that memory answers. It keeps no count itself, so the count is
+/// worked out here: it answers an input equal to the first one the job encoded with the same hash64 and
+/// length (its fit check takes no other), when it keeps inputs that long (as `flate::deflate_zlib` decides),
+/// and a job encodes with one setting. (The bridge's trial at effort 0's settings in `reencode` is left out:
+/// its settings are never the job's, so the memory never answers the job's encodes with its output, and it
+/// comes first, so it is never answered either.)
+fn job_encode(data: &[u8], opt: &flate::Options) -> Vec<u8> {
+    let kept = data.len() <= flate::deflate::REMEMBER_UP_TO.min(opt.segment.max(1));
+    MEMO_SEEN.with_borrow_mut(|seen| {
+        if let Some(seen) = seen.as_mut().filter(|_| kept) {
+            let sha = crate::pack::sha256(data);
+            match seen.first.entry((par::hash64(data), data.len())) {
+                hash_map::Entry::Occupied(e) => seen.hits += (*e.get() == sha) as usize,
+                hash_map::Entry::Vacant(e) => {
+                    e.insert(sha);
+                }
+            }
+        }
+    });
+    flate::deflate_zlib(data, opt)
+}
+
+/// One stream job: the stream's new encoding (None: it is kept as it is) and the job's check of it (see
+/// `prove`). It is given its `Job` only, so it can't reach the object table, the encryption or another job.
+/// Its encodes run on `pool` and share a memory of their outputs that goes with the job, so memory doesn't
+/// grow with the file. With `dbg` it prints a line and adds the encodes that memory answered to `memo_hits`.
+fn run_job(
+    job: &Job,
+    pool: &Arc<par::Pool>,
+    opt: &Options,
+    dbg: bool,
+    memo_hits: &AtomicUsize,
+) -> (Option<Reencoded>, Option<Proof>) {
+    // Out of time: nothing more is encoded (the whole rewrite is given up below).
+    if opt.deadline.passed() {
+        return (None, None);
+    }
+    let (n, s) = (job.n, job.s);
+    let resolve = |o: &Obj| job.resolve(o);
+    let t = clock::now();
+    MEMO_SEEN.set(dbg.then(MemoSeen::default));
+    let mut content = None;
+    let r = job.settings.as_ref().and_then(|o| {
+        let o = Options {
+            flate: flate::Options {
+                shared: Some(flate::deflate::Shared::with_pool(pool.clone(), true)),
+                ..o.flate.clone()
+            },
+            ..o.clone()
+        };
+        if job.xmp {
+            reencode_xmp(s, &o)
+        } else {
+            reencode(s, &o, &resolve, &mut content)
+        }
+    });
+    #[cfg(test)]
+    let r = check_tests::encoder_fault(n, r);
+    let short = r.is_some() && short_image(s, &resolve, content.as_ref());
+    let r = if short { None } else { r };
+    // The new data checked against the stream's content here, in parallel and without decoding the
+    // stream again, so the self-check only has to find the same data in the output.
+    let proof = match (&r, content) {
+        (Some(r), Some(c)) => prove(n, s, &c, r),
+        _ => None,
+    };
+    if dbg {
+        memo_hits.fetch_add(MEMO_SEEN.take().map_or(0, |m| m.hits), Ordering::Relaxed);
+        let new = r.as_ref().map_or(s.data.len(), |x| x.1.len());
+        let how =
+            job.settings.as_ref().map_or("kept, over the quick budget".to_string(), |o| format!("effort {}", o.effort));
+        eprintln!(
+            "stream {n}: {} -> {new} bytes, {how}, {:?}{}",
+            s.data.len(),
+            clock::since(t),
+            if short { " (short image, kept)" } else { "" }
+        );
+    }
+    (r, proof)
+}
+
 fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     let doc = xref::open(input).map_err(|e| format!("unreadable: {e:?}"))?;
     // An encrypted file the empty password doesn't open stays as it is. One it opens is read decrypted and
@@ -1076,8 +1235,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     };
     stats.encryption = crypt.map(|c| c.describe()).unwrap_or_default();
 
-    // One pool of threads for everything this file needs. Each stream gets its own memory of encoded inputs
-    // (its plain samples are often encoded twice), gone with the stream, so memory doesn't grow with the file.
+    // One pool of threads for everything this file needs.
     let workers = par::Pool::new(if opt.threads == 0 { par::default_threads() } else { opt.threads });
     let pool = Some(&*workers);
     let opt = &Options {
@@ -1095,66 +1253,37 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         objs.iter().filter_map(|(&n, (_, o))| if let Obj::Stream(s) = o { Some((n, &**s)) } else { None }).collect();
     let (same, unique, shares) = identical_streams(&streams);
     let settings = effort_plan(&streams, &unique, opt, input.len(), pool);
-    let mut order: Vec<usize> = (0..unique.len()).collect();
-    order.sort_by_key(|&u| (std::cmp::Reverse(streams[unique[u]].1.data.len()), u));
+    // Each job is given its stream, its settings and the few objects its encoders look up: nothing else of
+    // the file.
+    let jobs: Vec<Job> = unique
+        .iter()
+        .zip(settings)
+        .zip(shares)
+        .map(|((&i, settings), shares)| {
+            let (n, s) = streams[i];
+            // XMP stays as it is for tools that read it straight from the file, unless it is encrypted.
+            // (Whether it is depends on the dictionary alone, so identical streams agree.)
+            let xmp = s.dict.name(b"Type") == Some(b"Metadata")
+                && crypt.is_some_and(|c| c.stream_method(n, &s.dict).is_ok_and(|m| m != Method::Identity));
+            Job { n, s, settings, xmp, shares, refs: job_refs(&s.dict, &objs) }
+        })
+        .collect();
+    let mut order: Vec<usize> = (0..jobs.len()).collect();
+    order.sort_by_key(|&u| (std::cmp::Reverse(jobs[u].s.data.len()), u));
     let dbg = std::env::var_os("PDFE_DEBUG").is_some();
-    let jobs = par::map(pool, unique.len(), Some(&order), |u| {
-        // Out of time: nothing more is encoded (the whole rewrite is given up below).
-        if opt.deadline.passed() {
-            return (None, None);
-        }
-        let (n, s) = streams[unique[u]];
-        let resolve = |o: &Obj| -> Option<Obj> {
-            match o {
-                Obj::Ref(n, _) => objs.get(n).map(|x| x.1.clone()),
-                x => Some(x.clone()),
-            }
-        };
-        let t = clock::now();
-        // XMP stays as it is for tools that read it straight from the file, unless it is encrypted. (Whether
-        // it is depends on the dictionary alone, so identical streams agree.)
-        let xmp = s.dict.name(b"Type") == Some(b"Metadata")
-            && crypt.is_some_and(|c| c.stream_method(n, &s.dict).is_ok_and(|m| m != Method::Identity));
-        let mut content = None;
-        let r = settings[u].as_ref().and_then(|o| {
-            let o = Options {
-                flate: flate::Options {
-                    shared: Some(flate::deflate::Shared::with_pool(workers.clone(), true)),
-                    ..o.flate.clone()
-                },
-                ..o.clone()
-            };
-            if xmp {
-                reencode_xmp(s, &o)
-            } else {
-                reencode(s, &o, &resolve, &mut content)
-            }
-        });
+    let memo_hits = AtomicUsize::new(0);
+    #[cfg(test)]
+    let running = job_tests::Running::default();
+    let done = par::map(pool, jobs.len(), Some(&order), |u| {
         #[cfg(test)]
-        let r = check_tests::encoder_fault(n, r);
-        let short = r.is_some() && short_image(s, &resolve, content.as_ref());
-        let r = if short { None } else { r };
-        // The new data checked against the stream's content here, in parallel and without decoding the
-        // stream again, so the self-check only has to find the same data in the output.
-        let proof = match (&r, content) {
-            (Some(r), Some(c)) => prove(n, s, &c, r),
-            _ => None,
-        };
-        if dbg {
-            let new = r.as_ref().map_or(s.data.len(), |x| x.1.len());
-            let how = settings[u]
-                .as_ref()
-                .map_or("kept, over the quick budget".to_string(), |o| format!("effort {}", o.effort));
-            eprintln!(
-                "stream {n}: {} -> {new} bytes, {how}, {:?}{}",
-                s.data.len(),
-                clock::since(t),
-                if short { " (short image, kept)" } else { "" }
-            );
-        }
-        (r, proof)
+        let _running = running.enter();
+        run_job(&jobs[u], &workers, opt, dbg, &memo_hits)
     });
-    let (mut encoded, proofs): (Vec<_>, Vec<_>) = jobs.into_iter().unzip();
+    #[cfg(test)]
+    job_tests::MOST_JOBS.set(running.most());
+    let sharing = jobs.iter().filter(|j| j.shares).count();
+    drop(jobs);
+    let (mut encoded, proofs): (Vec<_>, Vec<_>) = done.into_iter().unzip();
     if opt.deadline.passed() {
         return Err(TIMED_OUT.into());
     }
@@ -1162,10 +1291,10 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         eprintln!("{} streams identical to an earlier one, encoded once", streams.len() - unique.len());
     }
     if dbg {
-        let sharing = shares.iter().filter(|&&x| x).count();
         if sharing > 0 {
             eprintln!("{sharing} streams encoded have the encoder input of another (under another dictionary)");
         }
+        eprintln!("per-stream memo hits: {}", memo_hits.load(Ordering::Relaxed));
     }
     let slot: HashMap<usize, usize> = unique.iter().enumerate().map(|(u, &i)| (i, u)).collect();
     // Each result is moved out at the last stream that uses it (identical streams share one), so it is not
@@ -2580,6 +2709,328 @@ pub(super) mod check_tests {
                 }
             }
             assert_eq!(found, stats.streams_reencoded, "{name}");
+        }
+    }
+}
+
+/// Stream jobs: what each is given, and how many run at once.
+#[cfg(test)]
+pub(super) mod job_tests {
+    use super::*;
+    use crate::fax::ccitt;
+    use std::cell::Cell;
+    use std::sync::atomic::Ordering::SeqCst;
+
+    /// Stream jobs running at once in one rewrite, counted around `run_job`.
+    #[derive(Default)]
+    pub(super) struct Running {
+        now: AtomicUsize,
+        most: AtomicUsize,
+    }
+
+    /// One job running (until dropped).
+    pub(super) struct In<'r>(&'r Running);
+
+    impl Running {
+        pub(super) fn enter(&self) -> In<'_> {
+            let now = self.now.fetch_add(1, SeqCst) + 1;
+            self.most.fetch_max(now, SeqCst);
+            In(self)
+        }
+        pub(super) fn most(&self) -> usize {
+            self.most.load(SeqCst)
+        }
+    }
+
+    impl Drop for In<'_> {
+        fn drop(&mut self) {
+            self.0.now.fetch_sub(1, SeqCst);
+        }
+    }
+
+    thread_local! {
+        /// The most stream jobs that ran at once in the last rewrite on this thread.
+        pub(super) static MOST_JOBS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn parse(text: &str) -> Obj {
+        super::super::parse::Lexer::new(text.as_bytes(), 0).parse_obj().unwrap()
+    }
+
+    fn dict(text: &str) -> Dict {
+        match parse(text) {
+            Obj::Dict(d) => d,
+            x => panic!("{text}: {x:?}"),
+        }
+    }
+
+    /// An image of `w` x `h` samples with `colors` components, its dictionary entries in `entries`.
+    fn image(entries: &str, w: usize, h: usize, colors: usize) -> Obj {
+        let px: Vec<u8> = (0..w * h * colors).map(|i| (i % 97 + i / (w * colors) * 3) as u8).collect();
+        let d = dict(&format!("<< /Subtype /Image /BitsPerComponent 8 /Filter /FlateDecode {entries} >>"));
+        Obj::Stream(Box::new(Stream { dict: d, data: flate::deflate_zlib(&px, &flate::Options::quick()) }))
+    }
+
+    /// A Group 4 fax image of `w` x `h`: rows of letter-sized blobs on white, like a scan.
+    fn fax(entries: &str, w: usize, h: usize) -> Obj {
+        let mut r = 0x1234_5678u64;
+        let mut next = move |k: u64| {
+            r ^= r << 13;
+            r ^= r >> 7;
+            r ^= r << 17;
+            (r % k) as usize
+        };
+        let mut px = vec![vec![0u8; w]; h];
+        for y in (10..h.saturating_sub(14)).step_by(18) {
+            for x in (8..w.saturating_sub(9)).step_by(9) {
+                let (bw, bh) = (3 + next(5), 6 + next(6));
+                for row in px.iter_mut().skip(y).take(bh) {
+                    for p in row.iter_mut().skip(x).take(bw) {
+                        *p = (next(9) != 0) as u8;
+                    }
+                }
+            }
+        }
+        let mut img = ccitt::Image::new(w);
+        let mut ch = Vec::new();
+        for row in &px {
+            ccitt::row_changes(row, &mut ch);
+            img.push_row(&ch);
+        }
+        let gaps = vec![ccitt::Gap { fill: 0, eol: false, tag: false }; h];
+        let end = vec![ccitt::Gap { fill: 0, eol: true, tag: false }; 2];
+        let layout = ccitt::Layout {
+            scheme: ccitt::Scheme::G4,
+            rule: ccitt::Rule::Standard,
+            gaps,
+            end,
+            pad: 0,
+            trailing: Vec::new(),
+        };
+        let d = dict(&format!(
+            "<< /Subtype /Image /BitsPerComponent 1 /ColorSpace /DeviceGray /Filter /CCITTFaxDecode \
+             /DecodeParms << /K -1 /Columns {w} >> {entries} >>"
+        ));
+        Obj::Stream(Box::new(Stream { dict: d, data: ccitt::encode(&img, &layout) }))
+    }
+
+    /// Object tables to look things up in: images that look up their Width, Height and colour space in every
+    /// way the encoders allow (references to names, arrays, ICC profiles, a non-stream profile, missing
+    /// objects, chains of references), and every PDF among the test files.
+    fn tables() -> Vec<BTreeMap<u32, (u16, Obj)>> {
+        let mut made: Vec<(u32, Obj)> = vec![
+            (1, Obj::Int(32)),
+            (2, Obj::Int(24)),
+            (3, parse("/DeviceRGB")),
+            (4, parse("[/ICCBased 5 0 R]")),
+            (5, Obj::Stream(Box::new(Stream { dict: dict("<< /N 3 >>"), data: vec![7; 300] }))),
+            (6, parse("<< /N 3 >>")),
+            (7, Obj::Ref(3, 0)),
+            (8, Obj::Ref(2, 0)),
+            (9, parse("[/ICCBased 6 0 R]")),
+            (10, Obj::Int(200)),
+            (11, Obj::Int(120)),
+            (12, Obj::Ref(11, 0)),
+            (13, parse("[/Indexed 3 0 R 255 <00>]")),
+            (14, parse("[/ICCBased 7 0 R]")),
+        ];
+        for (k, (entries, colors)) in [
+            ("/Width 32 /Height 2 0 R /ColorSpace 3 0 R", 3),
+            ("/Width 32 /Height 24 /ColorSpace 4 0 R", 3),
+            ("/Width 32 /Height 24 /ColorSpace [/ICCBased 5 0 R]", 3),
+            ("/Width 32 /Height 24 /ColorSpace [/ICCBased 6 0 R]", 3),
+            ("/Width 32 /Height 98 0 R /ColorSpace 99 0 R", 3),
+            ("/Width 32 /Height 24 /ColorSpace 7 0 R", 3),
+            ("/Width 32 /Height 8 0 R /ColorSpace /DeviceGray", 1),
+            ("/Width 1 0 R /Height 24 /ColorSpace /DeviceGray", 1),
+            ("/Width 32 /Height 24 /ColorSpace [/ICCBased 99 0 R]", 3),
+            ("/Width 32 /Height 24 /ColorSpace 13 0 R", 1),
+            ("/Width 32 /Height 24 /ColorSpace 14 0 R", 3),
+            ("/Width 32 /Height 24 /ColorSpace [/Indexed 3 0 R 255 <00>]", 1),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            made.push((20 + k as u32, image(entries, 32, 24, colors)));
+        }
+        made.push((40, fax("/Width 10 0 R /Height 11 0 R", 200, 120)));
+        made.push((41, fax("/Width 200 /Height 12 0 R", 200, 120)));
+        made.push((42, fax("/Width 10 0 R /Height 97 0 R", 200, 120)));
+        made.push((43, fax("/Width 200 /Height 120", 200, 120)));
+        let mut out = vec![made.into_iter().map(|(n, o)| (n, (0, o))).collect()];
+        for dir in ["tests/data", "tests/data/enc"] {
+            let mut files: Vec<_> = std::fs::read_dir(format!("{}/{dir}", env!("CARGO_MANIFEST_DIR")))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| p.extension().is_some_and(|x| x == "pdf"))
+                .collect();
+            files.sort();
+            for f in files {
+                let data = std::fs::read(&f).unwrap();
+                if let Some(objs) = xref::open(&data).ok().and_then(|doc| load_reachable(&doc).ok()) {
+                    out.push(objs);
+                }
+            }
+        }
+        assert!(out.len() > 15, "{} tables", out.len());
+        out
+    }
+
+    fn table_resolve(objs: &BTreeMap<u32, (u16, Obj)>, o: &Obj) -> Option<Obj> {
+        match o {
+            Obj::Ref(n, _) => objs.get(n).map(|x| x.1.clone()),
+            x => Some(x.clone()),
+        }
+    }
+
+    #[test]
+    fn job_refs_cover_every_lookup() {
+        let (mut streams, mut looked_up) = (0, 0);
+        for objs in tables() {
+            for (&n, (_, o)) in &objs {
+                let Obj::Stream(s) = o else { continue };
+                let refs: BTreeSet<u32> = job_refs(&s.dict, &objs).iter().map(|r| r.0).collect();
+                let asked = RefCell::new(BTreeSet::new());
+                let recording = |o: &Obj| {
+                    if let Obj::Ref(r, _) = o {
+                        asked.borrow_mut().insert(*r);
+                    }
+                    table_resolve(&objs, o)
+                };
+                // The quick settings (at 15 as the bridge gives them), and the fast encoder at 0 and 15.
+                let quick = |e: u8| Options { flate: flate::Options::quick(), ..Options::effort(e) };
+                for opt in [quick(0), quick(15), quick(50), quick(100), Options::effort(0), Options::effort(15)] {
+                    let mut content = None;
+                    reencode(s, &opt, &recording, &mut content);
+                    short_image(s, &recording, content.as_ref());
+                    short_image(s, &recording, None);
+                }
+                let asked = asked.into_inner();
+                let left: Vec<&u32> = asked.iter().filter(|r| objs.contains_key(*r) && !refs.contains(*r)).collect();
+                assert!(left.is_empty(), "stream {n} looked up {left:?}, which job_refs leaves out");
+                streams += 1;
+                looked_up += asked.len();
+            }
+        }
+        assert!(streams > 40 && looked_up >= 16, "{streams} streams, {looked_up} lookups");
+    }
+
+    #[test]
+    fn job_resolve_equals_the_table() {
+        let (mut compared, mut faxes) = (0, 0);
+        for objs in tables() {
+            for (&n, (_, o)) in &objs {
+                let Obj::Stream(s) = o else { continue };
+                let job = Job { n, s, settings: None, xmp: false, shares: false, refs: job_refs(&s.dict, &objs) };
+                let mine = |o: &Obj| job.resolve(o);
+                let table = |o: &Obj| table_resolve(&objs, o);
+                assert_eq!(images::geometry(&s.dict, &mine), images::geometry(&s.dict, &table), "stream {n}");
+                if let Some(cs) = s.dict.get(b"ColorSpace") {
+                    assert_eq!(images::components(cs, &mine), images::components(cs, &table), "stream {n}");
+                }
+                let why = crate::fax::pdf::explain(s, &table);
+                assert_eq!(crate::fax::pdf::explain(s, &mine), why, "stream {n}");
+                faxes += why.starts_with("JBIG2") as usize;
+                for opt in [Options { flate: flate::Options::quick(), ..Options::effort(0) }, Options::effort(0)] {
+                    let (a, b) = (reencode(s, &opt, &mine, &mut None), reencode(s, &opt, &table, &mut None));
+                    assert!(a == b, "stream {n}, effort {}", opt.flate.fast);
+                }
+                compared += 1;
+            }
+        }
+        assert!(compared > 40 && faxes >= 2, "{compared} streams, {faxes} fax images made JBIG2");
+    }
+
+    #[test]
+    fn the_memo_hit_count_takes_equal_inputs_only() {
+        // Two 16-byte inputs with the same hash64 (see identical_streams_match_the_pairwise_reference).
+        let m = 0x9E37_79B9_7F4A_7C15u64;
+        let step = |h: u64, v: u64| (h ^ v).wrapping_mul(m).rotate_left(29);
+        let h0 = 16u64.wrapping_mul(m) ^ 0x2545_F491_4F6C_DD1D;
+        let x = [1u64.to_le_bytes(), 7u64.to_le_bytes()].concat();
+        let y = [2u64.to_le_bytes(), (7 ^ step(h0, 1) ^ step(h0, 2)).to_le_bytes()].concat();
+        assert!(x != y && par::hash64(&x) == par::hash64(&y));
+        let opt = flate::Options {
+            shared: Some(flate::deflate::Shared::with_pool(par::Pool::new(1), true)),
+            ..flate::Options::quick()
+        };
+        let other = b"other".to_vec();
+        let memo_hits = || opt.shared.as_ref().map_or(0, |s| s.stats().hits);
+        MEMO_SEEN.set(Some(MemoSeen::default()));
+        // The memory answers x twice, and never y: it keeps x's output under the hash64 and length they share.
+        for (k, data) in [&x, &x, &y, &y, &other, &x].into_iter().enumerate() {
+            assert_eq!(job_encode(data, &opt), flate::deflate_zlib(data, &flate::Options::quick()), "input {k}");
+        }
+        assert_eq!(MEMO_SEEN.take().map(|m| m.hits), Some(2));
+        assert_eq!(memo_hits(), 2);
+        // An input longer than REMEMBER_UP_TO is not kept: encoded again, it is no hit, for the count as for
+        // the memory.
+        let big: Vec<u8> = (0..flate::deflate::REMEMBER_UP_TO + 1).map(|i| (i % 251) as u8).collect();
+        MEMO_SEEN.set(Some(MemoSeen::default()));
+        job_encode(&big, &opt);
+        job_encode(&big, &opt);
+        assert_eq!(MEMO_SEEN.take().map(|m| m.hits), Some(0));
+        assert_eq!(memo_hits(), 2);
+        // Without PDFE_DEBUG nothing is counted.
+        job_encode(&x, &opt);
+        assert!(MEMO_SEEN.take().is_none());
+    }
+
+    /// A page drawing `n` different small images (each its own job), stored with the fast encoder's quickest
+    /// level, so that effort 0 re-encodes every one.
+    fn images_pdf(n: usize) -> Vec<u8> {
+        let names: String = (0..n).map(|k| format!("/I{k} {} 0 R ", k + 4)).collect();
+        let mut objs: Vec<Vec<u8>> = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XObject << {names}>> >> >>")
+                .into_bytes(),
+        ];
+        for k in 0..n {
+            let px: Vec<u8> = (0..64 * 48).map(|i| ((i % 64) * (k % 5 + 1) + (i / 64) * (k / 5 + 1)) as u8).collect();
+            let data = flate::deflate_zlib(&px, &flate::Options { fast: 1, ..flate::Options::quick() });
+            let mut o = format!(
+                "<< /Type /XObject /Subtype /Image /Width 64 /Height 48 /ColorSpace /DeviceGray /BitsPerComponent 8 \
+                 /Filter /FlateDecode /Length {} >>\nstream\n",
+                data.len()
+            )
+            .into_bytes();
+            o.extend_from_slice(&data);
+            o.extend_from_slice(b"\nendstream");
+            objs.push(o);
+        }
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, o) in objs.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+            pdf.extend_from_slice(o);
+            pdf.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+        for off in offsets {
+            pdf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes(),
+        );
+        pdf
+    }
+
+    #[test]
+    fn jobs_in_flight_never_exceed_threads() {
+        let pdf = images_pdf(40);
+        let one = optimize(&pdf, &Options { threads: 1, ..Options::effort(0) });
+        let Outcome::Smaller(stats) = &one.outcome else { panic!("{:?}", one.outcome) };
+        assert!(stats.streams_reencoded == 40 && MOST_JOBS.get() == 1);
+        for threads in [2, 3, 4] {
+            for seed in 1..=4 {
+                let r = par::jitter::with(seed, || optimize(&pdf, &Options { threads, ..Options::effort(0) }));
+                let most = MOST_JOBS.get();
+                assert!(r.data == one.data, "{threads} threads, seed {seed}");
+                assert!((1..=threads).contains(&most), "{threads} threads, seed {seed}: {most} jobs at once");
+            }
         }
     }
 }
