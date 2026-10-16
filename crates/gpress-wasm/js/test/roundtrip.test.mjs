@@ -1,17 +1,36 @@
-// Runs against dist/gpress.wasm and dist/gpress.js after `npm run build`.
+// Runs against dist/gpress.js and the module test/module.mjs picks (dist/gpress.wasm, or
+// dist/gpress-web.wasm with GPRESS_WASM) after `npm run build`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { deflateSync as zlibSync } from "node:zlib";
-import { Gpress, GpressError } from "../dist/gpress.js";
+import { Gpress, GpressError, GpressFeatureError } from "../dist/gpress.js";
+import { modulePath } from "./module.mjs";
 
-const g = await Gpress.load(new URL("../dist/gpress.wasm", import.meta.url).pathname);
+const g = await Gpress.load(modulePath);
+// The web module has no archive: there every archive test checks that compress and expand say so instead.
+const archive = g.features.includes("archive");
+
+function archiveTest(name, body) {
+  test(archive ? name : `${name}: without the archive, compress and expand say they need it`, () => {
+    if (archive) return body();
+    for (const call of [() => g.compress(new Uint8Array(10)), () => g.expand(new Uint8Array(10))]) {
+      assert.throws(call, (e) => e instanceof GpressFeatureError && e instanceof GpressError &&
+        e.code === GpressError.NEEDS_FEATURE && e.feature === "archive" && e.message.includes("`archive`"));
+    }
+  });
+}
 
 test("version is set", () => {
   assert.match(g.version, /^\d+\.\d+\.\d+$/);
-  assert.equal(g.archiveVersion, 8);
+  assert.equal(g.archiveVersion, archive ? 8 : 0);
 });
 
-test("compress and expand restore any bytes exactly", () => {
+test("the module lists its parts: every one, or the web set without the archive", () => {
+  const web = modulePath.endsWith("gpress-web.wasm");
+  assert.deepEqual(g.features, web ? ["jpeg", "fax", "encryption"] : ["archive", "jpeg", "fax", "encryption"]);
+});
+
+archiveTest("compress and expand restore any bytes exactly", () => {
   for (const input of [new Uint8Array(0), new TextEncoder().encode("%PDF-1.7\n%%EOF\n"), Uint8Array.from({ length: 5000 }, (_, i) => (i * 7919) % 251)]) {
     const c = g.compress(input);
     assert.ok(Gpress.isArchive(c.data));
@@ -19,7 +38,7 @@ test("compress and expand restore any bytes exactly", () => {
   }
 });
 
-test("a damaged archive is refused, never a wrong file", () => {
+archiveTest("a damaged archive is refused, never a wrong file", () => {
   assert.throws(() => g.expand(new TextEncoder().encode("not an archive")), (e) => e instanceof GpressError && e.code === GpressError.DAMAGED);
   // Every single flipped bit is either refused or changes nothing that is restored (some bits of the coded
   // body are padding): never a wrong file. A flip in the magic is always refused.
@@ -47,7 +66,7 @@ test("a damaged archive is refused, never a wrong file", () => {
   assert.throws(() => g.expand(other), (e) => e instanceof GpressError && e.code === GpressError.UNSUPPORTED_VERSION);
 });
 
-test("the decoded-bytes budget is the caller's on both sides", () => {
+archiveTest("the decoded-bytes budget is the caller's on both sides", () => {
   // 3 MiB of zeros in one zlib stream: within a 4 MiB budget the stream is decoded and modelled; with a 1 MiB
   // budget it is stored as it is (still restored exactly), so the archives differ; and an archive made with the
   // larger budget is refused under the smaller one before anything is decoded. (Which archive is smaller depends
@@ -66,7 +85,7 @@ test("the decoded-bytes budget is the caller's on both sides", () => {
   assert.throws(() => g.expand(wide.data, { maxDecodedMiB: 1 }), (e) => e instanceof GpressError && e.code === GpressError.DECODED_TOO_LARGE);
 });
 
-test("a /Length that wraps to an earlier endstream on 32 bits is not trusted", () => {
+archiveTest("a /Length that wraps to an earlier endstream on 32 bits is not trusted", () => {
   // In the 32-bit module start + length would wrap to the offset of the early "endstream" unless the sum
   // is checked; the file must pack and restore exactly, like on 64 bits.
   const enc = new TextEncoder();
@@ -83,7 +102,7 @@ test("a /Length that wraps to an earlier endstream on 32 bits is not trusted", (
   assert.deepEqual(g.expand(c.data), pdf);
 });
 
-test("an image row past 2^32 bits packs as on 64 bits", () => {
+archiveTest("an image row past 2^32 bits packs as on 64 bits", () => {
   // 32 DeviceN components of 16 bits, 8,388,609 pixels wide: width x components x bits is 2^32 + 512, which the
   // 32-bit module's row length once wrapped to 512, so it took 100 rows of 64 bytes and wrote an archive the
   // native library refuses. The stream is zlib's level 9 of 6,400 bytes (i * 7919 % 251); `native` is the
@@ -153,7 +172,7 @@ test("optimize returns untouched with a reason for non-PDF input", () => {
   assert.ok(r.reason && r.reason.length > 0);
 });
 
-test("the limits are the caller's", () => {
+archiveTest("the limits are the caller's", () => {
   const big = new Uint8Array(3 << 20);
   assert.throws(() => g.compress(big, { maxInputMiB: 2 }), (e) => e instanceof GpressError && e.code === GpressError.TOO_LARGE);
   const c = g.compress(big);
