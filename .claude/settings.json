@@ -12,7 +12,6 @@
     "pr-review@gpress-mods": true
   },
   "attribution": {
-    "commit": "",
-    "sessionUrl": false
+    "commit": ""
   }
 }
