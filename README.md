@@ -52,9 +52,10 @@ assert_eq!(original, pdf_bytes);
 
 Errors are a plain `Error` enum with a stable numeric code (1 input too large, 2 damaged archive,
 3 unsupported archive version, 4 internal, 5 invalid options, 6 time budget, 7 declared length over the
-limit, 8 needs the existing library, 9 declared decoded total over the limit) and a message without
-internal paths. The library never panics across
-its boundary: every call runs inside a panic guard, and a bug comes back as `Error::Internal`.
+limit, 8 needs the existing library, 9 declared decoded total over the limit, 10 needs a part this build
+leaves out; see "Building only what a product needs") and a message without internal paths. The library
+never panics across its boundary: every call runs inside a panic guard, and a bug comes back as
+`Error::Internal`.
 `Optimized.outcome` says what happened (`Smaller` with a `Report`: objects, streams re-encoded and kept,
 object streams, JPEGs given new tables, fax images written as JBIG2, how the file is encrypted; or
 `Untouched` with the reason), and `Compressed` carries the archive's statistics (streams rebuilt, through
@@ -90,19 +91,20 @@ is a null pointer with length 0. The options struct has the same fields as the R
 
 ```ts
 import { Gpress } from "gpress";
-const g = await Gpress.load(fetch("/gpress.wasm"));
+const g = await Gpress.load(fetch("/gpress.wasm"));                 // or gpress-web.wasm: no archive, smaller
 const smaller = g.optimize(bytes, { effort: 70, jbig2: false });   // { data, outcome, reason? }
 const archive = g.compress(bytes);
 const original = g.expand(archive.data, { maxLenMiB: 512 });       // throws GpressError on a damaged archive
 ```
 
-The module gives the same bytes as the native library, is single-threaded and has no clock (so no time
-budget: run it in a Web Worker to keep a page responsive and to end it when it has taken too long). It is
-built with `panic = "abort"` (the only choice on `wasm32-unknown-unknown`), so the panic guard that turns
-a bug into `Error::Internal` natively catches nothing there: a bug, like a failed memory growth, traps the
-module, and the wrapper turns the trap into a `GpressError` with code 4 and marks the instance dead (load
-a fresh one). Sizes are 32-bit inside it: the wrapper refuses inputs of 2 GiB and more. Pages that load it
-need `'wasm-unsafe-eval'` in their Content Security Policy's `script-src`.
+The module gives the same bytes as the native library (the web module too, for `optimize`; see "Building
+only what a product needs"), is single-threaded and has no clock (so no time budget: run it in a Web Worker
+to keep a page responsive and to end it when it has taken too long). It is built with `panic = "abort"`
+(the only choice on `wasm32-unknown-unknown`), so the panic guard that turns a bug into `Error::Internal`
+natively catches nothing there: a bug, like a failed memory growth, traps the module, and the wrapper turns
+the trap into a `GpressError` with code 4 and marks the instance dead (load a fresh one). Sizes are 32-bit
+inside it: the wrapper refuses inputs of 2 GiB and more. Pages that load it need `'wasm-unsafe-eval'` in
+their Content Security Policy's `script-src`.
 
 Compiling is most of the cost of a first load. `Gpress.compile(source)` returns the compiled module, and
 `Gpress.load(module)` makes an instance from it without compiling again: compile once, then make one
@@ -172,6 +174,42 @@ bytes per byte and 4 MiB, 16 cross-reference rows per byte of the file plus 6553
 exact rounds, chain length, segment size, splitting, alternatives, multi-start limit, nice length and
 polishing) are public too, for measuring and for callers that want a knob the library's `Options` doesn't
 carry.
+
+## Building only what a product needs
+
+The parts of the engine are Cargo features, all on by default. A product that needs fewer builds with
+`--no-default-features --features ...`, and the code of a part it leaves out is not compiled. The C library
+and the WebAssembly crate have the same features and pass them on to the engine.
+
+| Feature | The part | Without it |
+| --- | --- | --- |
+| `archive` | The gpress archive: `compress` and `expand`, the context-mixing model, the exact re-creation of zlib streams. | `compress` and `expand` return `Error::NeedsFeature(Feature::Archive)`. `optimize` is not touched. |
+| `jpeg` | Normal PDF: optimal Huffman tables for JPEG images. | The step is skipped: the output is the one `jpeg_tables` off gives. |
+| `fax` | The CCITT fax and JBIG2 codecs: fax images become JBIG2 in a normal PDF and are stored as pixels in the archive. | The JBIG2 step is skipped (the output of `jbig2` off). The archive stores fax streams as they are, and `expand` of an archive with fax parts returns `NeedsFeature(Fax)`. |
+| `encryption` | Encrypted PDFs the empty password opens, with RustCrypto's AES, MD5 and SHA-2 (the only outside code in a default build). | An encrypted PDF is left untouched, with a reason that names the feature. The archive stores its streams as they are, and `expand` of an archive with decrypted streams returns `NeedsFeature(Encryption)`. |
+| `existing` | Lepton for JPEG streams in the archive. Off by default; it needs `archive`. | See "Existing library" below (`Error::NeedsExistingLibrary`). |
+
+`web` is the web compressor's set: `jpeg`, `fax` and `encryption`, without the archive. Its `optimize` gives
+the same bytes as a build with every part.
+
+No call panics for a part a build leaves out. `Error::NeedsFeature` has code 10 (`GPRESS_ERR_NEEDS_FEATURE`
+in C) and a message that names the feature, and `gpress::Feature::enabled` says what a build has. Without
+`encryption` an encrypted PDF is left untouched instead of refused, because that is how `optimize` already
+answers for a file it can't rewrite (a password it doesn't have, a handler it doesn't know): the caller gets
+the input back with the reason, and a batch goes on. The command-line tool prints the same message and exits
+with 10 (`pack` and `unpack` without `archive`, or a measuring command of a part left out).
+
+The npm package has two modules: `dist/gpress.wasm` with every part (229,289 bytes of gzip), and
+`dist/gpress-web.wasm`, the `web` set (167,352 bytes of gzip, 27% less). Both have the same wrapper; in the web
+module `compress` and `expand` throw a `GpressFeatureError` whose `feature` is `"archive"`, and `g.features`
+lists the parts a module has.
+
+```
+cargo build --release --no-default-features --features web     # the tool without the archive
+cd crates/gpress-wasm/js && node build-wasm.mjs --no-default-features --features web --out dist/gpress-web.wasm
+```
+
+What each part costs in bytes, and what each saves on the sample: bench/RESULTS.md, "What each feature costs".
 
 ## What is ours
 
@@ -247,9 +285,9 @@ or LGPL. `deny.toml` holds the rule and `cargo deny check` (installed with `carg
 --locked`) checks it for every feature and target, in CI and in `bench/security.py supply`, together with the
 RustSec advisories, version bans and the source of every crate; `cargo deny` skips crates marked `publish =
 false`, so `bench/check_dep_sources.py` (CI and `supply` too) refuses any dependency that is not from
-crates.io. A default build depends on `aes`, `md-5` and `sha2` (RustCrypto, MIT or Apache-2.0) and nothing
-else; `--features existing` adds `lepton_jpeg` and what it needs (MIT, Apache-2.0, Zlib, BSD-2-Clause,
-Unicode-3.0).
+crates.io. A default build depends on `aes`, `md-5` and `sha2` (RustCrypto, MIT or Apache-2.0, for the
+`encryption` feature) and nothing else; `--features existing` adds `lepton_jpeg` and what it needs (MIT,
+Apache-2.0, Zlib, BSD-2-Clause, Unicode-3.0).
 
 ## Build and test
 
@@ -258,28 +296,33 @@ cargo build --release --workspace                 # the library, the C library a
 cargo build --release --features existing         # also lepton_jpeg (Apache-2.0)
 cargo test --release --workspace
 cargo test --release --workspace --features existing
+cargo test --release --workspace --no-default-features --features web   # or any other set of features
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 cargo deny check                                  # and python3 -I bench/check_dep_sources.py
 cargo build --profile wasm -p gpress-wasm --target wasm32-unknown-unknown   # needs: rustup target add wasm32-unknown-unknown
 cd crates/gpress-wasm/js && npm ci && npm run build && npm test        # the npm package into js/dist/ (with wasm-opt if on PATH)
+npm run test:web                                  # (in crates/gpress-wasm/js) the same tests on the web module
 python3 -I bench/sizes.py check                   # the web module within 5% of its recorded size (bench/sizes.json); needs wasm-opt
 cd fuzz && cargo +nightly fuzz run expand -- -max_total_time=600      # needs cargo-fuzz; also inflate, pdf_optimize
 ```
 
 CI (`.github/workflows/ci.yml`) runs formatting, clippy with warnings as errors on both feature sets, both
-test suites, the C example against the shared library, the licence and advisory gate, the WebAssembly package
-with its tests and its size budget, and a short fuzzing run of the three decoders. `tests/api.rs` proves that
-every option changes what the engine does; `tests/interaction.rs` runs every feature on one encrypted file (a
-JPEG, a fax image, a Type 1 font and a zlib stream) in both outputs; `tests/pack_format.rs` keeps an archive
-made by the first build of the format version (`tests/data/format-v8.*`), which must still restore and pack to
-the same bytes.
+test suites, clippy and the tests again for the builds that leave parts out (none of them, the web set, and
+every part but one), the C example against the shared library, the licence and advisory gate, the
+WebAssembly package with the tests on both modules and the web module's size budget, and a short fuzzing run
+of the three decoders. `tests/features.rs` checks each part's absence in the builds without it;
+`tests/api.rs` proves that every option changes what the engine does; `tests/interaction.rs` runs every
+feature on one encrypted file (a JPEG, a fax image, a Type 1 font and a zlib stream) in both outputs;
+`tests/pack_format.rs` keeps an archive made by the first build of the format version
+(`tests/data/format-v8.*`), which must still restore and pack to the same bytes.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
 | `src/api.rs`, `src/clock.rs` | The public API and the deadline behind `time_budget`. |
+| `src/feature.rs`, `src/off/` | The Cargo features, and what stands in for a part a build leaves out. |
 | `src/flate/` | Our Flate decoder and encoder, and the bit-exact zlib re-creation. |
 | `src/pdf/` | PDF objects, strict parser, filters, images, encryption, the normal-PDF writer and its safety gate. |
 | `src/jpeg/` | JPEG parsing and the optimal Huffman tables. |
