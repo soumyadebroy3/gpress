@@ -25,20 +25,25 @@ Pull request descriptions keep their attribution block.
 
 On 2026-10-16 every branch was rewritten to take Claude's name and the Claude trailers off every commit. File contents
 did not change, but every commit id did: the first commit `2ef1abe` became `3eeb57c`, and main's `c1f07e1` became
-`d093ab4`. `git for-each-ref --contains 2ef1abe refs/heads` lists the local branches that still have old ids. After
-`git fetch origin`, move each of them:
+`d093ab4`. `git for-each-ref --contains 2ef1abe refs/heads` lists the local branches that still have old ids; in a
+clone made after the rewrite 2ef1abe does not exist, so the command fails and there is nothing to move. Move them by
+what they hold, whoever made it:
 
-- With no commits or changes of your own: `git branch -f <branch> origin/<branch>`, or `git reset --hard
-  origin/<branch>` for the branch you are on. A branch that is not on GitHub goes to `origin/main`.
-- With commits or uncommitted changes of your own: check the branch out and move your work onto the new tip, taking
-  Claude's name and the trailers off as it goes. Right after the fetch, `origin/<branch>@{1}` is the branch's old tip
-  on GitHub; for a branch that is not on GitHub, use `origin/main` and `origin/main@{1}` instead.
+1. `git fetch origin`. Below, `origin/<branch>` is the GitHub branch that `<branch>` tracks, usually of the same name,
+   or `origin/main` for a branch that is not on GitHub; right after the fetch, `origin/<branch>@{1}` is its old tip.
+2. If `git status --porcelain` prints anything, `git stash push -u` puts it aside; note the branch you are on.
+3. For each listed branch: if `git log --oneline origin/<branch>@{1}..<branch>` prints nothing, `git branch -f <branch>
+   origin/<branch>`, or `git reset --hard origin/<branch>` for the branch checked out. Otherwise check the branch out
+   and move its commits onto the new tip, taking Claude's name and the trailers off as they go:
 
-  ```sh
-  STRIP='git log -1 --format=%B | grep -viE "^(co-authored-by: *claude|claude-session:)" | git commit -q --amend --reset-author -F -'
-  git rebase --autostash --exec "$STRIP" --onto origin/<branch> origin/<branch>@{1}
-  git log origin/<branch>..HEAD --format='%an <%ae> | %cn <%ce>%n%B'
-  ```
+   ```sh
+   STRIP='git log -1 --format=%B | grep -viE "^(co-authored-by: *claude|claude-session:)" | git commit -q --amend --allow-empty --reset-author -F -'
+   git rebase --exec "$STRIP" --onto origin/<branch> origin/<branch>@{1}
+   git log origin/<branch>..HEAD --format='%an <%ae> | %cn <%ce>%n%B'
+   ```
+
+   If the rebase stops, `git rebase --abort` puts the branch back as it was; ask the owner before going further.
+4. If you stashed in step 2, check that branch out again and `git stash pop`.
 
 Before every push, `git merge-base --is-ancestor 2ef1abe HEAD` must fail. Never push a commit whose history has the old
 ids, and never force-push a branch to get rid of them.
