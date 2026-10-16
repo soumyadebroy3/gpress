@@ -365,9 +365,9 @@ NEW has not measured every file of BASE (an unfinished run compares only the fil
 ## Lightweight
 
 The download and the start-up are part of the time a person waits (`docs/tasks/lightweight.md`). Measured on
-a 4-core cloud machine in October 2026 with binaryen's wasm-opt 108 and Node 22.22: the sizes with Rust 1.99.1,
-the compiler CI uses, and the choice of the module's build and its start-up with Rust 1.97.0, on the code of
-066b65e and 4a60e08.
+a 4-core cloud machine in October 2026 with binaryen's wasm-opt 108 and Node 22.22: the sizes and what each
+feature costs with Rust 1.99.1, the compiler CI uses, and the choice of the module's build and its start-up
+with Rust 1.97.0, on the code of 066b65e and 4a60e08.
 
 ### Sizes
 
