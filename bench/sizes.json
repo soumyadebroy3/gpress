@@ -21,8 +21,8 @@
         "gzip": 2294657
       },
       "wasm": {
-        "raw": 730610,
-        "gzip": 269742
+        "raw": 927172,
+        "gzip": 339417
       },
       "wasm_opt": "wasm-opt version 108",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
@@ -59,8 +59,8 @@
         "gzip": 2565782
       },
       "wasm": {
-        "raw": 1061475,
-        "gzip": 376076
+        "raw": 1340446,
+        "gzip": 475102
       },
       "wasm_opt": "wasm-opt version 108",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
