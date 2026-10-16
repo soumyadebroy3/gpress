@@ -4,7 +4,8 @@ bound. Pass or fail, with every failing input saved so it can be replayed. Part 
 (benchmark.py time / space are parts 1 and 2; `benchmark.py security ...` runs this file).
 
   security.py archives  [RUN] [options]   20 packs, damaged every way; unpack must error or restore, never a wrong file
-  security.py pdfs      [RUN] [options]   hostile PDFs through optimize and pack: untouched, smaller or a clean error, bounded
+  security.py pdfs      [RUN] [options]   hostile PDFs through optimize and pack: untouched, smaller or a clean error, bounded;
+                                          then again at the engine's default thread count
   security.py fuzz      [RUN] [options]   mutation fuzzing of optimize, pack and unpack (--fuzz-seconds per entry point)
   security.py supply    [RUN] [options]   cargo audit, the licence of every dependency, unsafe blocks and their reasons
   security.py selfcheck [RUN] [options]   plant a wrong file, a crash, a hang, a memory blow-up, a bad licence, a bare unsafe
@@ -26,7 +27,10 @@ How a run is measured: each command is its own process, started by bench/measure
 the peak resident set it reports is the command's own; without a C compiler the harness forks from Python
 and says so in meta.json) under `prlimit` for the address-space and CPU-time limits. Time bounds apply to
 the child's CPU time (user + system), which does not depend on what else the machine is doing; a run past
-the hang limit in wall time is killed and counted as a hang. The engine runs single-threaded.
+the hang limit in wall time is killed and counted as a hang. The engine runs single-threaded, and the hostile
+PDFs run a second time at the engine's default thread count (`--threads 0`), since each thread can hold a
+stream of its own: that pass allows each thread beyond the first `mem_per_thread_mib` more memory and
+`as_per_thread_mib` more address space, and its outputs must be the same bytes as the first pass's.
 
 The bounds (also in the report): a damaged archive is refused in under 5 s with a peak under 512 MiB; a
 hostile PDF returns or errors in under 30 s plus 5 s per MiB of input, with a peak under 512 MiB or 16 bytes
@@ -52,6 +56,10 @@ DEFAULTS = {
     'sets': os.path.join(HERE, 'sets'),
     'effort': 0,  # the quick settings: legitimate work stays short, so a long run is the input's doing
     'threads': 1,
+    # The hostile PDFs again at the engine's default thread count (--threads 0): what one thread may hold,
+    # every thread may. The engine's default is every core, at most this many (par::DEFAULT_MAX).
+    'pdf_default_threads': True,
+    'engine_default_threads_max': 8,
     # The engine's decoded-bytes budget (Options::max_decoded) for every pack and unpack: what a service that
     # takes files from anyone sets to what it can afford. The archive bounds below hold for this setting; an
     # archive declaring more is refused before anything is decoded, and pack stores streams past it as they are.
@@ -69,6 +77,10 @@ DEFAULTS = {
         'time': 30.0, 'time_per_mib': 5.0, 'mem_mib': 512, 'mem_per_byte': 16,
         'nesting': 100_000, 'bomb_mib': 1024, 'nested_bomb_mib': 256, 'image_side': 100_000,
         'multi_bomb_streams': 8, 'multi_bomb_mib': 60,
+        'a85_streams': 4, 'a85_mib': 60,
+        # The pass at the default thread count: per thread beyond the first, this much more resident memory
+        # (about one stream of max_stream with its encodings) and address space (that, plus an allocator arena).
+        'mem_per_thread_mib': 128, 'as_per_thread_mib': 256,
         'objects': 1_000_000, 'runlength_mib': 2,
     },
     'fuzz': {
@@ -99,6 +111,12 @@ def deep_update(base, over):
 
 def say(*a):
     print(*a, flush=True)
+
+
+def cores():
+    """The cores this process may run on (its CPU affinity), which the engine counts for --threads 0 (a cgroup
+    CPU quota can make the engine count fewer)."""
+    return len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else os.cpu_count()
 
 
 # ----------------------------------------------------------------------------------------------------
@@ -256,10 +274,12 @@ def classify(r, cfg, time_bound, mem_bound):
     return ('ok' if r['rc'] == 0 else 'refused'), False
 
 
-def pdf_bounds(cfg, nbytes):
-    """Time and memory a hostile PDF may take: a base plus a share per byte of input."""
+def pdf_bounds(cfg, nbytes, threads=1):
+    """Time and memory a hostile PDF may take: a base plus a share per byte of input, and for memory a share
+    per thread beyond the first."""
     p = cfg['pdf']
-    return p['time'] + p['time_per_mib'] * nbytes / MIB, max(p['mem_mib'] * MIB, p['mem_per_byte'] * nbytes)
+    mem = max(p['mem_mib'] * MIB, p['mem_per_byte'] * nbytes) + (threads - 1) * p['mem_per_thread_mib'] * MIB
+    return p['time'] + p['time_per_mib'] * nbytes / MIB, mem
 
 
 def hang_after(cfg, time_bound):
@@ -430,6 +450,20 @@ def zeros_deflated(nbytes):
     return bytes(out)
 
 
+def a85_zeros_deflated(nbytes):
+    """zlib stream of nbytes of ASCII85 "z" (each one four zero bytes) and the end marker, made in pieces."""
+    c = zlib.compressobj(9)
+    out = bytearray()
+    piece = b'z' * MIB
+    left = nbytes
+    while left > 0:
+        n = min(left, MIB)
+        out += c.compress(piece[:n])
+        left -= n
+    out += c.compress(b'~>') + c.flush()
+    return bytes(out)
+
+
 PAGES = b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"
 PAGE = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>"
 
@@ -478,6 +512,20 @@ def hostile_pdfs(cfg, dst):
     add('flate_bomb_multi.pdf', make_pdf(objs),
         f"{p['multi_bomb_streams']} Flate streams of {len(piece) // 1024} KiB each decoding to {p['multi_bomb_mib']} MiB, "
         f"{p['multi_bomb_streams'] * p['multi_bomb_mib']} MiB in all")
+    # ASCII85 turns each "z" into four zero bytes, so behind a Flate stage under the per-stream cap it can
+    # decode to four times that cap; several such streams, each a little different so none is merged with
+    # another, let every thread decode one at once. At one thread an ASCII85 stage that ignored the limit
+    # would hold about 300 MiB, under the bound: this file finds it in the pass at the default thread count,
+    # on 2 or more cores (tests/bounds.rs checks the limit itself on any machine).
+    k = max(1, p['a85_streams'])
+    a85 = [a85_zeros_deflated(p['a85_mib'] * MIB - i) for i in range(k)]
+    objs = {1: b"<< /Type /Catalog /Pages 2 0 R >>", 2: PAGES,
+            3: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents [" + b" ".join(f"{4 + i} 0 R".encode() for i in range(k)) + b"] >>"}
+    for i, s in enumerate(a85):
+        objs[4 + i] = stream_obj(s, filters=b'[/FlateDecode /ASCII85Decode]')
+    add('ascii85_bomb_multi.pdf', make_pdf(objs),
+        f"{k} [/FlateDecode /ASCII85Decode] streams of {len(a85[0]) // 1024} KiB each: {p['a85_mib']} MiB of ASCII85 \"z\" "
+        f"that would decode to {4 * p['a85_mib']} MiB each")
     inner = zeros_deflated(p['nested_bomb_mib'] * MIB)
     outer = zlib.compress(inner, 9)
     doc(stream_obj(outer, filters=b'[/FlateDecode /FlateDecode]'), 'flate_bomb_nested.pdf', f'two-stage Flate ({len(outer)} B) decoding to {p["nested_bomb_mib"]} MiB')
@@ -837,30 +885,54 @@ def pdf_verdict(cfg, tool, run, r, op, path, outp, tb, mb):
     return ('packed-exact', False) if same_bytes(back, open(path, 'rb').read()) else ('PACK-NOT-EXACT', True)
 
 
-def pdfs(cfg, run, tool=None, tag=''):
+def pdfs(cfg, run, tool=None, tag='', threads=1, same_as=None):
+    """The hostile PDFs through optimize and pack. `threads` is how many the engine will use (for the bounds);
+    `same_as` maps (file, op) to the sha256 another pass wrote, which this pass's outputs must match."""
     tool = tool or Tool(cfg['engine'], cfg)
     cases = hostile_pdfs(cfg, os.path.join(run.work, 'hostile'))
-    header = ['file', 'op', 'result', 'verdict', 'wall_s', 'cpu_s', 'maxrss_mib', 'bytes_in', 'bytes_out', 'time_bound_s', 'mem_bound_mib', 'saved', 'what']
+    header = ['file', 'op', 'result', 'verdict', 'wall_s', 'cpu_s', 'maxrss_mib', 'bytes_in', 'bytes_out', 'time_bound_s', 'mem_bound_mib', 'saved', 'what', 'sha256']
     rows = []
     nfail = 0
+    ceiling = (cfg['as_ceiling_mib'] + (threads - 1) * cfg['pdf']['as_per_thread_mib']) * MIB
     for name, path, what in cases:
         nbytes = os.path.getsize(path)
-        tb, mb = pdf_bounds(cfg, nbytes)
+        tb, mb = pdf_bounds(cfg, nbytes, threads)
         for op in ('optimize', 'pack'):
             outp = run.tmp('out.tmp')
-            r = spawn(tool.argv(op, path, outp), timeout=hang_after(cfg, tb), as_limit=cfg['as_ceiling_mib'] * MIB)
+            r = spawn(tool.argv(op, path, outp), timeout=hang_after(cfg, tb), as_limit=ceiling)
             verdict, fail = pdf_verdict(cfg, tool, run, r, op, path, outp, tb, mb)
+            sha = sha256_file(outp) if r['rc'] == 0 and os.path.exists(outp) else ''
+            other = (same_as or {}).get((name, op), '')
+            if not fail and sha and other and sha != other:
+                verdict, fail = 'THREADS-DIFFER', True
             saved = ''
             if fail:
                 nfail += 1
                 saved = run.save_failure(tag + 'pdfs', name, path, r)
             out_size = os.path.getsize(outp) if os.path.exists(outp) else ''
             rows.append([name, op, 'FAIL' if fail else 'PASS', verdict, f"{r['wall']:.2f}", f"{r['cpu']:.2f}", r['maxrss'] // MIB,
-                         nbytes, out_size, f"{tb:.0f}", mb // MIB, saved, what])
+                         nbytes, out_size, f"{tb:.0f}", mb // MIB, saved, what, sha])
             say(f"pdfs: {name} {op}: {verdict} ({r['cpu']:.1f} s CPU, {r['maxrss'] // MIB} MiB)")
     write_tsv(run.path(tag + 'pdfs.tsv'), header, rows)
     say(f"pdfs: {len(rows)} runs over {len(cases)} hostile files, {nfail} failures")
     return nfail
+
+
+def pdfs_default_threads(cfg, run):
+    """The hostile PDFs again at the engine's default thread count (--threads 0), with the bounds scaled to the
+    threads it uses and every output compared with the first pass's. Skipped, with a note in its TSV, when the
+    configuration turns it off or the default is one thread (it would repeat the first pass)."""
+    tsv = run.path('threads0-pdfs.tsv')
+    n = min(cores(), cfg['engine_default_threads_max'])
+    if not cfg['pdf_default_threads'] or n == 1:
+        why = 'turned off (pdf_default_threads)' if not cfg['pdf_default_threads'] else 'one core here: the same as the pass above'
+        shutil.rmtree(os.path.join(run.failures, 'threads0-pdfs'), ignore_errors=True)
+        write_tsv(tsv, ['status', 'detail'], [['skipped', why]])
+        say(f"pdfs: the pass at the default thread count is skipped: {why}")
+        return 0
+    first = {(r['file'], r['op']): r.get('sha256', '') for r in read_tsv(run.path('pdfs.tsv'))}
+    say(f"pdfs: again at the default thread count (--threads 0: {n} threads on {cores()} cores)")
+    return pdfs(cfg, run, Tool(cfg['engine'], dict(cfg, threads=0)), tag='threads0-', threads=n, same_as=first)
 
 
 # ----------------------------------------------------------------------------------------------------
@@ -1260,6 +1332,15 @@ def report(cfg, run):
     pdf = read_tsv(run.path('pdfs.tsv'))
     if pdf:
         L += pdf_table(pdf, 'Hostile PDFs')
+    pdf = read_tsv(run.path('threads0-pdfs.tsv'))
+    if pdf and 'status' in pdf[0]:
+        L += ['### Hostile PDFs at the default thread count', '', f"Skipped: {pdf[0]['detail']}.", '']
+    elif pdf:
+        n = min(meta.get('cores') or meta.get('cpus') or 1, cfg['engine_default_threads_max'])
+        L += pdf_table(pdf, f"Hostile PDFs at the default thread count (`--threads 0`: {n} threads here)")
+        L[-2:-2] = [f"Each thread beyond the first may add {cfg['pdf']['mem_per_thread_mib']} MiB to the memory bound and "
+                    f"{cfg['pdf']['as_per_thread_mib']} MiB to the address space; every output is the same bytes as the "
+                    f"one-thread pass's (`THREADS-DIFFER` otherwise).", '']
     fzr = read_tsv(run.path('fuzz.tsv'))
     if fzr:
         seeds = read_tsv(run.path('fuzz_seeds.tsv'))
@@ -1426,9 +1507,10 @@ def failures(run):
     for r in read_tsv(run.path('archives.tsv')):
         if r['result'] == 'FAIL':
             out.append(f"archives: `{r['seed']}` ({r['file']}) {r['kind']}: {r['verdict']} (`{r['saved']}`)")
-    for r in read_tsv(run.path('pdfs.tsv')):
-        if r['result'] == 'FAIL':
-            out.append(f"pdfs: `{r['file']}` through {r['op']}: {r['verdict']}, {r['cpu_s']} s CPU, {r['maxrss_mib']} MiB against {r['time_bound_s']} s / {r['mem_bound_mib']} MiB (`{r['saved']}`)")
+    for tag, how in (('', ''), ('threads0-', ' at --threads 0')):
+        for r in read_tsv(run.path(tag + 'pdfs.tsv')):
+            if r.get('result') == 'FAIL':
+                out.append(f"pdfs: `{r['file']}` through {r['op']}{how}: {r['verdict']}, {r['cpu_s']} s CPU, {r['maxrss_mib']} MiB against {r['time_bound_s']} s / {r['mem_bound_mib']} MiB (`{r['saved']}`)")
     d = os.path.join(run.failures, 'fuzz')
     if os.path.isdir(d):
         for name in sorted(os.listdir(d)):
@@ -1493,10 +1575,11 @@ def write_meta(cfg, run, build, mode):
             tools[name] = None
     entry = {'mode': mode, 'date': time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime()), 'build': build, 'engine': cfg['engine'],
              'engine_sha256': sha256_file(cfg['engine']) if os.path.exists(cfg['engine']) else None,
-             'corpus': cfg['corpus'], 'cpus': os.cpu_count(), 'load_at_start': load, 'kernel': os.uname().release,
+             'corpus': cfg['corpus'], 'cpus': os.cpu_count(), 'cores': cores(), 'load_at_start': load, 'kernel': os.uname().release,
              'python': sys.version.split()[0], 'measured_by': Launcher.note, 'tools': tools,
              'bounds': {'archive': cfg['archive'], 'pdf': cfg['pdf'], 'fuzz': cfg['fuzz'], 'hang': cfg['hang'], 'time_metric': cfg['time_metric'],
-                        'max_decoded_mib': cfg['max_decoded_mib']}}
+                        'max_decoded_mib': cfg['max_decoded_mib'], 'pdf_default_threads': cfg['pdf_default_threads'],
+                        'engine_default_threads_max': cfg['engine_default_threads_max']}}
     meta = read_json(run.path('meta.json')) or {}
     runs = meta.get('runs', [])
     runs.append(entry)
@@ -1599,7 +1682,7 @@ def main():
     if a.mode == 'archives':
         fails = archives(cfg, run)
     elif a.mode == 'pdfs':
-        fails = pdfs(cfg, run)
+        fails = pdfs(cfg, run) + pdfs_default_threads(cfg, run)
     elif a.mode == 'fuzz':
         fails = fuzz(cfg, run, fresh=a.fresh)
     elif a.mode == 'supply':
@@ -1610,7 +1693,7 @@ def main():
         fails = charness(cfg, run)
     elif a.mode == 'run':
         fails += archives(cfg, run)
-        fails += pdfs(cfg, run)
+        fails += pdfs(cfg, run) + pdfs_default_threads(cfg, run)
         if cfg['fuzz']['seconds'] > 0:
             fails += fuzz(cfg, run, fresh=a.fresh)
         fails += supply(cfg, run)
