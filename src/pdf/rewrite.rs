@@ -1053,9 +1053,9 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         let r = if short { None } else { r };
         if dbg {
             let new = r.as_ref().map_or(s.data.len(), |x| x.1.len());
-            let how = settings[u]
-                .as_ref()
-                .map_or("kept: over the quick budget, or not decodable".to_string(), |o| format!("effort {}", o.effort));
+            let how = settings[u].as_ref().map_or("kept: over the quick budget, or not decodable".to_string(), |o| {
+                format!("effort {}", o.effort)
+            });
             eprintln!(
                 "stream {n}: {} -> {new} bytes, {how}, {:?}{}",
                 s.data.len(),

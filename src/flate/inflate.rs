@@ -351,7 +351,13 @@ fn dynamic_tables(br: &mut BitReader) -> Result<(Decoder, Decoder), InflateError
     Ok((ll, d))
 }
 
-fn codes<S: Sink>(br: &mut BitReader, out: &mut S, ll: &Decoder, d: &Decoder, limit: usize) -> Result<(), InflateError> {
+fn codes<S: Sink>(
+    br: &mut BitReader,
+    out: &mut S,
+    ll: &Decoder,
+    d: &Decoder,
+    limit: usize,
+) -> Result<(), InflateError> {
     loop {
         let sym = ll.decode(br)?;
         if sym < 256 {

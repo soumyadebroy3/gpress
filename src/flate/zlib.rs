@@ -233,7 +233,8 @@ mod counted {
             text.extend_from_slice(format!("{} {} l ", k % 113, k % 7).as_bytes());
         }
         let noise: Vec<u8> = (0..150_000).map(|_| rng(&mut s) as u8).collect();
-        let datas = [Vec::new(), b"a".to_vec(), b"abcabcabc".to_vec(), block.repeat(9), text, noise, vec![7u8; 300_000]];
+        let datas =
+            [Vec::new(), b"a".to_vec(), b"abcabcabc".to_vec(), block.repeat(9), text, noise, vec![7u8; 300_000]];
         datas.iter().map(|d| deflate_zlib(d, &Options::quick())).collect()
     }
 
