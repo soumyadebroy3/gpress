@@ -84,15 +84,18 @@ fn decrypt(c: &crypt::Crypt, d: &[u8], a: usize, b: usize) -> Option<(Sealed, Di
 }
 
 /// The plan for a decrypted payload that starts at byte `at` of the file: the same choices `plan` makes for
-/// a stream's bytes (`stream_plan`, then a fax part for CCITT data), or the bytes as they are.
+/// a stream's bytes (`stream_plan`, then a fax part for CCITT data with the `fax` feature), or the bytes as
+/// they are.
+#[cfg_attr(not(feature = "fax"), allow(unused_variables))]
 fn plan_bytes(raw: Vec<u8>, dict: Dict, at: usize, resolve: &dyn Fn(&Obj) -> Option<Obj>, opt: &PackOptions) -> Plan {
     if let Some(found) = stream_plan(&raw, opt) {
         return found.plan(Source::Bytes(raw));
     }
-    match fax_parse(&raw, dict, resolve) {
-        Some(parsed) => Plan::Fax { parsed: Box::new(parsed), at, raw: None },
-        None => Plan::Plain(raw),
+    #[cfg(feature = "fax")]
+    if let Some(parsed) = fax_parse(&raw, dict, resolve) {
+        return Plan::Fax { parsed: Box::new(parsed), at, raw: None };
     }
+    Plan::Plain(raw)
 }
 
 /// `N G obj <<dictionary>> stream` just before a stream's payload, which starts at the end of `d`: the object

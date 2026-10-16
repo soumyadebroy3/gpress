@@ -12,6 +12,13 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 gpress = { path = "../..", default-features = false }
 
+# The parts of the engine, as in gpress's Cargo.toml: all but "existing" on by default, so a plain build is the
+# whole module.
 [features]
-default = []
-existing = ["gpress/existing"]
+default = ["archive", "jpeg", "fax", "encryption"]
+archive = ["gpress/archive"]
+jpeg = ["gpress/jpeg"]
+fax = ["gpress/fax"]
+encryption = ["gpress/encryption"]
+existing = ["archive", "gpress/existing"]
+web = ["jpeg", "fax", "encryption", "gpress/web"]

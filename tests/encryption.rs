@@ -6,6 +6,7 @@
 //! files are left untouched, and still pack and restore exactly.
 
 use gpress::flate;
+#[cfg(feature = "archive")]
 use gpress::pack::{pack, unpack};
 use gpress::pdf::object::{Dict, Obj};
 use gpress::pdf::rewrite::{optimize, Options, Outcome};
@@ -232,7 +233,9 @@ fn files_that_need_a_password_or_that_readers_disagree_on_are_left_untouched() {
         }
         assert_eq!(r.data, input, "{what}");
         // The gpress archive restores them exactly too.
+        #[cfg(feature = "archive")]
         let (packed, _) = pack(&input);
+        #[cfg(feature = "archive")]
         assert_eq!(unpack(&packed).unwrap(), input, "{what}");
     }
     // The key length may be given in either place.
@@ -246,6 +249,7 @@ fn files_that_need_a_password_or_that_readers_disagree_on_are_left_untouched() {
 }
 
 #[test]
+#[cfg(feature = "archive")]
 fn archive_restores_encrypted_files_exactly_and_refuses_damaged_packs() {
     let mut total = (0, 0);
     for (name, _) in HANDLED {

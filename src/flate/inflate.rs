@@ -358,6 +358,8 @@ pub fn inflate_pieces(
 mod tests {
     use super::*;
     use crate::flate::bits::BitWriter;
+    // zlib's own encoder, which only the archive has, makes the streams of the tests that use `streams`.
+    #[cfg(feature = "archive")]
     use crate::flate::zlibexact::{zlib_stream, Params};
 
     /// `inflate_pieces` with every piece kept: the output, the input used and the largest piece.
@@ -393,6 +395,7 @@ mod tests {
 
     /// Deflate data made by zlib's algorithm (the zlib wrapper taken off) from text, runs, noise (stored
     /// blocks) and repeats as far back as zlib reaches, with small and large blocks.
+    #[cfg(feature = "archive")]
     fn streams() -> Vec<(Params, Vec<u8>, Vec<u8>)> {
         let mut s = 5u64;
         let noise: Vec<u8> = (0..40_000).map(|_| rng(&mut s) as u8).collect();
@@ -412,6 +415,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "archive")]
     fn pieces_are_the_whole_output_cut_at_block_ends() {
         for (p, raw, d) in streams() {
             let w = same(&raw, usize::MAX).unwrap();
@@ -433,6 +437,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "archive")]
     fn damaged_streams_give_the_same_errors() {
         let mut s = 11u64;
         for (_, raw, _) in streams().into_iter().filter(|(_, raw, _)| raw.len() > 8) {
@@ -526,6 +531,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "archive")]
     fn a_sink_can_stop_it() {
         let (_, raw, d) = streams().swap_remove(13);
         let mut got = Vec::new();

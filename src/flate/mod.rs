@@ -11,6 +11,8 @@ pub mod matcher;
 pub mod parse;
 pub mod tables;
 pub mod zlib;
+// The exact re-creation of zlib's own streams, which only the archive uses.
+#[cfg(feature = "archive")]
 pub mod zlibexact;
 
 pub use deflate::{deflate, deflate_zlib, Options};
