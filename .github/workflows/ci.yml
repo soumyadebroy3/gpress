@@ -39,7 +39,8 @@ jobs:
   # what they run. Together they are what it runs: the libraries' unit tests and their doc tests in one; the
   # binary's unit tests, every integration test (`--test '*'`, with the binary they call) and the examples, which
   # `cargo test` only builds, in the other. bench/check_test_split.py fails when a target's settings would make the
-  # halves differ from `cargo test`, and a part with no commands fails too, so no test can drop out unnoticed.
+  # halves differ from `cargo test`, and a part with no commands fails too: a manifest change or a renamed part can't
+  # drop tests unnoticed. A change to the commands below has to keep them the same as `cargo test` by itself.
   test:
     name: Tests, ${{ matrix.features }} features (${{ matrix.part }})
     runs-on: ubuntu-latest
