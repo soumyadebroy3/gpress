@@ -13,7 +13,7 @@ const SQUASH_T: [i32; 33] = [
 
 /// 1 / (1 + e^-x): x is ln-odds scaled by 256 (-2047..2047), result is a 12-bit probability.
 #[inline]
-pub fn squash(d: i32) -> i32 {
+pub const fn squash(d: i32) -> i32 {
     if d > 2047 {
         return 4095;
     }
@@ -25,36 +25,48 @@ pub fn squash(d: i32) -> i32 {
     (SQUASH_T[i] * (128 - w) + SQUASH_T[i + 1] * w + 64) >> 7
 }
 
-pub struct Tables {
-    stretch: Box<[i16; 4096]>,
+/// `squash` of every value of -2047..2047, worked out when compiling.
+static SQUASH: [u16; 4095] = {
+    let mut t = [0u16; 4095];
+    let mut i = 0;
+    while i < 4095 {
+        t[i] = squash(i as i32 - 2047) as u16;
+        i += 1;
+    }
+    t
+};
+
+/// `stretch` of every 12-bit probability: the inverse of `squash`, worked out when compiling.
+static STRETCH: [i16; 4096] = {
+    let mut t = [0i16; 4096];
+    let mut pi = 0usize;
+    let mut x = -2047;
+    while x <= 2047 {
+        let v = squash(x) as usize;
+        while pi <= v {
+            t[pi] = x as i16;
+            pi += 1;
+        }
+        x += 1;
+    }
+    while pi < 4096 {
+        t[pi] = 2047;
+        pi += 1;
+    }
+    t
+};
+
+/// ln(p / (1 - p)) scaled by 256 (-2047..2047) of a 12-bit probability: the inverse of `squash`.
+#[inline]
+pub fn stretch(p: i32) -> i32 {
+    STRETCH[p.clamp(0, 4095) as usize] as i32
 }
 
-impl Tables {
-    pub fn new() -> Tables {
-        // stretch = inverse of squash.
-        let mut stretch = Box::new([0i16; 4096]);
-        let mut pi = 0usize;
-        for x in -2047..=2047 {
-            let v = squash(x) as usize;
-            for j in pi..=v {
-                stretch[j] = x as i16;
-            }
-            pi = v + 1;
-        }
-        for j in pi..4096 {
-            stretch[j] = 2047;
-        }
-        Tables { stretch }
-    }
-    #[inline]
-    pub fn stretch(&self, p: i32) -> i32 {
-        self.stretch[p.clamp(0, 4095) as usize] as i32
-    }
-}
-
-impl Default for Tables {
-    fn default() -> Self {
-        Self::new()
+/// `N` copies of `v` in a boxed array, made on the heap (a large array would not fit on the stack first).
+fn boxed<T: Clone, const N: usize>(v: T) -> Box<[T; N]> {
+    match vec![v; N].into_boxed_slice().try_into() {
+        Ok(b) => b,
+        Err(_) => unreachable!("the vector has N items"),
     }
 }
 
@@ -259,135 +271,124 @@ impl Default for Counter {
     }
 }
 
-/// Maps a small context to an adaptive probability.
-pub struct StateMap {
-    t: Vec<Counter>,
+/// Maps a small context (below `N`, a power of two) to an adaptive probability.
+pub struct StateMap<const N: usize> {
+    t: [Counter; N],
     limit: u32,
     cx: usize,
 }
 
-impl StateMap {
-    pub fn new(n: usize, limit: u32) -> StateMap {
-        StateMap { t: vec![Counter::new(); n], limit, cx: 0 }
+impl<const N: usize> StateMap<N> {
+    pub fn new(limit: u32) -> StateMap<N> {
+        const { assert!(N.is_power_of_two()) };
+        StateMap { t: [Counter::new(); N], limit, cx: 0 }
     }
+    /// Contexts are below N: the mask changes nothing but spares the bounds checks.
     #[inline]
     pub fn p(&mut self, cx: usize) -> i32 {
-        self.cx = cx;
-        self.t[cx].p12()
+        self.cx = cx & (N - 1);
+        self.t[self.cx].p12()
     }
     #[inline]
     pub fn update(&mut self, bit: u32) {
         let l = self.limit;
-        self.t[self.cx].update(bit, l);
+        self.t[self.cx & (N - 1)].update(bit, l);
     }
 }
 
-/// Weighted combination of stretched predictions, one weight set per selector context.
-pub struct Mixer {
-    pub shift: i32,
-    n: usize,
-    w: Vec<i32>,
-    x: Vec<i32>,
-    nx: usize,
-    sel: usize,
+/// Mixer lanes: inputs and weights come in blocks of 16; the lanes past the inputs stay 0.
+pub const LANES: usize = 16;
+/// The mixer's learning rate and weight shift (fixed by the format). The error times the rate fits in 16
+/// bits, so the weight update is a 16 x 16-bit product per lane.
+const MIXER_RATE: i32 = 6;
+const MIXER_SHIFT: i32 = 12;
+const _: () = assert!(4095 * MIXER_RATE <= i16::MAX as i32);
+
+/// One weight set: a cache line.
+#[derive(Clone, Copy)]
+#[repr(align(64))]
+struct Row([i32; LANES]);
+
+/// Weighted combination of `N` stretched predictions, one weight set per selector context.
+pub struct Mixer<const N: usize> {
+    w: Vec<Row>,
+    /// The inputs, set before `mix`: stretched probabilities, at most 2047 either way. Lanes N.. stay 0.
+    pub x: [i16; LANES],
+    row: usize,
     pr: i32,
-    rate: i32,
 }
 
-impl Mixer {
-    pub fn new(inputs: usize, selectors: usize, rate: i32) -> Mixer {
-        // Inputs are stretched probabilities (at most 2047 either way) and the error at most 4095 x rate, so an
-        // input times the error fits in 32 bits (see `update`).
-        assert!((1..=256).contains(&rate));
-        Mixer {
-            shift: 10,
-            n: inputs,
-            w: vec![(1 << 16) / 4; inputs * selectors],
-            x: vec![0; inputs],
-            nx: 0,
-            sel: 0,
-            pr: 2048,
-            rate,
-        }
-    }
-    #[inline]
-    pub fn add(&mut self, st: i32) {
-        debug_assert!(self.nx < self.n && st.abs() <= 2047);
-        self.x[self.nx] = st;
-        self.nx += 1;
-    }
-    /// Several inputs at once: the same as adding them one by one.
-    #[inline]
-    pub fn add_all(&mut self, st: &[i32]) {
-        debug_assert!(st.iter().all(|x| x.abs() <= 2047));
-        self.x[self.nx..self.nx + st.len()].copy_from_slice(st);
-        self.nx += st.len();
+impl<const N: usize> Mixer<N> {
+    pub fn new(selectors: usize) -> Mixer<N> {
+        const { assert!(N <= LANES) };
+        let mut r = [0i32; LANES];
+        r[..N].fill((1 << 16) / 4);
+        Mixer { w: vec![Row(r); selectors], x: [0; LANES], row: 0, pr: 2048 }
     }
     #[inline]
     pub fn mix(&mut self, sel: usize) -> i32 {
-        let n = self.n;
-        // Inputs not given count as 0.
-        if self.nx < n {
-            self.x[self.nx..n].fill(0);
+        self.row = sel;
+        let w = &self.w[sel].0;
+        // A 64-bit sum is exact for any weights; the order of the terms doesn't matter.
+        let mut dot = 0i64;
+        for j in 0..N {
+            dot += self.x[j] as i64 * w[j] as i64;
         }
-        self.nx = n;
-        self.sel = sel * n;
-        let w = &self.w[self.sel..self.sel + n];
-        // Integer sums: the order of the terms doesn't matter.
-        let dot: i64 = self.x[..n].iter().zip(w).map(|(&x, &w)| x as i64 * w as i64).sum();
         let d = (dot >> 16).clamp(-2047, 2047) as i32;
-        self.pr = squash(d);
+        self.pr = SQUASH[(d + 2047) as usize] as i32;
         self.pr
     }
     #[inline]
     pub fn update(&mut self, bit: u32) {
-        let err = (((bit as i32) << 12) - self.pr) * self.rate;
-        let n = self.n;
-        let sh = self.shift;
-        // |x * err| <= 2047 * 4095 * 256 < 2^31: 32-bit arithmetic gives exactly the 64-bit result.
-        for (w, &x) in self.w[self.sel..self.sel + n].iter_mut().zip(&self.x[..n]) {
-            *w += (x * err + (1 << (sh - 1))) >> sh;
+        // At most 4095 x MIXER_RATE either way, so exact in 16 bits; an input times the error fits in 32 bits.
+        let err = ((((bit as i32) << 12) - self.pr) * MIXER_RATE) as i16 as i32;
+        let w = &mut self.w[self.row].0;
+        // All 16 lanes (the unused ones add 0). The weights wrap as 32-bit numbers, as they always did in the
+        // release build (a debug build no longer stops there).
+        for j in 0..LANES {
+            w[j] = w[j].wrapping_add((self.x[j] as i32 * err + (1 << (MIXER_SHIFT - 1))) >> MIXER_SHIFT);
         }
-        self.nx = 0;
     }
 }
 
-/// Adaptive probability map (secondary estimation): refines a probability within a context by
-/// interpolating between 33 buckets over the stretched probability.
-pub struct Apm {
-    t: Vec<u16>,
-    idx: usize,
+/// Adaptive probability map (secondary estimation): refines a probability within a context (below `N`, a
+/// power of two) by interpolating between 33 buckets over the stretched probability.
+pub struct Apm<const N: usize> {
+    t: Box<[[u16; 33]; N]>,
+    row: usize,
+    j: usize,
     rate: i32,
 }
 
-impl Apm {
-    pub fn new(contexts: usize, rate: i32) -> Apm {
-        let mut t = vec![0u16; contexts * 33];
-        for c in 0..contexts {
-            for j in 0..33 {
-                t[c * 33 + j] = (squash((j as i32 - 16) * 128) * 16) as u16;
-            }
+impl<const N: usize> Apm<N> {
+    pub fn new(rate: i32) -> Apm<N> {
+        const { assert!(N.is_power_of_two()) };
+        let mut r = [0u16; 33];
+        for (j, v) in r.iter_mut().enumerate() {
+            *v = (squash((j as i32 - 16) * 128) * 16) as u16;
         }
-        Apm { t, idx: 0, rate }
+        Apm { t: boxed(r), row: 0, j: 0, rate }
     }
+    /// `st` is the stretched probability (-2047..2047).
     #[inline]
-    pub fn p(&mut self, pr: i32, cx: usize, tables: &Tables) -> i32 {
-        let s = tables.stretch(pr) + 2048;
-        let lo = (s >> 7) as usize;
+    pub fn p(&mut self, st: i32, cx: usize) -> i32 {
+        let s = st + 2048;
+        // s is 1..4095 and cx below N: the masks change nothing but spare the bounds checks.
+        let lo = (s >> 7) as usize & 31;
         let w = s & 127;
-        self.idx = cx * 33 + lo;
-        let a = self.t[self.idx] as i32;
-        let b = self.t[(self.idx + 1).min(self.t.len() - 1)] as i32;
-        if w >= 64 {
-            self.idx += 1;
-        }
+        self.row = cx & (N - 1);
+        let r = &self.t[self.row];
+        let a = r[lo] as i32;
+        let b = r[lo + 1] as i32;
+        self.j = lo + (w >= 64) as usize;
         ((a * (128 - w) + b * w) >> 11).clamp(1, 4095)
     }
     #[inline]
     pub fn update(&mut self, bit: u32) {
         let target: i32 = if bit == 1 { 65535 } else { 0 };
-        let v = self.t[self.idx] as i32;
-        self.t[self.idx] = (v + ((target - v) >> self.rate)) as u16;
+        // The bucket is at most 32 (see `p`): the minimum changes nothing.
+        let v = &mut self.t[self.row & (N - 1)][self.j.min(32)];
+        *v = (*v as i32 + ((target - *v as i32) >> self.rate)) as u16;
     }
 }
 
@@ -453,10 +454,34 @@ mod tests {
     }
 
     #[test]
+    fn stretch_table_is_the_one_built_at_run_time() {
+        // The loop that made the table when the program started, before the table was made when compiling.
+        let mut t = [0i16; 4096];
+        let mut pi = 0usize;
+        for x in -2047..=2047 {
+            let v = squash(x) as usize;
+            for e in t.iter_mut().take(v + 1).skip(pi) {
+                *e = x as i16;
+            }
+            pi = v + 1;
+        }
+        for e in t.iter_mut().skip(pi) {
+            *e = 2047;
+        }
+        assert!(t == STRETCH);
+    }
+
+    #[test]
+    fn squash_table_is_squash() {
+        for d in -2047..=2047 {
+            assert_eq!(SQUASH[(d + 2047) as usize] as i32, squash(d), "{d}");
+        }
+    }
+
+    #[test]
     fn squash_stretch_are_inverse_enough() {
-        let t = Tables::new();
         for p in (1..4095).step_by(7) {
-            let back = squash(t.stretch(p));
+            let back = squash(stretch(p));
             assert!((back - p).abs() <= 40, "{p} -> {back}");
         }
     }

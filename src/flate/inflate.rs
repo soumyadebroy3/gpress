@@ -289,3 +289,251 @@ fn codes(br: &mut BitReader, out: &mut Vec<u8>, ll: &Decoder, d: &Decoder, limit
         }
     }
 }
+
+/// The output `inflate_pieces` keeps behind what it hands over: as far back as a distance reaches.
+const WINDOW: usize = 32 * 1024;
+
+/// Inflates like `inflate`, but hands the output to `sink` a piece at a time instead of returning it whole: a
+/// piece is what one Deflate block makes. Only the window (the last 32 KiB, as far back as a distance
+/// reaches; up to 64 KiB, so that small blocks don't each move it) and one block are held at a time. zlib
+/// never makes a block of more than 2^(mem_level + 6) - 1 symbols, so a block it made gives at most about
+/// 8.4 MB; a block made otherwise can be as large as `limit`. The same checks and errors as `inflate`, at the
+/// same places; the pieces before an error have been handed over. `sink` returns false to stop (then
+/// Ok(None)). Ok: the output's length and the input used (as `Inflated::consumed`).
+pub fn inflate_pieces(
+    input: &[u8],
+    limit: usize,
+    mut sink: impl FnMut(&[u8]) -> bool,
+) -> Result<Option<(usize, usize)>, InflateError> {
+    let mut br = BitReader::new(input);
+    // The window and the block being made; the `gone` bytes before them were handed over and dropped.
+    // `codes` is given the limit less those, so its size checks are `inflate`'s. Once anything is dropped it
+    // holds 32 KiB at least, so its test for a distance before the start of the output is `inflate`'s too.
+    let mut out: Vec<u8> = Vec::with_capacity((input.len() * 4).min(limit).min(4 * WINDOW));
+    let mut gone = 0usize;
+    loop {
+        let last = br.get(1)?;
+        let btype = br.get(2)?;
+        let start = out.len();
+        match btype {
+            0 => {
+                br.align();
+                let len = br.get(16)? as usize;
+                let nlen = br.get(16)? as usize;
+                if len != (!nlen & 0xffff) {
+                    return Err(InflateError::StoredLength);
+                }
+                let bytes = br.take_bytes(len)?;
+                if len > limit - gone - out.len() {
+                    return Err(InflateError::TooLarge);
+                }
+                out.extend_from_slice(bytes);
+            }
+            1 => {
+                let (ll, d) = fixed_decoders();
+                codes(&mut br, &mut out, ll, d, limit - gone)?;
+            }
+            2 => {
+                let (ll, d) = dynamic_tables(&mut br)?;
+                codes(&mut br, &mut out, &ll, &d, limit - gone)?;
+            }
+            _ => return Err(InflateError::BadBlockType),
+        }
+        if out.len() > start && !sink(&out[start..]) {
+            return Ok(None);
+        }
+        if out.len() >= 2 * WINDOW {
+            let drop = out.len() - WINDOW;
+            out.drain(..drop);
+            gone += drop;
+        }
+        if last == 1 {
+            break;
+        }
+    }
+    Ok(Some((gone + out.len(), br.byte_pos())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flate::bits::BitWriter;
+    use crate::flate::zlibexact::{zlib_stream, Params};
+
+    /// `inflate_pieces` with every piece kept: the output, the input used and the largest piece.
+    fn in_pieces(input: &[u8], limit: usize) -> Result<(Vec<u8>, usize, usize), InflateError> {
+        let (mut out, mut largest) = (Vec::new(), 0);
+        let (len, used) = inflate_pieces(input, limit, |p| {
+            largest = largest.max(p.len());
+            out.extend_from_slice(p);
+            true
+        })?
+        .expect("never stopped");
+        assert_eq!(len, out.len());
+        Ok((out, used, largest))
+    }
+
+    /// Checks that both ways give the same bytes and input used, or the same error; returns the first.
+    fn same(input: &[u8], limit: usize) -> Result<Inflated, InflateError> {
+        let whole = inflate(input, limit);
+        match (&whole, in_pieces(input, limit)) {
+            (Ok(w), Ok((p, used, _))) => assert!(w.data == p && w.consumed == used, "{} {}", w.data.len(), p.len()),
+            (Err(a), Err(b)) => assert_eq!(*a, b),
+            (w, p) => panic!("{:?} against {:?}", w.as_ref().map(|w| w.data.len()), p.map(|p| p.0.len())),
+        }
+        whole
+    }
+
+    fn rng(s: &mut u64) -> u64 {
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
+        *s
+    }
+
+    /// Deflate data made by zlib's algorithm (the zlib wrapper taken off) from text, runs, noise (stored
+    /// blocks) and repeats as far back as zlib reaches, with small and large blocks.
+    fn streams() -> Vec<(Params, Vec<u8>, Vec<u8>)> {
+        let mut s = 5u64;
+        let noise: Vec<u8> = (0..40_000).map(|_| rng(&mut s) as u8).collect();
+        let text: Vec<u8> =
+            (0..6000u32).flat_map(|i| format!("{} {} Td (x{}) Tj\n", i % 97, i % 13, i).into_bytes()).collect();
+        let far: Vec<u8> = noise[..32_000].repeat(5);
+        let data = [Vec::new(), vec![7], vec![0; 300_000], text, noise, far];
+        let mut out = Vec::new();
+        for d in data {
+            for (level, mem_level) in [(1, 8), (6, 1), (6, 8), (9, 9), (4, 2)] {
+                let p = Params { level, window_bits: 15, mem_level, filtered: false };
+                let z = zlib_stream(&d, p);
+                out.push((p, z[2..z.len() - 4].to_vec(), d.clone()));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn pieces_are_the_whole_output_cut_at_block_ends() {
+        for (p, raw, d) in streams() {
+            let w = same(&raw, usize::MAX).unwrap();
+            assert_eq!(w.data, d);
+            // A block of zlib's has at most 2^(mem_level + 6) - 1 symbols of at most 258 bytes each.
+            let (_, _, largest) = in_pieces(&raw, usize::MAX).unwrap();
+            assert!(largest <= ((1 << (p.mem_level + 6)) - 1) * 258, "{p:?}: {largest}");
+            // Exactly at the limit, and one byte short of it.
+            same(&raw, d.len()).unwrap();
+            if !d.is_empty() {
+                assert_eq!(same(&raw, d.len() - 1).unwrap_err(), InflateError::TooLarge);
+                same(&raw, d.len() / 2).unwrap_err();
+            }
+            // Cut short anywhere.
+            for cut in (0..raw.len()).step_by(raw.len() / 7 + 1) {
+                same(&raw[..cut], usize::MAX).unwrap_err();
+            }
+        }
+    }
+
+    #[test]
+    fn damaged_streams_give_the_same_errors() {
+        let mut s = 11u64;
+        for (_, raw, _) in streams().into_iter().filter(|(_, raw, _)| raw.len() > 8) {
+            for _ in 0..40 {
+                let mut bad = raw.clone();
+                let i = (rng(&mut s) % raw.len() as u64) as usize;
+                bad[i] ^= 1 << (rng(&mut s) % 8);
+                let _ = same(&bad, 1 << 24);
+            }
+        }
+    }
+
+    /// Writes a Huffman code (Deflate stores them from their first bit).
+    fn code(w: &mut BitWriter, c: u32, len: u32) {
+        w.put(c.reverse_bits() >> (32 - len), len);
+    }
+
+    /// A literal or a length symbol with the fixed codes.
+    fn fixed(w: &mut BitWriter, sym: u32) {
+        match sym {
+            0..=143 => code(w, 0x30 + sym, 8),
+            144..=255 => code(w, 0x190 + sym - 144, 9),
+            256..=279 => code(w, sym - 256, 7),
+            _ => code(w, 0xc0 + sym - 280, 8),
+        }
+    }
+
+    /// Stored blocks holding `data` (none final).
+    fn stored(w: &mut BitWriter, data: &[u8]) {
+        for part in data.chunks(65535) {
+            w.put(0, 3);
+            w.align();
+            w.put(part.len() as u32, 16);
+            w.put(!part.len() as u32 & 0xffff, 16);
+            for &b in part {
+                w.put(b as u32, 8);
+            }
+        }
+    }
+
+    #[test]
+    fn crafted_streams_give_the_same_results() {
+        let mut s = 3u64;
+        let noise: Vec<u8> = (0..70_000).map(|_| rng(&mut s) as u8).collect();
+        // Stored blocks, then a fixed block whose match reaches back exactly 32 KiB (distance code 29 with
+        // all 13 extra bits set), before the window moves, just as it moves (at 64 KiB) and after: restored
+        // the same both ways.
+        for n in [32_768, 65_533, 65_534, 65_535, 65_536, 65_537, 65_538, 70_000] {
+            let mut w = BitWriter::new();
+            stored(&mut w, &noise[..n]);
+            w.put(0b011, 3);
+            fixed(&mut w, 285);
+            code(&mut w, 29, 5);
+            w.put(8191, 13);
+            fixed(&mut w, 256);
+            let far = w.finish();
+            let out = same(&far, usize::MAX).unwrap().data;
+            assert_eq!(&out[n..], &noise[n - 32_768..n - 32_768 + 258], "{n} stored bytes");
+            same(&far, n + 257).unwrap_err();
+        }
+        // A literal, then a match two bytes back: too far.
+        let mut w = BitWriter::new();
+        w.put(0b011, 3);
+        fixed(&mut w, b'a' as u32);
+        fixed(&mut w, 257);
+        code(&mut w, 1, 5);
+        fixed(&mut w, 256);
+        assert_eq!(same(&w.finish(), 100).unwrap_err(), InflateError::TooFarBack);
+        // Length symbol 286, which can't occur.
+        let mut w = BitWriter::new();
+        w.put(0b011, 3);
+        fixed(&mut w, 286);
+        assert_eq!(same(&w.finish(), 100).unwrap_err(), InflateError::BadSymbol);
+        // Block type 3; a stored length whose complement is wrong; empty stored blocks.
+        let mut w = BitWriter::new();
+        w.put(0b111, 3);
+        assert_eq!(same(&w.finish(), 100).unwrap_err(), InflateError::BadBlockType);
+        let mut w = BitWriter::new();
+        w.put(1, 3);
+        w.align();
+        w.put(5, 16);
+        w.put(5, 16);
+        assert_eq!(same(&w.finish(), 100).unwrap_err(), InflateError::StoredLength);
+        let mut w = BitWriter::new();
+        stored(&mut w, &[]);
+        w.put(1, 3);
+        w.align();
+        w.put(0, 16);
+        w.put(0xffff, 16);
+        assert!(same(&w.finish(), 0).unwrap().data.is_empty());
+    }
+
+    #[test]
+    fn a_sink_can_stop_it() {
+        let (_, raw, d) = streams().swap_remove(13);
+        let mut got = Vec::new();
+        let r = inflate_pieces(&raw, usize::MAX, |p| {
+            got.extend_from_slice(p);
+            got.len() < 10_000
+        });
+        assert_eq!(r, Ok(None));
+        assert!(got.len() >= 10_000 && d.starts_with(&got));
+    }
+}
