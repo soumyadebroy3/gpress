@@ -5,6 +5,7 @@
 //! (the streams of a PDF and the segments of each stream), so the job never runs more threads than asked.
 //! A thread the system refuses (thread or process limits) is no loss: the calling thread does the work.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -18,19 +19,30 @@ pub struct Pool {
     threads: usize,
     /// Set when the system refused a thread: the job goes on with the threads it has.
     refused: AtomicBool,
+    /// Callers waiting for the slot they lent (see `map`), and slots handed to them.
+    lent: Mutex<(usize, usize)>,
+    back: Condvar,
 }
 
 impl Pool {
     /// A pool for `threads` threads in all (at least 1: the caller).
     pub fn new(threads: usize) -> Arc<Pool> {
         let threads = threads.max(1);
-        Arc::new(Pool { free: AtomicUsize::new(threads - 1), threads, refused: AtomicBool::new(false) })
+        Arc::new(Pool {
+            free: AtomicUsize::new(threads - 1),
+            threads,
+            refused: AtomicBool::new(false),
+            lent: Mutex::new((0, 0)),
+            back: Condvar::new(),
+        })
     }
 
     fn take(&self) -> bool {
-        if self.refused.load(Ordering::Relaxed) {
-            return false;
-        }
+        !self.refused.load(Ordering::Relaxed) && self.take_free()
+    }
+
+    /// A free slot, if there is one (also after a refused thread).
+    fn take_free(&self) -> bool {
         // One slot less, unless none is free (a plain compare-and-swap loop).
         let mut free = self.free.load(Ordering::Acquire);
         while free > 0 {
@@ -44,6 +56,34 @@ impl Pool {
 
     fn give(&self) {
         self.free.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Gives a slot back: to a caller waiting for the one it lent first, else to the pool.
+    fn release(&self) {
+        let mut lent = self.lent.lock().unwrap_or_else(|e| e.into_inner());
+        if lent.0 > 0 {
+            lent.0 -= 1;
+            lent.1 += 1;
+            self.back.notify_one();
+        } else {
+            self.give();
+        }
+    }
+
+    /// Takes back the slot a caller lent: a free one, else the next one given back. (While a caller waits
+    /// here no slot is free, since `release` hands every slot to the waiting callers first.)
+    fn take_back(&self) {
+        #[cfg(test)]
+        jitter::pause();
+        let mut lent = self.lent.lock().unwrap_or_else(|e| e.into_inner());
+        if self.take_free() {
+            return;
+        }
+        lent.0 += 1;
+        while lent.1 == 0 {
+            lent = self.back.wait(lent).unwrap_or_else(|e| e.into_inner());
+        }
+        lent.1 -= 1;
     }
 
     /// A helper thread running `work`, if a slot is free and the system gives a thread.
@@ -99,14 +139,27 @@ struct Slot<'p>(&'p Pool);
 
 impl Drop for Slot<'_> {
     fn drop(&mut self) {
-        self.0.give();
+        self.0.release();
+    }
+}
+
+/// Takes back the slot a `map` caller lent once its helpers are done, also when a piece panicked.
+struct Lend<'p>(&'p Pool, Cell<bool>);
+
+impl Drop for Lend<'_> {
+    fn drop(&mut self) {
+        if self.1.get() {
+            self.0.take_back();
+        }
     }
 }
 
 /// `f(i)` for every `i` in `0..n`, results in index order. Indices are started in the order given by
 /// `order` (all of `0..n`, e.g. the biggest piece first); without a pool, or with nothing free in it, the
 /// calling thread does everything. Every free thread joins at the start; later, a pool slot released by
-/// another part of the job is picked up at the next piece.
+/// another part of the job is picked up at the next piece. A caller with nothing left to start lends its
+/// slot to the rest of the job while its helpers finish, and takes a slot back before it goes on, so the
+/// job never runs more threads than its pool has.
 pub fn map<R: Send>(pool: Option<&Pool>, n: usize, order: Option<&[usize]>, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
     debug_assert!(order.is_none_or(|o| o.len() == n));
     let at = |k: usize| order.map_or(k, |o| o[k]);
@@ -123,11 +176,15 @@ pub fn map<R: Send>(pool: Option<&Pool>, n: usize, order: Option<&[usize]>, f: i
         }
     };
     let next = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
     let results: Vec<Mutex<Option<R>>> = (0..n).map(|_| Mutex::new(None)).collect();
     let run = |k: usize| {
+        #[cfg(test)]
+        jitter::pause();
         let i = at(k);
         let r = f(i);
         *results[i].lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+        done.fetch_add(1, Ordering::Release);
     };
     let help = || loop {
         let k = next.fetch_add(1, Ordering::Relaxed);
@@ -136,6 +193,7 @@ pub fn map<R: Send>(pool: Option<&Pool>, n: usize, order: Option<&[usize]>, f: i
         }
         run(k);
     };
+    let lend = Lend(pool, Cell::new(false));
     std::thread::scope(|s| {
         // As many helpers as the pool gives now (the caller takes a piece too).
         let mut helpers = 0;
@@ -153,7 +211,14 @@ pub fn map<R: Send>(pool: Option<&Pool>, n: usize, order: Option<&[usize]>, f: i
             }
             run(k);
         }
+        // Nothing left to start. While the helpers finish their pieces, the caller's slot works elsewhere in
+        // the job (the scope waits for them here, and `lend` takes a slot back after it).
+        if done.load(Ordering::Acquire) < n {
+            lend.1.set(true);
+            pool.release();
+        }
     });
+    drop(lend);
     results
         .into_iter()
         .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()).expect("every piece is done"))
@@ -255,6 +320,50 @@ pub fn hash64(d: &[u8]) -> u64 {
     h ^= h >> 32;
     h = h.wrapping_mul(0xD6E8_FEB8_6659_FD93);
     h ^ (h >> 32)
+}
+
+/// Random pauses in the pool, so that tests see many orders of events (tests only; nothing in a release
+/// build).
+#[cfg(test)]
+pub(crate) mod jitter {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
+
+    static SEED: AtomicU64 = AtomicU64::new(0);
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+    /// Runs `f` with random pauses in the pool (seed 0: none); one jitter test at a time.
+    pub(crate) fn with<R>(seed: u64, f: impl FnOnce() -> R) -> R {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        struct Off;
+        impl Drop for Off {
+            fn drop(&mut self) {
+                SEED.store(0, Ordering::SeqCst);
+            }
+        }
+        let _off = Off;
+        SEED.store(seed, Ordering::SeqCst);
+        f()
+    }
+
+    /// With a seed set: a pause of 0 to 200 us, drawn from the seed, the thread and a counter.
+    pub(super) fn pause() {
+        let seed = SEED.load(Ordering::Relaxed);
+        if seed == 0 {
+            return;
+        }
+        let mut h = DefaultHasher::new();
+        std::thread::current().id().hash(&mut h);
+        let mut x = seed ^ h.finish() ^ COUNT.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..2 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(x % 201));
+    }
 }
 
 #[cfg(test)]
@@ -393,6 +502,159 @@ pub(crate) mod tests {
         }));
         assert!(r.is_err());
         assert_eq!(pool.free.load(Ordering::SeqCst), 1);
+    }
+
+    /// Every slot is back in the pool and nobody waits for one.
+    fn all_back(pool: &Pool) {
+        assert_eq!(pool.free.load(Ordering::SeqCst), pool.threads - 1);
+        assert_eq!(*pool.lent.lock().unwrap(), (0, 0));
+    }
+
+    /// `f`, counted as running while it runs; the most at once goes to `most`.
+    fn counted<R>(now: &AtomicUsize, most: &AtomicUsize, f: impl FnOnce() -> R) -> R {
+        most.fetch_max(now.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+        let r = f();
+        now.fetch_sub(1, Ordering::SeqCst);
+        r
+    }
+
+    #[test]
+    fn nested_maps_never_run_more_than_the_pool() {
+        let leaf = |i: usize, j: usize, k: usize| i * 100 + j * 10 + k;
+        let want: Vec<usize> =
+            (0..8).map(|i| (0..4).map(|j| (0..3).map(|k| leaf(i, j, k)).sum::<usize>()).sum()).collect();
+        // Later outer pieces take longer, so free slots appear while nested maps still run: callers lend, and
+        // some find every slot taken when they want theirs back.
+        for threads in [1, 2, 3, 4, 5, 6, 8] {
+            for seed in 1..=8 {
+                let pool = Pool::new(threads);
+                let (now, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+                let got = jitter::with(seed, || {
+                    map(Some(&pool), 8, None, |i| {
+                        map(Some(&pool), 4, None, |j| {
+                            map(Some(&pool), 3, None, |k| {
+                                counted(&now, &most, || {
+                                    std::thread::sleep(std::time::Duration::from_micros(25 * (i as u64 + 1)));
+                                    leaf(i, j, k)
+                                })
+                            })
+                            .iter()
+                            .sum::<usize>()
+                        })
+                        .iter()
+                        .sum::<usize>()
+                    })
+                });
+                assert_eq!(got, want, "{threads} threads, seed {seed}");
+                let most = most.load(Ordering::SeqCst);
+                assert!(most <= threads, "{most} leaf pieces at once, {threads} threads, seed {seed}");
+                all_back(&pool);
+            }
+        }
+    }
+
+    #[test]
+    fn outer_pieces_in_flight_never_exceed_the_pool() {
+        // A slot lent by a caller inside an outer piece never starts another outer piece: the outer map took
+        // every free slot at its start, so a slot is free only once no outer piece is left to start. (Each
+        // nested map is a quick piece and a slow one, so its caller often lends while its helper works.)
+        for threads in [2, 3, 4, 6, 8] {
+            for seed in 1..=8 {
+                let pool = Pool::new(threads);
+                let (now, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+                let got = jitter::with(seed, || {
+                    map(Some(&pool), 60, None, |i| {
+                        counted(&now, &most, || {
+                            map(Some(&pool), 2, None, |j| {
+                                std::thread::sleep(std::time::Duration::from_micros(200 * j as u64));
+                                i * (j + 1)
+                            })
+                            .iter()
+                            .sum::<usize>()
+                        })
+                    })
+                });
+                assert_eq!(got, (0..60).map(|i| i * 3).collect::<Vec<_>>());
+                let most = most.load(Ordering::SeqCst);
+                assert!(most <= threads, "{most} outer pieces at once, {threads} threads, seed {seed}");
+                all_back(&pool);
+            }
+        }
+    }
+
+    #[test]
+    fn a_lender_is_first_in_line() {
+        let pool = Pool::new(2);
+        assert!(pool.take());
+        let back = Arc::new(AtomicBool::new(false));
+        let (p, b) = (pool.clone(), back.clone());
+        std::thread::spawn(move || {
+            p.take_back();
+            b.store(true, Ordering::SeqCst);
+        });
+        let t0 = std::time::Instant::now();
+        while pool.lent.lock().unwrap().0 != 1 {
+            assert!(t0.elapsed().as_secs() < 10, "the lender never waited");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        // The slot given back goes to the waiting lender, not to the pool.
+        pool.release();
+        while !back.load(Ordering::SeqCst) {
+            assert!(t0.elapsed().as_secs() < 10, "the lender never got the slot");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(pool.free.load(Ordering::SeqCst), 0);
+        assert_eq!(*pool.lent.lock().unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn a_panic_under_a_lent_slot_gives_every_slot_back() {
+        for threads in [2, 3, 4] {
+            for seed in 1..=4 {
+                let pool = Pool::new(threads);
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    jitter::with(seed, || {
+                        map(Some(&pool), 6, None, |i| {
+                            map(Some(&pool), 5, None, |j| {
+                                // The slow piece panics, mostly on a helper after its caller has lent its slot.
+                                if i == 3 && j == 0 {
+                                    std::thread::sleep(std::time::Duration::from_millis(2));
+                                    panic!("test panic");
+                                }
+                                i + j
+                            })
+                            .len()
+                        })
+                    })
+                }));
+                assert!(r.is_err());
+                all_back(&pool);
+            }
+        }
+    }
+
+    #[test]
+    fn a_refused_thread_under_nested_maps_is_no_loss() {
+        let leaf = |i: usize, j: usize, k: usize| i * 100 + j * 10 + k;
+        let want: Vec<usize> =
+            (0..12).map(|i| (0..5).map(|j| (0..3).map(|k| leaf(i, j, k)).sum::<usize>()).sum()).collect();
+        for allowed in [0, 1, 2] {
+            for seed in 1..=4 {
+                let _refuse = RefuseSpawns::after(allowed);
+                let pool = Pool::new(4);
+                let got = jitter::with(seed, || {
+                    map(Some(&pool), 12, None, |i| {
+                        map(Some(&pool), 5, None, |j| {
+                            map(Some(&pool), 3, None, |k| leaf(i, j, k)).iter().sum::<usize>()
+                        })
+                        .iter()
+                        .sum::<usize>()
+                    })
+                });
+                assert_eq!(got, want, "{allowed} threads allowed, seed {seed}");
+                all_back(&pool);
+            }
+        }
     }
 
     #[test]
