@@ -257,7 +257,7 @@ cargo fmt --all --check
 cargo deny check                                  # and python3 -I bench/check_dep_sources.py
 cargo build --profile wasm -p gpress-wasm --target wasm32-unknown-unknown   # needs: rustup target add wasm32-unknown-unknown
 cd crates/gpress-wasm/js && npm ci && npm run build && npm test        # the npm package into js/dist/ (with wasm-opt if on PATH)
-python3 -I bench/sizes.py check                   # the web module within 5% of its recorded size (bench/sizes.json)
+python3 -I bench/sizes.py check                   # the web module within 5% of its recorded size (bench/sizes.json); needs wasm-opt
 cd fuzz && cargo +nightly fuzz run expand -- -max_total_time=600      # needs cargo-fuzz; also inflate, pdf_optimize
 ```
 

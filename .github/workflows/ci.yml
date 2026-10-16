@@ -57,7 +57,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      # binaryen's wasm-opt: the package build runs it on the module when it is on PATH.
+      # binaryen's wasm-opt: the package build runs it on the module when it is on PATH, and the size check
+      # below fails without it (the module would not be the package's).
       - run: sudo apt-get update && sudo apt-get install -y binaryen
       - id: build
         working-directory: crates/gpress-wasm/js
