@@ -11,6 +11,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{Scope, ScopedJoinHandle};
 
+/// The most threads a pool runs, whatever it is asked for.
+pub const MAX_THREADS: usize = 64;
+
 /// The threads one job may use at the same time. The calling thread always works; the pool counts the
 /// others that may join it.
 #[derive(Debug)]
@@ -25,9 +28,9 @@ pub struct Pool {
 }
 
 impl Pool {
-    /// A pool for `threads` threads in all (at least 1: the caller).
+    /// A pool for `threads` threads in all (at least 1: the caller, at most [`MAX_THREADS`]).
     pub fn new(threads: usize) -> Arc<Pool> {
-        let threads = threads.max(1);
+        let threads = threads.clamp(1, MAX_THREADS);
         Arc::new(Pool {
             free: AtomicUsize::new(threads - 1),
             threads,
@@ -454,6 +457,14 @@ pub(crate) mod tests {
         // The same through the scope: a refused spawn returns None, and the scope still ends.
         let _refuse = RefuseSpawns::after(0);
         std::thread::scope(|s| assert!(spawn(s, || 1).is_none()));
+    }
+
+    #[test]
+    fn a_pool_never_has_more_than_max_threads() {
+        assert_eq!(Pool::new(usize::MAX).threads, MAX_THREADS);
+        assert_eq!(Pool::new(MAX_THREADS + 1).free.load(Ordering::SeqCst), MAX_THREADS - 1);
+        assert_eq!(Pool::new(0).threads, 1);
+        assert_eq!(Pool::new(5).threads, 5);
     }
 
     #[test]
