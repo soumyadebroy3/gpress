@@ -35,8 +35,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The archive format version this build writes and reads.
 pub const ARCHIVE_VERSION: u8 = pack::VERSION;
 
-/// Most worker threads a caller may ask for.
-pub const MAX_THREADS: usize = 64;
+/// Most worker threads a caller may ask for (a thread pool never runs more).
+pub const MAX_THREADS: usize = crate::par::MAX_THREADS;
 
 /// How hard to try, 0 to 100. 0 is the quick setting (still optimal-parsed Flate), 100 is everything the
 /// engine knows how to do. A percentage control maps straight onto this.
