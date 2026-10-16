@@ -49,7 +49,7 @@ if (process.argv[2] === "--sample") {
 } else {
   const { test } = await import("node:test");
   const assert = (await import("node:assert/strict")).default;
-  const { Gpress } = await import("../dist/gpress.js");
+  const { Gpress, GpressError } = await import("../dist/gpress.js");
   const self = fileURLToPath(import.meta.url);
 
   test("one compiled module makes independent instances", async () => {
@@ -63,9 +63,22 @@ if (process.argv[2] === "--sample") {
     assert.equal(r.outcome, "smaller");
     assert.deepEqual(b.optimize(pdf, { effort: 0 }).data, r.data);
     assert.deepEqual(fromBytes.optimize(pdf, { effort: 0 }).data, r.data);
-    // A dead instance (as after a trap) leaves the others working.
-    a.dead = new Error("dead");
-    assert.throws(() => a.optimize(pdf), /dead/);
+    // A real trap kills that instance only. Instance a's optimize export is replaced by one that hands the
+    // module a pointer past the end of its memory, so the module itself traps (an out-of-bounds read): the
+    // call throws GpressError INTERNAL, every later call on a throws that same error without calling the
+    // module again, and b, from the same Module, goes on giving the same bytes.
+    const real = a.ex.gpress_optimize;
+    let calls = 0;
+    a.ex = { ...a.ex, gpress_optimize: (_ptr, ...rest) => (calls++, real(0xfffffff0, ...rest)) };
+    let trap = null;
+    assert.throws(
+      () => a.optimize(pdf, { effort: 0 }),
+      (e) => ((trap = e), e instanceof GpressError && e.code === GpressError.INTERNAL && /the module trapped/.test(e.message)),
+    );
+    assert.equal(calls, 1);
+    assert.throws(() => a.optimize(pdf, { effort: 0 }), (e) => e === trap);
+    assert.throws(() => a.compress(pdf), (e) => e === trap);
+    assert.equal(calls, 1);
     assert.deepEqual(b.optimize(pdf, { effort: 0 }).data, r.data);
   });
 
