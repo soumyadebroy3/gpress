@@ -10,5 +10,8 @@
   "enabledPlugins": {
     "cheap-route@gpress-mods": true,
     "pr-review@gpress-mods": true
+  },
+  "attribution": {
+    "commit": ""
   }
 }
