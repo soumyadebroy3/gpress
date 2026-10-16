@@ -361,9 +361,10 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
             return None;
         }
     }
-    let mut data = s.data.clone();
+    // The stored bytes are read where they are, not copied: with no general filter they are the data.
+    let mut data: Cow<[u8]> = Cow::Borrowed(&s.data);
     for st in &stages[..k] {
-        data = decode_stage(st, &data, opt.max_stream).ok()?;
+        data = Cow::Owned(decode_stage(st, &data, opt.max_stream).ok()?);
     }
     let carried: Option<Dict> = if k > 0 {
         stages[k - 1].parms.clone().and_then(|mut p| {
@@ -442,7 +443,7 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
         with_flate.extend_from_slice(rest);
         let mut d = s.dict.clone();
         set_chain(&mut d, &with_flate);
-        let z = flate::deflate_zlib(jpeg.as_ref().unwrap_or(&data), &opt.flate);
+        let z = flate::deflate_zlib(jpeg.as_deref().unwrap_or(&data), &opt.flate);
         let again = opt.effort >= 100
             && jpeg.as_ref().is_some_and(|j| z.len() * 10 <= j.len() * 9 && j.len() * 10 <= data.len() * 9);
         // The first candidate is Flate over the JPEG with its new tables (when there is one), the second
@@ -463,7 +464,7 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
         let mut d = s.dict.clone();
         set_chain(&mut d, rest);
         best_len = data.len();
-        best = Some((d, data.clone()));
+        best = Some((d, data.to_vec()));
         best_retabled = false;
     }
     // Images: try storing the samples with a different (or no) PNG predictor. The fast path tries one,
