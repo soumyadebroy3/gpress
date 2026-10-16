@@ -4,6 +4,7 @@
 //! decoded (where they compress far better) and still give back the original file byte for byte.
 
 use super::bits::BitWriter;
+use super::inflate::first_block_symbols;
 use super::tables::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -744,7 +745,15 @@ pub fn find_params(data: &[u8], raw: &[u8]) -> Option<Params> {
         _ => &[9, 7, 8],
     };
     let body = &raw[2..raw.len() - 4];
+    // zlib ends every block but the last after exactly 2^(mem_level + 6) - 1 symbols (the `Tally` limit, at
+    // every level and strategy), so a first block that is neither stored nor the last leaves at most one
+    // memory level to try: none when it holds any other count (counted up to 2^15 - 1, memory level 9's).
+    // One that can't be read leaves them all.
+    let first = first_block_symbols(body, (1 << 15) - 1).ok().flatten();
     for &mem in &[8u8, 9, 7, 6, 5, 4, 3, 2, 1] {
+        if first.is_some_and(|n| n != (1 << (mem + 6)) - 1) {
+            continue;
+        }
         for &level in levels {
             for filtered in [false, true] {
                 if filtered && level < 4 {
@@ -857,5 +866,194 @@ mod tests {
             }
         }
         assert_eq!(tried, 64);
+    }
+
+    /// The search as it was before the first block's count cut it down: every memory level, in the same order.
+    fn unpruned(data: &[u8], raw: &[u8]) -> Option<Params> {
+        let wb = (raw[0] >> 4) + 8;
+        if raw.len() < 6 || raw[0] & 0x0f != 8 || raw[1] & 0x20 != 0 || !(9..=15).contains(&wb) {
+            return None;
+        }
+        let levels: &[u8] = match raw[1] >> 6 {
+            0 => &[1],
+            1 => &[2, 3, 4, 5],
+            2 => &[6],
+            _ => &[9, 7, 8],
+        };
+        for mem_level in [8u8, 9, 7, 6, 5, 4, 3, 2, 1] {
+            for &level in levels {
+                for filtered in [false, true] {
+                    let p = Params { level, window_bits: wb, mem_level, filtered };
+                    if !(filtered && level < 4) && rebuilds(data, p, &raw[2..raw.len() - 4]) {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Every setting of ours: levels 1 to 9, the filtered strategy from level 4 (as find_params tries them).
+    fn settings() -> impl Iterator<Item = (u8, bool)> {
+        (1u8..=9).flat_map(|level| [(level, false), (level, true)]).filter(|&(level, f)| !f || level >= 4)
+    }
+
+    /// Letters from a 20-letter alphabet: mostly literals and short matches, so a block never ends up
+    /// stored, and long enough for the first block not to be the last at `mem_level` and any level.
+    fn letters(mem_level: u8) -> Vec<u8> {
+        let mut s = 0x9e37_79b9_7f4a_7c15u64;
+        let len = (1usize << (mem_level + 6)) * 3;
+        (0..len)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                b'a' + (s % 20) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_first_block_that_is_not_the_last_holds_the_tally_limit() {
+        // What lets find_params try one memory level: at every level, strategy, window size and memory level,
+        // a first block that is neither stored nor the last holds exactly 2^(mem_level + 6) - 1 symbols.
+        let mut seen = 0;
+        for mem_level in 1u8..=9 {
+            let data = letters(mem_level);
+            for window_bits in 9u8..=15 {
+                for (level, filtered) in settings() {
+                    let p = Params { level, window_bits, mem_level, filtered };
+                    let z = deflate_like_zlib(&data, p);
+                    assert_eq!(first_block_symbols(&z, usize::MAX), Ok(Some((1 << (mem_level + 6)) - 1)), "{p:?}");
+                    seen += 1;
+                }
+            }
+        }
+        assert_eq!(seen, 9 * 7 * 15);
+    }
+
+    #[test]
+    fn the_cut_search_finds_what_the_full_search_finds() {
+        // Streams of ours at every level, strategy and memory level: the one memory level left to try is the
+        // right one, so the same parameters come out as from trying them all.
+        for mem_level in 1u8..=9 {
+            let data = letters(mem_level);
+            for (level, filtered) in settings() {
+                let p = Params { level, window_bits: 15, mem_level, filtered };
+                let z = zlib_stream(&data, p);
+                let found = find_params(&data, &z);
+                assert_eq!(found, unpruned(&data, &z), "{p:?}");
+                assert!(found.is_some_and(|q| q.mem_level == mem_level && zlib_stream(&data, q) == z), "{p:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_test_data_stream_gives_the_same_parameters() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+        let list = std::fs::read_to_string(dir.join("vectors.txt")).unwrap();
+        let (mut streams, mut found, mut cut) = (0, 0, 0);
+        for line in list.lines() {
+            let (z, raw) = line.split_once('\t').unwrap();
+            let zb = std::fs::read(dir.join(z)).unwrap();
+            let data = std::fs::read(dir.join(raw)).unwrap();
+            let u = super::super::zlib::unwrap(&zb, 1 << 24).unwrap();
+            assert_eq!(u.data, data, "{z}");
+            let whole = &zb[..zb.len() - u.trailing];
+            let p = find_params(&data, whole);
+            assert_eq!(p, unpruned(&data, whole), "{z}");
+            streams += 1;
+            found += p.is_some() as usize;
+            cut += first_block_symbols(&whole[2..], usize::MAX).unwrap().is_some() as usize;
+        }
+        // The default and filtered streams (and a few others) are rebuilt; 59 streams have a first block that
+        // is neither stored nor the last, so the cut is used.
+        assert_eq!((streams, found, cut), (240, 109, 59));
+    }
+
+    /// A raw Deflate stream made by hand: a block with fixed codes holding `lits` (the last one when `last`),
+    /// then, unless it is the last, an empty last block.
+    fn fixed_block(lits: &[u8], last: bool) -> Vec<u8> {
+        let lens = fixed_litlen_lengths();
+        let codes = super::super::huffman::canonical_codes(&lens);
+        let mut w = BitWriter::new();
+        w.put(2 | last as u32, 3);
+        for &b in lits {
+            w.put(codes[b as usize] as u32, lens[b as usize] as u32);
+        }
+        w.put(codes[256] as u32, lens[256] as u32);
+        if !last {
+            w.put(3, 3);
+            w.put(codes[256] as u32, lens[256] as u32);
+        }
+        w.finish()
+    }
+
+    /// The zlib stream (32K window, "default" level) around the raw Deflate stream `body` of `data`.
+    fn wrapped(body: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut z = vec![0x78, 0x9c];
+        z.extend_from_slice(body);
+        z.extend_from_slice(&super::super::zlib::adler32(data).to_be_bytes());
+        assert_eq!(super::super::zlib::unwrap(&z, 1 << 24).unwrap().data, data);
+        z
+    }
+
+    #[test]
+    fn first_blocks_made_by_hand() {
+        use super::super::inflate::InflateError;
+        let lits: Vec<u8> = (0..200u32).map(|i| (i * 7 % 251) as u8).collect();
+        // Not the last, with fixed codes: counted, up to one past `max`.
+        assert_eq!(first_block_symbols(&fixed_block(&lits, false), usize::MAX), Ok(Some(200)));
+        assert_eq!(first_block_symbols(&fixed_block(&lits, false), 50), Ok(Some(51)));
+        assert_eq!(first_block_symbols(&fixed_block(&[], false), usize::MAX), Ok(Some(0)));
+        // The last block, or a stored one, is not counted.
+        assert_eq!(first_block_symbols(&fixed_block(&lits, true), usize::MAX), Ok(None));
+        let stored = [0x00, 0x03, 0x00, 0xfc, 0xff, b'a', b'b', b'c', 0x03, 0x00];
+        assert_eq!(super::super::inflate(&stored, 100).unwrap().data, b"abc");
+        assert_eq!(first_block_symbols(&stored, usize::MAX), Ok(None));
+        // What can't be read is an error, as when inflating.
+        assert_eq!(first_block_symbols(&[], 10), Err(InflateError::Truncated));
+        assert_eq!(first_block_symbols(&[0x06], 10), Err(InflateError::BadBlockType));
+        assert_eq!(first_block_symbols(&fixed_block(&lits, false)[..20], usize::MAX), Err(InflateError::Truncated));
+        // A first match reaching before the start: length 3 (code 257, 7 bits 0000001), distance 1 (code 0).
+        let mut w = BitWriter::new();
+        w.put(2, 3);
+        w.put(0b1000000, 7);
+        w.put(0, 5);
+        assert_eq!(first_block_symbols(&w.finish(), 10), Err(InflateError::TooFarBack));
+
+        // A first block of 200 symbols: no memory level ends a block there, so nothing is tried.
+        let z = wrapped(&fixed_block(&lits, false), &lits);
+        assert_eq!(find_params(&lits, &z), None);
+        assert_eq!(unpruned(&lits, &z), None);
+        // 63 and 65535 symbols (2^6 - 1 and 2^16 - 1): out of the memory levels' range.
+        for n in [63usize, 65535] {
+            let lits: Vec<u8> = (0..n).map(|i| (i * 7 % 251) as u8).collect();
+            let z = wrapped(&fixed_block(&lits, false), &lits);
+            assert_eq!(find_params(&lits, &z), None);
+        }
+
+        // Ours, with a stored first block: random bytes in blocks of 127 symbols (memory level 1). The count
+        // can't be read, so every memory level is still tried, and memory level 1 is found.
+        let mut s = 7u64;
+        let random: Vec<u8> = (0..1000)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                (s >> 24) as u8
+            })
+            .collect();
+        let p = Params { level: 6, window_bits: 15, mem_level: 1, filtered: false };
+        let z = zlib_stream(&random, p);
+        assert_eq!(z[2] & 7, 0, "a stored first block, not the last");
+        assert_eq!(first_block_symbols(&z[2..], usize::MAX), Ok(None));
+        assert_eq!(find_params(&random, &z), Some(p));
+        // Ours, all in one last block.
+        let p = Params { level: 9, window_bits: 15, mem_level: 1, filtered: false };
+        let z = zlib_stream(b"one block, one block", p);
+        assert_eq!(first_block_symbols(&z[2..], usize::MAX), Ok(None));
+        assert_eq!(find_params(b"one block, one block", &z), unpruned(b"one block, one block", &z));
+        assert!(find_params(b"one block, one block", &z).is_some());
     }
 }
