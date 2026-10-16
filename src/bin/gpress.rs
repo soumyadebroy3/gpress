@@ -52,7 +52,7 @@ fn fail(e: &gpress::Error) -> ! {
 fn tool_needs(tool: &str) -> Option<gpress::Feature> {
     use gpress::Feature::{Archive, Fax, Jpeg};
     let needs: &[gpress::Feature] = match tool {
-        "repro" | "expand" | "cm-test" | "claim-archive" => &[Archive],
+        "repro" | "expand" | "cm-test" | "claim-archive" | "pack-batch" => &[Archive],
         "jpeg" | "jpeg-batch" | "jpeg-info" => &[Jpeg],
         "fax-decode" | "fax-encode" | "fax-scan" | "jbig2-encode" => &[Fax],
         "fax-model" => &[Fax, Archive],
@@ -646,4 +646,20 @@ fn describe_archive(name: &str, in_len: usize, c: &gpress::Compressed, secs: f64
         c.streams_decrypted,
         c.decoded_bytes
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use gpress::Feature;
+
+    /// A build without the archive refuses every tool that makes or reads archives up front, with code 10 (pack
+    /// and unpack get it from the library); a build with it runs them.
+    #[test]
+    fn the_archive_tools_need_the_archive() {
+        let needs = (!Feature::Archive.enabled()).then_some(Feature::Archive);
+        for tool in ["repro", "expand", "cm-test", "claim-archive", "pack-batch"] {
+            assert_eq!(super::tool_needs(tool), needs, "{tool}");
+        }
+        assert_eq!(super::tool_needs("optimize"), None);
+    }
 }
