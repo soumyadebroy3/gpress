@@ -7,6 +7,12 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels that pull request's run still in progress, since only its latest commit is
+# merged. Each push to main has a group of its own, so none of main's runs waits for or cancels another.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # A runner has two cores, so the checks are spread over jobs that run at the same time: the test suites by feature
 # set and by target, and the fuzzing by decoder. Every command and every test of the one job before is still run.
 jobs:
