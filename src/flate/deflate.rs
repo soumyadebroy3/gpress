@@ -187,8 +187,10 @@ pub fn deflate(data: &[u8], opt: &Options) -> Vec<u8> {
     let dbg = std::env::var_os("PDFE_DEBUG").is_some();
     let pool = opt.shared.as_ref().map(|s| &*s.pool);
     // Segments are optimised independently (in parallel when threads are free) and written in order, so the
-    // output is the same whatever the number of threads.
-    for group in bounds.chunks(SEGMENTS_AT_ONCE) {
+    // output is the same whatever the number of threads. A group has a segment per thread of the pool (up to
+    // SEGMENTS_AT_ONCE), so with one thread each plan is written before the next segment is optimised.
+    let at_once = pool.map_or(1, |p| p.threads()).clamp(1, SEGMENTS_AT_ONCE);
+    for group in bounds.chunks(at_once) {
         let plans = par::map(pool, group.len(), None, |k| {
             let (a, b) = group[k];
             // Out of time: this segment goes out stored, and the caller drops the whole output.

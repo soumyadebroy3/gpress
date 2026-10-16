@@ -98,6 +98,13 @@ impl Drop for Slot<'_> {
     }
 }
 
+impl Pool {
+    /// The threads of the pool in all (the caller included).
+    pub fn threads(&self) -> usize {
+        self.threads
+    }
+}
+
 /// `f(i)` for every `i` in `0..n`, results in index order. Indices are started in the order given by
 /// `order` (all of `0..n`, e.g. the biggest piece first); without a pool, or with nothing free in it, the
 /// calling thread does everything. Every free thread joins at the start; later, a pool slot released by
