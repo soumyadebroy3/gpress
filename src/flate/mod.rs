@@ -115,4 +115,30 @@ mod threads {
             }
         }
     }
+
+    #[test]
+    fn a_remembered_output_is_never_used_for_another_input() {
+        // Two inputs of the same length and the same 64-bit hash, so the same memo key. Each 8-byte word goes
+        // into the hash as h = ((h ^ word) * M) rotated left by 29: after a different first word, a second
+        // word with the right difference brings the hash back to the same state.
+        const M: u64 = 0x9E37_79B9_7F4A_7C15;
+        let step = |h: u64, w: u64| (h ^ w).wrapping_mul(M).rotate_left(29);
+        let word = |d: &[u8], k: usize| u64::from_le_bytes(d[8 * k..8 * k + 8].try_into().unwrap());
+        let a = b"BT /F1 12 Tf 72 712 Td [(Hello)-250(World)]TJ ET\n".repeat(300);
+        let mut b = a.clone();
+        b[..8].copy_from_slice(b"q 1 0 0 ");
+        let h0 = (a.len() as u64).wrapping_mul(M) ^ 0x2545_F491_4F6C_DD1D;
+        let second = word(&a, 1) ^ step(h0, word(&a, 0)) ^ step(h0, word(&b, 0));
+        b[8..16].copy_from_slice(&second.to_le_bytes());
+        assert!(a != b && crate::par::hash64(&a) == crate::par::hash64(&b), "the planted collision");
+        for t in [1, 2] {
+            let o = Options { shared: Some(deflate::Shared::new(t)), ..Options::quick() };
+            let za = deflate_zlib(&a, &o);
+            assert_eq!(zlib::unwrap(&za, a.len() + 1).unwrap().data, a);
+            // The output remembered for `a` fails the check, so `b` is encoded afresh.
+            let zb = deflate_zlib(&b, &o);
+            assert_eq!(zlib::unwrap(&zb, b.len() + 1).unwrap().data, b, "{t} threads");
+            assert!(zb == deflate_zlib(&b, &Options::quick()));
+        }
+    }
 }
