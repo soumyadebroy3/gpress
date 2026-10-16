@@ -15,17 +15,16 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     let mut h: [u32; 8] =
         [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
     // Whole blocks straight from the input (no copy of it); only the tail and the padding go through a buffer.
-    let mut blocks = data.chunks_exact(64);
-    for block in &mut blocks {
+    let (blocks, rest) = data.as_chunks::<64>();
+    for block in blocks {
         compress(&mut h, block);
     }
-    let rest = blocks.remainder();
     let mut tail = [0u8; 128];
     tail[..rest.len()].copy_from_slice(rest);
     tail[rest.len()] = 0x80;
     let end = if rest.len() < 56 { 64 } else { 128 };
     tail[end - 8..end].copy_from_slice(&(data.len() as u64).wrapping_mul(8).to_be_bytes());
-    for block in tail[..end].chunks_exact(64) {
+    for block in tail[..end].as_chunks::<64>().0 {
         compress(&mut h, block);
     }
     let mut out = [0u8; 32];
@@ -35,10 +34,10 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     out
 }
 
-fn compress(h: &mut [u32; 8], block: &[u8]) {
+fn compress(h: &mut [u32; 8], block: &[u8; 64]) {
     let mut w = [0u32; 64];
-    for (i, c) in block.chunks_exact(4).enumerate() {
-        w[i] = u32::from_be_bytes([c[0], c[1], c[2], c[3]]);
+    for (i, c) in block.as_chunks::<4>().0.iter().enumerate() {
+        w[i] = u32::from_be_bytes(*c);
     }
     for i in 16..64 {
         let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
