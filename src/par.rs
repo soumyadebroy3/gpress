@@ -430,6 +430,11 @@ impl<K: std::hash::Hash + Eq + Clone, V: Clone> Memo<K, V> {
         }
     }
 
+    /// The most its kept values may weigh in all (`usize::MAX`: no bound).
+    pub fn budget(&self) -> usize {
+        self.budget
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Kept<K, V>> {
         self.kept.lock().unwrap_or_else(|e| e.into_inner())
     }
