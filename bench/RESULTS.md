@@ -479,10 +479,11 @@ the distance to 50 ms. It fails only above 150 ms at effort 0 and 300 ms at the 
 machine or one with fewer cores can take two or three times as long; `GPRESS_STARTUP_LIMIT_MS` raises the
 limits on such a machine (CI sets nothing).
 
-**In CI** (GitHub's two-core runner, the WebAssembly package job) with this change: a median of 26.3 ms at
-effort 0 (compile 3.8, instantiate 0.3, first call 22.2; the 7 processes took 24 to 30 ms), so the target is
-met with 24 ms to spare, and 136.9 ms at the default effort (126 to 146 ms). Before the fast tier (#1), the
-same test took a median of 133 ms at effort 0 there.
+**In CI** (GitHub's two-core runner, the WebAssembly package job), two runs with this change: medians of 26.3
+and 32.3 ms at effort 0 (compile 3.8 and 4.9, instantiate 0.3, first call 22.2 and 27.1; single processes 24
+to 45 ms), so the target is met with 18 to 24 ms to spare, and 136.9 and 180.9 ms at the default effort (126
+to 185 ms). Runners differ from one run to the next by about that much. Before the fast tier (#1), the same
+test took a median of 133 ms at effort 0 there.
 
 On this machine, at d093ab4 (the rows of the table above; one core: core 3 alone, 21 processes, the other
 cores busy with other work; two cores: cores 2 and 3, both idle, 11 processes; `--quiet` kept a round only
@@ -514,11 +515,11 @@ Where the time goes, the package's module:
   memory, no start function; every table of the engine is made when a call needs it.
 - **The first call.** It compiles the functions it reaches with V8's quick compiler, Liftoff, and runs in
   that code while the optimizing compiler (TurboFan) works on the hot functions in the background; a function
-  switches to optimized code only when it is next called. At effort 0 the fast tier's work is small, so the
-  call is mostly that compiling: 27 to 34 ms here (22 in CI), against 5 to 13 ms for the same call once
-  compiled. At effort 100 the call is longer and TurboFan has more to do; with one core it competes with the
-  work: the package's first call at effort 100 takes 304 ms on one core against 178 ms on two, and "s", with
-  less code to compile, 165 and 129 ms.
+  switches to optimized code only when it is next called. At effort 0 the fast tier's work is small, so most
+  of the call is the cost of new code: 27 to 34 ms here (22 and 27 in CI), against 5 to 13 ms for the same
+  call once compiled. At effort 100 the call is longer and TurboFan has more to do; with one core it competes
+  with the work: the package's first call at effort 100 takes 304 ms on one core against 178 ms on two, and
+  "s", with less code to compile, 165 and 129 ms.
 
 Tables sized to the input: at effort 0 the fast tier's hash tables and window are sized to the stream
 (`table_bits` and `window_slots` in `src/flate/fast.rs`). At efforts 20 and above the match finder still
@@ -541,9 +542,10 @@ The test PDF holds a single Flate stream. Real one-page PDFs of 3 to 6 KB that e
 | `issue7492.pdf` | 4,619 | 2,191 bytes | 3,878 | **43.9** | 8.2 | **39.2** | 11.3 |
 | `issue5256.pdf` | 6,136 | 4,244 bytes | 5,265 | **43.7** | 7.5 | **42.0** | 11.5 |
 
-The target, at effort 0 on the test PDF, is met in CI (26.3 ms), on two idle cores here (34.8 ms) and on one
-core here (43.1 ms, and 48.5 in the busier run of the table above; single processes took up to 68 ms). The
-default effort does not reach 50 ms, and is not meant to: the native tool itself takes 54 to 66 ms there.
+The target, at effort 0 on the test PDF, is met in CI (26.3 and 32.3 ms), on two idle cores here (34.8 ms)
+and on one core here (43.1 ms, and 48.5 in the busier run of the table above; single processes took up to 68
+ms). The default effort does not reach 50 ms, and is not meant to: the native tool itself takes 54 to 66 ms
+there.
 
 ## Security (hostile input)
 
