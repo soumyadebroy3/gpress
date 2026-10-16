@@ -17,7 +17,7 @@ gpress reads files that may be hostile. These are the rules the code is held to,
 | --- | --- | --- |
 | No panic crosses the library boundary | Every public call runs inside `catch_unwind`; a panic becomes `Error::Internal` with a message that names no source path, and the command-line tool and the C harness exit with that code (4), so the security suite and the fuzz targets count a caught panic as the bug it is, never as a refusal. The C layer adds its own guard. WebAssembly is built with `panic = "abort"`, where nothing unwinds: a bug traps the module, and the TypeScript wrapper turns the trap into `GpressError` code 4 and marks the instance dead. | `src/api.rs`, `crates/gpress-c`, `crates/gpress-wasm` |
 | Every error has a stable code | `Error::code()`: 1 too large, 2 damaged, 3 unsupported version, 4 internal, 5 invalid options or argument, 6 time budget, 7 declared length over the limit, 8 needs the existing library, 9 declared decoded total over the limit. The C header and the TypeScript wrapper carry the same numbers. | `src/api.rs`, `crates/gpress-c/include/gpress.h`, `crates/gpress-wasm/js/gpress.ts` |
-| Bounded memory | `Options::max_input` is checked before anything is read; `max_stream` and `max_stream_archive` cap decoded streams; `max_decoded` caps what the parts of one archive may claim in all, on both sides: compress stores streams past it as they are and declares the total in the header, expand refuses an archive declaring more before anything is decoded and holds every part to what the header declared (2 GiB per part either way), with `max_len` (1 GiB by default, 16 GiB the format's limit) doing the same for the restored length. Memory while expanding is then about `max_len` + (`max_len` + `max_decoded`) for the model's history + twice the largest part + the model's tables (README, "Options"); at most 4 MiB is reserved up front, the rest grows with what is actually decoded. Nothing a PDF claims (object counts, /Size, image sizes, predictor parameters) sizes memory on its own. | `src/api.rs`, `src/pack/mod.rs`, `src/pdf/` |
+| Bounded memory | `Options::max_input` is checked before anything is read; `max_stream` and `max_stream_archive` cap decoded streams; `max_decoded` caps what the parts of one archive may claim in all, on both sides: compress stores streams past it as they are and declares the total in the header, expand refuses an archive declaring more before anything is decoded and holds every part to what the header declared (2 GiB per part either way), with `max_len` (1 GiB by default, 16 GiB the format's limit) doing the same for the restored length. Memory while expanding is then about `max_len` + (`max_len` + `max_decoded`) for the model's history + twice the largest part + the model's tables (README, "Options"); at most 4 MiB is reserved up front, the rest grows with what is actually decoded. Nothing a PDF claims (object counts, /Size, image sizes, predictor parameters) sizes memory on its own. What threads add to the normal-PDF writer's memory is below the table ("Memory with threads"). | `src/api.rs`, `src/pack/mod.rs`, `src/pdf/` |
 | Bounded time | Decoding stops when the arithmetic decoder reads past its input or a part restores nothing; the fax work per byte follows the declared length and the model's work the declared length and decoded total; the quick settings work within a budget proportional to the file; `Options::time_budget` stops optimize, compress and expand with `Error::TimeBudget` and no output. | `src/pack/mod.rs`, `src/fax/part.rs`, `src/pdf/rewrite.rs`, `src/clock.rs` |
 | A wrong file is never returned | Archive: length and a 128-bit SHA-256 prefix of the restored bytes are checked against the header, and every archive is expanded and compared before it is returned. Normal PDF: the output is re-read and every reachable object compared with the input before it is returned; when in doubt the input comes back untouched. | `src/pack/mod.rs` (`unpack_with`, `pack_pass`), `src/pdf/rewrite.rs` (`self_check`, `gate`) |
 | Strict parsing | The Flate decoder accepts exactly what zlib accepts, nothing damaged is silently repaired; the PDF parser rejects ambiguous syntax; the JPEG, CCITT and JBIG2 codecs read back and compare before anything they wrote is used. | `src/flate/inflate.rs`, `src/pdf/parse.rs`, `src/jpeg/`, `src/fax/` |
@@ -27,6 +27,35 @@ gpress reads files that may be hostile. These are the rules the code is held to,
 | 32-bit targets | Sizes are `u64` in the format and clamped, never wrapped, in the WebAssembly module; the TypeScript wrapper refuses inputs of 2 GiB and more before they reach it. | `crates/gpress-wasm` |
 | Encrypted and signed files | Files that need a password, signed or certified files, PDF/A and PDF/X are left untouched by the normal-PDF writer (`respect_conformance` governs the conformance ones; files the empty password opens are rewritten with their encryption kept exactly). | `src/pdf/rewrite.rs` (`gate`), `src/pdf/crypt.rs` |
 | Licences and advisories | Our own code plus libraries under MIT, Apache-2.0, BSD, ISC, Zlib, Unicode or MPL-2.0 only; `deny.toml` holds the rule and `cargo deny check` (licences, advisories, bans, sources) runs in CI, for every feature and target; `bench/check_dep_sources.py` refuses any dependency that is not from crates.io, since `cargo deny` skips crates marked `publish = false`. | `deny.toml`, `bench/check_dep_sources.py`, `.github/workflows/ci.yml` |
+
+## Memory with threads
+
+With T threads (at most 64), the normal-PDF writer needs at most this for one file:
+
+    Peak(T) <= Peak(1) + (T - 1) x (J + E) + T x 2 x RANK_TOGETHER + store_budget
+
+- Peak(1): what one thread needs: the input, the object table and the output, and in the self-check the
+  output's object table and the largest stream it compares, one at a time once the others are done (to 1 GiB a
+  filter stage).
+- J: the most one thread holds besides its encoder, in a stream job or in the self-check: a stream as stored
+  and up to three decoded copies of it (its content, and its new data decoded with and without its predictor;
+  `self_check` says what a comparison holds), each at most `max_stream` in a job and 16 MiB in the self-check
+  on the pool; for an image whose predictor is chosen again (one that decodes to at most 48 MiB), its samples
+  and one candidate's input as well.
+- E: one encoder's working set at the effort, about 42 MB at effort 100 (measured). The output an encode is
+  making for the store, at most one per thread, is part of it.
+- RANK_TOGETHER, 8 MiB: an image's predictor candidates are ranked side by side only up to this size, and
+  one after another above it.
+- `store_budget`: 2 MiB by default, the 256 bytes each kept output counts included.
+
+No more stream jobs run at once than there are threads. The stream map takes every free thread when it
+starts, so a thread comes free, or is lent by a job waiting for its helpers, only once no stream job is left
+to start: lending adds no term. (`src/par.rs` `map`, `src/pdf/rewrite.rs`; the test
+`jobs_in_flight_never_exceed_threads` counts the jobs at once.)
+
+The self-check runs on the same threads once the stream jobs are done, and their data, the store and the
+rankings are gone by then. On the pool each decoded copy is at most 16 MiB (`CHECK_ON_POOL`); a stream that
+needs more is compared afterwards, one at a time, which Peak(1) counts.
 
 ## How it is checked
 
