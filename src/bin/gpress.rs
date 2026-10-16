@@ -6,9 +6,9 @@
 //!   gpress unpack IN OUT [options]     the original from an archive; a damaged archive is an error
 //!
 //! Options (the library's `Options`, the same defaults): --effort N (0 fast .. 100 smallest, default 100;
-//! --quick = 0), --threads N (0: every core the machine offers, at most 64), --max-input BYTES, --max-stream BYTES
-//! (normal PDF), --max-stream-archive BYTES, --max-decoded BYTES (the archive's decoded-bytes budget, for pack
-//! and unpack), --max-len BYTES (unpack: a file declaring more is refused),
+//! --quick = 0), --threads N (0: every core the machine offers, at most 8; at most 64), --max-input BYTES,
+//! --max-stream BYTES (normal PDF), --max-stream-archive BYTES, --max-decoded BYTES (the archive's decoded-bytes
+//! budget, for pack and unpack), --max-len BYTES (unpack: a file declaring more is refused),
 //! --objects-per-stream N, --time-budget MS (give up after that long), --ignore-conformance,
 //! --no-flate-over-jpeg, --no-jpeg-tables, --no-jbig2, --keep-encrypted (normal PDF), --no-decrypt
 //! (archive), --no-existing. The output never depends on the thread count or the time budget: a budget that
@@ -50,7 +50,7 @@ usage: gpress optimize IN OUT [options]   a smaller PDF that any reader opens (o
        gpress pack IN OUT [options]       the gpress archive of IN (any file)
        gpress unpack IN OUT [options]     the original from an archive (a damaged archive is an error)
 
-options: --effort N (0 fast .. 100 smallest, default 100; --quick = 0)   --threads N (0: every core, at most 64)
+options: --effort N (0 fast .. 100 smallest, default 100; --quick = 0)   --threads N (0: up to 8 cores; max 64)
          --max-input BYTES   --max-stream BYTES (normal PDF)   --max-stream-archive BYTES   --max-decoded BYTES (archive,
          pack and unpack)   --max-len BYTES (unpack)   --objects-per-stream N   --time-budget MS   --ignore-conformance
          --no-flate-over-jpeg   --no-jpeg-tables   --no-jbig2   --keep-encrypted (normal PDF)   --no-decrypt (archive)

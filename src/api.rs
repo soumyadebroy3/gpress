@@ -17,10 +17,17 @@
 //! engine decides from sizes only, never from time. A budget that runs out gives [`Error::TimeBudget`] and no
 //! output, in all three operations.
 //!
-//! Memory on hostile input follows the options, never what a file claims: `max_input` for the input,
-//! `max_stream` and `max_stream_archive` per decoded stream, and for the archive `max_decoded` (what the
-//! parts of one archive may claim in all, declared in its header and refused up front when over the
-//! caller's limit) with `max_len` (the restored length, likewise).
+//! Memory on hostile input follows the options rather than what a file claims: `max_input` for the input,
+//! `max_stream` for each filter stage the rewrite decodes from a stream it may re-encode (a stream with no
+//! filter we decode, an image codec's say, is held at its stored size, within `max_input`),
+//! `max_stream_archive` for each Flate stream compress decodes, and for the archive `max_decoded` (what the
+//! parts of one archive may claim in all, declared in its header and refused up front when over the caller's
+//! limit) with `max_len` (the restored length, likewise). Not yet bounded by an option: in optimize, object
+//! streams are decoded to at most 256 MiB a stage each whatever `max_stream` is, and kept while the file is
+//! read, so the peak grows with their number; cross-reference streams are decoded as far as the file's size
+//! allows, and the PDF/A check reads metadata to 16 MiB. In optimize, and in compress's planning, up to
+//! `threads` streams are decoded at once, each with its own copies, so the peak grows with `threads`; expand
+//! runs on one thread, and compress's coding on one with its restore check beside it.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
@@ -73,9 +80,10 @@ impl Default for Effort {
 pub struct Options {
     /// Effort for both outputs, 0 to 100 (see [`Effort`]).
     pub effort: Effort,
-    /// Worker threads for independent work: 0 = every core the machine offers, up to [`MAX_THREADS`]; else at
-    /// most [`MAX_THREADS`]. Output is identical whatever the count; this only changes speed. A thread the
-    /// system refuses is no loss: the calling thread does the work.
+    /// Worker threads for independent work: 0 = every core the machine offers, at most 8 for now (each thread
+    /// holds a stream of its own, so memory grows with them); else at most [`MAX_THREADS`]. Output is identical
+    /// whatever the count; this only changes speed. A thread the system refuses is no loss: the calling thread
+    /// does the work.
     pub threads: usize,
     /// Largest input accepted, in bytes. Inputs over this return [`Error::TooLarge`] at once.
     pub max_input: usize,
