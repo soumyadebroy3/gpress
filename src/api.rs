@@ -43,8 +43,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The archive format version this build writes and reads.
 pub const ARCHIVE_VERSION: u8 = pack::VERSION;
 
-/// Most worker threads a caller may ask for.
-pub const MAX_THREADS: usize = 64;
+/// Most worker threads a caller may ask for (a thread pool never runs more).
+pub const MAX_THREADS: usize = crate::par::MAX_THREADS;
 
 /// How hard to try, 0 to 100. 0 is the fast path: our fast Flate encoder (a near-optimal parse for page
 /// content and fonts, one pass of it for a stream over 4 MiB, a lazy one for images), image predictors
