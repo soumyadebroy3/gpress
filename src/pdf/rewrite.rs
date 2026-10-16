@@ -14,6 +14,7 @@ use super::xref::{self, Doc, Entry};
 use crate::clock::{self, Deadline};
 use crate::flate;
 use crate::par;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 #[derive(Clone, Debug)]
@@ -507,17 +508,18 @@ fn reencode_xmp(s: &Stream, opt: &Options) -> Option<Reencoded> {
 
 /// An image's geometry and its samples, whatever predictor they are stored with now; None when it is not an
 /// image we can work on (unknown geometry, a predictor that doesn't fit it, under 1 KiB, not whole rows).
-fn samples(
+fn samples<'a>(
     s: &Stream,
-    data: &[u8],
+    data: &'a [u8],
     carried: Option<&Dict>,
     resolve: &dyn Fn(&Obj) -> Option<Obj>,
-) -> Option<(images::Geometry, Vec<u8>)> {
+) -> Option<(images::Geometry, Cow<'a, [u8]>)> {
     let g = images::geometry(&s.dict, resolve)?;
     let (row, bpp) = (g.row(), g.bpp());
-    let px = match carried {
-        None => data.to_vec(),
-        Some(p) => {
+    // Without a predictor the samples are the decoded data itself: it is not copied.
+    let px: Cow<[u8]> = match carried {
+        None => Cow::Borrowed(data),
+        Some(p) => Cow::Owned({
             let pred = p.get(b"Predictor").and_then(|x| x.as_int()).unwrap_or(1);
             let pc = p.get(b"Colors").and_then(|x| x.as_int()).unwrap_or(1) as usize;
             let pb = p.get(b"BitsPerComponent").and_then(|x| x.as_int()).unwrap_or(8) as usize;
@@ -532,7 +534,7 @@ fn samples(
             } else {
                 return None;
             }
-        }
+        }),
     };
     if px.is_empty() || px.len() % row != 0 || px.len() < 1024 {
         return None;
@@ -567,7 +569,7 @@ fn repredict_fast(
     let nrows = px.len() / row;
     let bands = predictor_sample(nrows, row, 0).unwrap_or_else(|| vec![(0, nrows)]);
     let (parms, bytes) = if let Some(how) = images::estimate_choice(&px, row, bpp, g.bpc, &bands) {
-        (Some(png_parms(&g)), images::png_filter(&px, row, bpp, how))
+        (Some(png_parms(&g)), Cow::Owned(images::png_filter(&px, row, bpp, how)))
     } else if carried.is_some() {
         (None, px)
     } else {
@@ -608,7 +610,7 @@ fn repredict(
         d
     };
     let dict_len = |parms: &Option<Dict>| to_bytes(&Obj::Dict(dict_with(parms))).len();
-    let mut best: Option<(u64, Option<Dict>, Vec<u8>)> = None;
+    let mut best: Option<(u64, Option<Dict>, Cow<[u8]>)> = None;
     for how in [
         None,
         Some(images::Choice::MinSum),
@@ -617,8 +619,8 @@ fn repredict(
         Some(images::Choice::Fixed(4)),
     ] {
         let (parms, bytes, stride) = match how {
-            None => (None, px.clone(), row),
-            Some(how) => (Some(png_parms(&g)), images::png_filter(&px, row, bpp, how), row + 1),
+            None => (None, Cow::Borrowed(&px[..]), row),
+            Some(how) => (Some(png_parms(&g)), Cow::Owned(images::png_filter(&px, row, bpp, how)), row + 1),
         };
         let data_len = match &rows {
             None => flate::deflate_zlib(&bytes, &quick).len(),
