@@ -1383,10 +1383,14 @@ fn self_check(
         }
         return Err("self-check: different objects reachable".into());
     }
-    // Objects are compared on the pool (the biggest streams first), each stream decoded to at most
-    // `CHECK_ON_POOL` bytes there; a stream that needs more is compared afterwards, one at a time, so the check
-    // holds at most two such copies per thread beside two of the largest stream. The first difference in object
-    // order is the one reported, whatever the number of threads.
+    // Objects are compared on the pool (the biggest stored streams first), each filter stage decoding to at
+    // most `CHECK_ON_POOL` bytes there; a stream that needs more is compared afterwards, one at a time, to 1 GiB
+    // a stage. A comparison holds a clone of the stream's stored bytes, whole whatever its filters (and that is
+    // its content when its first filter is not one we decode), and up to three decoded copies: the input's
+    // content, and the output's decode with and without its predictor, whose two row buffers add up to two more
+    // for a one-row image. On the pool each decoded copy is at most `CHECK_ON_POOL`; a fax image written as
+    // JBIG2 has both images parsed, within the fax limits but for its trailing end-of-line codes. The first
+    // difference in object order is the one reported, whatever the number of threads.
     let all: Vec<(&u32, &(u16, Obj))> = objs.iter().collect();
     let mut order: Vec<usize> = (0..all.len()).collect();
     order.sort_by_key(|&k| (std::cmp::Reverse(if let Obj::Stream(s) = &all[k].1 .1 { s.data.len() } else { 0 }), k));
