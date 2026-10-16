@@ -262,4 +262,21 @@ mod threads {
         assert!(deflate_zlib(small, &o) == deflate_zlib(small, &o));
         assert_eq!(none.stats(), deflate::StoreStats::default());
     }
+
+    #[test]
+    fn without_the_store_nothing_is_kept_and_segments_still_count() {
+        // Three segments of zeros: the third is like the second (the first has no history).
+        let opt = Options { segment: 40_000, ..Options::quick() };
+        let data = vec![0u8; 3 * 40_000];
+        let store = Shared::with_store(Pool::new(2), 1 << 20);
+        let sibling = store.without_store();
+        assert!(std::sync::Arc::ptr_eq(&sibling.pool, &store.pool));
+        let o = Options { shared: Some(sibling.clone()), ..opt.clone() };
+        assert!(deflate_zlib(&data, &o) == deflate_zlib(&data, &opt));
+        let small = b"q 1 0 0 1 72 720 cm /Im1 Do Q\n".repeat(30);
+        assert!(deflate_zlib(&small, &o) == deflate_zlib(&small, &o));
+        let st = store.stats();
+        assert_eq!((st.hits, st.computed, st.kept, st.reused_segments), (0, 0, 0, 1));
+        assert_eq!(sibling.stats(), st);
+    }
 }

@@ -150,8 +150,9 @@ pub struct Shared {
     memo: Option<Memo<MemoKey, Arc<Done>>>,
     /// The encoding time the remembered outputs saved, in nanoseconds (for the debug figures).
     saved: AtomicU64,
-    /// Segments written from the plans of an earlier one like them (for the debug figures).
-    reused_segments: AtomicUsize,
+    /// Segments written from the plans of an earlier one like them (for the debug figures); shared with the
+    /// `without_store` of this one.
+    reused_segments: Arc<AtomicUsize>,
 }
 
 /// What an encoded input is remembered by: the hash and length of the data and the settings that matter.
@@ -199,7 +200,18 @@ impl Shared {
     }
 
     fn with_memo(pool: Arc<Pool>, memo: Option<Memo<MemoKey, Arc<Done>>>) -> Arc<Shared> {
-        Arc::new(Shared { pool, memo, saved: AtomicU64::new(0), reused_segments: AtomicUsize::new(0) })
+        Arc::new(Shared { pool, memo, saved: AtomicU64::new(0), reused_segments: Arc::default() })
+    }
+
+    /// Encodes on the same pool that remember nothing (candidates ranked by their size alone, say); the
+    /// segments they plan once are counted in this one's figures.
+    pub fn without_store(&self) -> Arc<Shared> {
+        Arc::new(Shared {
+            pool: self.pool.clone(),
+            memo: None,
+            saved: AtomicU64::new(0),
+            reused_segments: self.reused_segments.clone(),
+        })
     }
 
     /// What the store of outputs has done and holds (zero without one), and how many segments were not

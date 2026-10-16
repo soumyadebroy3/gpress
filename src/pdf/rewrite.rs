@@ -708,10 +708,7 @@ fn repredict(
     // On the fast path the candidates are ranked with the level effort 0 gives images, else with the quick
     // settings.
     let rank = flate::Options { fast: if opt.flate.fast > 0 { image_level(0) } else { 0 }, ..flate::Options::quick() };
-    let quick = flate::Options {
-        shared: opt.flate.shared.as_ref().map(|sh| flate::deflate::Shared::with_pool(sh.pool.clone(), false)),
-        ..rank
-    };
+    let quick = flate::Options { shared: opt.flate.shared.as_ref().map(|sh| sh.without_store()), ..rank };
     let nrows = px.len() / row;
     let rows = predictor_sample(nrows, row, opt.effort);
     let sampled = rows.as_ref().map_or(nrows, |r| r.iter().map(|&(a, b)| b - a).sum());
@@ -1287,12 +1284,25 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     if opt.deadline.passed() {
         return Err(TIMED_OUT.into());
     }
-    if dbg && unique.len() < streams.len() {
-        eprintln!("{} streams identical to an earlier one, encoded once", streams.len() - unique.len());
+    if dbg {
+        let st = store.stats();
+        eprintln!(
+            "plan: {} streams, {} jobs ({} identical to an earlier one, {sharing} sharing their input); store: \
+             budget {}, peak {} bytes, {} kept, {} hits, {} computed, about {:.3} s saved; segments planned once: {}",
+            streams.len(),
+            unique.len(),
+            streams.len() - unique.len(),
+            opt.store_budget,
+            st.peak,
+            st.kept,
+            st.hits,
+            st.computed,
+            st.saved.as_secs_f64(),
+            st.reused_segments
+        );
     }
-    if dbg && sharing > 0 {
-        eprintln!("{sharing} streams encoded have the encoder input of another (under another dictionary)");
-    }
+    // The outputs in the store are not needed any more.
+    drop(store);
     let slot: HashMap<usize, usize> = unique.iter().enumerate().map(|(u, &i)| (i, u)).collect();
     // Each result is moved out at the last stream that uses it (identical streams share one), so it is not
     // held twice.
