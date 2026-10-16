@@ -29,6 +29,7 @@
 //! than the bytes the limits count (an array of small integers about 35 times its bytes). In optimize, and in compress's planning, up to
 //! `threads` streams are decoded at once, each with its own copies, so the peak grows with `threads`; expand
 //! runs on one thread, and compress's coding on one with its restore check beside it.
+//! The encoded outputs optimize keeps for a file are bounded by `store_budget`.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
@@ -45,6 +46,9 @@ pub const ARCHIVE_VERSION: u8 = pack::VERSION;
 
 /// Most worker threads a caller may ask for (a thread pool never runs more).
 pub const MAX_THREADS: usize = crate::par::MAX_THREADS;
+
+/// The largest `store_budget` a caller may ask for (a store never keeps more).
+pub const MAX_STORE_BUDGET: usize = crate::flate::deflate::MAX_STORE_BUDGET;
 
 /// How hard to try, 0 to 100. 0 is the fast path: our fast Flate encoder (a near-optimal parse for page
 /// content and fonts, one pass of it for a stream over 4 MiB, a lazy one for images), image predictors
@@ -86,6 +90,10 @@ pub struct Options {
     /// whatever the count; this only changes speed. A thread the system refuses is no loss: the calling thread
     /// does the work.
     pub threads: usize,
+    /// Normal PDF: bytes of encoded outputs one file keeps, so that an input another stream or step also
+    /// encodes is encoded once (at most [`MAX_STORE_BUDGET`]). The oldest go first; 0 keeps none. Never
+    /// changes the output. Nothing is kept from one call to the next.
+    pub store_budget: usize,
     /// Largest input accepted, in bytes. Inputs over this return [`Error::TooLarge`] at once.
     pub max_input: usize,
     /// Normal PDF: largest decoded stream re-encoded, in bytes. A stream that decodes to more is kept as it is.
@@ -150,6 +158,7 @@ impl Default for Options {
         Options {
             effort: Effort::MAX,
             threads: 0,
+            store_budget: 2 << 20,
             max_input: 1 << 30,
             max_stream: 64 << 20,
             max_stream_archive: 256 << 20,
@@ -178,6 +187,10 @@ impl Options {
     }
     pub fn threads(mut self, n: usize) -> Options {
         self.threads = n;
+        self
+    }
+    pub fn store_budget(mut self, bytes: usize) -> Options {
+        self.store_budget = bytes;
         self
     }
     pub fn max_input(mut self, bytes: usize) -> Options {
@@ -242,6 +255,12 @@ impl Options {
         if self.threads > MAX_THREADS {
             return Err(Error::InvalidOptions(format!("threads is {}, more than {MAX_THREADS}", self.threads)));
         }
+        if self.store_budget > MAX_STORE_BUDGET {
+            return Err(Error::InvalidOptions(format!(
+                "store_budget is {}, more than {MAX_STORE_BUDGET}",
+                self.store_budget
+            )));
+        }
         if self.time_budget == Some(Duration::ZERO) {
             return Err(Error::InvalidOptions("a time budget of zero would stop at once".into()));
         }
@@ -283,6 +302,7 @@ impl Options {
             max_stream: self.max_stream,
             effort: self.effort.level(),
             threads: self.threads,
+            store_budget: self.store_budget,
             respect_conformance: self.respect_conformance,
             flate_over_jpeg: self.flate_over_jpeg,
             jbig2: self.jbig2,
@@ -557,6 +577,7 @@ mod tests {
     fn options_outside_the_engine_are_refused_with_a_code() {
         let bad = [
             Options::new().threads(MAX_THREADS + 1),
+            Options::new().store_budget(MAX_STORE_BUDGET + 1),
             Options::new().time_budget(Some(Duration::ZERO)),
             Options::new().max_input(0),
             Options::new().objects_per_stream(0),
@@ -638,6 +659,7 @@ mod tests {
         let opt = Options::new()
             .effort(40)
             .threads(3)
+            .store_budget(4096)
             .max_stream(1000)
             .max_stream_archive(2000)
             .max_decoded(2500)
@@ -652,7 +674,7 @@ mod tests {
             .use_existing_libraries(false)
             .time_budget(Some(Duration::from_secs(9)));
         let r = opt.rewrite();
-        assert_eq!((r.effort, r.threads, r.max_stream, r.objstm_size), (40, 3, 1000, 7));
+        assert_eq!((r.effort, r.threads, r.store_budget, r.max_stream, r.objstm_size), (40, 3, 4096, 1000, 7));
         assert!(!r.respect_conformance && !r.flate_over_jpeg && !r.jpeg_tables && !r.jbig2 && !r.rewrite_encrypted);
         assert!(r.deadline.is_set() && r.flate.deadline == Deadline::NONE, "the pool sets the Flate deadline");
         let p = opt.pack();

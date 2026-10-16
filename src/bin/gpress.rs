@@ -10,9 +10,9 @@
 //! --max-stream BYTES (normal PDF), --max-stream-archive BYTES, --max-decoded BYTES (the archive's decoded-bytes
 //! budget, for pack and unpack), --max-len BYTES (unpack: a file declaring more is refused),
 //! --objects-per-stream N, --time-budget MS (give up after that long), --ignore-conformance,
-//! --no-flate-over-jpeg, --no-jpeg-tables, --no-jbig2, --keep-encrypted (normal PDF), --no-decrypt
-//! (archive), --no-existing. The output never depends on the thread count or the time budget: a budget that
-//! runs out gives an error and no file.
+//! --no-flate-over-jpeg, --no-jpeg-tables, --no-jbig2, --keep-encrypted, --store-budget BYTES (normal PDF),
+//! --no-decrypt (archive), --no-existing. The output never depends on the thread count or the time budget: a
+//! budget that runs out gives an error and no file.
 //!
 //! Measuring tools (the engine's own modules, for the benchmarks): deflate, inflate, batch, pdf-batch,
 //! repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info, fax-decode, fax-encode, fax-scan,
@@ -53,8 +53,8 @@ usage: gpress optimize IN OUT [options]   a smaller PDF that any reader opens (o
 options: --effort N (0 fast .. 100 smallest, default 100; --quick = 0)   --threads N (0: up to 8 cores; max 64)
          --max-input BYTES   --max-stream BYTES (normal PDF)   --max-stream-archive BYTES   --max-decoded BYTES (archive,
          pack and unpack)   --max-len BYTES (unpack)   --objects-per-stream N   --time-budget MS   --ignore-conformance
-         --no-flate-over-jpeg   --no-jpeg-tables   --no-jbig2   --keep-encrypted (normal PDF)   --no-decrypt (archive)
-         --no-existing
+         --no-flate-over-jpeg   --no-jpeg-tables   --no-jbig2   --keep-encrypted   --store-budget BYTES (normal PDF)
+         --no-decrypt (archive)   --no-existing
 measuring tools: deflate, inflate, batch, pdf-batch, repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info,
          fax-decode, fax-encode, fax-scan, fax-model, jbig2-encode, claim-archive (see the comments at the top of
          src/bin/gpress.rs)";
@@ -75,6 +75,7 @@ const WITH_VALUE: &[&str] = &[
     "--max-len",
     "--objects-per-stream",
     "--time-budget",
+    "--store-budget",
 ];
 
 /// The flags that fine-tune the strong encoder's settings in the deflate tools.
@@ -128,6 +129,9 @@ fn main() {
     }
     if let Some(ms) = num("--time-budget") {
         lib.time_budget = Some(Duration::from_millis(ms));
+    }
+    if let Some(n) = size("--store-budget") {
+        lib.store_budget = n;
     }
     lib.respect_conformance = !flag("--ignore-conformance");
     lib.flate_over_jpeg = !flag("--no-flate-over-jpeg");
