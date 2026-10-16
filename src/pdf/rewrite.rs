@@ -16,7 +16,7 @@ use crate::flate;
 use crate::par;
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{hash_map, BTreeMap, BTreeSet, HashMap};
+use std::collections::{hash_map, BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -227,7 +227,7 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, conformance: bool) -> Resul
     }
     // A reference to an object missing from the cross-reference data is null — unless the object is
     // physically in the file, where some readers find it anyway.
-    let mut dangling = Vec::new();
+    let mut dangling = HashSet::new();
     for (_, o) in objs.values() {
         let mut r = Vec::new();
         match o {
@@ -237,11 +237,8 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, conformance: bool) -> Resul
         }
         dangling.extend(r.into_iter().filter(|(n, _)| !objs.contains_key(n)));
     }
-    for (n, g) in dangling {
-        let pat = format!("{n} {g} obj");
-        if contains(doc.data, pat.as_bytes()) {
-            return Err("an object in the file is missing from its cross-reference data".into());
-        }
+    if holds_header(doc.data, &dangling) {
+        return Err("an object in the file is missing from its cross-reference data".into());
     }
     if !conformance {
         return Ok(());
@@ -335,6 +332,46 @@ fn crypt_objects(c: Option<&Crypt>) -> Vec<(u32, u16)> {
 
 fn contains(h: &[u8], n: &[u8]) -> bool {
     h.windows(n.len()).any(|w| w == n)
+}
+
+/// Whether `data` holds "n g obj" for some (n, g) of `refs`, anywhere, as `format!("{n} {g} obj")` writes
+/// it: the same answer as a search for each, in one pass. Before each " obj" must come g's digits (all of
+/// them, as g is written after a space), a space, and n's digits; n is every number the digits before that
+/// space end with ("112 0 obj" holds "12 0 obj"). A number is written without leading zeros.
+fn holds_header(data: &[u8], refs: &HashSet<(u32, u16)>) -> bool {
+    if refs.is_empty() {
+        return false;
+    }
+    // The digits that end at `end`, at most `most` of them.
+    let digits = |end: usize, most: usize| {
+        data[end.saturating_sub(most)..end].iter().rev().take_while(|c| c.is_ascii_digit()).count()
+    };
+    let number = |t: &[u8]| -> Option<u64> {
+        if t.len() > 1 && t[0] == b'0' {
+            return None;
+        }
+        t.iter().try_fold(0u64, |v, &c| v.checked_mul(10)?.checked_add((c - b'0') as u64))
+    };
+    for at in 0..data.len().saturating_sub(3) {
+        if &data[at..at + 4] != b" obj" {
+            continue;
+        }
+        // g: every digit before " obj" (more than five can't be a u16), after a space.
+        let k = digits(at, 6);
+        if k == 0 || k > 5 || at < k + 1 || data[at - k - 1] != b' ' {
+            continue;
+        }
+        let Some(g) = number(&data[at - k..at]).and_then(|g| u16::try_from(g).ok()) else { continue };
+        let end = at - k - 1;
+        // n: each number of up to ten digits (a u32) that ends at that space.
+        for j in 1..=digits(end, 10) {
+            let n = number(&data[end - j..end]).and_then(|n| u32::try_from(n).ok());
+            if n.is_some_and(|n| refs.contains(&(n, g))) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn set_chain(dict: &mut Dict, stages: &[Stage]) {
@@ -2418,6 +2455,85 @@ mod effort_tests {
             shared += got.2.iter().filter(|&&x| x).count();
         }
         assert!(merged > 1000 && shared > 1000, "{merged} merged, {shared} sharing");
+    }
+
+    #[test]
+    fn headers_are_found_as_a_search_for_each_finds_them() {
+        let planted: [&[u8]; 14] = [
+            b"112 0 obj",
+            b"5 010 obj",
+            b"x 0 obj",
+            b"0 0 obj",
+            b"00 1 obj",
+            b"98765432101234 7 obj",
+            b"4294967295 65535 obj",
+            b"4294967296 65536 obj",
+            b"12  3 obj",
+            b"7 3obj",
+            b"8 123456 obj",
+            b"5\n0 obj",
+            b"6x10 obj",
+            b"1 0 obj",
+        ];
+        // Soups of these, so that near-headers of every kind come up.
+        let tokens: [&[u8]; 12] = [b"0", b"1", b"2", b"5", b"7", b"9", b"0", b" ", b" ", b" obj", b"x", b"\n"];
+        let mut r = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move |k: usize| {
+            r ^= r << 13;
+            r ^= r >> 7;
+            r ^= r << 17;
+            (r % k as u64) as usize
+        };
+        let (mut found, mut asked) = (0, 0);
+        for round in 0..600 {
+            let mut soup: Vec<u8> = (0..next(60)).flat_map(|_| tokens[next(tokens.len())].iter().copied()).collect();
+            for _ in 0..next(4) {
+                let at = next(soup.len() + 1);
+                soup.splice(at..at, planted[next(planted.len())].iter().copied());
+            }
+            // Headers at the very start and the very end too.
+            if round % 3 == 0 {
+                soup.splice(0..0, planted[next(planted.len())].iter().copied());
+            }
+            if round % 3 == 1 {
+                soup.extend_from_slice(planted[next(planted.len())]);
+            }
+            // Every (n, g) the soup could hold: numbers read from every "digits space digits" in it, leading
+            // zeros and all, plus small ones.
+            let mut cands: BTreeSet<(u32, u16)> = (0..=12).flat_map(|n| (0..=12).map(move |g| (n, g))).collect();
+            for a in 0..soup.len() {
+                for b in a + 1..=soup.len().min(a + 18) {
+                    let Some(sp) = soup[a..b].iter().position(|&c| c == b' ') else { continue };
+                    let (x, y) = (&soup[a..a + sp], &soup[a + sp + 1..b]);
+                    let read = |t: &[u8]| -> Option<u64> {
+                        if t.is_empty() || !t.iter().all(u8::is_ascii_digit) {
+                            return None;
+                        }
+                        std::str::from_utf8(t).ok()?.parse().ok()
+                    };
+                    if let (Some(n), Some(g)) = (read(x), read(y)) {
+                        if let (Ok(n), Ok(g)) = (u32::try_from(n), u16::try_from(g)) {
+                            cands.insert((n, g));
+                        }
+                    }
+                }
+            }
+            let mut any = false;
+            for &(n, g) in &cands {
+                let want = contains(&soup, format!("{n} {g} obj").as_bytes());
+                assert_eq!(
+                    holds_header(&soup, &HashSet::from([(n, g)])),
+                    want,
+                    "{n} {g} in {:?}",
+                    String::from_utf8_lossy(&soup)
+                );
+                any |= want;
+                found += want as usize;
+                asked += 1;
+            }
+            assert_eq!(holds_header(&soup, &cands.iter().copied().collect()), any);
+        }
+        assert!(found > 1000 && asked > found * 3, "{found} found of {asked}");
     }
 }
 
