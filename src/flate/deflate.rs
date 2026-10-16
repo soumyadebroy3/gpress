@@ -15,8 +15,11 @@ use super::parse::{greedy, optimal_nice, Costs, ParseScratch};
 use super::tables::*;
 use crate::clock::{self, Deadline};
 use crate::par::{self, Memo, Pool};
+use std::cell::Cell;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -132,11 +135,32 @@ impl Options {
 pub struct Shared {
     pub pool: Arc<Pool>,
     /// Kept as long as this `Shared` lives; None: nothing is remembered.
-    memo: Option<Memo<MemoKey, Arc<Vec<u8>>>>,
+    memo: Option<Memo<MemoKey, Arc<Done>>>,
+    /// The encoding time the remembered outputs saved, in nanoseconds (for the debug figures).
+    saved: AtomicU64,
 }
 
 /// What an encoded input is remembered by: the hash and length of the data and the settings that matter.
 type MemoKey = (u64, usize, [usize; 9]);
+
+/// A remembered output, and how long it took to make (for the debug figures only).
+struct Done {
+    z: Vec<u8>,
+    took: Duration,
+}
+
+/// What a store of outputs has done and holds (debug figures; they never change an output).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StoreStats {
+    /// Outputs given again, and outputs made.
+    pub hits: usize,
+    pub computed: usize,
+    /// Outputs kept now, and the most bytes they ever took ([`par::ENTRY_COST`] each included).
+    pub kept: usize,
+    pub peak: usize,
+    /// About how much encoding time the outputs given again saved.
+    pub saved: Duration,
+}
 
 impl Shared {
     /// A new pool of `threads` threads, remembering every output.
@@ -147,7 +171,27 @@ impl Shared {
     /// Encodes that use `pool`; with `remember`, every output is kept for later encodes of the same input
     /// while this `Shared` lives (one per stream, say, so memory doesn't grow with the file).
     pub fn with_pool(pool: Arc<Pool>, remember: bool) -> Arc<Shared> {
-        Arc::new(Shared { pool, memo: remember.then(Memo::new) })
+        Arc::new(Shared { pool, memo: remember.then(Memo::new), saved: AtomicU64::new(0) })
+    }
+
+    /// Encodes that use `pool` and one store of outputs (one per file, say): outputs are kept while they
+    /// take at most `budget` bytes in all, [`par::ENTRY_COST`] each included, and the oldest go first. 0: no
+    /// store at all.
+    pub fn with_store(pool: Arc<Pool>, budget: usize) -> Arc<Shared> {
+        let memo = (budget > 0).then(|| Memo::bounded(budget, |d: &Arc<Done>| d.z.len()));
+        Arc::new(Shared { pool, memo, saved: AtomicU64::new(0) })
+    }
+
+    /// What the store of outputs has done and holds (all zero without one).
+    pub fn stats(&self) -> StoreStats {
+        let m = self.memo.as_ref().map(|m| m.stats()).unwrap_or_default();
+        StoreStats {
+            hits: m.hits,
+            computed: m.computed,
+            kept: m.kept,
+            peak: m.peak,
+            saved: Duration::from_nanos(self.saved.load(Ordering::Relaxed)),
+        }
     }
 }
 
@@ -213,23 +257,38 @@ pub fn deflate(data: &[u8], opt: &Options) -> Vec<u8> {
     w.finish()
 }
 
+/// The largest input whose output is remembered. Repeated inputs are small (the largest repeat in the sample
+/// corpus is 152,965 bytes), and an input this small is one segment, so encoding it on one thread (as a
+/// memo's compute does, see `par::Memo`) costs no parallelism.
+pub(crate) const REMEMBER_UP_TO: usize = 256 << 10;
+
 /// Zlib-wrapped data, as PDF's FlateDecode expects. With a remembering `shared`, an input already encoded with
 /// the same settings is not encoded again: the earlier output is reused after checking that it decodes to
-/// this input.
+/// this input. Only inputs up to `REMEMBER_UP_TO` bytes and one segment are remembered, and never an output
+/// made after the deadline.
 pub fn deflate_zlib(data: &[u8], opt: &Options) -> Vec<u8> {
     let encode = || super::zlib::wrap(&deflate(data, opt), data);
-    // Only an input of one segment is remembered: a memo's compute runs on its own thread (see `par::Memo`),
-    // and one segment is one piece of work anyway.
-    match opt.shared.as_ref().and_then(|sh| sh.memo.as_ref()).filter(|_| data.len() <= opt.segment.max(1)) {
-        None => encode(),
-        Some(memo) => {
-            let key = (par::hash64(data), data.len(), opt.fingerprint());
-            let fits = |z: &Arc<Vec<u8>>| {
-                super::zlib::unwrap(z, data.len() + 1).is_ok_and(|u| u.data == data && u.trailing == 0)
-            };
-            memo.get(key, fits, || Arc::new(encode())).to_vec()
-        }
+    let Some(sh) = opt.shared.as_deref() else { return encode() };
+    let memo = match &sh.memo {
+        Some(memo) if data.len() <= REMEMBER_UP_TO.min(opt.segment.max(1)) => memo,
+        _ => return encode(),
+    };
+    let key = (par::hash64(data), data.len(), opt.fingerprint());
+    let fits =
+        |d: &Arc<Done>| super::zlib::unwrap(&d.z, data.len() + 1).is_ok_and(|u| u.data == data && u.trailing == 0);
+    let made = Cell::new(false);
+    let done = memo.get_kept(key, fits, || {
+        made.set(true);
+        let t = clock::now();
+        let z = encode();
+        // Past the deadline some segments may have gone out stored: such an output is never kept.
+        (Arc::new(Done { z, took: clock::since(t) }), !opt.deadline.passed())
+    });
+    if !made.get() {
+        let took = u64::try_from(done.took.as_nanos()).unwrap_or(u64::MAX);
+        sh.saved.fetch_add(took, Ordering::Relaxed);
     }
+    done.z.to_vec()
 }
 
 struct Plan {
