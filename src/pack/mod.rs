@@ -1315,12 +1315,6 @@ fn run<'d, C: Coder>(
         let left = total_len - out.len();
         io.m.set_kind(Kind::Meta, Geom::default(), out.len() as u64);
         let tag = io.byte(tag_in);
-        // Parts that need a part of the engine this build leaves out restore only in a build with it.
-        if let Some(f) = left_out(tag) {
-            stats.needs = Some(f);
-            io.damaged = true;
-            break;
-        }
         // An encrypted stream's settings come right after the syntax before the stream (the file key, once,
         // right before the first settings) and are followed by its payload.
         let in_order = match tag {
@@ -1330,6 +1324,14 @@ fn run<'d, C: Coder>(
             _ => sealing.is_none() && prev != Some(T_CRYPT_KEY),
         };
         if !in_order {
+            io.damaged = true;
+            break;
+        }
+        // Parts that need a part of the engine this build leaves out restore only in a build with it. A tag out
+        // of place is damage in any build, so this comes after the order; a damaged archive whose tag reads as
+        // such a part in its place can't be told from one, as with Lepton's parts.
+        if let Some(f) = left_out(tag) {
+            stats.needs = Some(f);
             io.damaged = true;
             break;
         }
@@ -1982,7 +1984,8 @@ pub enum UnpackError {
     TimedOut,
     /// Parts made with the existing library (Lepton), which this build doesn't have.
     NeedsExisting,
-    /// Parts that need a part of the engine this build leaves out (fax or encryption).
+    /// Parts that need a part of the engine this build leaves out (fax or encryption), or damage that reads
+    /// as such a part in its place: only a build with the part can tell the two apart.
     NeedsFeature(Feature),
     /// Damaged: what is in the file doesn't restore it (the detail says where it was found out).
     Damaged(&'static str),

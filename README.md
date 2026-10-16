@@ -197,7 +197,10 @@ in C) and a message that names the feature, and `gpress::Feature::enabled` says 
 `encryption` an encrypted PDF is left untouched instead of refused, because that is how `optimize` already
 answers for a file it can't rewrite (a password it doesn't have, a handler it doesn't know): the caller gets
 the input back with the reason, and a batch goes on. The command-line tool prints the same message and exits
-with 10 (`pack` and `unpack` without `archive`, or a measuring command of a part left out).
+with 10 (`pack` and `unpack` without `archive`, or a measuring command of a part left out). In a build without
+`fax` or `encryption`, a damaged archive whose damage reads as a part of that kind gives `NeedsFeature` too:
+only a build with the part can tell the two apart, as with Lepton's parts and `NeedsExistingLibrary`. Neither
+ever gives a wrong file.
 
 The npm package has two modules: `dist/gpress.wasm` with every part (229,289 bytes of gzip), and
 `dist/gpress-web.wasm`, the `web` set (167,352 bytes of gzip, 27% less). Both have the same wrapper; in the web

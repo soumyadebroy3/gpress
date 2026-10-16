@@ -326,8 +326,10 @@ pub enum Error {
     DecodedTooLarge { declared: u64, limit: u64 },
     /// The call needs a part of the engine this build leaves out (a Cargo feature): `compress` and `expand`
     /// without the archive, or `expand` of an archive with parts that need fax or encryption. Nothing was
-    /// done. (An archive with Lepton's parts gives `NeedsExistingLibrary`, as before; `optimize` skips a step
-    /// whose feature is left out, and leaves an encrypted file untouched without `encryption`.)
+    /// done. A damaged archive whose damage reads as such a part gives it too: only a build with the part can
+    /// tell the two apart (as with `NeedsExistingLibrary`, which an archive with Lepton's parts gives).
+    /// (`optimize` skips a step whose feature is left out, and leaves an encrypted file untouched without
+    /// `encryption`.)
     NeedsFeature(Feature),
 }
 
