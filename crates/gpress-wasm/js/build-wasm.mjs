@@ -2,23 +2,40 @@
 // size, LTO, one codegen unit, panic = "abort", symbols stripped), then binaryen's wasm-opt when it is on
 // PATH. Without wasm-opt the module is used as cargo built it, and a message says so.
 //
-//   node build-wasm.mjs [--out FILE] [cargo arguments, such as --features web]
+//   node build-wasm.mjs [--out FILE | --out=FILE] [cargo arguments, such as --features web]
 //
-// The output is dist/gpress.wasm unless --out names another file. bench/sizes.py builds the module with this
-// script too, so the size it records is the size of the package's module.
+// The output is dist/gpress.wasm unless --out names another file; every other argument goes to cargo. The
+// module is written to a temporary file next to the output and renamed over it when complete, so a failed
+// step leaves no partial module there. bench/sizes.py builds the module with this script too, so the size it
+// records is the size of the package's module.
 
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { copyFileSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const args = process.argv.slice(2);
+const usage = "usage: node build-wasm.mjs [--out FILE | --out=FILE] [cargo arguments, such as --features web]";
 let out = join(here, "dist", "gpress.wasm");
-const at = args.indexOf("--out");
-if (at >= 0) {
-  out = resolve(args[at + 1]);
-  args.splice(at, 2);
+const args = [];
+const argv = process.argv.slice(2);
+for (let k = 0; k < argv.length; k++) {
+  let file;
+  if (argv[k] === "--out") {
+    // The next argument, unless there is none or it is another option (`--out --features web`).
+    const next = argv[k + 1];
+    if (next !== undefined && !next.startsWith("-")) file = argv[++k];
+  } else if (argv[k].startsWith("--out=")) {
+    file = argv[k].slice("--out=".length);
+  } else {
+    args.push(argv[k]);
+    continue;
+  }
+  if (!file) {
+    console.error(`build-wasm: --out needs a file name\n${usage}`);
+    process.exit(2);
+  }
+  out = resolve(file);
 }
 
 // wasm-opt's setting. -O1, not -Oz: on this module -Oz (and -Os) takes 12% off the raw bytes but adds 4% to
@@ -62,16 +79,35 @@ if (!built) {
 }
 
 mkdirSync(dirname(out), { recursive: true });
+const tmp = join(dirname(out), `.${basename(out)}.${process.pid}.tmp`);
+/** Removes the temporary file and exits with the message. */
+function fail(message, status) {
+  rmSync(tmp, { force: true });
+  console.error(`build-wasm: ${message}`);
+  process.exit(status);
+}
 const probe = spawnSync("wasm-opt", ["--version"], { encoding: "utf8" });
-if (probe.error || probe.status !== 0) {
+const optimized = !probe.error && probe.status === 0;
+if (!optimized) {
   console.error("build-wasm: wasm-opt is not on PATH, so the module is used as cargo built it (install binaryen for a smaller one)");
-  copyFileSync(built, out);
-} else {
-  const opt = spawnSync("wasm-opt", [level, ...features, built, "-o", out], { stdio: "inherit" });
-  if (opt.status !== 0) {
-    console.error("build-wasm: wasm-opt failed");
-    process.exit(opt.status ?? 1);
+  try {
+    copyFileSync(built, tmp);
+  } catch (e) {
+    fail(`cannot copy the module: ${e.message}`, 1);
   }
+} else {
+  const opt = spawnSync("wasm-opt", [level, ...features, built, "-o", tmp], { stdio: "inherit" });
+  if (opt.error || opt.status !== 0) {
+    const why = opt.error ? `: ${opt.error.message}` : opt.signal ? ` (${opt.signal})` : ` (exit status ${opt.status})`;
+    fail(`wasm-opt failed${why}`, opt.status || 1);
+  }
+}
+try {
+  renameSync(tmp, out);
+} catch (e) {
+  fail(`cannot write ${out}: ${e.message}`, 1);
+}
+if (optimized) {
   console.error(`build-wasm: ${probe.stdout.trim()}, ${level}: ${statSync(built).size} bytes from cargo, ${statSync(out).size} after`);
 }
 console.error(`build-wasm: wrote ${out}`);
