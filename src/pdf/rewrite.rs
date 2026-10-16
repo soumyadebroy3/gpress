@@ -357,7 +357,14 @@ fn set_chain(dict: &mut Dict, stages: &[Stage]) {
 }
 
 /// The best encoding of one stream: (new dict, new data, what changed), or None to keep it exactly as it is.
-fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) -> Option<Reencoded> {
+/// With a new encoding, `content` gets the stream's content (see `content_of`) when it can be had from the
+/// decoding done here, so the stream is not decoded again to check the new data or its size.
+fn reencode(
+    s: &Stream,
+    opt: &Options,
+    resolve: &dyn Fn(&Obj) -> Option<Obj>,
+    content: &mut Option<Content>,
+) -> Option<Reencoded> {
     if s.dict.name(b"Type") == Some(b"Metadata") || s.dict.has(b"F") {
         return None; // XMP stays readable by other tools; external file streams are left alone
     }
@@ -506,7 +513,19 @@ fn reencode(s: &Stream, opt: &Options, resolve: &dyn Fn(&Obj) -> Option<Obj>) ->
             }
         }
     }
-    best.map(|(d, z)| (d, z, Change { jpeg_retabled: best_retabled, ..Change::default() }))
+    let best = best.map(|(d, z)| (d, z, Change { jpeg_retabled: best_retabled, ..Change::default() }));
+    // The content as `content_of` decodes it: the general filters gave these same bytes (it decodes with a
+    // limit no lower), and only the last of them can have a predictor (checked above). Kept when decoding
+    // it again would cost something: when the filters decompress (Flate, LZW).
+    let decompress = stages[..k].iter().any(|st| matches!(st.name.as_slice(), b"FlateDecode" | b"LZWDecode"));
+    if best.is_some() && decompress && opt.max_stream <= CHECK_LIMIT {
+        let samples = match stages[..k].last() {
+            Some(st) if predicted(st) => super::filters::unpredict(st, &data).ok(),
+            _ => Some(data),
+        };
+        *content = samples.map(|d| (d, rest.to_vec()));
+    }
+    best
 }
 
 /// An encrypted XMP metadata stream (no tool reads it from the file without decrypting it): our Flate when
@@ -712,10 +731,19 @@ fn predictor_sample(nrows: usize, row: usize, effort: u8) -> Option<Vec<(usize, 
 /// An image with fewer samples (general filters decoded, predictors undone) than its width, height and
 /// colours need. Readers differ on such images (one pads them, another leaves them out), and other filters
 /// can change what a reader does, so they are kept exactly as they are. Unknown: not known to be short.
-fn short_image(s: &Stream, resolve: &dyn Fn(&Obj) -> Option<Obj>) -> bool {
+/// `content`: the stream's content (see `content_of`) when it is known already.
+fn short_image(s: &Stream, resolve: &dyn Fn(&Obj) -> Option<Obj>, content: Option<&Content>) -> bool {
     let Some(g) = images::geometry(&s.dict, resolve) else { return false };
     let Some(h) = s.dict.get(b"Height").and_then(|x| x.as_int()) else { return false };
-    match content_of(s) {
+    let decoded;
+    let content = match content {
+        Some(c) => Some(c),
+        None => {
+            decoded = content_of(s);
+            decoded.as_ref()
+        }
+    };
+    match content {
         Some((px, rest)) => rest.is_empty() && (px.len() as u128) < g.row() as u128 * h.max(0) as u128,
         None => false,
     }
@@ -1025,10 +1053,10 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     let mut order: Vec<usize> = (0..unique.len()).collect();
     order.sort_by_key(|&u| (std::cmp::Reverse(streams[unique[u]].1.data.len()), u));
     let dbg = std::env::var_os("PDFE_DEBUG").is_some();
-    let mut encoded = par::map(pool, unique.len(), Some(&order), |u| {
+    let jobs = par::map(pool, unique.len(), Some(&order), |u| {
         // Out of time: nothing more is encoded (the whole rewrite is given up below).
         if opt.deadline.passed() {
-            return None;
+            return (None, None);
         }
         let (n, s) = streams[unique[u]];
         let resolve = |o: &Obj| -> Option<Obj> {
@@ -1042,6 +1070,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         // it is depends on the dictionary alone, so identical streams agree.)
         let xmp = s.dict.name(b"Type") == Some(b"Metadata")
             && crypt.is_some_and(|c| c.stream_method(n, &s.dict).is_ok_and(|m| m != Method::Identity));
+        let mut content = None;
         let r = settings[u].as_ref().and_then(|o| {
             let o = Options {
                 flate: flate::Options {
@@ -1053,11 +1082,19 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
             if xmp {
                 reencode_xmp(s, &o)
             } else {
-                reencode(s, &o, &resolve)
+                reencode(s, &o, &resolve, &mut content)
             }
         });
-        let short = r.is_some() && short_image(s, &resolve);
+        #[cfg(test)]
+        let r = check_tests::encoder_fault(n, r);
+        let short = r.is_some() && short_image(s, &resolve, content.as_ref());
         let r = if short { None } else { r };
+        // The new data checked against the stream's content here, in parallel and without decoding the
+        // stream again, so the self-check only has to find the same data in the output.
+        let proof = match (&r, content) {
+            (Some(r), Some(c)) => prove(n, s, &c, r),
+            _ => None,
+        };
         if dbg {
             let new = r.as_ref().map_or(s.data.len(), |x| x.1.len());
             let how = settings[u]
@@ -1070,8 +1107,9 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
                 if short { " (short image, kept)" } else { "" }
             );
         }
-        r
+        (r, proof)
     });
+    let (mut encoded, proofs): (Vec<_>, Vec<_>) = jobs.into_iter().unzip();
     if opt.deadline.passed() {
         return Err(TIMED_OUT.into());
     }
@@ -1089,6 +1127,8 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     // Every stream gets a direct /Length.
     let mut direct: BTreeMap<u32, (u16, Vec<u8>)> = BTreeMap::new(); // serialised indirect objects
     let mut packable: Vec<(u32, &Obj)> = Vec::new();
+    // The stream jobs' checks, with the object each is written to (in object order).
+    let mut proven: Vec<(u32, &Proof)> = Vec::new();
     let mut si = 0;
     for (&n, (g, o)) in &objs {
         match o {
@@ -1098,8 +1138,13 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
                 let u = slot[&same[si]];
                 uses[u] -= 1;
                 let result = if uses[u] == 0 { encoded[u].take() } else { encoded[u].clone() };
+                #[cfg(test)]
+                let (result, u) = check_tests::writer_fault(n, result, u, &encoded);
                 let (dict, data) = match result {
                     Some((d, z, change)) => {
+                        if let Some(p) = &proofs[u] {
+                            proven.push((n, p));
+                        }
                         stats.streams_reencoded += 1;
                         stats.jpegs_retabled += change.jpeg_retabled as usize;
                         stats.fax_to_jbig2 += change.fax_to_jbig2 as usize;
@@ -1289,7 +1334,12 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     out.extend_from_slice(format!("startxref\n{xref_off}\n%%EOF\n").as_bytes());
 
     // Read our own output back and compare everything reachable.
-    self_check(&objs, &out, &doc.trailer, crypt, pool)?;
+    let taken = self_check(&objs, &out, &doc.trailer, crypt, &proven, pool)?;
+    if dbg {
+        eprintln!("self-check: {taken} of {} re-encoded streams checked by their jobs", stats.streams_reencoded);
+    }
+    #[cfg(test)]
+    check_tests::TAKEN.with(|t| t.set(taken));
     // Anything written after the deadline passed (object streams, say) went out stored and is not an
     // output of these settings: a rewrite either finishes in time or gives nothing.
     if opt.deadline.passed() {
@@ -1312,34 +1362,84 @@ fn bytes_for(v: u64) -> usize {
 
 /// Decoded content of a stream through its general filters, predictors undone, plus the image-codec stages
 /// that remain (their bytes are compared as they are).
-fn content_of(s: &Stream) -> Option<(Vec<u8>, Vec<Stage>)> {
-    content_within(s, 1 << 30)
+type Content = (Vec<u8>, Vec<Stage>);
+
+/// Most bytes the self-check decodes a stream to.
+const CHECK_LIMIT: usize = 1 << 30;
+
+/// The content of a stream (see `Content`).
+fn content_of(s: &Stream) -> Option<Content> {
+    content_in(&s.dict, &s.data, CHECK_LIMIT)
 }
 
-/// `content_of` with each stage decoding to at most `limit` bytes (None beyond it, as for damaged data).
-fn content_within(s: &Stream, limit: usize) -> Option<(Vec<u8>, Vec<Stage>)> {
-    let stages = chain(&s.dict)?;
-    let mut data = s.data.clone();
+/// The content of stream data under a dictionary's filters, each stage decoding to at most `limit` bytes (None
+/// beyond it, as for damaged data).
+fn content_in(dict: &Dict, data: &[u8], limit: usize) -> Option<Content> {
+    let stages = chain(dict)?;
+    let mut data = std::borrow::Cow::Borrowed(data);
     let mut rest = Vec::new();
     for st in stages {
         if is_general(&st.name) && rest.is_empty() {
-            data = decode_stage(&st, &data, limit).ok()?;
-            if st.name == b"FlateDecode" || st.name == b"LZWDecode" {
-                let pred = st.parms.as_ref().and_then(|p| p.get(b"Predictor")).and_then(|x| x.as_int()).unwrap_or(1);
-                if pred > 1 {
-                    data = super::filters::unpredict(&st, &data).ok()?;
-                }
+            data = std::borrow::Cow::Owned(decode_stage(&st, &data, limit).ok()?);
+            if predicted(&st) {
+                data = std::borrow::Cow::Owned(super::filters::unpredict(&st, &data).ok()?);
             }
         } else {
             rest.push(st);
         }
     }
-    Some((data, rest))
+    Some((data.into_owned(), rest))
+}
+
+/// Whether the content is read with this general stage's predictor undone.
+fn predicted(st: &Stage) -> bool {
+    (st.name == b"FlateDecode" || st.name == b"LZWDecode")
+        && st.parms.as_ref().and_then(|p| p.get(b"Predictor")).and_then(|x| x.as_int()).unwrap_or(1) > 1
+}
+
+/// A stream job's check of a re-encoded stream, for the self-check: the new data of stream `of`, decoded
+/// under these filter entries, gave the stream's content back; `sha` is that data's SHA-256.
+struct Proof {
+    of: u32,
+    sha: [u8; 32],
+    filter: Option<Obj>,
+    parms: Option<Obj>,
+}
+
+impl Proof {
+    /// Whether output stream `s2`, written for stream `n` (`s1`), is what the job checked: `s1` is the
+    /// stream it checked (or one identical to it), and the output has the same data under the same filter
+    /// entries, so it decodes to the content of `s1`.
+    fn holds(&self, n: u32, s1: &Stream, s2: &Stream, objs: &BTreeMap<u32, (u16, Obj)>) -> bool {
+        (self.of == n || matches!(objs.get(&self.of), Some((_, Obj::Stream(s))) if **s == *s1))
+            && s2.dict.get(b"Filter") == self.filter.as_ref()
+            && s2.dict.get(b"DecodeParms") == self.parms.as_ref()
+            && crate::pack::sha256(&s2.data) == self.sha
+    }
+}
+
+/// Checks the new encoding of stream `n` (`s`, with `content`) the way the self-check would, where that
+/// saves work. The check costs two SHA-256 passes over the new data (here and in the self-check); decoding
+/// the stream again costs more once its filters halve the content or better (inflating then takes about 130
+/// instructions per input byte, slow ones; two SHA-256 passes 128 per byte of the smaller new data, fast
+/// ones). The streams it leaves, and JPEGs and fax images whose bytes change by design, are compared in full
+/// by the self-check.
+fn prove(n: u32, s: &Stream, content: &Content, (d, z, change): &Reencoded) -> Option<Proof> {
+    let pays = content.0.len() / 2 >= s.data.len();
+    if !pays || *change != Change::default() || content_in(d, z, CHECK_LIMIT).as_ref() != Some(content) {
+        return None;
+    }
+    Some(Proof {
+        of: n,
+        sha: crate::pack::sha256(z),
+        filter: d.get(b"Filter").cloned(),
+        parms: d.get(b"DecodeParms").cloned(),
+    })
 }
 
 /// The same JPEG with other Huffman tables: the same DCT stage, every other byte the same, and the same coded
 /// symbols in every scan (so the same coefficients).
-fn same_jpeg(a: &(Vec<u8>, Vec<Stage>), b: &(Vec<u8>, Vec<Stage>)) -> bool {
+fn same_jpeg(a: &Content, b: &Content) -> bool {
     a.1 == b.1 && matches!(a.1.as_slice(), [st] if st.name == b"DCTDecode") && crate::jpeg::equivalent(&a.0, &b.0)
 }
 
@@ -1350,13 +1450,17 @@ fn same_except_encoding(a: &Dict, b: &Dict) -> bool {
     strip(a) == strip(b)
 }
 
+/// Reads the output back and compares every reachable object with the input's. A re-encoded stream is
+/// decoded and compared unless its job's check (in `proven`, by object number) holds for it. Gives the number
+/// of streams taken on their job's check.
 fn self_check(
     objs: &BTreeMap<u32, (u16, Obj)>,
     out: &[u8],
     trailer: &Dict,
     crypt: Option<&Crypt>,
+    proven: &[(u32, &Proof)],
     pool: Option<&par::Pool>,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let doc2 = xref::open(out).map_err(|e| format!("self-check: output unreadable: {e:?}"))?;
     // It opens the same way: the same encryption dictionary and object, file key and methods. Objects are then
     // compared decrypted.
@@ -1394,8 +1498,9 @@ fn self_check(
     let all: Vec<(&u32, &(u16, Obj))> = objs.iter().collect();
     let mut order: Vec<usize> = (0..all.len()).collect();
     order.sort_by_key(|&k| (std::cmp::Reverse(if let Obj::Stream(s) = &all[k].1 .1 { s.data.len() } else { 0 }), k));
-    // None: the stream needs more than `limit` decoded bytes (or doesn't decode within it).
-    let check = |k: usize, limit: usize| -> Option<Result<(), String>> {
+    // None: the stream needs more than `limit` decoded bytes (or doesn't decode within it). Ok(true): taken on
+    // its job's check, without decoding.
+    let check = |k: usize, limit: usize| -> Option<Result<bool, String>> {
         let (n, (g, o)) = all[k];
         let (g2, o2) = &objs2[n];
         if g != g2 {
@@ -1410,13 +1515,17 @@ fn self_check(
                     && s1.dict.get(b"Filter") == s2.dict.get(b"Filter")
                     && s1.dict.get(b"DecodeParms") == s2.dict.get(b"DecodeParms")
                 {
-                    return Some(Ok(()));
+                    return Some(Ok(false));
                 }
-                let full = limit == 1 << 30;
-                let Some(c1) = content_within(s1, limit) else {
+                let proof = proven.binary_search_by_key(n, |&(m, _)| m).ok().and_then(|i| proven.get(i));
+                if proof.is_some_and(|(_, p)| p.holds(*n, s1, s2, objs)) {
+                    return Some(Ok(true));
+                }
+                let full = limit == CHECK_LIMIT;
+                let Some(c1) = content_in(&s1.dict, &s1.data, limit) else {
                     return full.then(|| Err(format!("self-check: stream {n} undecodable")));
                 };
-                let Some(c2) = content_within(s2, limit) else {
+                let Some(c2) = content_in(&s2.dict, &s2.data, limit) else {
                     return full.then(|| Err(format!("self-check: stream {n} undecodable in output")));
                 };
                 // Different bytes are fine for a JPEG with other Huffman tables (the same coded symbols) and
@@ -1428,17 +1537,17 @@ fn self_check(
                 if c1 != c2 && !same_jpeg(&c1, &c2) && !crate::fax::pdf::same_image(s1, s2, &resolve) {
                     return Some(Err(format!("self-check: content of stream {n} differs")));
                 }
-                Some(Ok(()))
+                Some(Ok(false))
             }
-            (x, y) => Some(if x != y { Err(format!("self-check: object {n} differs")) } else { Ok(()) }),
+            (x, y) => Some(if x != y { Err(format!("self-check: object {n} differs")) } else { Ok(false) }),
         }
     };
     let on_pool = par::map(pool, all.len(), Some(&order), |k| check(k, CHECK_ON_POOL));
     let mut checked = Vec::with_capacity(all.len());
     for (k, r) in on_pool.into_iter().enumerate() {
-        checked.push(r.or_else(|| check(k, 1 << 30)).unwrap_or_else(|| Err("self-check: stream undecodable".into())));
+        checked.push(r.or_else(|| check(k, CHECK_LIMIT)).unwrap_or_else(|| Err("self-check: stream undecodable".into())));
     }
-    checked.into_iter().collect()
+    checked.into_iter().try_fold(0, |taken, r| r.map(|t| taken + t as usize))
 }
 
 /// Decoded bytes a stream may take, per copy, while it is compared on the thread pool (see `self_check`).
@@ -1622,8 +1731,8 @@ mod effort_tests {
         let s = Stream { dict: d.clone(), data: flate::deflate_zlib(&text, &flate::Options::max()) };
         assert!(flate::deflate_zlib(&text, &flate::Options::effort(0)).len() >= s.data.len());
         let strong = |e: u8| Options { flate: flate::Options::quick(), ..Options::effort(e) };
-        assert!(reencode(&s, &strong(15), &resolve).is_none());
-        assert!(reencode(&s, &Options::effort(0), &resolve).is_none());
+        assert!(reencode(&s, &strong(15), &resolve, &mut None).is_none());
+        assert!(reencode(&s, &Options::effort(0), &resolve, &mut None).is_none());
         // Stored with effort 0's settings: the strong encoder's quick settings still shrink it. The bridge
         // leaves it alone, but the quick settings the plans of 20 and above give (effort 0, the strong
         // encoder) must try it exactly as before the fast path.
@@ -1635,9 +1744,9 @@ mod effort_tests {
             .collect();
         let s = Stream { dict: d, data: flate::deflate_zlib(&page, &flate::Options::effort(0)) };
         assert!(flate::deflate_zlib(&page, &flate::Options::quick()).len() < s.data.len());
-        assert!(reencode(&s, &strong(15), &resolve).is_none());
+        assert!(reencode(&s, &strong(15), &resolve, &mut None).is_none());
         let legacy_quick = Options { flate: flate::Options::quick(), effort: 0, ..Options::effort(50) };
-        assert!(reencode(&s, &legacy_quick, &resolve).is_some());
+        assert!(reencode(&s, &legacy_quick, &resolve, &mut None).is_some());
         // Noise behind Flate takes more room than the noise itself: the bridge goes on and, like effort 0,
         // stores it without a filter.
         let mut r = 7u64;
@@ -1654,7 +1763,7 @@ mod effort_tests {
         let s = Stream { dict: d, data: flate::deflate_zlib(&noise, &flate::Options::effort(0)) };
         assert!(s.data.len() > noise.len());
         for opt in [Options::effort(0), strong(15)] {
-            let (d, z, _) = reencode(&s, &opt, &resolve).expect("stored without a filter");
+            let (d, z, _) = reencode(&s, &opt, &resolve, &mut None).expect("stored without a filter");
             assert!(!d.has(b"Filter") && z == noise, "effort {}", opt.effort);
         }
     }
@@ -1724,7 +1833,7 @@ mod effort_tests {
         for effort in [100u8, 0] {
             let opt = Options::effort(effort);
             for (k, (s, predicted)) in cases.iter().enumerate() {
-                let (d, z, _) = reencode(s, &opt, &resolve).expect("Flate makes it smaller");
+                let (d, z, _) = reencode(s, &opt, &resolve, &mut None).expect("Flate makes it smaller");
                 let mut plain = s.dict.clone();
                 set_chain(&mut plain, &[Stage { name: b"FlateDecode".to_vec(), parms: None }]);
                 let plain_total = total(&plain, &flate::deflate_zlib(&s.data, &opt.flate));
@@ -1839,8 +1948,8 @@ mod effort_tests {
                 let (out_a, out_b) = (optimize(&a, &opt), optimize(&b, &opt));
                 assert!(matches!(out_a.outcome, Outcome::Smaller(_)), "{size}: {:?}", out_a.outcome);
                 let pool = par::Pool::new(threads);
-                assert_eq!(self_check(&objs, &out_a.data, &doc.trailer, None, Some(&pool)), Ok(()));
-                let wrong = self_check(&objs, &out_b.data, &doc.trailer, None, Some(&pool));
+                assert_eq!(self_check(&objs, &out_a.data, &doc.trailer, None, &[], Some(&pool)), Ok(0));
+                let wrong = self_check(&objs, &out_b.data, &doc.trailer, None, &[], Some(&pool));
                 assert_eq!(
                     wrong,
                     Err("self-check: content of stream 4 differs".to_string()),
@@ -1860,5 +1969,299 @@ mod effort_tests {
         let (same, unique) = identical_streams(&streams);
         assert_eq!(same, vec![0, 1, 0, 3, 0]);
         assert_eq!(unique, vec![0, 1, 3]);
+    }
+}
+
+/// The self-check against wrong streams planted on purpose: new data changed before its stream job checks it
+/// (an encoder fault), or after (a writer fault).
+#[cfg(test)]
+pub(super) mod check_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub(super) enum Fault {
+        /// One byte of the new data changed before the job checks it (it no longer decodes).
+        Encoder,
+        /// One byte changed under the Flate layer before the job checks it: it decodes, to other content.
+        EncoderContent,
+        /// One byte of the new data changed after the job checked it.
+        Writer,
+        /// The next stream's new data written in its place, under its own dictionary.
+        Swap,
+        /// The new dictionary written with other filter parameters.
+        Parms,
+        /// The new dictionary written without its filter.
+        Filter,
+    }
+
+    thread_local! {
+        /// The fault planted in one object by rewrites on this thread (with one thread, the stream jobs run on
+        /// it too).
+        static FAULT: Cell<Option<(Fault, u32)>> = const { Cell::new(None) };
+        /// Streams the last self-check on this thread took on their jobs' checks.
+        pub(super) static TAKEN: Cell<usize> = const { Cell::new(usize::MAX) };
+    }
+
+    fn flip(z: &mut [u8]) {
+        let i = z.len() / 2;
+        z[i] ^= 0x10;
+    }
+
+    pub(super) fn encoder_fault(n: u32, r: Option<Reencoded>) -> Option<Reencoded> {
+        let (d, mut z, change) = r?;
+        match FAULT.get() {
+            Some((Fault::Encoder, at)) if at == n => flip(&mut z),
+            Some((Fault::EncoderContent, at)) if at == n => {
+                let mut raw = flate::zlib::unwrap(&z, usize::MAX).expect("Flate data").data;
+                flip(&mut raw);
+                z = flate::deflate_zlib(&raw, &flate::Options::quick());
+            }
+            _ => {}
+        }
+        Some((d, z, change))
+    }
+
+    pub(super) fn writer_fault(
+        n: u32,
+        r: Option<Reencoded>,
+        u: usize,
+        encoded: &[Option<Reencoded>],
+    ) -> (Option<Reencoded>, usize) {
+        let Some((mut d, mut z, change)) = r else { return (None, u) };
+        match FAULT.get() {
+            Some((Fault::Writer, at)) if at == n => flip(&mut z),
+            Some((Fault::Swap, at)) if at == n => {
+                let next = encoded[u + 1].as_ref().expect("the next stream is re-encoded");
+                return (Some((d, next.1.clone(), change)), u + 1);
+            }
+            Some((Fault::Parms, at)) if at == n => {
+                let mut p = Dict::default();
+                p.set(b"Predictor", Obj::Int(2));
+                p.set(b"Columns", Obj::Int(4));
+                d.set(b"DecodeParms", Obj::Dict(p));
+            }
+            Some((Fault::Filter, at)) if at == n => {
+                d.remove(b"Filter");
+            }
+            _ => {}
+        }
+        (Some((d, z, change)), u)
+    }
+
+    /// The rewrite of `pdf` at effort 0 with `fault` planted, and the streams its self-check took on their
+    /// jobs' checks.
+    fn rewrite_with(pdf: &[u8], threads: usize, fault: Option<(Fault, u32)>) -> (Optimized, usize) {
+        FAULT.set(fault);
+        TAKEN.set(usize::MAX);
+        let r = optimize(pdf, &Options { threads, ..Options::effort(0) });
+        FAULT.set(None);
+        (r, TAKEN.get())
+    }
+
+    /// Zlib data in stored blocks (no compression), so every stream is re-encoded.
+    fn stored(data: &[u8]) -> Vec<u8> {
+        let mut z = vec![0x78, 0x01];
+        let mut blocks = data.chunks(65535).peekable();
+        if blocks.peek().is_none() {
+            z.extend_from_slice(&[1, 0, 0, 0xFF, 0xFF]);
+        }
+        while let Some(b) = blocks.next() {
+            z.push(blocks.peek().is_none() as u8);
+            z.extend_from_slice(&(b.len() as u16).to_le_bytes());
+            z.extend_from_slice(&(!(b.len() as u16)).to_le_bytes());
+            z.extend_from_slice(b);
+        }
+        z.extend_from_slice(&flate::zlib::adler32(data).to_be_bytes());
+        z
+    }
+
+    /// A page drawn by three content streams (4, 5, and 6 identical to 4) and an image (7), each compressed
+    /// twice over with the fast encoder's quickest level: the rewrite makes them smaller, and decoding them
+    /// costs more than the jobs' checks.
+    fn test_pdf() -> Vec<u8> {
+        let stream = |dict: &str, decoded: &[u8]| {
+            let quickest = flate::Options { fast: 1, ..flate::Options::quick() };
+            let data = flate::deflate_zlib(&flate::deflate_zlib(decoded, &quickest), &quickest);
+            let mut o = format!("<< {dict} /Filter [/FlateDecode /FlateDecode] /Length {} >>\nstream\n", data.len())
+                .into_bytes();
+            o.extend_from_slice(&data);
+            o.extend_from_slice(b"\nendstream");
+            o
+        };
+        let text = |k: usize| -> Vec<u8> {
+            let mut r = k as u64;
+            (0..300)
+                .flat_map(|i| {
+                    r = r.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    let (x, w) = ((r >> 40) % 500, ["fox", "dog", "jumps", "over", "lazy"][(r >> 20) as usize % 5]);
+                    format!("BT /F1 {} Tf {x} {} Td (Line {i}: the {w}) Tj ET\n", 9 + k, i % 700).into_bytes()
+                })
+                .collect()
+        };
+        let px: Vec<u8> = (0..160 * 120).map(|i| ((i % 160) + (i / 160) * 2) as u8).collect();
+        let objs: Vec<Vec<u8>> = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents [4 0 R 5 0 R 6 0 R] /Resources << /XObject << /A 7 0 R >> >> >>".to_vec(),
+            stream("", &text(1)),
+            stream("", &text(2)),
+            stream("", &text(1)),
+            stream("/Type /XObject /Subtype /Image /Width 160 /Height 120 /ColorSpace /DeviceGray /BitsPerComponent 8", &px),
+        ];
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, o) in objs.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+            pdf.extend_from_slice(o);
+            pdf.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+        for off in offsets {
+            pdf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes(),
+        );
+        pdf
+    }
+
+    #[test]
+    fn the_content_from_reencode_is_what_the_self_check_decodes() {
+        let text: Vec<u8> = (0..400).flat_map(|i| format!("BT ({i} of 400) Tj ET\n").into_bytes()).collect();
+        let px: Vec<u8> = (0..160 * 120).map(|i| ((i % 160) * 3 + (i / 160)) as u8).collect();
+        let tiff: Vec<u8> =
+            px.iter().enumerate().map(|(i, &x)| if i % 160 == 0 { x } else { x.wrapping_sub(px[i - 1]) }).collect();
+        // LZW with 9-bit codes only: a clear code every 200 bytes, each byte as its own code.
+        let lzw = |d: &[u8]| {
+            let codes: Vec<u16> = d
+                .chunks(200)
+                .flat_map(|c| std::iter::once(256).chain(c.iter().map(|&b| b as u16)))
+                .chain(std::iter::once(257))
+                .collect();
+            let mut out = vec![0u8; (codes.len() * 9).div_ceil(8)];
+            for (k, &c) in codes.iter().enumerate() {
+                for b in 0..9 {
+                    if c >> (8 - b) & 1 == 1 {
+                        out[(k * 9 + b) / 8] |= 0x80 >> ((k * 9 + b) % 8);
+                    }
+                }
+            }
+            out
+        };
+        let hex: Vec<u8> = stored(&text).iter().flat_map(|b| format!("{b:02X}").into_bytes()).chain(*b">").collect();
+        let image = "/Subtype /Image /Width 160 /Height 120 /ColorSpace /DeviceGray /BitsPerComponent 8";
+        let parms = |p: u8, bpc: u8| {
+            format!("/DecodeParms << /Predictor {p} /Colors 1 /BitsPerComponent {bpc} /Columns 160 >>")
+        };
+        // Each with whether its content is kept: only when the filters decompress (Flate, LZW).
+        let cases: Vec<(String, Vec<u8>, bool)> = vec![
+            ("/Filter /FlateDecode".into(), stored(&text), true),
+            (
+                format!("{image} /Filter /FlateDecode {}", parms(15, 8)),
+                stored(&images::png_filter(&px, 160, 1, images::Choice::Fixed(2))),
+                true,
+            ),
+            (format!("{image} /Filter /FlateDecode {}", parms(2, 8)), stored(&tiff), true),
+            // Predictor 2 is undone only for 8-bit samples: the content is unknown, and the check fails.
+            (format!("/Filter /FlateDecode {}", parms(2, 4)), stored(&tiff), true),
+            ("/Filter [/ASCIIHexDecode /FlateDecode]".into(), hex, true),
+            ("/Filter /LZWDecode".into(), lzw(&text), true),
+            (format!("{image} /Filter [/FlateDecode /DCTDecode]"), stored(&text), true),
+            (
+                "/Filter /RunLengthDecode".into(),
+                text.chunks(128).flat_map(|c| [&[c.len() as u8 - 1][..], c].concat()).chain([128]).collect(),
+                false,
+            ),
+            (image.into(), px.clone(), false),
+        ];
+        let resolve = |o: &Obj| Some(o.clone());
+        let mut decoded = 0;
+        for (dict, data, kept) in cases {
+            let dict = match super::super::parse::Lexer::new(format!("<< {dict} >>").as_bytes(), 0).parse_obj() {
+                Ok(Obj::Dict(d)) => d,
+                x => panic!("{dict}: {x:?}"),
+            };
+            let s = Stream { dict, data };
+            for (max_stream, known) in [(Options::default().max_stream, kept), (CHECK_LIMIT + 1, false)] {
+                let mut content = None;
+                let r = reencode(&s, &Options { max_stream, ..Options::effort(0) }, &resolve, &mut content);
+                assert!(r.is_some(), "{:?}", s.dict);
+                assert_eq!(content, if known { content_of(&s) } else { None }, "{:?}", s.dict);
+                decoded += content.is_some() as usize;
+            }
+        }
+        assert_eq!(decoded, 6);
+    }
+
+    fn caught(r: &Optimized) -> bool {
+        matches!(&r.outcome, Outcome::Untouched(why) if why.starts_with("self-check:"))
+    }
+
+    #[test]
+    fn a_correct_rewrite_is_checked_by_its_stream_jobs() {
+        let pdf = test_pdf();
+        let (one, taken) = rewrite_with(&pdf, 1, None);
+        let Outcome::Smaller(stats) = &one.outcome else { panic!("{:?}", one.outcome) };
+        assert_eq!(stats.streams_reencoded, 4);
+        // Every stream, the one identical to another too, is taken on its job's check.
+        assert_eq!(taken, 4);
+        let (four, taken) = rewrite_with(&pdf, 4, None);
+        assert!(four.data == one.data && taken == 4);
+    }
+
+    #[test]
+    fn a_wrong_stream_is_caught() {
+        let pdf = test_pdf();
+        let (clean, _) = rewrite_with(&pdf, 1, None);
+        assert!(matches!(clean.outcome, Outcome::Smaller(_)));
+        // Stream 6 is encoded once with 4, by 4's job; the next stream encoded after 6 or 7 has been written.
+        for (fault, objects) in [
+            (Fault::Encoder, &[4, 5, 7][..]),
+            (Fault::EncoderContent, &[4, 5, 7]),
+            (Fault::Writer, &[4, 5, 6, 7]),
+            (Fault::Swap, &[4, 5]),
+            (Fault::Parms, &[4, 5, 6, 7]),
+            (Fault::Filter, &[4, 5, 6, 7]),
+        ] {
+            for &n in objects {
+                let (r, _) = rewrite_with(&pdf, 1, Some((fault, n)));
+                assert!(caught(&r), "{fault:?} in stream {n}: {:?}", r.outcome);
+                assert!(r.data == pdf, "{fault:?} in stream {n}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_encrypted_output_is_checked_on_its_decrypted_data() {
+        for (name, pdf) in [
+            ("r4_aes_128", &include_bytes!("../../tests/data/enc/r4_aes_128.pdf")[..]),
+            ("r3_rc4_128", &include_bytes!("../../tests/data/enc/r3_rc4_128.pdf")[..]),
+        ] {
+            let (clean, taken) = rewrite_with(pdf, 1, None);
+            let Outcome::Smaller(stats) = &clean.outcome else { panic!("{name}: {:?}", clean.outcome) };
+            assert!(!stats.encryption.is_empty() && taken > 0, "{name}: {taken}");
+            // A byte changed in any stream as it is written is caught.
+            let doc = xref::open(pdf).unwrap();
+            let streams: Vec<u32> = load_reachable(&doc)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, (_, o))| matches!(o, Obj::Stream(_)))
+                .map(|(n, _)| n)
+                .collect();
+            let mut found = 0;
+            for n in streams {
+                let (r, _) = rewrite_with(pdf, 1, Some((Fault::Writer, n)));
+                if caught(&r) {
+                    found += 1;
+                } else {
+                    // A stream kept as it was: nothing was changed.
+                    assert!(r.data == clean.data, "{name}: stream {n}: {:?}", r.outcome);
+                }
+            }
+            assert_eq!(found, stats.streams_reencoded, "{name}");
+        }
     }
 }
