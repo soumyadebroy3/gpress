@@ -1,6 +1,6 @@
 //! The zlib wrapper (RFC 1950) that PDF's FlateDecode uses around Deflate data.
 
-use super::inflate::{inflate, inflate_pieces, InflateError};
+use super::inflate::{inflate, inflate_len, inflate_pieces, InflateError};
 
 pub fn adler32(data: &[u8]) -> u32 {
     const MOD: u32 = 65521;
@@ -47,6 +47,23 @@ pub struct Unwrapped {
 
 /// Decodes a zlib stream strictly: the header, the Deflate data to its final block, and a matching checksum.
 pub fn unwrap(input: &[u8], limit: usize) -> Result<Unwrapped, ZlibError> {
+    header(input)?;
+    let inf = inflate(&input[2..], limit).map_err(ZlibError::Inflate)?;
+    let end = checksum_at(input, 2 + inf.consumed, adler32(&inf.data))?;
+    Ok(Unwrapped { trailing: input.len() - end, data: inf.data })
+}
+
+/// The length of the data `unwrap` gives, with the same checks and the same errors, but at most 128 KiB of
+/// the data held at any time (see `inflate_len`).
+pub fn unwrapped_len(input: &[u8], limit: usize) -> Result<usize, ZlibError> {
+    header(input)?;
+    let (len, adler, consumed) = inflate_len(&input[2..], limit).map_err(ZlibError::Inflate)?;
+    checksum_at(input, 2 + consumed, adler)?;
+    Ok(len)
+}
+
+/// The two header bytes: Deflate, a window zlib accepts, the header check, no preset dictionary.
+fn header(input: &[u8]) -> Result<(), ZlibError> {
     if input.len() < 2 {
         return Err(ZlibError::Header("too short"));
     }
@@ -63,16 +80,19 @@ pub fn unwrap(input: &[u8], limit: usize) -> Result<Unwrapped, ZlibError> {
     if flg & 0x20 != 0 {
         return Err(ZlibError::NeedsDictionary);
     }
-    let inf = inflate(&input[2..], limit).map_err(ZlibError::Inflate)?;
-    let end = 2 + inf.consumed;
+    Ok(())
+}
+
+/// The Adler-32 trailer at `end` must be `adler`; gives where the trailer ends.
+fn checksum_at(input: &[u8], end: usize, adler: u32) -> Result<usize, ZlibError> {
     if input.len() < end + 4 {
         return Err(ZlibError::NoChecksum);
     }
     let want = u32::from_be_bytes([input[end], input[end + 1], input[end + 2], input[end + 3]]);
-    if want != adler32(&inf.data) {
+    if want != adler {
         return Err(ZlibError::BadChecksum);
     }
-    Ok(Unwrapped { trailing: input.len() - end - 4, data: inf.data })
+    Ok(end + 4)
 }
 
 /// The Adler-32 of more data: `adler` is that of the bytes before `data` (1 for none), so the Adler-32 of a
@@ -103,22 +123,7 @@ pub fn unwrap_pieces(
     limit: usize,
     mut sink: impl FnMut(&[u8]) -> bool,
 ) -> Result<Option<(usize, usize)>, ZlibError> {
-    if input.len() < 2 {
-        return Err(ZlibError::Header("too short"));
-    }
-    let (cmf, flg) = (input[0], input[1]);
-    if cmf & 0x0f != 8 {
-        return Err(ZlibError::Header("not Deflate"));
-    }
-    if cmf >> 4 > 7 {
-        return Err(ZlibError::Header("window too large"));
-    }
-    if !((cmf as u16) << 8 | flg as u16).is_multiple_of(31) {
-        return Err(ZlibError::Header("bad header check"));
-    }
-    if flg & 0x20 != 0 {
-        return Err(ZlibError::NeedsDictionary);
-    }
+    header(input)?;
     let mut adler = 1;
     let inflated = inflate_pieces(&input[2..], limit, |p| {
         adler = adler32_more(adler, p);
@@ -126,15 +131,8 @@ pub fn unwrap_pieces(
     })
     .map_err(ZlibError::Inflate)?;
     let Some((len, consumed)) = inflated else { return Ok(None) };
-    let end = 2 + consumed;
-    if input.len() < end + 4 {
-        return Err(ZlibError::NoChecksum);
-    }
-    let want = u32::from_be_bytes([input[end], input[end + 1], input[end + 2], input[end + 3]]);
-    if want != adler {
-        return Err(ZlibError::BadChecksum);
-    }
-    Ok(Some((len, input.len() - end - 4)))
+    let end = checksum_at(input, 2 + consumed, adler)?;
+    Ok(Some((len, input.len() - end)))
 }
 
 #[cfg(test)]
@@ -211,5 +209,65 @@ mod tests {
         });
         assert_eq!(r, Ok(None));
         assert!(!got.is_empty() && unwrap(&z, usize::MAX).unwrap().data.starts_with(&got));
+    }
+}
+
+#[cfg(test)]
+mod counted {
+    use super::*;
+    use crate::flate::{deflate_zlib, Options};
+
+    fn rng(s: &mut u64) -> u64 {
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
+        *s
+    }
+
+    /// Streams with matches across the counter's window cuts, stored blocks (random bytes) and fixed codes.
+    fn streams() -> Vec<Vec<u8>> {
+        let mut s = 11u64;
+        let block: Vec<u8> = (0..30_000).map(|_| rng(&mut s) as u8).collect();
+        let mut text = Vec::new();
+        for k in 0..20_000 {
+            text.extend_from_slice(format!("{} {} l ", k % 113, k % 7).as_bytes());
+        }
+        let noise: Vec<u8> = (0..150_000).map(|_| rng(&mut s) as u8).collect();
+        let datas = [Vec::new(), b"a".to_vec(), b"abcabcabc".to_vec(), block.repeat(9), text, noise, vec![7u8; 300_000]];
+        datas.iter().map(|d| deflate_zlib(d, &Options::quick())).collect()
+    }
+
+    fn same(z: &[u8], limit: usize) {
+        let full = unwrap(z, limit).map(|u| u.data.len());
+        assert_eq!(unwrapped_len(z, limit), full, "{} bytes, limit {limit}", z.len());
+    }
+
+    #[test]
+    fn the_counted_length_is_the_decoded_length_or_the_same_error() {
+        let mut s = 5u64;
+        for z in streams() {
+            let n = unwrap(&z, usize::MAX).unwrap().data.len();
+            assert_eq!(unwrapped_len(&z, usize::MAX), Ok(n));
+            // Over the limit by one byte, exactly at it, and far under it.
+            for limit in [n, n.saturating_sub(1), n / 2, 0] {
+                same(&z, limit);
+            }
+            // Cut short, a header byte or a checksum byte changed, and bits flipped anywhere.
+            for cut in [0, 1, 2, z.len() / 3, z.len() - 5, z.len() - 1] {
+                same(&z[..cut], usize::MAX);
+            }
+            for at in [0, 1, z.len() - 1] {
+                let mut bad = z.clone();
+                bad[at] ^= 0x10;
+                same(&bad, usize::MAX);
+            }
+            for _ in 0..40 {
+                let mut bad = z.clone();
+                let at = 2 + rng(&mut s) as usize % (z.len() - 2);
+                bad[at] ^= 1 << (rng(&mut s) % 8);
+                same(&bad, usize::MAX);
+                same(&bad, n);
+            }
+        }
     }
 }

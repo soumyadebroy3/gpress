@@ -101,6 +101,20 @@ pub fn decode_stage(st: &Stage, data: &[u8], limit: usize) -> Result<Vec<u8>, Fi
     }
 }
 
+/// The length of what `decode_stage` gives, or the same error, without holding the decoded bytes for Flate
+/// and RunLength (Flate holds at most 128 KiB of them, see `zlib::unwrapped_len`).
+pub fn decoded_size(st: &Stage, data: &[u8], limit: usize) -> Result<usize, FilterError> {
+    match st.name.as_slice() {
+        b"FlateDecode" => match zlib::unwrapped_len(data, limit) {
+            Ok(n) => Ok(n),
+            Err(zlib::ZlibError::Inflate(crate::flate::InflateError::TooLarge)) => Err(FilterError::TooLarge),
+            Err(_) => Err(FilterError::Bad("flate")),
+        },
+        b"RunLengthDecode" => run_length_len(data, limit),
+        _ => decode_stage(st, data, limit).map(|d| d.len()),
+    }
+}
+
 /// Predictor settings of a stage: (predictor, colors, bits, columns).
 pub fn predictor(st: &Stage) -> Option<(i64, i64, i64, i64)> {
     Some((
@@ -455,8 +469,25 @@ mod tests {
             for limit in [usize::MAX, 300, 50, 0] {
                 let full = run_length_decode(&data, limit).map(|d| d.len());
                 assert_eq!(run_length_len(&data, limit), full);
+                let st = Stage { name: b"RunLengthDecode".to_vec(), parms: None };
+                assert_eq!(decoded_size(&st, &data, limit), full);
             }
         }
+    }
+
+    #[test]
+    fn decoded_sizes_agree_with_the_decoders() {
+        let text = b"0 0 m 100 100 l S ".repeat(5000);
+        let z = crate::flate::deflate_zlib(&text, &crate::flate::Options::quick());
+        let flate = Stage { name: b"FlateDecode".to_vec(), parms: None };
+        let hex = Stage { name: b"ASCIIHexDecode".to_vec(), parms: None };
+        for (st, data) in [(&flate, &z[..]), (&flate, &z[..z.len() - 3]), (&hex, &b"41 42 4"[..]), (&hex, &b"4x"[..])] {
+            for limit in [usize::MAX, text.len(), text.len() - 1] {
+                assert_eq!(decoded_size(st, data, limit), decode_stage(st, data, limit).map(|d| d.len()));
+            }
+        }
+        assert_eq!(decoded_size(&flate, &z, usize::MAX), Ok(text.len()));
+        assert_eq!(decoded_size(&flate, &z, text.len() - 1), Err(FilterError::TooLarge));
     }
 
     #[test]

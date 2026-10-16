@@ -7,7 +7,7 @@
 //! cross-reference stream. Before anything is returned, the output is read back and compared object by object.
 
 use super::crypt::{Crypt, Method};
-use super::filters::{chain, decode_stage, is_general, Stage};
+use super::filters::{self, chain, decode_stage, is_general, Stage};
 use super::images;
 use super::object::*;
 use super::xref::{self, Doc, Entry};
@@ -721,15 +721,18 @@ fn identical_streams(streams: &[(u32, &Stream)]) -> (Vec<usize>, Vec<usize>) {
 
 /// Bytes the general filters of a stream decode to; None when they don't decode within `limit`, or the last of
 /// them not within `last` (where a caller can stop early: an earlier stage, hex text say, can be the larger).
+/// The last stage's output is only counted, not held (`filters::decoded_size`).
 fn decoded_size(s: &Stream, limit: usize, last: usize) -> Option<usize> {
     let Some(stages) = chain(&s.dict) else { return Some(s.data.len()) };
     let general = stages.iter().take_while(|st| is_general(&st.name)).count();
-    let mut data: std::borrow::Cow<[u8]> = std::borrow::Cow::Borrowed(&s.data);
-    for (i, st) in stages[..general].iter().enumerate() {
-        let limit = if i + 1 == general { limit.min(last) } else { limit };
-        data = std::borrow::Cow::Owned(decode_stage(st, &data, limit).ok()?);
+    let mut data: Cow<[u8]> = Cow::Borrowed(&s.data);
+    for st in &stages[..general.saturating_sub(1)] {
+        data = Cow::Owned(decode_stage(st, &data, limit).ok()?);
     }
-    Some(data.len())
+    match stages[..general].last() {
+        Some(st) => filters::decoded_size(st, &data, limit.min(last)).ok(),
+        None => Some(data.len()),
+    }
 }
 
 /// The fast encoder's level for image streams below `FAST_BELOW` (other streams get `flate::Options::effort`).
@@ -790,17 +793,10 @@ fn structure_flate(opt: &Options, raw: usize, input_len: usize) -> flate::Option
     }
 }
 
-/// Bytes the general filters of a stream decode to (the stored size when they don't decode).
-fn decoded_len(s: &Stream, limit: usize) -> usize {
-    let Some(stages) = chain(&s.dict) else { return s.data.len() };
-    let mut data: std::borrow::Cow<[u8]> = std::borrow::Cow::Borrowed(&s.data);
-    for st in stages.iter().take_while(|st| is_general(&st.name)) {
-        match decode_stage(st, &data, limit) {
-            Ok(d) => data = std::borrow::Cow::Owned(d),
-            Err(_) => return s.data.len(),
-        }
-    }
-    data.len()
+/// Bytes the general filters of a stream decode to, and whether they decode within `limit` (the stored size
+/// when they don't). Only counted, as in `decoded_size`.
+fn decoded_len(s: &Stream, limit: usize) -> (usize, bool) {
+    decoded_size(s, limit, usize::MAX).map_or((s.data.len(), false), |n| (n, true))
 }
 
 /// The extra work allowed below effort 100, per byte of input, in units of quick-encoding one decoded byte:
@@ -830,7 +826,8 @@ fn work_per_byte(effort: u8) -> f64 {
 }
 
 /// The settings for each distinct stream (see `Options::effort`), or None to keep it exactly as it is. At
-/// effort 100, `opt` for all of them. Below, the streams that take the most room in the file come first:
+/// effort 100, `opt` for every stream whose general filters decode within `max_stream`, None for the others
+/// (`reencode` would keep them). Below, the streams that take the most room in the file come first:
 /// each gets the quick settings while its decoded bytes fit in what is left of `quick_budget` (and is kept
 /// otherwise), then the strongest settings up to the effort (`opt` itself, or a lower step of 20) whose
 /// extra work fits in what is left of `work_budget`. Sizes decide, never time.
@@ -841,8 +838,21 @@ fn effort_plan(
     input_len: usize,
     pool: Option<&par::Pool>,
 ) -> Vec<Option<Options>> {
+    // From 20 on, what each stream decodes to is counted (`decoded_len`). A stream whose general filters don't
+    // decode within `max_stream` is kept as it is (`reencode` would find the same), so it is not decoded again
+    // only to fail; below 100 its stored size still counts in the budgets. Out of time: nothing more is
+    // counted (the whole rewrite is given up after the plan, so this changes no output).
+    let counted = || {
+        par::map(pool, unique.len(), None, |u| {
+            let s = streams[unique[u]].1;
+            if opt.deadline.passed() {
+                return (s.data.len(), false);
+            }
+            decoded_len(s, opt.max_stream)
+        })
+    };
     if opt.effort >= 100 {
-        return vec![Some(opt.clone()); unique.len()];
+        return counted().into_iter().map(|(_, decodes)| decodes.then(|| opt.clone())).collect();
     }
     let mut order: Vec<usize> = (0..unique.len()).collect();
     order.sort_by_key(|&u| (std::cmp::Reverse(streams[unique[u]].1.data.len()), u));
@@ -906,7 +916,7 @@ fn effort_plan(
         effort: e,
         ..opt.clone()
     };
-    let sizes = par::map(pool, unique.len(), None, |u| decoded_len(streams[unique[u]].1, opt.max_stream));
+    let sizes = counted();
     // From 20 on, every stream gets at least the strong encoder's quick settings.
     let quick = Options {
         flate: flate::Options {
@@ -927,18 +937,22 @@ fn effort_plan(
     }
     let mut budget = input_len as f64 * work_budget(opt.effort);
     for u in order {
-        if sizes[u] as f64 > floor {
+        let (size, decodes) = sizes[u];
+        if size as f64 > floor {
             continue;
         }
-        floor -= sizes[u] as f64;
+        floor -= size as f64;
         out[u] = Some(quick.clone());
         for (o, extra) in &steps {
-            let w = sizes[u] as f64 * extra;
+            let w = size as f64 * extra;
             if w <= budget {
                 budget -= w;
                 out[u] = Some(o.clone());
                 break;
             }
+        }
+        if !decodes {
+            out[u] = None;
         }
     }
     out
@@ -1040,7 +1054,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
             let new = r.as_ref().map_or(s.data.len(), |x| x.1.len());
             let how = settings[u]
                 .as_ref()
-                .map_or("kept, over the quick budget".to_string(), |o| format!("effort {}", o.effort));
+                .map_or("kept: over the quick budget, or not decodable".to_string(), |o| format!("effort {}", o.effort));
             eprintln!(
                 "stream {n}: {} -> {new} bytes, {how}, {:?}{}",
                 s.data.len(),
@@ -1669,6 +1683,39 @@ mod effort_tests {
         assert!(
             quick_budget(0, 1000) >= (4 << 20) as f64 && quick_budget(10, 1 << 20) == 2.0 * quick_budget(0, 1 << 20)
         );
+    }
+
+    #[test]
+    fn a_stream_that_does_not_decode_is_kept_and_its_stored_size_still_counts() {
+        // 3 MiB of noise behind Flate, over a max_stream of 2 MiB: kept at every effort without being decoded
+        // again in reencode (which would find the same). From 20 on its stored size still counts in the quick
+        // budget (4 MiB here) as it did when it was decoded only to fail: at effort 50, 1.5 MB of text after it
+        // no longer fits, 0.9 MB does. Below 20 (the fast path) a stream that does not decode takes nothing
+        // from the budget, and at 100 there is none.
+        let resolve = |o: &Obj| Some(o.clone());
+        let mut r = 9u64;
+        let noise: Vec<u8> = (0..3 << 20)
+            .map(|_| {
+                r ^= r << 13;
+                r ^= r >> 7;
+                r ^= r << 17;
+                r as u8
+            })
+            .collect();
+        let big = flate_stream(&noise, &[]);
+        for (n, fits) in [(1_500_000, false), (900_000, true)] {
+            let text: Vec<u8> = b"BT (gpress) Tj ET\n".iter().copied().cycle().take(n).collect();
+            let small = flate_stream(&text, &[]);
+            assert!(small.data.len() < big.data.len());
+            let streams: Vec<(u32, &Stream)> = vec![(1, &big), (2, &small)];
+            for e in [0u8, 50, 100] {
+                let opt = Options { max_stream: 2 << 20, ..Options::effort(e) };
+                assert!(reencode(&big, &opt, &resolve).is_none());
+                let plan = effort_plan(&streams, &[0, 1], &opt, 1000, None);
+                assert!(plan[0].is_none(), "effort {e}");
+                assert_eq!(plan[1].is_some(), fits || e != 50, "effort {e}, {n} bytes");
+            }
+        }
     }
 
     #[test]
