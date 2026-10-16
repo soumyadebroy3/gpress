@@ -41,6 +41,22 @@ impl Pool {
         !self.refused.load(Ordering::Relaxed) && self.take_free()
     }
 
+    /// Up to `most` free slots at once (none after a refused thread).
+    fn take_up_to(&self, most: usize) -> usize {
+        if self.refused.load(Ordering::Relaxed) {
+            return 0;
+        }
+        let mut free = self.free.load(Ordering::Acquire);
+        while free > 0 && most > 0 {
+            let got = free.min(most);
+            match self.free.compare_exchange_weak(free, free - got, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return got,
+                Err(now) => free = now,
+            }
+        }
+        0
+    }
+
     /// A free slot, if there is one (also after a refused thread).
     fn take_free(&self) -> bool {
         // One slot less, unless none is free (a plain compare-and-swap loop).
@@ -88,9 +104,12 @@ impl Pool {
 
     /// A helper thread running `work`, if a slot is free and the system gives a thread.
     fn helper<'scope>(&'scope self, s: &'scope Scope<'scope, '_>, work: impl FnOnce() + Send + 'scope) -> bool {
-        if !self.take() {
-            return false;
-        }
+        self.take() && self.start(s, work)
+    }
+
+    /// A helper thread running `work` on a slot already taken, if the system gives a thread (else the slot
+    /// goes back).
+    fn start<'scope>(&'scope self, s: &'scope Scope<'scope, '_>, work: impl FnOnce() + Send + 'scope) -> bool {
         let slot = Slot(self);
         // Refused: the closure, slot included, is dropped, so the slot goes back.
         let ok = spawn(s, move || {
@@ -195,10 +214,18 @@ pub fn map<R: Send>(pool: Option<&Pool>, n: usize, order: Option<&[usize]>, f: i
     };
     let lend = Lend(pool, Cell::new(false));
     std::thread::scope(|s| {
-        // As many helpers as the pool gives now (the caller takes a piece too).
-        let mut helpers = 0;
-        while helpers + 1 < n && pool.helper(s, help) {
-            helpers += 1;
+        // As many helpers as the pool gives now (the caller takes a piece too). Their slots are all taken
+        // before the first helper starts, so a nested map in a helper's piece finds none free: no slot can be
+        // lent back to this map while it has pieces left to start, and a map started on the whole pool (the
+        // streams of a file) never has more pieces in flight than the pool has threads.
+        let mut slots = pool.take_up_to(n - 1);
+        while slots > 0 {
+            slots -= 1;
+            if !pool.start(s, help) {
+                // The system refused a thread: the slots not used go back too.
+                (0..slots).for_each(|_| pool.release());
+                break;
+            }
         }
         loop {
             let k = next.fetch_add(1, Ordering::Relaxed);
@@ -575,6 +602,35 @@ pub(crate) mod tests {
                     })
                 });
                 assert_eq!(got, (0..60).map(|i| i * 3).collect::<Vec<_>>());
+                let most = most.load(Ordering::SeqCst);
+                assert!(most <= threads, "{most} outer pieces at once, {threads} threads, seed {seed}");
+                all_back(&pool);
+            }
+        }
+    }
+
+    #[test]
+    fn a_lent_slot_never_starts_another_piece_of_the_same_map() {
+        // A helper can start its first piece while the outer map is still starting the others. Had its nested
+        // map found a slot free then, it could lend it at its end and the outer map start another of its own
+        // pieces on it; but the outer map takes the slots of all its helpers before the first one starts.
+        for threads in [3, 4, 8] {
+            for seed in 1..=40 {
+                let pool = Pool::new(threads);
+                let (now, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+                let got = jitter::with(seed, || {
+                    map(Some(&pool), 40, None, |i| {
+                        counted(&now, &most, || {
+                            map(Some(&pool), 2, None, |j| {
+                                std::thread::sleep(std::time::Duration::from_micros(100 * j as u64));
+                                i + j
+                            })
+                            .iter()
+                            .sum::<usize>()
+                        })
+                    })
+                });
+                assert_eq!(got, (0..40).map(|i| 2 * i + 1).collect::<Vec<_>>());
                 let most = most.load(Ordering::SeqCst);
                 assert!(most <= threads, "{most} outer pieces at once, {threads} threads, seed {seed}");
                 all_back(&pool);
