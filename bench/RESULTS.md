@@ -705,6 +705,126 @@ fast tier (`fast-tier.md`, F1), which replaces the optimal parse and the block s
 first call at effort 0, would leave a wide margin. Opt-level s for the module (L2) starts as fast as 3 at
 effort 0 on idle cores (9% slower at effort 100) and saves a quarter to a third on one core.
 
+### Memory
+
+The target (L3): at effort 0, a peak of at most 32 MiB (32 x 2^20 bytes) plus twice the input. The peak is the
+resident set that `wait4` gives (bench/measure.c) for `optimize` with 1 thread, one process per file, on the
+120-file sample. Before: the baseline rows (build base-066b65e, `bench/results/base`). After: branch
+`wip/l3-memory` at 1bd32b3 with every feature on, measured by `benchmark.py space` at efforts 0 and 100 on cores
+0-2 of a shared machine. All 240 outputs are byte for byte the baseline's (the same SHA-256).
+
+Each run fitted as a fixed cost plus bytes per input byte, by least squares and as the lowest line with every
+file on or under it (MiB; "at slope 2" is the fixed cost every file would need with the target's 2 bytes per
+input byte):
+
+| Effort | Run | Median | Peak (file, MiB in) | Least squares | Every file under | At slope 2 | Files over the target |
+| --- | --- | ---: | --- | --- | --- | ---: | ---: |
+| 0 | before | 5.1 | 97.1 (GeoTopo.pdf, 5.07) | 9.26 + 9.76 x input | 65.18 + 11.41 x input | 86.98 | 20 |
+| 0 | after | 5.1 | 78.9 (GeoTopo.pdf, 5.07) | 8.28 + 7.12 x input | 57.32 + 4.26 x input | 68.78 | 15 |
+| 100 | before | 5.1 | 173.7 (issue12963.pdf, 0.58) | 17.03 + 11.26 x input | 173.67 + 0.00 x input | 172.52 | 27 |
+| 100 | after | 5.3 | 157.2 (GeoTopo.pdf, 5.07) | 16.52 + 9.70 x input | 147.88 + 1.83 x input | 147.78 | 25 |
+
+The fixed cost stays small. On the empty one-page PDF (420 bytes, left untouched; the smallest wall time of 5
+runs) the baseline peaks at 4,796 KB in 7.3 ms at effort 0 and 4,764 KB in 9.6 ms at effort 100. Run back to
+back on the same busy cores, the baseline and the final build peak at 4,708 and 5,040 KB at effort 0 (7.4 and
+7.5 ms of CPU) and 4,676 and 4,896 KB at effort 100 (9.5 and 9.4 ms).
+
+The target is not met at effort 0: 15 files are over the line after the changes (20 before). The files over it
+in either run, in MiB:
+
+| File | MiB in | Line | Before | After | After - line |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| GeoTopo.pdf | 5.07 | 42.1 | 97.1 | 78.9 | +36.8 |
+| issue9262_reduced.pdf | 5.28 | 42.6 | 89.9 | 69.5 | +27.0 |
+| issue9940.pdf | 0.38 | 32.8 | 55.9 | 58.9 | +26.2 |
+| issue12841_reduced.pdf | 5.58 | 43.2 | 81.6 | 67.6 | +24.4 |
+| issue1905.pdf | 0.88 | 33.8 | 44.0 | 42.2 | +8.5 |
+| freeculture.pdf | 2.48 | 37.0 | 46.7 | 44.2 | +7.2 |
+| issue12810.pdf | 0.24 | 32.5 | 36.4 | 36.7 | +4.2 |
+| issue6286.pdf | 1.82 | 35.6 | 47.7 | 39.5 | +3.9 |
+| base64image.pdf | 2.16 | 36.3 | 41.7 | 40.2 | +3.9 |
+| ocrmypdf multipage.pdf | 1.07 | 34.1 | 77.2 | 37.0 | +2.9 |
+| pikepdf pdfa multipage.pdf | 1.07 | 34.1 | 77.4 | 36.9 | +2.8 |
+| issue6961.pdf | 2.06 | 36.1 | 38.4 | 37.3 | +1.2 |
+| issue19971.pdf | 1.65 | 35.3 | 38.7 | 36.4 | +1.1 |
+| PDFJS-9279-reduced.pdf | 2.95 | 37.9 | 41.8 | 39.0 | +1.1 |
+| issue6931_reduced.pdf | 0.05 | 32.1 | 36.3 | 32.8 | +0.7 |
+| 3small.pdf | 0.16 | 32.3 | 33.7 | 32.0 | -0.3 |
+| issue12295.pdf | 0.36 | 32.7 | 33.1 | 32.3 | -0.4 |
+| issue14821.pdf | 0.30 | 32.6 | 33.7 | 31.5 | -1.1 |
+| issue19517.pdf | 5.97 | 43.9 | 82.9 | 28.0 | -16.0 |
+| enormous.pdf | 0.30 | 32.6 | 68.6 | 5.5 | -27.1 |
+
+Each row is one run of each build, and some peaks move by up to 6.6 MiB from one run to the next with the same
+build and input: issue9940.pdf gives 53,712 to 60,480 KB with the final build (57,140 to 57,228 KB with the
+start; the spread came with 81727ac), and a high and a low run made the same memory system calls but one brk.
+Differences of a few MiB on one file are within that.
+
+What each change saved, in KB (the median of 3 runs, 1 thread; one run for GeoTopo.pdf and issue12963.pdf;
+every output the same). "start" is opt-lightweight 3b5b501, and each column adds one commit:
+
+| File | Effort | start | +128f885 | +f472f35 | +aa6b571 | +81727ac | +815b642 | +4e27026 | +1bd32b3 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| issue12841_reduced | 0 | 83,524 | 59,364 | 59,488 | 59,532 | 59,320 | 59,400 | 53,652 | 69,116 |
+| issue19517 | 0 | 85,016 | 85,036 | 84,892 | 34,764 | 34,632 | 28,548 | 28,648 | 28,632 |
+| enormous | 0 | 70,168 | 70,216 | 70,344 | 70,352 | 5,964 | 5,608 | 5,512 | 5,624 |
+| issue6286 | 0 | 48,844 | 38,060 | 38,072 | 38,052 | 36,276 | 36,280 | 37,140 | 40,412 |
+| PDFJS-9279-reduced | 0 | 42,704 | 39,648 | 39,592 | 39,568 | 39,616 | 39,592 | 36,844 | 39,932 |
+| issue6931_reduced | 0 | 37,752 | 37,096 | 34,604 | 34,788 | 35,604 | 35,248 | 35,256 | 33,676 |
+| base64image | 0 | 43,364 | 44,456 | 42,456 | 42,420 | 42,108 | 42,112 | 41,356 | 41,148 |
+| pikepdf pdfa multipage | 0 | 79,080 | 79,312 | 79,176 | 79,152 | 36,120 | 36,016 | 35,864 | 37,860 |
+| ocrmypdf multipage | 0 | 79,284 | 79,316 | 79,260 | 79,280 | 36,080 | 36,028 | 35,952 | 37,588 |
+| issue9940 | 0 | 57,212 | 57,036 | 53,348 | 53,396 | 54,788 | 59,460 | 54,008 | 57,644 |
+| issue9262_reduced | 0 | 92,156 | 80,036 | 80,004 | 79,944 | 70,652 | 60,444 | 55,108 | 71,120 |
+| GeoTopo | 0 | 90,628 | 90,508 | 83,608 | 83,084 | 81,792 | 83,428 | 81,108 | 84,024 |
+| issue19517 | 100 | 84,748 | 84,848 | 84,820 | 34,768 | 34,680 | 28,628 | 28,588 | 28,620 |
+| enormous | 100 | 69,976 | 70,064 | 70,092 | 70,124 | 5,968 | 5,616 | 5,648 | 5,668 |
+| issue13931 | 100 | 81,380 | 81,368 | 66,260 | 66,292 | 66,668 | 66,664 | 66,648 | 66,672 |
+| issue12963 | 100 | 177,772 | 177,736 | 152,340 | 151,280 | 148,452 | 148,312 | 152,508 | 152,508 |
+
+- **128f885**: a stream's 1 MiB segments are optimised in groups of one per thread (eight before) before their
+  blocks are written, so with one thread one segment's plan is held instead of eight: issue12841_reduced
+  83,524 to 59,364 KB, issue9262_reduced 92,156 to 80,036, issue6286 48,844 to 38,060.
+- **f472f35**: the image predictor candidates read the decoded samples where they are (the plain candidate was
+  a whole copy, held through the full encode): issue12963 at effort 100 177,736 to 152,340 KB, issue13931 at
+  effort 100 81,368 to 66,260, GeoTopo 90,508 to 83,608.
+- **aa6b571**: RunLength output is sized by a first pass instead of doubling as it grows: issue19517 85,036
+  to 34,764 KB.
+- **81727ac**: the effort plan counts each stream's decoded size, holding only the last 32 KiB of it (it
+  decoded every stream whole, and the stream was then decoded again to be encoded), and a stream that does not
+  decode within the 64 MiB limit is kept at once, at every effort, instead of being decoded up to the limit
+  only to fail: enormous.pdf (one image that decodes to 243 MB) 70,352 to 5,964 KB, the two multipage files
+  79,152 to 36,120, issue9262_reduced 79,944 to 70,652.
+- **815b642**: each object's bytes are freed once they are in the output: issue9262_reduced 70,652 to 60,444
+  KB, issue19517 34,632 to 28,548.
+- **4e27026**: a stream with no general filter is read in place before it is re-encoded, not copied:
+  issue12841_reduced 59,400 to 53,652 KB, issue9262_reduced 60,444 to 55,108, PDFJS-9279-reduced 39,592 to
+  36,844.
+- **1bd32b3**: with one thread, a segment's plan is held until the next one's is made. Freed at once
+  (128f885), its memory and the segment's tables went back to the system after every segment and were faulted
+  in again: twice the page faults (40,508 against 20,110 on issue12841_reduced, 64,006 against 24,647 on
+  issue9262_reduced) and 4 to 5% more CPU time at effort 0. Held, the faults are as before, and so is the
+  time. This gives back part of 128f885's saving on the files with several segments (issue12841_reduced 53,652
+  to 69,116 KB, issue9262_reduced 55,108 to 71,120: still 14,408 and 21,036 KB under the start).
+- 88e2fc3 and 40ebe0c change no behaviour (clippy, rustfmt).
+
+The time stays. CPU-time medians of 7 rounds, the start and the final build run back to back in alternating
+order, on the 16 file and effort pairs the changes touch, are all within +2.0% (issue6286 at effort 100
++2.0%, PDFJS-9279-reduced at effort 100 +1.6%), and their sum is 1.0% lower; enormous.pdf and issue19517 take
+half the time at effort 0, where a stream is no longer decoded only to be dropped. Those wall times varied too
+much to compare (another agent shared the cores: wall about twice the CPU time). Later, on quieter cores:
+issue9262_reduced at effort 0 -0.1% (7 rounds), issue12841_reduced at effort 0 +0.5% (9 rounds) and
+PDFJS-9279-reduced at effort 100 +0.8% (7 rounds), with the wall times as close.
+
+What is left. On the eight files over the line that were profiled with heaptrack, the peak at effort 0 is the
+Flate encoder's working memory for one 1 MiB segment, 14 to 28 MiB of match finder and 6 to 9 MiB of optimal
+parse, plus the decoded stream being encoded, the chosen predictor's copy of an image (GeoTopo.pdf: about 9
+MiB each), the input and its objects: over 32 MiB before the input counts. Meeting the target needs the match
+finder and the parse to hold less (open work in PR #2 and #6, not touched here) and an image to be filtered and
+encoded without holding both copies (code that PR #1 rewrites). At effort 100 the match finder is most of the
+peak (50 to 128 MiB on the largest files). Once PR #2 keeps the match finder's tables per thread, 1bd32b3
+should be measured again: without the faults, freeing each plan at once may cost nothing.
+
 ## Security (hostile input)
 
 Every number here comes from `bench/security.py` (run `security`, build main-d86b799, 2026-10-08 17:45:03 UTC), engine at effort 0 with 1 thread, each command its own process measured by bench/measure.c (parent under 1 MB); address-space limit by prlimit. Time bounds apply to the child's CPU time. The bounds: a damaged archive is refused in under 5 s with a peak under 512 MiB; a hostile PDF returns (untouched, or smaller and proven by the engine's own self-check) or gives a clean error in under 30 s plus 5 s per MiB of input, with a peak under 512 MiB or 16 bytes per input byte, whichever is more; a run past 60 s of wall time (2x its bound when that is more) is a hang. The fuzzer runs with a hard 512 MiB address space.
