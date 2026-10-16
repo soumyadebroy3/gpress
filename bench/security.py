@@ -82,6 +82,12 @@ DEFAULTS = {
         # (about one stream of max_stream with its encodings) and address space (that, plus an allocator arena).
         'mem_per_thread_mib': 128, 'as_per_thread_mib': 256,
         'objects': 1_000_000, 'runlength_mib': 2,
+        # Object streams: past max_stream (64 MiB); held at once, never read through; read through, but many;
+        # entries sharing one offset before a long object; each holding the next one in its stored bytes.
+        'objstm_big_streams': 8, 'objstm_big_mib': 200, 'objstm_held_streams': 12, 'objstm_held_mib': 60,
+        'objstm_held_pad_mib': 6,  # a file this large has a budget past what may be held: the held cap is what stops it
+        'objstm_many_streams': 160, 'objstm_many_mib': 60, 'objstm_alias_entries': 100, 'objstm_alias_mib': 8,
+        'objstm_nested_streams': 128_000,
     },
     'fuzz': {
         'seconds': 600, 'mem_mib': 512, 'seeds': 40, 'max_seed_bytes': 1_500_000, 'archive_seeds': 12,
@@ -542,6 +548,17 @@ def hostile_pdfs(cfg, dst):
     add('objstm_selfref.pdf', objstm_selfref(), 'xref stream saying an object lives inside object stream 2: itself')
     add('objstm_loop.pdf', objstm_loop(), 'object stream that contains itself and /Extends itself')
     add('million_objects.pdf', million_objects(p['objects']), f'{p["objects"]:,} tiny objects reachable from the catalog')
+    k, mib = p['objstm_big_streams'], p['objstm_big_mib']
+    add('objstm_bomb_big.pdf', objstm_streams(k, mib), f'{k} object streams decoding to {mib} MiB each, past max_stream')
+    k, mib, pad = p['objstm_held_streams'], p['objstm_held_mib'], p['objstm_held_pad_mib']
+    add('objstm_bomb_held.pdf', objstm_streams(k, mib, unread=True, pad_mib=pad),
+        f'{k} object streams of {mib} MiB, none ever read through (each lists an object nothing refers to), in a {pad} MiB file')
+    k, mib = p['objstm_many_streams'], p['objstm_many_mib']
+    add('objstm_bomb_many.pdf', objstm_streams(k, mib), f'{k} object streams of {mib} MiB, each read through: {k * mib:,} MiB in all')
+    k, mib = p['objstm_alias_entries'], p['objstm_alias_mib']
+    add('objstm_alias.pdf', objstm_alias(k, mib), f'{k} object stream entries at one offset, before an array of {mib} MiB')
+    k = p['objstm_nested_streams']
+    add('objstm_nested.pdf', objstm_nested(k), f'{k:,} object streams, each holding the next one whole in its stored bytes')
     return cases
 
 
@@ -639,6 +656,108 @@ def objstm_loop():
     body += xref_stream_obj(6, e, 7, b"")
     body += f"startxref\n{o6}\n%%EOF\n".encode()
     return bytes(body)
+
+
+def objstm_pdf(stms, rows, refs, pad_mib=0, nested=False):
+    """A PDF with a cross-reference stream: the catalog (referring to `refs`), the pages and a page, with
+    `pad_mib` an image of that many MiB that doesn't compress; then object streams (number, data behind two
+    Flate stages, /N, /First), one after the other or with `nested` each inside the one before, and `rows`
+    placing objects in them (object, object stream, index)."""
+    body = bytearray(b'%PDF-1.7\n')
+    at = {}
+
+    def plain(n, b):
+        at[n] = (1, len(body), 0)
+        body.extend(f"{n} 0 obj\n".encode() + b + b"\nendobj\n")
+
+    refs = list(refs) + ([4] if pad_mib else [])
+    plain(1, b"<< /Type /Catalog /Pages 2 0 R /C [" + b' '.join(f"{r} 0 R".encode() for r in refs) + b"] >>")
+    plain(2, PAGES)
+    plain(3, PAGE)
+    if pad_mib:
+        noise = random.Random(4).randbytes(pad_mib * MIB)
+        plain(4, stream_obj(noise, extra=f"/Subtype /Image /Width {MIB} /Height {pad_mib} /BitsPerComponent 8 /ColorSpace /DeviceGray".encode()))
+    def head(sn, n, first, length):
+        return f"{sn} 0 obj\n<< /Type /ObjStm /N {n} /First {first} /Filter [/FlateDecode /FlateDecode] /Length {length} >>\nstream\n".encode()
+
+    tail = b"\nendstream\nendobj\n"
+    # Nested: the stored bytes of each object stream are its own data (which Flate ends) and then the next object
+    # stream whole, so its /Length counts all that follows; the lengths are found from the inside out.
+    lengths, inside = [len(data) for _, data, _, _ in stms], 0
+    if nested:
+        for i in range(len(stms) - 1, -1, -1):
+            sn, data, n, first = stms[i]
+            lengths[i] = len(data) + inside
+            inside = len(head(sn, n, first, lengths[i])) + lengths[i] + len(tail)
+    for (sn, data, n, first), length in zip(stms, lengths):
+        at[sn] = (1, len(body), 0)
+        body.extend(head(sn, n, first, length) + data + (b"" if nested else tail))
+    if nested:
+        body.extend(tail * len(stms))
+    for n, sn, i in rows:
+        at[n] = (2, sn, i)
+    xn = max(at) + 1
+    xa = len(body)
+    at[xn] = (1, xa, 0)
+    e = bytearray()
+    for n in range(xn + 1):
+        t, a, b = at.get(n, (0, 0, 65535 if n == 0 else 0))
+        e += bytes([t]) + a.to_bytes(4, 'big') + b.to_bytes(2, 'big')
+    body += xref_stream_obj(xn, bytes(e), xn + 1, b"")
+    body += f"startxref\n{xa}\n%%EOF\n".encode()
+    return bytes(body)
+
+
+def objstm_data(objs, mib, fill=b' ', tail=b''):
+    """An object stream holding `objs` [(number, offset, body)] (the header lists every number at its offset;
+    the bodies are written in the order given), then `fill` repeated and `tail`, `mib` MiB in all (header
+    included; nothing more when that is less), behind two Flate stages; made in pieces so the fill never sits in
+    memory at once. Returns (data, /N, /First)."""
+    head = b''.join(f"{n} {off} ".encode() for n, off, _ in objs)
+    body = b''.join(b for _, _, b in objs)
+    c = zlib.compressobj(9)
+    inner = bytearray(c.compress(head + body))
+    piece = fill * (MIB // len(fill))
+    left = mib * MIB - len(head) - len(body) - len(tail)
+    while left > 0:
+        n = min(left, len(piece))
+        inner += c.compress(piece[:n])
+        left -= n
+    inner += c.compress(tail) + c.flush()
+    return zlib.compress(bytes(inner), 9), len(objs), len(head)
+
+
+def objstm_streams(k, mib, unread=False, pad_mib=0):
+    """`k` object streams with the same `mib` MiB of decoded bytes. Each lists objects 1000..1000+k (the catalog
+    refers to them) and 2000..2000+k (nothing does); the xref stream places 1000+i in stream 100+i, and with
+    `unread` 2000+i there too, so that no stream is ever read through."""
+    objs, off = [], 0
+    for n in list(range(1000, 1000 + k)) + list(range(2000, 2000 + k)):
+        b = f"<< /K {n} >>\n".encode()
+        objs.append((n, off, b))
+        off += len(b)
+    data, n, first = objstm_data(objs, mib)
+    rows = [(1000 + i, 100 + i, i) for i in range(k)]
+    if unread:
+        rows += [(2000 + i, 100 + i, k + i) for i in range(k)]
+    return objstm_pdf([(100 + i, data, n, first) for i in range(k)], rows, range(1000, 1000 + k), pad_mib)
+
+
+def objstm_alias(k, mib):
+    """One object stream whose `k` entries all start at offset 0, where an array of `mib` MiB of zeros starts:
+    read one by one, each entry parses the whole array."""
+    data, n, first = objstm_data([(1000 + i, 0, b'[' if i == 0 else b'') for i in range(k)], mib, fill=b'0 ', tail=b']')
+    return objstm_pdf([(5, data, n, first)], [(1000 + i, 5, i) for i in range(k)], range(1000, 1000 + k))
+
+
+def objstm_nested(k):
+    """`k` object streams, each listing one object the catalog refers to, each holding the next one whole in its
+    stored bytes after its own data: read one after the other, they copy about k * k / 2 streams' worth."""
+    stms = []
+    for i in range(k):
+        data, n, first = objstm_data([(10 + k + i, 0, b"<< >>")], 0)
+        stms.append((10 + i, data, n, first))
+    return objstm_pdf(stms, [(10 + k + i, 10 + i, 0) for i in range(k)], range(10 + k, 10 + 2 * k), nested=True)
 
 
 def million_objects(n):
