@@ -177,6 +177,8 @@ fn load_reachable(doc: &Doc) -> Result<BTreeMap<u32, (u16, Obj)>, String> {
         todo.extend(refs.iter().map(|r| r.0).filter(|r| !all.contains_key(r)));
         all.insert(n, (g, o));
     }
+    // Everything reachable is read: the object streams decoded for it go.
+    doc.drop_cache();
     Ok(all)
 }
 
@@ -979,7 +981,8 @@ fn kind_key(o: &Obj) -> (u8, Vec<u8>, Vec<u8>) {
 }
 
 fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
-    let doc = xref::open(input).map_err(|e| format!("unreadable: {e:?}"))?;
+    // Object streams are read once each, within max_stream (see `xref::Limits::once`).
+    let doc = xref::open_with(input, xref::Limits::once(opt.max_stream)).map_err(|e| format!("unreadable: {e:?}"))?;
     // An encrypted file the empty password doesn't open stays as it is. One it opens is read decrypted and
     // written with the same encryption: same dictionary, /ID, file key and permissions.
     if let Some(Err(why)) = &doc.crypt {
@@ -989,7 +992,24 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         return Err("encrypted: left as it is (rewrite_encrypted is off)".into());
     }
     let crypt = doc.crypt.as_ref().and_then(|c| c.as_ref().ok());
-    let objs = load_reachable(&doc)?;
+    let objs = load_reachable(&doc);
+    if std::env::var_os("PDFE_DEBUG").is_some() {
+        let s = doc.objstm_stats();
+        eprintln!(
+            "object streams: {} decoded, largest {} B, {} B decoded and {} B read of a budget of {} B, at most {} B \
+             held, {} integers read again, {} header entries out of order, {} sharing an offset",
+            s.decoded,
+            s.largest,
+            s.decoded_bytes,
+            s.stored_bytes,
+            s.budget,
+            s.peak_held,
+            s.memo_hits,
+            s.unordered,
+            s.shared
+        );
+    }
+    let objs = objs?;
     gate(&doc, &objs, opt.respect_conformance)?;
     let mut stats = Stats {
         objects: objs.len(),
@@ -1848,6 +1868,39 @@ mod effort_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn load_reachable_lets_the_object_streams_go() {
+        // Our output keeps its objects in object streams. Read as the self-check reads it (each stream kept
+        // once decoded), nothing is held once everything reachable is read.
+        let annots: Vec<String> = (4..54).map(|n| format!("{n} 0 R")).collect();
+        let mut objs = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [{}] >>", annots.join(" ")),
+        ];
+        objs.extend((4..54).map(|n| format!("<< /Type /Annot /Subtype /Link /Rect [0 0 {n} {n}] /Border [0 0 0] >>")));
+        let mut input = b"%PDF-1.4\n".to_vec();
+        let mut offs = Vec::new();
+        for (i, o) in objs.iter().enumerate() {
+            offs.push(input.len());
+            input.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+            input.extend_from_slice(o.as_bytes());
+            input.extend_from_slice(b"\nendobj\n");
+        }
+        let x = input.len();
+        input.extend_from_slice(b"xref\n0 54\n0000000000 65535 f \n");
+        for off in offs {
+            input.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        input.extend_from_slice(format!("trailer\n<< /Size 54 /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n").as_bytes());
+        let out = optimize(&input, &Options::effort(0));
+        assert!(matches!(&out.outcome, Outcome::Smaller(s) if s.objstms > 0), "{:?}", out.outcome);
+        let doc = xref::open(&out.data).unwrap();
+        assert_eq!(load_reachable(&doc).unwrap().len(), 53);
+        let s = doc.objstm_stats();
+        assert!(s.peak_held > 0 && s.held == 0, "{s:?}");
     }
 
     #[test]
