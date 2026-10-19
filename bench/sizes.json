@@ -9,24 +9,24 @@
         "gpress-wasm": []
       },
       "tool": {
-        "raw": 1970816,
-        "gzip": 871899
+        "raw": 1981664,
+        "gzip": 879783
       },
       "c_shared": {
-        "raw": 1783872,
-        "gzip": 789167
+        "raw": 1794208,
+        "gzip": 795338
       },
       "c_static": {
-        "raw": 10541448,
-        "gzip": 2295057
+        "raw": 10558472,
+        "gzip": 2302665
       },
       "wasm": {
-        "raw": 928095,
-        "gzip": 339845
+        "raw": 938444,
+        "gzip": 343709
       },
       "wasm_opt": "wasm-opt version 108",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "date": "2026-10-16"
+      "date": "2026-10-19"
     },
     "existing": {
       "cargo_arguments": {
@@ -47,24 +47,24 @@
         ]
       },
       "tool": {
-        "raw": 2588944,
-        "gzip": 1108665
+        "raw": 2140096,
+        "gzip": 897021
       },
       "c_shared": {
-        "raw": 2401936,
-        "gzip": 1023515
+        "raw": 2033312,
+        "gzip": 848934
       },
       "c_static": {
-        "raw": 11623992,
-        "gzip": 2566394
+        "raw": 11034000,
+        "gzip": 2370729
       },
       "wasm": {
-        "raw": 1341370,
-        "gzip": 475431
+        "raw": 1098257,
+        "gzip": 386912
       },
       "wasm_opt": "wasm-opt version 108",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "date": "2026-10-16"
+      "date": "2026-10-19"
     },
     "web": {
       "cargo_arguments": {
@@ -85,24 +85,24 @@
         ]
       },
       "tool": {
-        "raw": 1365984,
-        "gzip": 611153
+        "raw": 1376880,
+        "gzip": 617497
       },
       "c_shared": {
-        "raw": 1235352,
-        "gzip": 554303
+        "raw": 1246272,
+        "gzip": 560448
       },
       "c_static": {
-        "raw": 9619232,
-        "gzip": 2022233
+        "raw": 9634544,
+        "gzip": 2029262
       },
       "wasm": {
-        "raw": 491278,
-        "gzip": 185288
+        "raw": 613209,
+        "gzip": 229312
       },
       "wasm_opt": "wasm-opt version 108",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "date": "2026-10-16"
+      "date": "2026-10-19"
     },
     "default,existing": {
       "cargo_arguments": {
@@ -123,24 +123,24 @@
         ]
       },
       "tool": {
-        "raw": 2588896,
-        "gzip": 1108657
+        "raw": 2599144,
+        "gzip": 1113726
       },
       "c_shared": {
-        "raw": 2401992,
-        "gzip": 1023666
+        "raw": 2412416,
+        "gzip": 1031341
       },
       "c_static": {
-        "raw": 11627880,
-        "gzip": 2567035
+        "raw": 11641144,
+        "gzip": 2572911
       },
       "wasm": {
-        "raw": 1062803,
-        "gzip": 376620
+        "raw": 1351828,
+        "gzip": 479536
       },
       "wasm_opt": "wasm-opt version 108",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-      "date": "2026-10-16"
+      "date": "2026-10-19"
     }
   }
 }

@@ -366,132 +366,111 @@ NEW has not measured every file of BASE (an unfinished run compares only the fil
 
 The download and the start-up are part of the time a person waits (`docs/tasks/lightweight.md`). Measured on
 a 4-core cloud machine in October 2026 with Rust 1.99.1 (the compiler CI uses), binaryen's wasm-opt 108 and
-Node 22.22: the sizes on main at dcd8a8b with this work, the choice of the module's build and its start-up on
-main at d093ab4 (the fast tier, #1, and the Flate parse, #9) with this work. Main's later changes, the
-archive model (#3) and the decode limit (#12), add code to the module; on the optimize path that the speeds
-and start-up measure, #3 changes nothing and #12 only a few limit checks.
+Node 22: the sizes on main at dcd8a8b with PR #8 and this work, in CI's image (Ubuntu 24.04, x86_64); the
+choice of the module's build and its start-up on main at d093ab4 (the fast tier, #1, and the Flate parse, #9)
+with PR #8; the memory on main at dcd8a8b with PR #8 and this work. Main's later changes, the archive model
+(#3) and the decode limit (#12), add code to the module; on the optimize path that the speeds and start-up
+measure, #3 changes nothing and #12 only a few limit checks.
 
 ### Sizes
 
 `python3 -I bench/sizes.py measure [--features SET]` builds each part and records its size in
 `bench/sizes.json`: the native tool and the C library with the release profile, the WebAssembly module the
 way the npm package builds it (cargo's `wasm` profile, opt-level 3, then `wasm-opt -O1`; see below). Gzip is
-level 9. A feature set is the cargo features a build has: "default" is a plain build, today every part of the
-engine; "existing" adds Lepton. "Before" is the module built the way the package built it until now, with
-the release profile (opt-level 3, symbol names kept, no wasm-opt), from the same code. The release profile is
-unchanged, so the native builds are the same as before.
+level 9. Each part of the engine is a Cargo feature (README, "Building only what a product needs"), and a set
+is built with `--no-default-features`, so that it is exactly what is named: "default" is a plain build, every
+part of the engine (`archive`, `jpeg`, `fax` and `encryption`); "web" is the web module's set, every part but
+the archive; "existing" is the archive and Lepton and nothing else; "default,existing" is every part and
+Lepton, which is what "existing" built before the parts were features. "Before" is the same build without
+this work (PR #8 on main at dcd8a8b), where the engine had no parts and "existing" was every part and Lepton,
+so its sizes are the "Before" of "default,existing".
 
 | Build | Feature set | Raw bytes | Gzip bytes | Before: raw, gzip | Gzip change |
 | --- | --- | ---: | ---: | ---: | ---: |
-| WebAssembly module | default (stands in for "web") | 928,095 | 339,845 | 1,078,903, 366,073 | -7.2% |
-| WebAssembly module | existing | 1,341,370 | 475,431 | 1,575,904, 513,406 | -7.4% |
-| Native tool `gpress` | default | 1,970,816 | 871,899 | the same | 0 |
-| Native tool `gpress` | existing | 2,588,944 | 1,108,665 | the same | 0 |
-| C library, shared (`libgpress_c.so`) | default | 1,783,872 | 789,167 | the same | 0 |
-| C library, shared (`libgpress_c.so`) | existing | 2,401,936 | 1,023,515 | the same | 0 |
-| C library, static (`libgpress_c.a`) | default | 10,541,448 | 2,295,057 | the same | 0 |
-| C library, static (`libgpress_c.a`) | existing | 11,623,992 | 2,566,394 | the same | 0 |
+| WebAssembly module | web | 613,209 | 229,312 | | |
+| WebAssembly module | default | 938,444 | 343,709 | 928,095, 339,845 | +1.1% |
+| WebAssembly module | default,existing | 1,351,828 | 479,536 | 1,341,370, 475,431 | +0.9% |
+| WebAssembly module | existing | 1,098,257 | 386,912 | | |
+| Native tool `gpress` | web | 1,376,880 | 617,497 | | |
+| Native tool `gpress` | default | 1,981,664 | 879,783 | 1,970,816, 871,899 | +0.9% |
+| Native tool `gpress` | default,existing | 2,599,144 | 1,113,726 | 2,588,944, 1,108,665 | +0.5% |
+| Native tool `gpress` | existing | 2,140,096 | 897,021 | | |
+| C library, shared (`libgpress_c.so`) | web | 1,246,272 | 560,448 | | |
+| C library, shared (`libgpress_c.so`) | default | 1,794,208 | 795,338 | 1,783,872, 789,167 | +0.8% |
+| C library, shared (`libgpress_c.so`) | default,existing | 2,412,416 | 1,031,341 | 2,401,936, 1,023,515 | +0.8% |
+| C library, shared (`libgpress_c.so`) | existing | 2,033,312 | 848,934 | | |
+| C library, static (`libgpress_c.a`) | web | 9,634,544 | 2,029,262 | | |
+| C library, static (`libgpress_c.a`) | default | 10,558,472 | 2,302,665 | 10,541,448, 2,295,057 | +0.3% |
+| C library, static (`libgpress_c.a`) | default,existing | 11,641,144 | 2,572,911 | 11,623,992, 2,566,394 | +0.3% |
+| C library, static (`libgpress_c.a`) | existing | 11,034,000 | 2,370,729 | | |
 
-The target for the web module is 400 KB gzip (400,000 bytes); the web module itself is in the next
-section. Lepton adds 135,586 bytes of gzip to the module. The static library carries Rust's standard
-library whole, so it is far larger than what a program linked with it gets. The module grows with main: the
-same build was 305,524 bytes of gzip at d093ab4, the archive model (#3) added 33,893 bytes and the decode
-limit (#12) 428.
+With every part built in, this work (the features, and the memory changes of L3) adds 0.3% to 1.1% of gzip
+to each build: 3,864 bytes to the module and 7,884 to the tool. The web module is 325,235 bytes (34.7%)
+smaller than the whole one, 114,397 bytes (33.3%) of gzip; the next section says where the bytes go.
 
-### Sizes of the feature sets
-
-Each part of the engine is a Cargo feature (README, "Building only what a product needs"), and a set is built
-with `--no-default-features`, so that it is exactly what is named: "default" is a plain build, every part of
-the engine; "web" is the web module's set (`jpeg`, `fax` and `encryption`, without the archive);
-"default,existing" is every part and Lepton, which is what "existing" built before the parts were features;
-"existing" is now the archive and Lepton and nothing else. Built with Rust 1.99.1, the version CI uses, the
-same way as above. "Before" is commit f34ba33, the start of this work (this branch with main f5f9701 merged,
-so with main's fast tier and archive model), built and measured the same way.
-
-| Build | Feature set | Raw bytes | Gzip bytes | Before: raw, gzip | Gzip change |
-| --- | --- | ---: | ---: | ---: | ---: |
-| WebAssembly module | web | 491,278 | 185,288 | | |
-| WebAssembly module | default | 731,929 | 269,931 | 730,610, 269,742 | +0.07% |
-| WebAssembly module | default,existing | 1,062,803 | 376,620 | 1,061,475, 376,076 | +0.14% |
-| WebAssembly module | existing | 881,286 | 309,538 | | |
-| Native tool `gpress` | web | 1,365,984 | 611,153 | | |
-| Native tool `gpress` | default | 1,971,552 | 872,513 | 1,969,632, 871,535 | +0.11% |
-| Native tool `gpress` | default,existing | 2,588,896 | 1,108,657 | 2,587,712, 1,108,239 | +0.04% |
-| Native tool `gpress` | existing | 2,129,472 | 890,835 | | |
-| C library, shared (`libgpress_c.so`) | web | 1,235,352 | 554,303 | | |
-| C library, shared (`libgpress_c.so`) | default | 1,783,928 | 789,549 | 1,782,672, 788,781 | +0.10% |
-| C library, shared (`libgpress_c.so`) | default,existing | 2,401,992 | 1,023,666 | 2,400,688, 1,023,093 | +0.06% |
-| C library, shared (`libgpress_c.so`) | existing | 2,022,560 | 842,584 | | |
-| C library, static (`libgpress_c.a`) | web | 9,619,232 | 2,022,233 | | |
-| C library, static (`libgpress_c.a`) | default | 10,545,384 | 2,295,579 | 10,539,672, 2,294,657 | +0.04% |
-| C library, static (`libgpress_c.a`) | default,existing | 11,627,880 | 2,567,035 | 11,622,120, 2,565,782 | +0.05% |
-| C library, static (`libgpress_c.a`) | existing | 11,020,592 | 2,365,208 | | |
-
-With every part built in, the features add 189 to 1,253 bytes of gzip to each build (at most 0.14%): the
-error that names a part, and the checks for archive parts a build can't restore. The web module is 240,651
-bytes (32.9%) smaller than the whole one, 84,643 bytes (31.4%) of gzip; the next section says where the bytes
-go.
-
-The target for the web module is 400 KB gzip (400,000 bytes): at 185,288 bytes it is 214,712 bytes (54%) under
-it. Lepton adds 106,689 bytes of gzip to the module with every part.
+The target for the web module is 400 KB gzip (400,000 bytes): at 229,312 bytes it is 170,688 bytes (43%) under
+it, and the whole module is 56,291 bytes under it. Built at opt-level "s", before the choice below, the web
+module was 185,288 bytes of gzip (on f34ba33): opt-level 3 adds 24%. Lepton adds 135,827 bytes of gzip to the
+module with every part. The static library carries Rust's standard library whole, so it is far larger than
+what a program linked with it gets. The module grows with main: the whole module was 305,524 bytes of gzip at
+d093ab4, the archive model (#3) added 33,893 bytes and the decode limit (#12) 428.
 
 The budget: CI's WebAssembly job runs `python3 -I bench/sizes.py check`, which builds the web module as the
-package does and fails when its gzip size is more than 5% over the recorded one (194,552 bytes today) or over
+package does and fails when its gzip size is more than 5% over the recorded one (240,777 bytes today) or over
 400,000 bytes. A growth that is wanted is recorded with `measure --features web`. When the module is more than
-5% under the record (under 176,023 bytes today), the check passes with a warning to record the new size, since
+5% under the record (under 217,846 bytes today), the check passes with a warning to record the new size, since
 the 5% is counted from the record and would otherwise allow more. The whole module (`dist/gpress.wasm`) has no
 budget of its own; `measure --features default` records it with the other sets.
 
 ### What each feature costs
 
-The builds of the Sizes table (Rust 1.99.1; the module as the package builds it, the native tool with the
-release profile; gzip level 9) for each set of parts:
+The builds of the Sizes table (the module as the package builds it, the native tool with the release profile;
+gzip level 9) for each set of parts:
 
 | Build | Module raw | Module gzip | Tool raw | Tool gzip |
 | --- | ---: | ---: | ---: | ---: |
-| Every part (default) | 731,929 | 269,931 | 1,971,552 | 872,513 |
-| `web`: every part but `archive` | 491,278 | 185,288 | 1,365,984 | 611,153 |
-| Every part but `jpeg` | 688,440 | 254,304 | 1,887,864 | 833,838 |
-| Every part but `fax` | 672,174 | 246,971 | 1,745,472 | 768,112 |
-| Every part but `encryption` | 654,766 | 240,910 | 1,821,232 | 798,671 |
-| None (`--no-default-features`) | 353,921 | 133,576 | 1,081,088 | 477,022 |
-| Every part and `existing` | 1,062,803 | 376,620 | 2,588,896 | 1,108,657 |
+| Every part (default) | 938,444 | 343,709 | 1,981,664 | 879,783 |
+| `web`: every part but `archive` | 613,209 | 229,312 | 1,376,880 | 617,497 |
+| Every part but `jpeg` | 887,547 | 325,639 | 1,898,576 | 840,244 |
+| Every part but `fax` | 852,500 | 307,805 | 1,755,728 | 774,000 |
+| Every part but `encryption` | 820,578 | 303,564 | 1,832,112 | 804,799 |
+| None (`--no-default-features`) | 439,986 | 166,722 | 1,092,640 | 484,292 |
+| Every part and `existing` | 1,351,828 | 479,536 | 2,599,144 | 1,113,726 |
 
-Naming the three parts (`--features jpeg,fax,encryption`) instead of `web` compiles the same code: the same
-raw module, 12 bytes more gzip, and 560 bytes less tool (symbol names).
+Naming the three parts (`--features jpeg,fax,encryption`) instead of `web` compiles the same code: a module 2
+bytes smaller raw and 5 bytes larger gzip, and 560 bytes less tool (symbol names).
 
 What a part costs is the bytes the build with every part has over the build with every part but that one
 (for Lepton, every part and `existing` over every part). "Sample gain" is what the part saves on the
 normal-PDF output of the 120-file sample at effort 0: the native tool's total output without the part, less
-its total with every part (71,470,799 bytes from 78,313,418; all 120 files byte-identical to f34ba33's). One
-run each, one process per file, `gpress optimize IN OUT --effort 0 --threads 1`, with main's fast tier at
-effort 0.
+its total with every part (71,470,799 bytes from 78,313,418). One run each on f34ba33, the start of this work,
+one process per file, `gpress optimize IN OUT --effort 0 --threads 1`, with main's fast tier at effort 0; the
+outputs with every part are byte for byte the same on this branch and on main at dcd8a8b (Memory, below).
 
 | Feature | Module raw | Module gzip | Tool raw | Tool gzip | Sample gain, bytes | Files changed |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `archive` | 240,651 | 84,643 | 605,568 | 261,360 | (not used by normal PDF) | |
-| `jpeg` | 43,489 | 15,627 | 83,688 | 38,675 | 27,906 (0.04%) | 10 |
-| `fax` | 59,755 | 22,960 | 226,080 | 104,401 | 220,632 (0.31%) | 4 |
-| `encryption` | 77,163 | 29,021 | 150,320 | 73,842 | 2,758 (0.004%) | 1 |
-| `existing` | 330,874 | 106,689 | 617,344 | 236,144 | (archive only) | |
+| `archive` | 325,235 | 114,397 | 604,784 | 262,286 | (not used by normal PDF) | |
+| `jpeg` | 50,897 | 18,070 | 83,088 | 39,539 | 27,906 (0.04%) | 10 |
+| `fax` | 85,944 | 35,904 | 225,936 | 105,783 | 220,632 (0.31%) | 4 |
+| `encryption` | 117,866 | 40,145 | 149,552 | 74,984 | 2,758 (0.004%) | 1 |
+| `existing` | 413,384 | 135,827 | 617,480 | 233,943 | (archive only) | |
 
-The four costs add up to more than the 378,008 raw bytes (136,355 gzip) between every part and none, because
+The four costs add up to more than the 498,458 raw bytes (176,987 gzip) between every part and none, because
 some code is there only with two parts: the archive's fax parts and its decrypted streams.
 
 - `jpeg` saves 27,906 bytes on 10 files (freeculture.pdf 12,198, issue19971.pdf 8,524); one file,
-  issue13931.pdf, comes out 1,479 bytes larger with the step than without it. It costs 15,627 bytes of gzip in
-  the module, a little more than half of what it saves on the whole sample. Kept.
-- `fax` saves 220,632 bytes on 4 files (freeculture.pdf 191,828, the OCRmyPDF ccitt.pdf 27,583) for 22,960
+  issue13931.pdf, comes out 1,479 bytes larger with the step than without it. It costs 18,070 bytes of gzip in
+  the module, about two thirds of what it saves on the whole sample. Kept.
+- `fax` saves 220,632 bytes on 4 files (freeculture.pdf 191,828, the OCRmyPDF ccitt.pdf 27,583) for 35,904
   bytes of gzip: worth its cost. Kept.
-- `encryption` costs the most of the three, 29,021 bytes of gzip in the whole module (24,901 in the web module:
-  160,387 bytes without it), and saves the least: the sample has three encrypted files, one of which the
-  engine rewrites (issue17215.pdf, 2,758 bytes smaller); the other two are left untouched in every build (one
-  needs a password, one has a handler the engine doesn't take). On this sample it costs far more than it
-  saves. It stays in the default and in `web`: without it an encrypted file the engine can rewrite is left
-  untouched, so the web compressor would give a different answer from the native tool for those files, and
-  the web module is 54% under its budget with it.
-- `archive` is most of the difference between the two modules (84,643 bytes of gzip), and Lepton (`existing`)
-  would cost more than every normal-PDF part together; neither is in `web`.
+- `encryption` costs the most of the three, 40,145 bytes of gzip in the whole module, and saves the least: the
+  sample has three encrypted files, one of which the engine rewrites (issue17215.pdf, 2,758 bytes smaller);
+  the other two are left untouched in every build (one needs a password, one has a handler the engine doesn't
+  take). On this sample it costs far more than it saves. It stays in the default and in `web`: without it an
+  encrypted file the engine can rewrite is left untouched, so the web compressor would give a different
+  answer from the native tool for those files, and the web module is 43% under its budget with it.
+- `archive` is most of the difference between the two modules (114,397 bytes of gzip), and Lepton (`existing`,
+  135,827 bytes) would cost more than the three normal-PDF parts together (94,119); neither is in `web`.
 
 ### Choosing the module's build
 
