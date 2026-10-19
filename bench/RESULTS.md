@@ -479,11 +479,12 @@ the distance to 50 ms. It fails only above 150 ms at effort 0 and 300 ms at the 
 machine or one with fewer cores can take two or three times as long; `GPRESS_STARTUP_LIMIT_MS` raises the
 limits on such a machine (CI sets nothing).
 
-**In CI** (GitHub's two-core runner, the WebAssembly package job), two runs with this change: medians of 26.3
-and 32.3 ms at effort 0 (compile 3.8 and 4.9, instantiate 0.3, first call 22.2 and 27.1; single processes 24
-to 45 ms), so the target is met with 18 to 24 ms to spare, and 136.9 and 180.9 ms at the default effort (126
-to 185 ms). Runners differ from one run to the next by about that much. Before the fast tier (#1), the same
-test took a median of 133 ms at effort 0 there.
+**In CI** (GitHub's two-core runner, the WebAssembly package job), six runs with this change: medians of
+26.3, 32.3, 46.2, 49.2, 33.4 and 31.1 ms at effort 0 (compile 3.8 to 9.1, instantiate 0.3, first call 22.2 to
+39.7; single processes 24 to 62 ms), so the target is met in every run, but in the slowest with only 0.8 ms to
+spare, and 136.9, 180.9, 180.0, 263.6, 174.1 and 183.3 ms at the default effort. Runners differ from one run
+to the next by about that much: the two slow runs at effort 0 took 9 ms to compile, the others about 5. Before
+the fast tier (#1), the same test took a median of 133 ms at effort 0 there.
 
 On this machine, at d093ab4 (the rows of the table above; one core: core 3 alone, 21 processes, the other
 cores busy with other work; two cores: cores 2 and 3, both idle, 11 processes; `--quiet` kept a round only
@@ -542,7 +543,7 @@ The test PDF holds a single Flate stream. Real one-page PDFs of 3 to 6 KB that e
 | `issue7492.pdf` | 4,619 | 2,191 bytes | 3,878 | **43.9** | 8.2 | **39.2** | 11.3 |
 | `issue5256.pdf` | 6,136 | 4,244 bytes | 5,265 | **43.7** | 7.5 | **42.0** | 11.5 |
 
-The target, at effort 0 on the test PDF, is met in CI (26.3 and 32.3 ms), on two idle cores here (34.8 ms)
+The target, at effort 0 on the test PDF, is met in CI (26.3 to 49.2 ms), on two idle cores here (34.8 ms)
 and on one core here (43.1 ms, and 48.5 in the busier run of the table above; single processes took up to 68
 ms). The default effort does not reach 50 ms, and is not meant to: the native tool itself takes 54 to 66 ms
 there.
