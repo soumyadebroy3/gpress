@@ -557,6 +557,8 @@ def hostile_pdfs(cfg, dst):
     add('objstm_bomb_many.pdf', objstm_streams(k, mib), f'{k} object streams of {mib} MiB, each read through: {k * mib:,} MiB in all')
     k, mib = p['objstm_alias_entries'], p['objstm_alias_mib']
     add('objstm_alias.pdf', objstm_alias(k, mib), f'{k} object stream entries at one offset, before an array of {mib} MiB')
+    add('objstm_alias_alternate.pdf', objstm_alias(k, mib, alternate=True),
+        f'{k} object stream entries taking turns between two offsets, half of them at an array of {mib} MiB')
     k = p['objstm_nested_streams']
     add('objstm_nested.pdf', objstm_nested(k), f'{k:,} object streams, each holding the next one whole in its stored bytes')
     return cases
@@ -743,10 +745,15 @@ def objstm_streams(k, mib, unread=False, pad_mib=0):
     return objstm_pdf([(100 + i, data, n, first) for i in range(k)], rows, range(1000, 1000 + k), pad_mib)
 
 
-def objstm_alias(k, mib):
+def objstm_alias(k, mib, alternate=False):
     """One object stream whose `k` entries all start at offset 0, where an array of `mib` MiB of zeros starts:
-    read one by one, each entry parses the whole array."""
-    data, n, first = objstm_data([(1000 + i, 0, b'[' if i == 0 else b'') for i in range(k)], mib, fill=b'0 ', tail=b']')
+    read one by one, each entry parses the whole array. With `alternate`, every other entry starts at a `null`
+    just before the array instead, so no two entries at the array's offset are listed next to each other."""
+    if alternate:
+        objs = [(1000 + i, 0 if i % 2 else 5, b'null [' if i == 0 else b'') for i in range(k)]
+    else:
+        objs = [(1000 + i, 0, b'[' if i == 0 else b'') for i in range(k)]
+    data, n, first = objstm_data(objs, mib, fill=b'0 ', tail=b']')
     return objstm_pdf([(5, data, n, first)], [(1000 + i, 5, i) for i in range(k)], range(1000, 1000 + k))
 
 

@@ -26,9 +26,9 @@ pub enum Entry {
 
 /// One entry of an object stream's header, kept because the cross-reference data points that far: the object's
 /// number, where it starts in the decoded data (`PAST` when that is beyond it), where its window ends (where
-/// the next entry starts, of the ones kept and the first one after them, or the end of the data), whether the
-/// entry after it in the header starts at the same place, and whether it has been read. An object is parsed
-/// within its own bytes only, so the objects of a stream take one pass over it.
+/// the next entry starts, of the ones kept and the first one after them, or the end of the data), whether an
+/// entry listed after it in the header starts at the same place, and whether it has been read. An object is
+/// parsed within its own bytes only, so the objects of a stream take one pass over it.
 #[derive(Clone, Copy)]
 struct Head {
     num: u32,
@@ -131,7 +131,7 @@ pub struct ObjStmStats {
     pub memo_hits: usize,
     /// Header entries kept whose offset is not past the one before.
     pub unordered: usize,
-    /// Header entries kept that start where the entry after them does.
+    /// Header entries kept that start where an entry listed after them does.
     pub shared: usize,
 }
 
@@ -764,8 +764,6 @@ impl<'a> Doc<'a> {
             let at = (first as u64).checked_add(b).filter(|&p| p <= raw.len() as u64).map_or(PAST, |p| p as u32);
             if let Some(h) = heads.last_mut().filter(|h| h.at != PAST && at != PAST) {
                 stats.unordered += usize::from(at <= h.at);
-                h.shared = at == h.at;
-                stats.shared += usize::from(h.shared);
             }
             if i == keep {
                 beyond = at;
@@ -778,6 +776,16 @@ impl<'a> Doc<'a> {
             heads.push(Head { num: a, at, end: len, shared: false, read: false });
         }
         heads.shrink_to_fit();
+        // Of the entries that start at one place only the last listed is read, wherever the others are listed:
+        // an entry is shared when one listed after it (kept, or the first one after them) starts there too.
+        let mut order: Vec<(u32, usize)> =
+            heads.iter().enumerate().filter(|(_, h)| h.at != PAST).map(|(i, h)| (h.at, i)).collect();
+        order.sort_unstable();
+        for (k, &(at, i)) in order.iter().enumerate() {
+            heads[i].shared = at == beyond || order.get(k + 1).is_some_and(|&(next, _)| next == at);
+            stats.shared += usize::from(heads[i].shared);
+        }
+        drop(order);
         // Each object kept is read up to where the next one starts, in whatever order the header lists them.
         let mut starts: Vec<u32> = heads.iter().map(|h| h.at).chain([beyond]).filter(|&a| a != PAST).collect();
         starts.sort_unstable();

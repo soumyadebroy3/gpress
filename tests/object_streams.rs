@@ -371,6 +371,21 @@ fn each_object_of_an_object_stream_is_read_within_its_own_bytes() {
     assert_eq!(doc.load(1099).unwrap().1, Obj::Int(1));
     assert_eq!(doc.load(1099).unwrap().1, Obj::Int(1));
     assert_eq!(doc.load(1098), Err(xref::LoadError::BadObject(1098, "object stream lists two objects at one offset")));
+    // Entries at one offset with others listed between them: still only the last listed is read, so a header
+    // that takes turns between two offsets can't have the same bytes parsed once per entry.
+    let raw = b"1000 0 1001 6 1002 0 1003 6 [1 2] null".to_vec();
+    let first = raw.iter().position(|&c| c == b'[').unwrap();
+    let rows: Vec<(u32, u32, u32)> = (0..4).map(|i| (1000 + i, 5, i)).collect();
+    let pdf = build(&catalog(1000..1004, 0), &[(5, raw, 4, first)], &rows);
+    let why = untouched(&optimize(&pdf, &opt(64 << 20)), &pdf);
+    assert!(why.contains("object stream lists two objects at one offset"), "{why}");
+    let doc = xref::open(&pdf).unwrap();
+    assert_eq!(doc.load(1002).unwrap().1, Obj::Array(vec![Obj::Int(1), Obj::Int(2)]));
+    assert_eq!(doc.load(1003).unwrap().1, Obj::Null);
+    assert_eq!(doc.objstm_stats().shared, 2);
+    for n in [1000, 1001] {
+        assert_eq!(doc.load(n), Err(xref::LoadError::BadObject(n, "object stream lists two objects at one offset")));
+    }
     // Two entries at one offset, the second read (whatever the first lists, and whether or not anything reads
     // it): every reader reads it. The first read: refused.
     for (raw, row, read, n) in [
