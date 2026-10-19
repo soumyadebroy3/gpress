@@ -638,72 +638,66 @@ there.
 
 The target (L3): at effort 0, a peak of at most 32 MiB (32 x 2^20 bytes) plus twice the input. The peak is the
 resident set that `wait4` gives (bench/measure.c) for `optimize` with 1 thread, one process per file, on the
-120-file sample, measured by `benchmark.py space` on cores 0-2 of a shared machine with every feature on. Three
-builds:
+120-file sample, measured by `benchmark.py space` (`--verify 0`) in the Linux aarch64 container of a shared
+4-core machine (2 GiB), every feature on (`--features existing`). Two builds:
 
-- before: the baseline rows (build base-a518968, `bench/results/base`), one run;
-- opt-lightweight: 60c247d without the changes below. It has session 2's Flate search lists in less memory (B3,
-  #6) and the matcher sort (#9), so it shows what those saved; one run;
-- after: branch `wip/l3-memory-r1` at 916fbfb, that opt-lightweight with the changes below; three runs, and
-  each file's peak is the median of the three.
+- before: main at dcd8a8b (with main's fast tier, #1, and session 2's Flate lists in less memory, #6); three
+  runs at effort 0, and at effort 100 one run made earlier the same day on the same machine by
+  `benchmark.py time`, which takes the peak the same way;
+- after: this branch at 3c86c02 (main with PR #8 and this work); three runs at effort 0, one at effort 100.
 
-Every output of the after build is byte for byte the baseline's (the same SHA-256): 120 files in each of the
-three runs at efforts 0 and 100, and one run at effort 50, 840 outputs.
+Each file's peak is the median of its runs. Every output of the after build is byte for byte main's (the same
+SHA-256): 120 files in every run at efforts 0 and 100.
 
-Each run fitted as a fixed cost plus bytes per input byte, by least squares and as the lowest line with every
-file on or under it (MiB; "at slope 2" is the fixed cost every file would need with the target's 2 bytes per
-input byte):
+Each build fitted as a fixed cost plus bytes per input byte, by least squares and as the lowest line (on
+average over the files) with every file on or under it (MiB; "at slope 2" is the fixed cost every file would
+need with the target's 2 bytes per input byte):
 
 | Effort | Build | Median | Peak (file, MiB in) | Least squares | Every file under | At slope 2 | Files over the target |
 | --- | --- | ---: | --- | --- | --- | ---: | ---: |
-| 0 | before | 5.1 | 97.1 (GeoTopo.pdf, 5.07) | 9.26 + 9.76 x input | 65.18 + 11.41 x input | 86.98 | 20 |
-| 0 | opt-lightweight | 5.2 | 88.5 (issue9262_reduced.pdf, 5.28) | 8.55 + 9.01 x input | 65.21 + 11.38 x input | 77.98 | 12 |
-| 0 | after | 5.2 | 70.5 (GeoTopo.pdf, 5.07) | 7.36 + 6.34 x input | 44.53 + 5.12 x input | 60.36 | 4 |
-| 100 | before | 5.1 | 173.7 (issue12963.pdf, 0.58) | 17.03 + 11.26 x input | 173.67 + 0.00 x input | 172.52 | 27 |
-| 100 | opt-lightweight | 5.0 | 133.0 (issue12963.pdf, 0.58) | 11.18 + 8.86 x input | 132.96 + 0.00 x input | 131.81 | 19 |
-| 100 | after | 5.2 | 110.4 (issue12963.pdf, 0.58) | 9.81 + 6.78 x input | 110.35 + 0.00 x input | 109.20 | 14 |
+| 0 | before | 3.4 | 78.7 (issue19517.pdf, 5.97) | 3.95 + 7.01 x input | 11.26 + 15.22 x input | 66.72 | 3 |
+| 0 | after | 3.4 | 66.2 (GeoTopo.pdf, 5.07) | 4.14 + 5.46 x input | 11.53 + 15.03 x input | 56.04 | 2 |
+| 100 | before | 4.0 | 131.0 (issue12963.pdf, 0.58) | 10.14 + 8.65 x input | 130.99 + 0.00 x input | 129.84 | 19 |
+| 100 | after | 4.0 | 107.3 (issue12963.pdf, 0.58) | 8.81 + 6.62 x input | 107.25 + 0.00 x input | 106.10 | 12 |
 
-The fixed cost stays small. On the empty one-page PDF (420 bytes, left untouched; the smallest wall time of 5
-runs, each build on the same busy cores within an hour) the peak is 4,764 KB at effort 0 and 4,748 KB at effort
-100 with the baseline, 4,988 and 4,884 KB with opt-lightweight, and 4,924 to 5,056 and 5,032 to 5,180 KB in
-the three after runs, in 9 to 16 ms of CPU time.
+The fixed cost stays small: on the empty one-page PDF (420 bytes, left untouched; the smallest wall time of 5
+runs) the peak is 2,800 KB with main and 2,972 to 2,988 KB with the after build at effort 0, and 3,832 KB with
+the after build at effort 100.
 
-The target is not met at effort 0: 4 files are over the line after the changes (12 with opt-lightweight, 20
-before), by 13.7 to 28.4 MiB. The files over it with any of the builds, in MiB ("after runs": the lowest and the
-highest of the three):
+The target is not met at effort 0: 2 files are over the line after the changes (3 before), by 11.3 and 24.0
+MiB. The files over it with either build, in MiB ("after runs": the lowest and the highest of the three):
 
-| File | MiB in | Line | Before | opt-lightweight | After | After runs | After - line |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| GeoTopo.pdf | 5.07 | 42.1 | 97.1 | 80.4 | 70.5 | 70.3 to 70.7 | +28.4 |
-| issue9262_reduced.pdf | 5.28 | 42.6 | 89.9 | 88.5 | 60.6 | 60.6 to 60.7 | +18.1 |
-| issue12841_reduced.pdf | 5.58 | 43.2 | 81.6 | 72.8 | 59.4 | 59.3 to 59.6 | +16.2 |
-| issue9940.pdf | 0.38 | 32.8 | 55.9 | 46.2 | 46.5 | 43.5 to 46.6 | +13.7 |
-| issue1905.pdf | 0.88 | 33.8 | 44.0 | 36.0 | 33.5 | 33.4 to 33.6 | -0.3 |
-| freeculture.pdf | 2.48 | 37.0 | 46.7 | 41.2 | 35.8 | 34.7 to 35.8 | -1.1 |
-| issue6286.pdf | 1.82 | 35.6 | 47.7 | 39.4 | 33.4 | 33.3 to 33.4 | -2.3 |
-| issue12810.pdf | 0.24 | 32.5 | 36.4 | 30.1 | 30.2 | 30.1 to 30.3 | -2.3 |
-| pikepdf pdfa multipage.pdf | 1.07 | 34.1 | 77.4 | 77.2 | 31.4 | 31.3 to 31.4 | -2.8 |
-| base64image.pdf | 2.16 | 36.3 | 41.7 | 37.2 | 33.3 | 33.2 to 33.5 | -3.0 |
-| ocrmypdf multipage.pdf | 1.07 | 34.1 | 77.2 | 77.4 | 30.5 | 30.3 to 31.4 | -3.6 |
-| issue6961.pdf | 2.06 | 36.1 | 38.4 | 34.5 | 32.3 | 32.2 to 32.3 | -3.9 |
-| PDFJS-9279-reduced.pdf | 2.95 | 37.9 | 41.8 | 34.5 | 31.8 | 31.5 to 31.9 | -6.1 |
-| issue6931_reduced.pdf | 0.05 | 32.1 | 36.3 | 27.4 | 26.0 | 25.7 to 26.1 | -6.1 |
-| issue19971.pdf | 1.65 | 35.3 | 38.7 | 32.4 | 29.0 | 28.8 to 29.1 | -6.3 |
-| 3small.pdf | 0.16 | 32.3 | 33.7 | 25.0 | 22.9 | 22.8 to 23.4 | -9.5 |
-| issue12295.pdf | 0.36 | 32.7 | 33.1 | 24.0 | 22.9 | 22.8 to 23.1 | -9.8 |
-| issue14821.pdf | 0.30 | 32.6 | 33.7 | 24.5 | 22.8 | 22.5 to 22.8 | -9.8 |
-| issue19517.pdf | 5.97 | 43.9 | 82.9 | 82.6 | 28.1 | 28.1 to 28.2 | -15.8 |
-| enormous.pdf | 0.30 | 32.6 | 68.6 | 68.6 | 5.6 | 5.6 to 5.6 | -27.0 |
+| File | MiB in | Line | Before | After | After runs | After - line |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| GeoTopo.pdf | 5.07 | 42.1 | 66.0 | 66.2 | 66.2 to 66.2 | +24.0 |
+| issue9262_reduced.pdf | 5.28 | 42.6 | 60.8 | 53.9 | 53.7 to 53.9 | +11.3 |
+| issue19517.pdf | 5.97 | 43.9 | 78.7 | 26.8 | 26.8 to 26.9 | -17.2 |
 
-Peaks move from one run to the next with the same build and input. Over the three after runs the largest
-spread is 3.1 MiB at effort 0 (issue9940.pdf, 44,552 to 47,676 KB) and 10.0 MiB at effort 100 (issue9940.pdf
-again, 45,432 to 55,680 KB; the next is 2.8 MiB). Other runs have moved more: issue1905.pdf at effort 100 gave
-119,556 to 129,160 KB in three runs of one build of this branch before the merge, and one run of the start of
-this work (e220e03) gave 139,000 KB against 120,184 KB for the baseline binary. So a difference of a few MiB in
-one run on one file says little, and at effort 100 even 10 MiB can be noise; the before and opt-lightweight
-columns are one run each.
+Main's fast tier changed what effort 0 holds: the strong encoder no longer runs there, so issue12841_reduced.pdf
+and issue9940.pdf, over the line before the fast tier, are under it with both builds: issue12841_reduced.pdf
+38.3 MiB with main and 35.4 after (line 43.2), issue9940.pdf about 14 MiB with both (line 32.8). For issue9940.pdf, whose peak an earlier review found about 3 MB higher with this
+work: 10 runs of each build in alternation give 14,408 to 14,468 KB with main (median 14,454) and 14,084 to
+15,016 KB with the after build (median 14,994; the runs fall on two levels, about 14,100 and 15,000 KB, 5
+each), so the difference is under 1 MB either way and the file is 18 MiB under its line. At effort 100 it
+is 54.2 MiB with main and 45.7 after.
 
-What each change saved. The commits from before the merge were measured one at a time before #6 was merged,
+At effort 100 the 12 files over the line after the changes are issue12963.pdf (+74.1 MiB), GeoTopo.pdf
+(+40.7), 2400dpi.pdf (+22.8), base64image.pdf (+17.6), issue1905.pdf (+16.6), issue9262_reduced.pdf (+15.5),
+issue12841_reduced.pdf (+14.5), issue13931.pdf (+13.0), issue9940.pdf (+12.9), the two multipage files
+(+4.9 and +4.0) and issue12810.pdf (+4.0). The changes took enormous.pdf (67.3 to 4.6 MiB), issue19517.pdf
+(81.8 to 26.9), issue6931_reduced.pdf, issue19971.pdf, 3small.pdf, freeculture.pdf and PDFJS-9279-reduced.pdf
+under it.
+
+Peaks move from one run to the next with the same build and input. Over the three runs at effort 0 the
+largest spread is 0.9 MiB with the after build (issue9940.pdf) and 2.6 MiB with main (issue1905.pdf, 17,128 to
+19,756 KB). Before the fast tier, spreads of 3 MiB at effort 0 and 10 MiB at effort 100 were seen on one file
+(issue9940.pdf again), so a difference of a few MiB in one run on one file says little, and the effort-100
+columns are one run each. The CPU times of these runs say nothing either: the machine was shared, and the
+sum over the sample moved by 20% from one run of a build to the next.
+
+What each change saved. These and the rest of this section were measured before main's fast tier (#1) was
+merged, when effort 0 ran the strong encoder's quick settings. The commits from before the merge were measured
+one at a time before #6 was merged,
 on opt-lightweight e220e03 ("start"), each column adding one commit; in KB, the median of 3 runs, 1 thread
 (one run for GeoTopo.pdf and issue12963.pdf), every output the same. With #6 the match finder holds less, so
 the same commits save different amounts today; the tables above are what the whole branch gives now.
@@ -749,7 +743,9 @@ the same commits save different amounts today; the tables above are what the who
   issue9262_reduced 79,944 to 70,652. Only the last stage is counted that way: in a chain of several general
   filters (ASCII85 then Flate, say) the stages before it are still decoded whole. At effort 100 the plan
   decoded nothing before, so there the counting pass is new work, one more decode of every stream (0.66% more
-  instructions on bug1743245.pdf, below); it stops counting when the time budget has run out.
+  instructions on bug1743245.pdf, below); it stops counting when the time budget has run out (on a file of 40
+  Flate images of 60 MiB of zeros each, `--effort 100 --time-budget 1000` gives up after 1.23 s with 1 thread
+  or 4, as main does).
 - **d782526** (main's, taken onto this work before main was merged into it, so it is no longer one of its
   commits): each object's bytes are freed once they are in the output: issue9262_reduced 70,652 to 60,444
   KB, issue19517 34,632 to 28,548.
@@ -779,7 +775,8 @@ within 1%, but issue9262_reduced's page faults double again (48,101 against 21,4
 them (0.18 against 0.09 s). The hold stays. Giving up about 0.1 s of system time on such files for up to 13 MB
 on files like issue12841_reduced is the owner's choice.
 
-Time. CPU-time medians with 1 thread, opt-lightweight (60c247d) and the after build run back to back in
+Time (before the fast tier, and not measured again on this base). CPU-time medians with 1 thread,
+opt-lightweight (60c247d) and the after build run back to back in
 alternating order on cores 0-2, 9 rounds (3 for GeoTopo.pdf and issue12963.pdf), on the file and effort pairs
 the changes touch; every output the same:
 
@@ -838,8 +835,8 @@ against 57.6 million, last level 1.59 against 1.92 million). The same merge with
 the same instructions again and was 3.5% slower over those files: on this machine a few percent come and go
 with code that does the same work.
 
-What is left. heaptrack on the after build at effort 0 shows what the four files over the line hold at their
-peak:
+What is left. Before the fast tier, heaptrack on the after build at effort 0 showed what the four files then
+over the line held at their peak; the first two are the two still over it:
 
 - issue9262_reduced.pdf (60.6 MiB, line 42.6) and GeoTopo.pdf (70.5, line 42.1): the self-check decodes the
   stream as it was and as it is written, each whole, to compare them: 20.6 and 19.9 MiB on issue9262_reduced,
