@@ -3,13 +3,13 @@
 // compiled code within a process. Runs against dist/ after `npm run build` (the module test/module.mjs
 // picks). bench/wasm_startup.mjs makes the same measurement for any module file, with more detail.
 //
-// The target is a median of at most 50 ms at effort 0, and the test prints the distance to it. No machine
-// measured meets it yet (bench/RESULTS.md, Start-up): most of the first call runs while V8's optimizing
-// compiler works in the background, so a machine with fewer cores, or a busy one, is much slower, and
-// GitHub's two-core runner takes about twice the target. So the test fails only above 150 ms, which still
-// catches a large step back; GPRESS_STARTUP_LIMIT_MS raises that limit (a smaller number is ignored). The
-// default effort (100) does about one and a half times the work of effort 0 on this PDF and is held to
-// twice the limit. Run the test files one at a time (`npm test` does), or the samples measure the other
+// The target is a median of at most 50 ms at effort 0, and the test prints the distance to it. GitHub's
+// two-core runner meets it (bench/RESULTS.md, Start-up), but most of the first call runs while V8's
+// optimizing compiler works in the background, so a machine with fewer cores, or a busy one, can take two or
+// three times as long. So the test fails only above 150 ms, which still catches a large step back;
+// GPRESS_STARTUP_LIMIT_MS raises that limit (a smaller number is ignored). The default effort (100) does
+// far more work on this PDF than effort 0 (once compiled, its call takes 5 to 15 times as long) and is held
+// to twice the limit. Run the test files one at a time (`npm test` does), or the samples measure the other
 // tests too.
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";

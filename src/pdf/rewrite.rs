@@ -38,7 +38,7 @@ pub struct Options {
     /// budget too (16 per byte of the file at effort 0, twice as much every 10 points, at least 4 MiB): a
     /// stream beyond it is kept as it is. Decided from sizes only, never from time, so the output is repeatable.
     pub effort: u8,
-    /// Threads to use (0: every core the machine offers, at most 64). Never changes the output.
+    /// Threads to use (0: every core the machine offers, at most 8; at most 64). Never changes the output.
     pub threads: usize,
     /// Leave files that claim a conformance or carry a signature untouched: PDF/A, PDF/X, signed, certified,
     /// usage rights (the safe default). With `false` every object's value is still kept, but those
@@ -260,9 +260,14 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, conformance: bool) -> Resul
         });
         if let Obj::Stream(s) = o {
             if s.dict.name(b"Type") == Some(b"Metadata") {
-                let data = xref::decode_fully(&s.dict, &s.data, 16 << 20).unwrap_or_default();
-                if contains(&data, b"pdfaid:part") || contains(&data, b"pdfaid:conformance") {
-                    why.get_or_insert("PDF/A".into());
+                match metadata_text(s) {
+                    Some(data) if contains(&data, b"pdfaid:part") || contains(&data, b"pdfaid:conformance") => {
+                        why.get_or_insert("PDF/A".into());
+                    }
+                    Some(_) => {}
+                    None => {
+                        why.get_or_insert("metadata too large to check for PDF/A".into());
+                    }
                 }
             }
         }
@@ -271,6 +276,25 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, conformance: bool) -> Resul
         Some(w) => Err(w),
         None => Ok(()),
     }
+}
+
+/// A metadata stream's text for the PDF/A check, each stage decoded to at most 16 MiB: None when a stage would
+/// decode further (the check can't be made, so the file is left as it is), empty when it doesn't decode.
+fn metadata_text(s: &Stream) -> Option<Vec<u8>> {
+    let Some(stages) = chain(&s.dict) else { return Some(Vec::new()) };
+    let mut data = s.data.clone();
+    for st in &stages {
+        data = match decode_stage(st, &data, 16 << 20) {
+            Ok(d) => d,
+            Err(super::filters::FilterError::TooLarge) => return None,
+            Err(_) => return Some(Vec::new()),
+        };
+        if st.name == b"FlateDecode" || st.name == b"LZWDecode" {
+            let Ok(d) = super::filters::unpredict(st, &data) else { return Some(Vec::new()) };
+            data = d;
+        }
+    }
+    Some(data)
 }
 
 /// Encrypted files we rewrite: the encryption dictionary and the objects it refers to stay apart from the
@@ -1383,10 +1407,14 @@ fn self_check(
         }
         return Err("self-check: different objects reachable".into());
     }
-    // Objects are compared on the pool (the biggest streams first), each stream decoded to at most
-    // `CHECK_ON_POOL` bytes there; a stream that needs more is compared afterwards, one at a time, so the check
-    // holds at most two such copies per thread beside two of the largest stream. The first difference in object
-    // order is the one reported, whatever the number of threads.
+    // Objects are compared on the pool (the biggest stored streams first), each filter stage decoding to at
+    // most `CHECK_ON_POOL` bytes there; a stream that needs more is compared afterwards, one at a time, to 1 GiB
+    // a stage. A comparison holds a clone of the stream's stored bytes, whole whatever its filters (and that is
+    // its content when its first filter is not one we decode), and up to three decoded copies: the input's
+    // content, and the output's decode with and without its predictor, whose two row buffers add up to two more
+    // for a one-row image. On the pool each decoded copy is at most `CHECK_ON_POOL`; a fax image written as
+    // JBIG2 has both images parsed, within the fax limits but for its trailing end-of-line codes. The first
+    // difference in object order is the one reported, whatever the number of threads.
     let all: Vec<(&u32, &(u16, Obj))> = objs.iter().collect();
     let mut order: Vec<usize> = (0..all.len()).collect();
     order.sort_by_key(|&k| (std::cmp::Reverse(if let Obj::Stream(s) = &all[k].1 .1 { s.data.len() } else { 0 }), k));

@@ -22,7 +22,8 @@ record without wasm-opt and `check` fails without it when the record was made wi
 wasm-opt version, and CI installs binaryen); a different wasm-opt or rustc version is only noted. Builds use
 cargo's usual target directory and settings (CARGO_BUILD_JOBS and the like). `measure` also prints the set's
 rows for the Sizes table in bench/RESULTS.md, in its columns, with the sizes it replaced in the "Before"
-cells (empty for a set measured the first time).
+cells (empty for a set measured the first time); the rows now in the table give the module built the old way
+(the release profile, no wasm-opt) from the same code there instead.
 """
 import argparse
 import datetime

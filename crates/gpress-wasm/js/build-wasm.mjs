@@ -1,6 +1,6 @@
-// Builds the module for the package (`npm run build:wasm`): cargo's "wasm" profile (Cargo.toml: built for
-// size, LTO, one codegen unit, panic = "abort", symbols stripped), then binaryen's wasm-opt when it is on
-// PATH. Without wasm-opt the module is used as cargo built it, and a message says so.
+// Builds the module for the package (`npm run build:wasm`): cargo's "wasm" profile (Cargo.toml: opt-level 3,
+// LTO, one codegen unit, panic = "abort", symbols stripped), then binaryen's wasm-opt when it is on PATH.
+// Without wasm-opt the module is used as cargo built it, and a message says so.
 //
 //   node build-wasm.mjs [--out FILE | --out=FILE] [cargo arguments, such as --no-default-features --features web]
 //
@@ -41,9 +41,9 @@ for (let k = 0; k < argv.length; k++) {
   out = resolve(file);
 }
 
-// wasm-opt's setting. -O1, not -Oz: on this module -Oz (and -Os) takes 12% off the raw bytes but adds 4% to
-// the gzip size, which is what a browser downloads, and makes the first call in a fresh process slower;
-// -O1 takes 8% off the raw bytes and 3% off the gzip size at the same speed (bench/RESULTS.md, "Lightweight").
+// wasm-opt's setting. -O1, not -Oz: on this module -Oz, -Os and -O2 take more off the raw bytes (-Oz 10%) but
+// less off the gzip size, which is what a browser downloads; -O1 takes 7% off the raw bytes and the most off
+// the gzip size (3%), at the same speed (bench/RESULTS.md, "Lightweight").
 const level = "-O1";
 
 // The WebAssembly features rustc's wasm32-unknown-unknown target uses by default. The module is stripped,

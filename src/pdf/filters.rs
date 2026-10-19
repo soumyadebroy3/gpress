@@ -94,8 +94,8 @@ pub fn decode_stage(st: &Stage, data: &[u8], limit: usize) -> Result<Vec<u8>, Fi
             }
             lzw_decode(data, early == 1, limit)
         }
-        b"ASCIIHexDecode" => ascii_hex_decode(data),
-        b"ASCII85Decode" => ascii85_decode(data),
+        b"ASCIIHexDecode" => ascii_hex_decode(data, limit),
+        b"ASCII85Decode" => ascii85_decode(data, limit),
         b"RunLengthDecode" => run_length_decode(data, limit),
         _ => Err(FilterError::Unsupported),
     }
@@ -283,8 +283,9 @@ pub fn lzw_decode(data: &[u8], early: bool, limit: usize) -> Result<Vec<u8>, Fil
     Ok(out)
 }
 
-pub fn ascii_hex_decode(data: &[u8]) -> Result<Vec<u8>, FilterError> {
-    let mut out = Vec::with_capacity(data.len() / 2);
+/// ASCIIHex, to at most `limit` bytes (TooLarge beyond them, as the other decoders).
+pub fn ascii_hex_decode(data: &[u8], limit: usize) -> Result<Vec<u8>, FilterError> {
+    let mut out = Vec::with_capacity((data.len() / 2).min(limit));
     let mut hi: Option<u8> = None;
     for &c in data {
         if c == b'>' {
@@ -302,19 +303,34 @@ pub fn ascii_hex_decode(data: &[u8]) -> Result<Vec<u8>, FilterError> {
         match hi {
             None => hi = Some(v),
             Some(h) => {
+                if out.len() == limit {
+                    return Err(FilterError::TooLarge);
+                }
                 out.push(h << 4 | v);
                 hi = None;
             }
         }
     }
     if let Some(h) = hi {
+        if out.len() == limit {
+            return Err(FilterError::TooLarge);
+        }
         out.push(h << 4);
     }
     Ok(out)
 }
 
-pub fn ascii85_decode(data: &[u8]) -> Result<Vec<u8>, FilterError> {
-    let mut out = Vec::with_capacity(data.len() * 4 / 5);
+/// ASCII85, to at most `limit` bytes (TooLarge beyond them, as the other decoders): each "z" is four zero
+/// bytes, so the output can be four times the input.
+pub fn ascii85_decode(data: &[u8], limit: usize) -> Result<Vec<u8>, FilterError> {
+    let mut out = Vec::with_capacity((data.len() * 4 / 5).min(limit));
+    let push = |out: &mut Vec<u8>, bytes: &[u8]| {
+        if out.len() + bytes.len() > limit {
+            return Err(FilterError::TooLarge);
+        }
+        out.extend_from_slice(bytes);
+        Ok(())
+    };
     let mut group = [0u8; 5];
     let mut n = 0;
     let mut i = 0;
@@ -338,7 +354,7 @@ pub fn ascii85_decode(data: &[u8]) -> Result<Vec<u8>, FilterError> {
             if n != 0 {
                 return Err(FilterError::Bad("z inside an ASCII85 group"));
             }
-            out.extend_from_slice(&[0, 0, 0, 0]);
+            push(&mut out, &[0, 0, 0, 0])?;
             continue;
         }
         if !(b'!'..=b'u').contains(&c) {
@@ -354,7 +370,7 @@ pub fn ascii85_decode(data: &[u8]) -> Result<Vec<u8>, FilterError> {
             if v > u32::MAX as u64 {
                 return Err(FilterError::Bad("ASCII85 group overflow"));
             }
-            out.extend_from_slice(&(v as u32).to_be_bytes());
+            push(&mut out, &(v as u32).to_be_bytes())?;
             n = 0;
         }
     }
@@ -372,7 +388,7 @@ pub fn ascii85_decode(data: &[u8]) -> Result<Vec<u8>, FilterError> {
         if v > u32::MAX as u64 {
             return Err(FilterError::Bad("ASCII85 group overflow"));
         }
-        out.extend_from_slice(&(v as u32).to_be_bytes()[..n - 1]);
+        push(&mut out, &(v as u32).to_be_bytes()[..n - 1])?;
     }
     Ok(out)
 }
@@ -443,13 +459,13 @@ mod tests {
 
     #[test]
     fn ascii85_known() {
-        assert_eq!(ascii85_decode(b"87cURD]i,\"Ebo80~>").unwrap(), b"Hello World!".to_vec());
-        assert_eq!(ascii85_decode(b"z~>").unwrap(), vec![0, 0, 0, 0]);
+        assert_eq!(ascii85_decode(b"87cURD]i,\"Ebo80~>", 100).unwrap(), b"Hello World!".to_vec());
+        assert_eq!(ascii85_decode(b"z~>", 100).unwrap(), vec![0, 0, 0, 0]);
     }
 
     #[test]
     fn hex_and_runlength() {
-        assert_eq!(ascii_hex_decode(b"48 65 6C6c 6F7>").unwrap(), b"Hellop".to_vec());
+        assert_eq!(ascii_hex_decode(b"48 65 6C6c 6F7>", 100).unwrap(), b"Hellop".to_vec());
         assert_eq!(run_length_decode(&[2, b'a', b'b', b'c', 254, b'x', 128], 100).unwrap(), b"abcxxx".to_vec());
     }
 
@@ -488,6 +504,32 @@ mod tests {
         }
         assert_eq!(decoded_size(&flate, &z, usize::MAX), Ok(text.len()));
         assert_eq!(decoded_size(&flate, &z, text.len() - 1), Err(FilterError::TooLarge));
+    }
+
+    #[test]
+    fn the_ascii_decoders_stop_at_the_limit() {
+        // Each output up to its exact length is allowed, one byte less is refused: whole groups, a "z", the
+        // last partial group, and a lone last hex digit alike. Through `decode_stage` as for every caller.
+        let stage = |name: &[u8]| Stage { name: name.to_vec(), parms: None };
+        let cases: [(&[u8], &[u8], &[u8]); 5] = [
+            (b"ASCII85Decode", b"87cURD]i,\"Ebo80~>", b"Hello World!"),
+            (b"ASCII85Decode", b"zz~>", &[0; 8]),
+            (b"ASCII85Decode", b"87cURD]i,\"Ebo80z87~>", b"Hello World!\0\0\0\0H"),
+            (b"ASCIIHexDecode", b"48 65 6C6c 6F7>", b"Hellop"),
+            (b"ASCIIHexDecode", b"4865>", b"He"),
+        ];
+        for (name, enc, dec) in cases {
+            assert_eq!(decode_stage(&stage(name), enc, dec.len()).unwrap(), dec);
+            assert_eq!(decode_stage(&stage(name), enc, dec.len() - 1), Err(FilterError::TooLarge));
+        }
+        // Decoding stops at the limit: a bad byte after it is never reached (a decoder that decoded everything
+        // and only then compared the length would report the bad byte).
+        assert_eq!(decode_stage(&stage(b"ASCII85Decode"), b"zz\x01", 4), Err(FilterError::TooLarge));
+        assert_eq!(decode_stage(&stage(b"ASCIIHexDecode"), b"4865!", 1), Err(FilterError::TooLarge));
+        // A "z" run four times its input.
+        let zs = vec![b'z'; 1 << 20];
+        assert_eq!(ascii85_decode(&zs, 1 << 20), Err(FilterError::TooLarge));
+        assert_eq!(ascii85_decode(&zs, 4 << 20).unwrap().len(), 4 << 20);
     }
 
     #[test]

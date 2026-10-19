@@ -365,37 +365,38 @@ NEW has not measured every file of BASE (an unfinished run compares only the fil
 ## Lightweight
 
 The download and the start-up are part of the time a person waits (`docs/tasks/lightweight.md`). Measured on
-a 4-core cloud machine in October 2026 with binaryen's wasm-opt 108 and Node 22.22: the sizes and what each
-feature costs with Rust 1.99.1, the compiler CI uses, and the choice of the module's build and its start-up
-with Rust 1.97.0, on the code of 066b65e and 4a60e08.
+a 4-core cloud machine in October 2026 with Rust 1.99.1 (the compiler CI uses), binaryen's wasm-opt 108 and
+Node 22.22: the sizes on main at dcd8a8b with this work, the choice of the module's build and its start-up on
+main at d093ab4 (the fast tier, #1, and the Flate parse, #9) with this work. Main's later changes, the
+archive model (#3) and the decode limit (#12), add code to the module; on the optimize path that the speeds
+and start-up measure, #3 changes nothing and #12 only a few limit checks.
 
 ### Sizes
 
 `python3 -I bench/sizes.py measure [--features SET]` builds each part and records its size in
 `bench/sizes.json`: the native tool and the C library with the release profile, the WebAssembly module the
-way the npm package builds it (cargo's `wasm` profile, opt-level "s", then `wasm-opt -O1`; see below). Gzip is
-level 9. A feature set is the cargo features a build has: "default" is a plain build, every part of the engine;
-"existing" adds Lepton (as they were before the parts became features, next section). The sizes are of main
-at 1a8aee1 with this work; "Before" is the same code with the module built the way the package built it until
-now, with the release profile (opt-level 3, symbol names kept, no wasm-opt). The release profile is unchanged,
-so the native builds are the same as before.
+way the npm package builds it (cargo's `wasm` profile, opt-level 3, then `wasm-opt -O1`; see below). Gzip is
+level 9. A feature set is the cargo features a build has: "default" is a plain build, today every part of the
+engine; "existing" adds Lepton. "Before" is the module built the way the package built it until now, with
+the release profile (opt-level 3, symbol names kept, no wasm-opt), from the same code. The release profile is
+unchanged, so the native builds are the same as before.
 
 | Build | Feature set | Raw bytes | Gzip bytes | Before: raw, gzip | Gzip change |
 | --- | --- | ---: | ---: | ---: | ---: |
-| WebAssembly module | default (stands in for "web") | 614,252 | 233,730 | 905,778, 312,697 | -25.3% |
-| WebAssembly module | existing | 945,114 | 341,277 | 1,405,707, 459,129 | -25.7% |
-| Native tool `gpress` | default | 1,700,424 | 770,376 | the same | 0 |
-| Native tool `gpress` | existing | 2,327,568 | 1,012,831 | the same | 0 |
-| C library, shared (`libgpress_c.so`) | default | 1,512,864 | 685,128 | the same | 0 |
-| C library, shared (`libgpress_c.so`) | existing | 2,139,736 | 926,018 | the same | 0 |
-| C library, static (`libgpress_c.a`) | default | 10,178,304 | 2,189,875 | the same | 0 |
-| C library, static (`libgpress_c.a`) | existing | 11,275,648 | 2,464,402 | the same | 0 |
+| WebAssembly module | default (stands in for "web") | 928,095 | 339,845 | 1,078,903, 366,073 | -7.2% |
+| WebAssembly module | existing | 1,341,370 | 475,431 | 1,575,904, 513,406 | -7.4% |
+| Native tool `gpress` | default | 1,970,816 | 871,899 | the same | 0 |
+| Native tool `gpress` | existing | 2,588,944 | 1,108,665 | the same | 0 |
+| C library, shared (`libgpress_c.so`) | default | 1,783,872 | 789,167 | the same | 0 |
+| C library, shared (`libgpress_c.so`) | existing | 2,401,936 | 1,023,515 | the same | 0 |
+| C library, static (`libgpress_c.a`) | default | 10,541,448 | 2,295,057 | the same | 0 |
+| C library, static (`libgpress_c.a`) | existing | 11,623,992 | 2,566,394 | the same | 0 |
 
-The target for the web module is 400 KB gzip (400,000 bytes). Before the "web" feature set (next section), the
-module with every part of the engine stood in for it: 233,730 bytes, 166,270 bytes (42%) under the target.
-Lepton adds 107,547 bytes of gzip to the module. The static library carries Rust's standard library whole, so
-it is far larger than what a program linked with it gets. Main's Flate lists (A5, A6, B3, at 1a8aee1) made
-the module 16,191 bytes larger raw and 4,472 bytes larger gzip (598,061 and 229,258 bytes at 4a60e08).
+The target for the web module is 400 KB gzip (400,000 bytes); the web module itself is in the next
+section. Lepton adds 135,586 bytes of gzip to the module. The static library carries Rust's standard
+library whole, so it is far larger than what a program linked with it gets. The module grows with main: the
+same build was 305,524 bytes of gzip at d093ab4, the archive model (#3) added 33,893 bytes and the decode
+limit (#12) 428.
 
 ### Sizes of the feature sets
 
@@ -494,216 +495,144 @@ some code is there only with two parts: the archive's fax parts and its decrypte
 
 ### Choosing the module's build
 
-Every build of the module in Node (`bench/wasm_speed.mjs`): one process per run, pinned to one core, two runs at
-a time on two cores in a rotating order, three runs of each build; the CPU time of the optimize calls, median of
-the three. Effort 0 on all 120 files of the sample, effort 50 on the 30 files of
-`bench/sets/sample120-size30.txt` (the sample sorted by size, every fourth file: 657 B to 6.3 MB). Opt-level 3
-is the `wasm` profile at opt-level 3 (symbols stripped). The effort-0 cells of the -O1 rows come from a later
-batch that measured opt-level 3 and "s" again beside them (245.6 s and 257.6 s, +4.9%), and their "vs 3" is
-against that batch's 245.6 s; -O1 of "z" was not run at effort 0. "First call": from the module's bytes to the
-first optimized PDF (one page, 3.8 KB, effort 0) in a fresh Node process, median of 21 processes, on two cores,
-measured with `bench/wasm_startup.mjs` (see Start-up below).
+The brief's rule (L2): opt-level "z" or "s", whichever is smaller and not more than 10% slower on the sample.
+Every build of the module was run in Node with `bench/wasm_speed.mjs` on the 30 files of
+`bench/sets/sample120-size30.txt` (the 120-file sample sorted by size, every fourth file: 657 B to 6.3 MB),
+one process per run pinned to one core, timing the CPU of the optimize calls: 22 runs of each build at effort
+0, 8 at effort 50 and 8 at effort 100, in a rotating order on four cores, among them batches of four runs
+started together. The machine was shared with other work, so a build's runs moved by up to 14% during the
+day (its later runs 4% to 15% slower than its earlier ones); the ratios between builds run at the same time
+did not. So "vs 3" is the median ratio over every pair of runs that overlapped in time with a run of an
+opt-level-3 build (the first three rows), and the CPU columns are medians of all runs. "First call": compile,
+instantiate and the first optimize of the one-page PDF (Start-up, below), median of fresh Node processes:
+21 on one core (`taskset -c 3`, the other three busy with other work) and 11 on two idle cores (`taskset -c
+2-3`, as GitHub gives a private repository's runner). Opt-level 3, 2, "s" and "z" are the `wasm` profile at
+that opt-level (symbols stripped, `panic = "abort"`); "dependencies z" builds the other crates at "z".
 
-| opt-level | wasm-opt | Raw bytes | Gzip bytes | Effort 0, CPU s | vs 3 | Effort 50, CPU s | vs 3 | First call, ms |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 3, before (release profile) | none | 841,082 | 293,702 | | | | | 79.7 |
-| 3 | none | 766,709 | 279,771 | 261.1 | | 83.4 | | 79.5 |
-| 3 | -O1 | 711,712 | 272,498 | 247.7 | +0.8% | 82.0 | -1.7% | 80.4 |
-| 3 | -Os | 697,417 | 275,292 | 251.6 | -3.6% | 85.9 | +3.0% | 79.9 |
-| 3 | -Oz | 692,060 | 274,932 | 267.4 | +2.4% | 88.5 | +6.1% | 78.8 |
-| s | none | 652,516 | 235,380 | 268.5 | +2.8% | 87.6 | +5.0% | 68.1 |
-| **s** | **-O1** | **600,115** | **228,746** | **256.9** | **+4.6%** | **86.7** | **+3.9%** | **71.8** |
-| s | -Os | 579,983 | 244,594 | 273.6 | +4.8% | 90.6 | +8.6% | 71.9 |
-| s | -Oz | 572,933 | 244,364 | 273.9 | +4.9% | 88.1 | +5.6% | 76.1 |
-| z | none | 587,289 | 212,192 | 476.3 | +82.4% | 140.6 | +68.5% | 116.9 |
-| z | -O1 | 530,236 | 204,651 | | | 134.2 | +60.8% | 95.1 |
-| z | -Os | 508,982 | 218,570 | 464.5 | +77.9% | 133.4 | +59.8% | 103.4 |
-| z | -Oz | 501,190 | 218,626 | 538.9 | +106.4% | 148.4 | +77.8% | 128.1 |
+| opt-level | wasm-opt | Raw bytes | Gzip bytes | Effort 0, CPU s | vs 3 | Effort 50, CPU s | vs 3 | Effort 100, CPU s | vs 3 | First call, effort 0, one core / two cores, ms | Effort 100, one core / two cores, ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 3 (release profile, as main builds it) | none | 961,453 | 328,536 | 8.23 | -2.1% | 94.3 | +0.4% | 271.0 | -0.1% | 45.2 / 33.9 | 304.2 / 167.0 |
+| 3 | none | 879,083 | 313,649 | 8.21 | +0.8% | 93.6 | -0.8% | 271.0 | -0.5% | 45.0 | 296.7 |
+| **3 (the package)** | **-O1** | **817,696** | **305,524** | **8.45** | **+2.2%** | **94.1** | **+0.4%** | **273.6** | **+0.7%** | **43.1 / 34.8** | **303.9 / 177.8** |
+| 3, dependencies z | -O1 | 814,631 | 304,847 | | | | | | | 43.4 | 302.7 |
+| 2 | -O1 | 737,185 | 285,328 | 9.55 | +15.3% | 98.9 | +5.0% | 291.4 | +6.5% | 41.6 / 30.2 | 224.0 / 130.8 |
+| s | none | 709,868 | 255,097 | 9.65 | +15.2% | 113.5 | +21.5% | 337.6 | +23.7% | 37.4 | 170.6 |
+| s | -O1 | 652,660 | 247,366 | 9.05 | +8.1% | 116.0 | +22.3% | 339.8 | +25.9% | 36.6 / 26.6 | 164.8 / 128.8 |
+| z | -O1 | 575,462 | 219,249 | 14.58 | +81.0% | 179.4 | +89.2% | 529.8 | +92.9% | 39.9 | 249.6 |
 
-Every output of every run was byte-identical to the native tool's at 066b65e (the hashes of the baseline
-benchmark run, `--features existing`, one thread): the 120 files at effort 0 and the 30 at effort 50, three
-times over for each build.
+wasm-opt's levels, gzip bytes (raw bytes in brackets):
 
-- opt-level "z" is 10% smaller than "s" but 1.8 times slower at effort 0 (1.7 at effort 50). "s" is 3% to 5%
-  slower than opt-level 3 at effort 0 (two batches) and 5% at effort 50, inside the 10% the brief allows, and
-  its first call comes 10 to 15 ms sooner (less code to compile). The profile uses "s".
-- wasm-opt: -Oz and -Os take 11% to 12% off the raw bytes of the "s" build but add 4% to its gzip size, which is
-  what a browser downloads, and the first call with -Oz took 4 to 8 ms longer than with -O1 in three batches
-  (the table's, and two more of 31 processes for the "s" builds: 73.1 against 65.0 ms, 77.2 against 71.8). -O1
-  takes 8% off the raw bytes and 3% off the gzip size at the same speed, so the package build runs -O1 (the
-  brief named -Oz; it is one word in `crates/gpress-wasm/js/build-wasm.mjs`). Without wasm-opt on PATH the
-  build uses cargo's module as it is and says so.
-- For scale: the native tool takes 208.6 s of CPU for the same 120 files at effort 0 (the baseline run, one
-  process per file), so the module takes about 1.2 to 1.3 times the native time.
+| opt-level | none | -O1 | -O2 | -Os | -Oz |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 3 | 313,649 (879,083) | **305,524** (817,696) | 309,330 (808,786) | 308,555 (802,131) | 308,022 (794,936) |
+| 2 | 293,241 (795,650) | **285,328** (737,185) | 291,133 (729,527) | 291,393 (723,300) | 291,164 (715,461) |
+| s | 255,097 (709,868) | **247,366** (652,660) | 266,536 (637,606) | 264,738 (631,565) | 264,435 (621,454) |
+| z | 226,919 (636,219) | **219,249** (575,462) | 235,670 (557,564) | 234,924 (551,899) | 234,391 (542,313) |
+
+Every output of every run was byte-identical to the native tool's on the same code (`--threads 1`): 4,620
+outputs at effort 0, 1,680 at 50 and 1,680 at 100.
+
+- Neither size level meets the rule. "s" is 19% smaller in gzip than opt-level 3 and 8% slower at effort 0,
+  but 22% slower at effort 50 and 26% at effort 100; "z" is 28% smaller and 1.8 to 1.9 times slower at every
+  effort. Opt-level 2 is not a size level, and is 15% slower at effort 0 anyway. So the profile keeps
+  opt-level 3 and takes only what costs no speed: `panic = "abort"` and stripped symbols (4.5% less gzip than
+  the release profile) and wasm-opt (2.6% less again). An earlier measurement, on main before its Flate work
+  (A5, A6 and B3 of the plan, then the fast tier), had "s" 3% to 5% slower at effort 0, inside the rule, and
+  this branch used "s" until main's changes widened the gap.
+- wasm-opt: -O1 leaves the smallest gzip at every opt-level. -O2, -Os and -Oz take more off the raw bytes (-Oz
+  10% at opt-level 3, against 7% for -O1) but less off the gzip, which is what a browser downloads, so the
+  package build runs -O1 (the brief named -Oz; it is one word in `crates/gpress-wasm/js/build-wasm.mjs`).
+  Without wasm-opt on PATH the build uses cargo's module as it is and says so.
+- What opt-level 3 costs: 58 KB more to download than "s" (305,524 against 247,366 bytes of gzip here;
+  339,845 against 269,742 on main at f5f9701), and a slower first call at the default effort, where
+  V8's optimizing compiler has more code to work on (below): 304 against 165 ms on one core, 178 against 129
+  on two idle cores. At effort 0 the first call is 6 to 8 ms slower (43.1 against 36.6 ms on one core, 34.8
+  against 26.6 on two cores).
 
 ### Start-up (the WebAssembly module in Node)
 
-The target: compiling the module, making an instance and optimizing a one-page PDF of a few KB take at most
-50 ms in all, measured in CI's Node test. `bench/wasm_startup.mjs` measures it from the module's bytes in
+The target (L4): compiling the module, making an instance and optimizing a one-page PDF of a few KB take at
+most 50 ms in all, measured in CI's Node test. `bench/wasm_startup.mjs` measures it from the module's bytes in
 memory: compile, instantiate, the first `optimize` call, and a second call in the same process (the same work
 once the code is compiled). Each sample is a fresh Node 22.22 process, because V8 reuses compiled code within
 a process; the modules are measured in turn, round after round, and the tables give medians. The PDF is 3,851
 bytes, made by `crates/gpress-wasm/js/test/onepage.mjs`: a Flate content stream of text in two fonts, and the
 two fonts with their widths and descriptors (named, not embedded: the file holds no font program; real files
-that do are below). It comes out at 2,774 bytes at effort 0, 2,777 at effort 50 and 2,767 at effort 100, the
+that do are below). It comes out at 2,794 bytes at effort 0, 2,777 at effort 50 and 2,767 at effort 100, the
 same bytes as the native tool. CI runs the same measurement in `crates/gpress-wasm/js/test/startup.test.mjs`:
-7 processes at effort 0 and 7 at the default effort, and it prints the median and its distance to 50 ms. Its
-limit is 50 ms at effort 0 and twice that at the default effort; `GPRESS_STARTUP_LIMIT_MS` raises it, and CI
-sets it to 150 ms (300 at the default effort) because its runner has two cores (below).
+one process not counted, then 7 at effort 0 and 7 at the default effort (100), and it prints the medians and
+the distance to 50 ms. It fails only above 150 ms at effort 0 and 300 ms at the default effort, since a busy
+machine or one with fewer cores can take two or three times as long; `GPRESS_STARTUP_LIMIT_MS` raises the
+limits on such a machine (CI sets nothing).
 
-"today (3)" is the module as main built it before this change: every part built in (the web feature set does not
-exist yet), the release profile (opt-level 3). The package now builds opt-level s with `wasm-opt -O1` (Sizes,
-above); its numbers on one core are below the one-core table. "s" and "z" are the same code at those opt-levels, "+Oz" after `wasm-opt -Oz` (binaryen
-108), and "S1" is session 1's unmerged branch (A1, A3 and A4 of the plan, commit 5e37ac6) built the same way.
-Medians in ms of 11 processes on three idle cores of the 4-core machine (the fourth was kept for the baseline
-benchmark), from `taskset -c 0-2 node bench/wasm_startup.mjs --runs 11 --quiet 0-2 LABEL=module.wasm ...`.
-Other work shared the machine, so a round counted only when the three cores had been idle for a second
-before it and after it (`--quiet`; no round was dropped in this run):
+**In CI** (GitHub's two-core runner, the WebAssembly package job), six runs with this change: medians of
+26.3, 32.3, 46.2, 49.2, 33.4 and 31.1 ms at effort 0 (compile 3.8 to 9.1, instantiate 0.3, first call 22.2 to
+39.7; single processes 24 to 62 ms), so the target is met in every run, but in the slowest with only 0.8 ms to
+spare, and 136.9, 180.9, 180.0, 263.6, 174.1 and 183.3 ms at the default effort. Runners differ from one run
+to the next by about that much: the two slow runs at effort 0 took 9 ms to compile, the others about 5. Before
+the fast tier (#1), the same test took a median of 133 ms at effort 0 there.
 
-| Module | Bytes (gzip) | Effort 0: compile | instantiate | first call | **total** | second call | Effort 100: **total** | second call |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| today (3) | 841,082 (294,455) | 4.1 | 0.2 | 50.6 | **54.5** | 23.9 | **85.5** | 52.5 |
-| s | 846,550 (263,987) | 4.2 | 0.2 | 50.5 | **55.0** | 27.6 | **92.9** | 59.2 |
-| z | 897,443 (256,028) | 4.1 | 0.2 | 87.5 | **91.8** | 58.9 | **166.8** | 149.9 |
-| s +Oz | 573,121 (244,046) | 3.6 | 0.2 | 56.1 | **59.9** | 25.5 | **90.6** | 54.5 |
-| s +Oz, one-caller inlining capped (`-ocimfs 20`) | 576,816 (227,619) | 3.9 | 0.2 | 58.3 | **62.3** | 31.0 | **88.6** | 59.0 |
-| z +Oz | 501,378 (218,201) | 3.7 | 0.2 | 96.4 | **100.3** | 68.8 | **209.5** | 166.6 |
-| S1 (3) | 855,462 (301,977) | 4.3 | 0.2 | 41.8 | **46.7** | 21.4 | **68.7** | 29.6 |
-| S1 s | 855,987 (268,373) | 4.1 | 0.2 | 35.1 | **39.4** | 16.1 | **63.8** | 33.7 |
-| S1 s +Oz, `-ocimfs 20` | 585,050 (231,454) | 4.2 | 0.2 | 38.2 | **42.8** | 15.5 | **61.3** | 31.5 |
+On this machine, at d093ab4 (the rows of the table above; one core: core 3 alone, 21 processes, the other
+cores busy with other work; two cores: cores 2 and 3, both idle, 11 processes; `--quiet` kept a round only
+when its cores had been idle for a second before and after it):
 
-Medians on the same idle cores move by about a tenth from one session to the next: at effort 0 today's
-module took 54.5, 54.9 and 59.8 ms in three sessions of 9 to 11 processes (56.1 in an earlier one), and
-session 1's branch 46.7, 47.9 and 46.8 (42.5 earlier); single samples of session 1's branch ranged from 38 to
-64 ms.
+| Module | Cores | Effort 0: compile | instantiate | first call | **total** | second call | Effort 100: **total** | second call |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| the package (3, -O1) | one | 8.5 | 0.2 | 34.0 | **43.1** | 13.3 | **303.9** | 88.3 |
+| the package (3, -O1) | two | 6.4 | 0.3 | 26.8 | **34.8** | 4.5 | **177.8** | 72.6 |
+| main's build (3, release profile) | one | 9.0 | 0.2 | 34.5 | **45.2** | 11.8 | **304.2** | 85.4 |
+| main's build (3, release profile) | two | 6.6 | 0.3 | 26.1 | **33.9** | 5.0 | **167.0** | 73.9 |
+| 2, -O1 | one | 8.0 | 0.2 | 33.4 | **41.6** | 12.9 | **224.0** | 70.5 |
+| 2, -O1 | two | 6.4 | 0.3 | 22.9 | **30.2** | 5.3 | **130.8** | 66.5 |
+| s, -O1 | one | 7.3 | 0.2 | 29.2 | **36.6** | 10.5 | **164.8** | 88.7 |
+| s, -O1 | two | 6.1 | 0.3 | 18.8 | **26.6** | 6.1 | **128.8** | 78.6 |
+| z, -O1 | one | 7.0 | 0.2 | 32.2 | **39.9** | 15.8 | **249.6** | 178.2 |
 
-The CI test on the same idle cores: 59.9 ms at effort 0 with today's module, 47.4 ms with session 1's branch
-and 41.3 ms with session 1's branch and the `memcmp` change below; 85.9, 61.9 and 61.9 ms at the default
-effort. Run 6 times more on those cores at the plain 50 ms limit, the CI test passed 4 times with session 1's
-branch (medians 44.1 to 48.5 ms) and failed twice (51.2 and 55.0 ms): its margin is within the spread of seven
-samples. The native tool takes about 24 ms at effort 0 and 49 ms at effort 100 on the same file (medians of
-three sessions of 21 runs on one idle core, process start included: 24.9, 24.4 and 24.0 ms, and 49.4, 47.8
-and 49.2 ms; the fastest runs 22 and 43 ms), so the module's start-up at effort 0 takes about 2.3 times the
-native tool's whole run, and 1.7 times at effort 100.
+Single processes vary widely on a shared machine: on one core the package's effort-0 totals ranged from 36
+to 68 ms. The native tool takes 7 to 8 ms at effort 0 and 54 to 66 ms at effort 100 on the same file (medians
+of three sets of 21 runs on core 3, process start included), so the module's start-up at effort 0 takes five
+to six times the native tool's whole run, and three to six times at effort 100.
 
-On two cores (`taskset -c 0,2 node bench/wasm_startup.mjs --quiet 0,2`), as GitHub gives a private
-repository's runner, the first call is slower: V8's optimizing compiler then has one core beside the work
-instead of two. Session 1's branch gains little there (two sessions of 11 processes, medians in ms):
+Where the time goes, the package's module:
 
-| Module | Effort 0: **total** | second call | Effort 100: **total** | second call |
-| --- | ---: | ---: | ---: | ---: |
-| today (3) | **71.9**, **81.4** | 24.2, 26.1 | **104.7**, **104.9** | 51.7, 52.9 |
-| S1 (3) | **70.9**, **69.9** | 18.5, 18.2 | **88.9**, **92.0** | 33.0, 31.3 |
+- **Compile, 4 to 9 ms.** V8 decodes and validates the 859 KB of code; it compiles each function only when it
+  is first called. `Gpress.compile` once, then `Gpress.load(module)` for each instance, skips this step for
+  every instance after the first.
+- **Instantiate, 0.2 to 0.3 ms.** Nothing is built at start-up: 64 KB of data and 18 pages (1.13 MiB) of
+  memory, no start function; every table of the engine is made when a call needs it.
+- **The first call.** It compiles the functions it reaches with V8's quick compiler, Liftoff, and runs in
+  that code while the optimizing compiler (TurboFan) works on the hot functions in the background; a function
+  switches to optimized code only when it is next called. At effort 0 the fast tier's work is small, so most
+  of the call is the cost of new code: 27 to 34 ms here (22 and 27 in CI), against 5 to 13 ms for the same
+  call once compiled. At effort 100 the call is longer and TurboFan has more to do; with one core it competes
+  with the work: the package's first call at effort 100 takes 304 ms on one core against 178 ms on two, and
+  "s", with less code to compile, 165 and 129 ms.
 
-`npm test` runs the test files one at a time (`--test-concurrency=1`): on three cores the start-up test
-otherwise shares them with the round-trip tests, and it took 70 to 87 ms at effort 0 in four runs with today's
-module, against 59 to 70 ms alone. Run on two cores here (`taskset -c 0,2`) with today's module it passed 3
-runs of 3 at the 150 ms limit, with medians of 73.7, 81.5 and 93.6 ms at effort 0 and 98.1 to 115.4 ms at the
-default effort; session 1's module failed 3 runs of 3 there at a 50 ms limit (68.0 to 76.7 ms). GitHub's
-two-core runner is slower: the first CI run of the test, with main's Flate lists merged (below), took 135,
-152, 141, 133, 114, 100 and 97 ms at effort 0 (median 132.8) and a median of 147.2 ms at the default effort.
-Its first processes were the slowest, so the test now starts one process first that it does not count.
+Tables sized to the input: at effort 0 the fast tier's hash tables and window are sized to the stream
+(`table_bits` and `window_slots` in `src/flate/fast.rs`). At efforts 20 and above the match finder still
+makes its two largest-case tables (`head`, 256 KiB, and `son`, 512 KiB, filled with NIL) on every
+`find_matches` call, even for a 60-byte stream; A4 of the plan (`docs/tasks/flate-fixed-costs.md`) reuses
+them and clears only what a search reads, so this branch leaves `src/flate/` to it. Everything else on the
+optimize path is sized to its input: the parse's cost arrays, the match and symbol lists, the bit writer, the
+inflate output. The archive is not on this path, and its model's tables are fixed (`src/cm/`, `src/pack/`:
+the archive briefs).
 
-On one core (`taskset -c 0 node bench/wasm_startup.mjs --runs 11`) the first call is much slower, because V8's
-optimizing compiler then shares the core with the work; `--liftoff-only` turns that compiler off:
+The test PDF holds a single Flate stream. Real one-page PDFs of 3 to 6 KB that embed a font program (a Flate
+`FontFile2` or `FontFile3` of 0.9 to 4.2 KB), from the corpus's `pdfjs/` folder, take about as long at effort
+0 (`--pdf`, 9 processes on core 3, the modules of the table above, medians in ms):
 
-| Module | Effort 0: **total** | second call | Effort 100: **total** | second call | `--liftoff-only`, effort 0: first call | **total** | second call |
+| File | Bytes | Font program | Output bytes | the package: **total** | second call | s, -O1: **total** | second call |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| today (3) | **118.7** | 29.6 | **154.4** | 54.0 | 53.7 | **60.6** | 41.5 |
-| s | **86.5** | 29.6 | **129.2** | 68.0 | 57.6 | **63.9** | 45.7 |
-| z | **116.9** | 63.8 | **211.1** | 149.8 | | | |
-| s +Oz | **111.9** | 28.5 | **149.0** | 65.2 | | | |
-| s +Oz, `-ocimfs 20` | **93.3** | 30.9 | **122.7** | 67.6 | | | |
-| z +Oz | **139.2** | 75.0 | **257.0** | 172.5 | | | |
-| S1 (3) | **118.1** | 37.8 | **150.5** | 32.0 | 36.2 | **43.6** | 21.7 |
-| S1 s | **76.3** | 18.7 | **103.9** | 38.4 | 34.5 | **41.6** | 24.2 |
-| S1 z | **82.6** | 28.3 | **115.3** | 54.0 | | | |
-| S1 s +Oz, `-ocimfs 20` | **83.5** | 22.5 | **99.0** | 37.1 | | | |
-| S1 (3), `package_merge` without `memcmp` | | | | | 32.6 | **39.7** | 20.1 |
+| the test PDF | 3,851 | none | 2,794 | **48.5** | 12.4 | **39.7** | 13.9 |
+| `Embedded_font.pdf` | 3,323 | 909 bytes | 2,444 | **51.5** | 2.5 | **33.8** | 7.6 |
+| `TrueType_without_cmap.pdf` | 3,989 | 1,916 bytes | 2,944 | **42.3** | 10.9 | **36.5** | 7.6 |
+| `issue7492.pdf` | 4,619 | 2,191 bytes | 3,878 | **43.9** | 8.2 | **39.2** | 11.3 |
+| `issue5256.pdf` | 6,136 | 4,244 bytes | 5,265 | **43.7** | 7.5 | **42.0** | 11.5 |
 
-One core gives the widest spread: a second session (`--quiet 0`) gave 131.1 ms at effort 0 for today's module,
-86.0 for s, 118.9 for S1 (3) and 80.2 for S1 s.
-
-The package's build, opt-level s with `wasm-opt -O1` (600,066 bytes), measured later beside today's module in
-the same rounds on one idle core (`taskset -c 3 node bench/wasm_startup.mjs --runs 11 --quiet 3`, built from
-main 4a60e08): 89.0 ms at effort 0 (second call 30.5) and 117.6 ms at effort 100 (68.6), against 137.3 and
-154.4 ms for today's module (27.3 and 55.0). It starts 35% sooner at effort 0 on one core, like s alone.
-
-Main's Flate lists (A5, A6 and B3 of the plan, merged at 1a8aee1) slow the module down. Built the package's
-way from this branch before and after merging them (Rust 1.97.0, outputs byte-identical), start-up on one idle
-core went from 85.7 to 110.5 ms at effort 0 and from 125.7 to 158.0 ms at effort 100 (second calls 31.1 to
-34.7 and 64.6 to 81.7 ms), and `bench/wasm_speed.mjs` on the 30 files of `sample120-size30` at effort 0 from
-38.4 and 37.8 s of CPU to 41.5 and 41.2 s (+9%). The other tables here were measured before that merge.
-
-Where the time goes, today's module at effort 0:
-
-- **Compile, 4 to 7 ms.** V8 decodes and validates the 717 KB of code; it compiles each function only when it
-  is first called. Making later instances from the compiled `WebAssembly.Module` (`Gpress.compile` once,
-  then `Gpress.load(module)`) costs 0.3 ms each instead; compiling the same bytes again in one process cost 4
-  to 7 ms.
-- **Instantiate, 0.2 to 0.5 ms.** Nothing is built at start-up: 48 KB of data and 17 pages (1.06 MiB) of
-  memory, no constructor; every table of the engine is made when a call needs it.
-- **The first call: 51 ms on idle cores, 112 to 122 ms on one core, for work that takes 24 to 30 ms once
-  compiled.** The first call compiles the 217 functions it reaches (242 KB of code) with V8's quick compiler,
-  Liftoff, and touches its memory for the first time: about 12 ms (53.7 against 41.5 ms with Liftoff alone).
-  It then runs in Liftoff's code, 1.4 to 1.7 times slower than optimized code here, while the optimizing
-  compiler (TurboFan) works on the 21 hot functions in the background. V8 switches a function to optimized
-  code only when it is next called, so a large function that runs once runs unoptimized throughout: deflate's
-  per-segment closure (12.8 KB of code, with the parse rounds, the block split and the polish inlined into it)
-  took TurboFan up to 90 ms on a busy machine. On idle cores the optimized code comes too late for most of
-  the first call (50.8 ms, against 53.7 with Liftoff alone on one core); on one core compiling it costs the
-  first call more than it gives back (118.7 ms against 60.6). Smaller functions are compiled sooner: on one
-  core opt-level s starts 27 to 34% faster than 3 at effort 0 (16 to 18% at effort 100), and `wasm-opt -Oz`,
-  which inlines every function that has one caller, gives that back unless that inlining is capped (`-ocimfs
-  20`: 576,816 bytes against 573,121, and a smaller gzip, 227,619 against 244,046). On idle cores 3 and s start
-  about alike (54.5 and 55.0 ms at effort 0, 85.5 and 92.9 at effort 100). z runs 2.2 to 3 times slower than 3
-  once compiled, and starts 50 to 70% slower at effort 0.
-- **The work is Flate.** In a profile of the two calls at effort 0 (`--cpu-prof`, which names the module's
-  functions) 88% of the time is `deflate_zlib`, for four streams: the content stream, the object stream and
-  two tries of the cross-reference stream. Its fixed costs lead: `header_search` 22%, `estimate_dynamic_bits`
-  15%, `limited_lengths_into` 13%, `optimal_nice` 9%, `fast_lengths` 5%, `find_matches` 3% (session 1's A1,
-  A3 and A4). With session 1's branch, 11% of the time at effort 0 is `memcmp`, called from `package_merge`
-  for `cur[..k] == prev[..k]`: in WebAssembly `memcmp` is a loop over bytes. Comparing the u64 values in a
-  loop takes it out of the profile, and the CI test's median from 47.4 to 41.3 ms.
-
-Tables sized for the largest case: on the optimize path only the match finder's two tables (`head`, 256 KiB,
-and `son`, 512 KiB), which every `find_matches` call allocates and fills with NIL, even for a 60-byte stream.
-Session 1's A4 keeps them per thread, allocated zeroed (fresh pages, no fill), and clears only the entries a
-search reads, so a small stream touches a few KB of them; this branch leaves `matcher.rs` to it, so until
-session 1's branch is merged the match finder still builds its largest-case tables on every call. Everything
-else on the path is sized to its input: the parse's cost arrays, the match and symbol lists, the bit writer,
-the inflate output. The archive is not on this path, and its tables are fixed: in the module a compress of
-the same PDF takes about 120 ms and an expand 50 ms, and the memory grows to 12.7 MB. A model holds about
-11.4 MB whatever the input (context tables of at least 2.6 MB, a 4 MiB match table, and a 65,536-context APM
-table of 4.3 MiB that is filled entry by entry with a computed value at every `Model::new`); `Model::new` is
-23 ms of the two calls, and priming the model with its fixed text is most of the rest (`src/cm/`,
-`src/pack/`: the archive briefs).
-
-The test PDF holds a single Flate stream. Real one-page PDFs of 3 to 6 KB that embed a font program (a
-Flate `FontFile2` or `FontFile3` of 0.9 to 4.2 KB) take from about as long to two and a half times as long,
-the more the larger the program (`--pdf`, files from the corpus's `pdfjs/` folder, effort 0, 9 processes on
-three idle cores, medians in ms):
-
-| File | Bytes | Font program | today: **total** | second call | S1: **total** | second call |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| the test PDF | 3,851 | none | **59.8** | 24.8 | **46.8** | 17.0 |
-| `Embedded_font.pdf` | 3,323 | 909 bytes | **51.7** | 24.0 | **46.3** | 17.5 |
-| `TrueType_without_cmap.pdf` | 3,989 | 1,916 bytes | **74.9** | 41.7 | **62.9** | 24.5 |
-| `issue7492.pdf` | 4,619 | 2,191 bytes | **78.7** | 45.5 | **75.2** | 27.7 |
-| `issue5256.pdf` | 6,136 | 4,244 bytes | **149.7** | 104.9 | **119.7** | 60.1 |
-
-The target, at effort 0, on the test PDF. On three idle cores session 1's branch meets it, but not reliably:
-its medians were 46.7 to 47.9 ms in three sessions here (42.5 in an earlier one), and the CI test failed 2 runs
-of 6 (medians 51.2 and 55.0 ms). Without that branch it is 5 to 10 ms short (54.5 to 59.8 ms). On two cores,
-as CI's runner has, neither meets it: 72 to 81 ms today and about 70 with session 1's branch; on one core 119
-to 131 ms today and 76 to 80 with session 1's branch at opt-level s. So in CI's Node test the target is not
-met, with or without session 1's branch (GitHub's two-core runner took a median of 133 ms): the test prints
-the distance, and fails only above 150 ms, to catch a large step back. Real one-page files that embed a font program are further from it: 46 to 120 ms
-with session 1's branch on three idle cores. The default effort (100) does not reach 50 ms: 85.5 ms today and
-68.7 with session 1's branch on idle cores, when the native tool itself takes about 49 ms on this file. The
-fast tier (`fast-tier.md`, F1), which replaces the optimal parse and the block search that are most of the
-first call at effort 0, would leave a wide margin. Opt-level s for the module (L2) starts as fast as 3 at
-effort 0 on idle cores (9% slower at effort 100) and saves a quarter to a third on one core.
+The target, at effort 0 on the test PDF, is met in CI (26.3 to 49.2 ms), on two idle cores here (34.8 ms)
+and on one core here (43.1 ms, and 48.5 in the busier run of the table above; single processes took up to 68
+ms). The default effort does not reach 50 ms, and is not meant to: the native tool itself takes 54 to 66 ms
+there.
 
 ### Memory
 

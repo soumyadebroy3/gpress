@@ -325,6 +325,78 @@ fn an_image_width_that_wraps_around_is_refused() {
 }
 
 #[test]
+fn an_ascii85_stage_decodes_no_further_than_max_stream() {
+    // [/FlateDecode /ASCII85Decode] over a run of "z", in stored Flate blocks so that any re-encode is much
+    // smaller: each "z" is four zero bytes, so 50,000 of them decode to 200,000. Under a max_stream of 128 KiB
+    // the stream is kept as it is at efforts 0 and 100, whichever step refuses it first; under 256 KiB it is
+    // decoded and re-encoded.
+    let mut a85 = vec![b'z'; 50_000];
+    a85.extend_from_slice(b"~>");
+    let mut stored = vec![0x78, 0x01];
+    let blocks = a85.chunks(65535).count();
+    for (i, c) in a85.chunks(65535).enumerate() {
+        stored.push((i + 1 == blocks) as u8);
+        stored.extend_from_slice(&(c.len() as u16).to_le_bytes());
+        stored.extend_from_slice(&(!(c.len() as u16)).to_le_bytes());
+        stored.extend_from_slice(c);
+    }
+    stored.extend_from_slice(&gpress::flate::zlib::adler32(&a85).to_be_bytes());
+    let mut objs = page_objects();
+    objs[3].1 = stream("/Filter [/FlateDecode /ASCII85Decode]", &stored);
+    let pdf = classic(&objs, "5");
+    let content = |r: &gpress::pdf::rewrite::Optimized| match xref::open(&r.data).unwrap().load(4).unwrap().1 {
+        Obj::Stream(s) => s,
+        o => panic!("{o:?}"),
+    };
+    for effort in [0u8, 100] {
+        let r = quick(&pdf, &Options { max_stream: 128 << 10, threads: 2, ..Options::effort(effort) });
+        let s = content(&r);
+        assert_eq!(s.data, stored, "effort {effort}");
+        let r = quick(&pdf, &Options { max_stream: 256 << 10, threads: 2, ..Options::effort(effort) });
+        smaller(&r, &pdf);
+        let s = content(&r);
+        assert!(s.data.len() < stored.len() / 10, "effort {effort}: {} bytes", s.data.len());
+        assert_eq!(xref::decode_fully(&s.dict, &s.data, 1 << 20).unwrap(), vec![0u8; 200_000]);
+    }
+    packs_and_restores(&pdf);
+}
+
+#[test]
+fn metadata_too_large_to_check_for_pdf_a_leaves_the_file_untouched() {
+    // A PDF/A marker in [/FlateDecode /ASCII85Decode] metadata, followed by a run of "z" (four zero bytes
+    // each). The check reads metadata to at most 16 MiB a stage: past that it can't tell, so the file is left
+    // as it is rather than rewritten as if it weren't PDF/A; within it, the marker is found.
+    let a85 = |d: &[u8]| -> Vec<u8> {
+        let mut out = Vec::new();
+        for c in d.chunks(4) {
+            let mut b = [0u8; 4];
+            b[..c.len()].copy_from_slice(c);
+            let mut v = u32::from_be_bytes(b);
+            let mut g = [0u8; 5];
+            for x in g.iter_mut().rev() {
+                *x = (v % 85) as u8 + b'!';
+                v /= 85;
+            }
+            out.extend_from_slice(&g[..c.len() + 1]);
+        }
+        out
+    };
+    let marker = b"<x:xmpmeta><pdfaid:part>1</pdfaid:part></x:xmpmeta> ";
+    assert_eq!(marker.len() % 4, 0);
+    for (zs, why) in [(4_300_000usize, "metadata too large to check for PDF/A"), (1000, "PDF/A")] {
+        let mut text = a85(marker);
+        text.resize(text.len() + zs, b'z');
+        text.extend_from_slice(b"~>");
+        let mut objs = page_objects();
+        objs[0].1 = b"<< /Type /Catalog /Pages 2 0 R /Metadata 5 0 R >>".to_vec();
+        objs.push((5, stream("/Type /Metadata /Subtype /XML /Filter [/FlateDecode /ASCII85Decode]", &z(&text))));
+        let pdf = classic(&objs, "6");
+        let r = optimize(&pdf, &Options { threads: 2, ..Options::effort(0) });
+        assert_eq!(untouched(&r, &pdf), why);
+    }
+}
+
+#[test]
 fn predictor_rows_are_cut_to_the_data() {
     // A content stream whose predictor parameters describe a 1 GB row: the row is only as long as the data,
     // so decoding it (the self-check undoes predictors) reserves nothing for the claim.
