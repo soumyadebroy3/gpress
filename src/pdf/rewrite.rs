@@ -1755,6 +1755,22 @@ mod effort_tests {
     }
 
     #[test]
+    fn out_of_time_the_plan_decodes_nothing_more() {
+        // Once the deadline has passed no stream is decoded to be counted, at effort 100 too, where the counting
+        // pass is the plan's only decoding: a stream not counted is kept (the rewrite is given up after the plan,
+        // so no output changes). A file of many large streams would otherwise be decoded whole past the budget.
+        let text: Vec<u8> = b"BT (gpress) Tj ET\n".iter().copied().cycle().take(100_000).collect();
+        let s = flate_stream(&text, &[]);
+        let streams: Vec<(u32, &Stream)> = vec![(1, &s)];
+        for e in [0u8, 50, 100] {
+            assert!(effort_plan(&streams, &[0], &Options::effort(e), 1000, None)[0].is_some(), "effort {e}");
+            let gone = Options { deadline: Deadline::after(std::time::Duration::ZERO), ..Options::effort(e) };
+            assert!(gone.deadline.passed());
+            assert!(effort_plan(&streams, &[0], &gone, 1000, None)[0].is_none(), "effort {e}");
+        }
+    }
+
+    #[test]
     fn a_predictor_is_kept_only_when_it_saves_more_than_its_parameters() {
         let resolve = |o: &Obj| Some(o.clone());
         let image = |w: usize, h: usize, cs: &[u8], px: Vec<u8>| {
