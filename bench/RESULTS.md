@@ -641,10 +641,10 @@ resident set that `wait4` gives (bench/measure.c) for `optimize` with 1 thread, 
 120-file sample, measured by `benchmark.py space` on cores 0-2 of a shared machine with every feature on. Three
 builds:
 
-- before: the baseline rows (build base-066b65e, `bench/results/base`), one run;
-- opt-lightweight: 2c3ebc5 without the changes below. It has session 2's Flate search lists in less memory (B3,
+- before: the baseline rows (build base-a518968, `bench/results/base`), one run;
+- opt-lightweight: 60c247d without the changes below. It has session 2's Flate search lists in less memory (B3,
   #6) and the matcher sort (#9), so it shows what those saved; one run;
-- after: branch `wip/l3-memory-r1` at 04c6a58, that opt-lightweight with the changes below; three runs, and
+- after: branch `wip/l3-memory-r1` at 916fbfb, that opt-lightweight with the changes below; three runs, and
   each file's peak is the median of the three.
 
 Every output of the after build is byte for byte the baseline's (the same SHA-256): 120 files in each of the
@@ -699,16 +699,16 @@ Peaks move from one run to the next with the same build and input. Over the thre
 spread is 3.1 MiB at effort 0 (issue9940.pdf, 44,552 to 47,676 KB) and 10.0 MiB at effort 100 (issue9940.pdf
 again, 45,432 to 55,680 KB; the next is 2.8 MiB). Other runs have moved more: issue1905.pdf at effort 100 gave
 119,556 to 129,160 KB in three runs of one build of this branch before the merge, and one run of the start of
-this work (3b5b501) gave 139,000 KB against 120,184 KB for the baseline binary. So a difference of a few MiB in
+this work (e220e03) gave 139,000 KB against 120,184 KB for the baseline binary. So a difference of a few MiB in
 one run on one file says little, and at effort 100 even 10 MiB can be noise; the before and opt-lightweight
 columns are one run each.
 
 What each change saved. The commits from before the merge were measured one at a time before #6 was merged,
-on opt-lightweight 3b5b501 ("start"), each column adding one commit; in KB, the median of 3 runs, 1 thread
+on opt-lightweight e220e03 ("start"), each column adding one commit; in KB, the median of 3 runs, 1 thread
 (one run for GeoTopo.pdf and issue12963.pdf), every output the same. With #6 the match finder holds less, so
 the same commits save different amounts today; the tables above are what the whole branch gives now.
 
-| File | Effort | start | +128f885 | +f472f35 | +aa6b571 | +81727ac | +815b642 | +4e27026 | +1bd32b3 |
+| File | Effort | start | +23594ec | +e999065 | +058ac94 | +a54f45c | +d782526 | +8a6906e | +d75ddc0 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | issue12841_reduced | 0 | 83,524 | 59,364 | 59,488 | 59,532 | 59,320 | 59,400 | 53,652 | 69,116 |
 | issue19517 | 0 | 85,016 | 85,036 | 84,892 | 34,764 | 34,632 | 28,548 | 28,648 | 28,632 |
@@ -727,54 +727,55 @@ the same commits save different amounts today; the tables above are what the who
 | issue13931 | 100 | 81,380 | 81,368 | 66,260 | 66,292 | 66,668 | 66,664 | 66,648 | 66,672 |
 | issue12963 | 100 | 177,772 | 177,736 | 152,340 | 151,280 | 148,452 | 148,312 | 152,508 | 152,508 |
 
-- **128f885**: with one thread, a stream's 1 MiB segments are optimised one at a time and each plan is written
+- **23594ec**: with one thread, a stream's 1 MiB segments are optimised one at a time and each plan is written
   before the next segment is optimised (eight segments were optimised, then written): issue12841_reduced
   83,524 to 59,364 KB, issue9262_reduced 92,156 to 80,036, issue6286 48,844 to 38,060. With more threads it
-  made a group as many segments as threads; 04c6a58 puts that back to eight (below).
-- **f472f35**: the image predictor candidates read the decoded samples where they are (the plain candidate was
+  made a group as many segments as threads; 916fbfb puts that back to eight (below).
+- **e999065**: the image predictor candidates read the decoded samples where they are (the plain candidate was
   a whole copy, held through the full encode): issue12963 at effort 100 177,736 to 152,340 KB, issue13931 at
   effort 100 81,368 to 66,260, GeoTopo 90,508 to 83,608. Taken alone it makes images slower: issue13931 at
-  effort 100 takes 24.9 s of CPU time instead of 21.7 (+15%, 4 alternating rounds against 128f885) with the
+  effort 100 takes 24.9 s of CPU time instead of 21.7 (+15%, 4 alternating rounds against 23594ec) with the
   same instructions (+0.001%, cachegrind); the extra time is in the match search over the candidates, and
-  moving glibc's mmap threshold does not change it. The time is back from 81727ac on (2 rounds at each commit:
-  128f885 22.4 s, f472f35 25.6, aa6b571 26.3, 81727ac 20.8, 815b642 21.1, 4e27026 21.4, 1bd32b3 20.6), and the
-  whole branch is +0.3% on this file (below). So f472f35 should not be taken without 81727ac.
-- **aa6b571**: RunLength output is sized by a first pass instead of doubling as it grows: issue19517 85,036
+  moving glibc's mmap threshold does not change it. The time is back from a54f45c on (2 rounds at each commit:
+  23594ec 22.4 s, e999065 25.6, 058ac94 26.3, a54f45c 20.8, d782526 21.1, 8a6906e 21.4, d75ddc0 20.6), and the
+  whole branch is +0.3% on this file (below). So e999065 should not be taken without a54f45c.
+- **058ac94**: RunLength output is sized by a first pass instead of doubling as it grows: issue19517 85,036
   to 34,764 KB.
-- **81727ac**: the effort plan counts each stream's decoded size, holding only the last 32 KiB of it (it
+- **a54f45c**: the effort plan counts each stream's decoded size, holding only the last 32 KiB of it (it
   decoded every stream whole, and the stream was then decoded again to be encoded), and a stream that does not
   decode within the 64 MiB limit is kept at once, at every effort, instead of being decoded up to the limit
   only to fail: enormous.pdf (one image that decodes to 243 MB) 70,352 to 5,964 KB, the two multipage files
   79,152 to 36,120, issue9262_reduced 79,944 to 70,652.
-- **815b642**: each object's bytes are freed once they are in the output: issue9262_reduced 70,652 to 60,444
+- **d782526** (main's, taken onto this work before main was merged into it, so it is no longer one of its
+  commits): each object's bytes are freed once they are in the output: issue9262_reduced 70,652 to 60,444
   KB, issue19517 34,632 to 28,548.
-- **4e27026**: a stream with no general filter is read in place before it is re-encoded, not copied:
+- **8a6906e**: a stream with no general filter is read in place before it is re-encoded, not copied:
   issue12841_reduced 59,400 to 53,652 KB, issue9262_reduced 60,444 to 55,108, PDFJS-9279-reduced 39,592 to
   36,844.
-- **1bd32b3**: with one thread, a segment's plan is held until the next one's is made. Freed at once
-  (128f885), its memory and the segment's tables went back to the system after every segment and were faulted
+- **d75ddc0**: with one thread, a segment's plan is held until the next one's is made. Freed at once
+  (23594ec), its memory and the segment's tables went back to the system after every segment and were faulted
   in again: twice the page faults (40,508 against 20,110 on issue12841_reduced, 64,006 against 24,647 on
   issue9262_reduced) and 4 to 5% more CPU time at effort 0. Held, the faults are as before, and so is the
-  time. This gives back part of 128f885's saving on the files with several segments (issue12841_reduced 53,652
+  time. This gives back part of 23594ec's saving on the files with several segments (issue12841_reduced 53,652
   to 69,116 KB, issue9262_reduced 55,108 to 71,120: still 14,408 and 21,036 KB under the start).
-- **11eebba**: the JPEG with new tables is not copied while Flate is tried over it; it goes into the result at
+- **6752422**: the JPEG with new tables is not copied while Flate is tried over it; it goes into the result at
   the end when nothing smaller came after it. On a PDF with one 3000 x 2400 JPEG (4.2 MB, 3.9 MB with new
   tables), 3 runs: 53.6 to 49.7 MB at effort 0 and 62.2 to 58.3 MB at effort 100, the same time. The sample's
   retabled JPEGs are 1 MB or less and the peak is elsewhere: no change there.
-- **04c6a58**: with more than one thread, segments go in groups of eight again, as before 128f885. In groups of
+- **916fbfb**: with more than one thread, segments go in groups of eight again, as before 23594ec. In groups of
   as many segments as threads, a thread that finished its segment waited for the slowest of the group: scheduled
   from the one-thread segment times of issue12841_reduced (six segments, the first the slowest), its segments
   would take 26% longer with 3 threads and 40% longer with 4. One thread is unchanged.
-- 88e2fc3 and 40ebe0c change no behaviour (clippy, rustfmt).
+- bbecf93 and 61d2ccf change no behaviour (clippy, rustfmt).
 
-1bd32b3 measured again on top of #6, against the same build without it (16 alternating rounds, 1 thread):
+d75ddc0 measured again on top of #6, against the same build without it (16 alternating rounds, 1 thread):
 without the hold the peak is lower (issue12841_reduced 48.1 MB instead of 60.9 at effort 0 and 57.2 instead of
 67.9 at effort 100, issue6286 28.8 instead of 34.2, issue9262_reduced 57.5 instead of 59.4) and the CPU time
 within 1%, but issue9262_reduced's page faults double again (48,101 against 21,492) and its system time with
 them (0.18 against 0.09 s). The hold stays. Giving up about 0.1 s of system time on such files for up to 13 MB
 on files like issue12841_reduced is the owner's choice.
 
-Time. CPU-time medians with 1 thread, opt-lightweight (2c3ebc5) and the after build run back to back in
+Time. CPU-time medians with 1 thread, opt-lightweight (60c247d) and the after build run back to back in
 alternating order on cores 0-2, 9 rounds (3 for GeoTopo.pdf and issue12963.pdf), on the file and effort pairs
 the changes touch; every output the same:
 
@@ -812,7 +813,7 @@ cachegrind). freeculture.pdf at effort 0 is slower in most sets: +3.6% here, the
 (9, 9, 7, 9 and 7 rounds); over the 41 rounds the medians are 16.76 and 17.18 s (+2.5%), and 31 rounds were
 slower. It is not more work: the after build runs the same instructions (129,742 million against 129,721
 million, +0.02%) and, in cachegrind's cache model, has as many first-level data misses (116.5 million each) and
-fewer last-level ones (0.68 against 0.99 million). Nor is it 4e27026: with its in-place read undone (one line),
+fewer last-level ones (0.68 against 0.99 million). Nor is it 8a6906e: with its in-place read undone (one line),
 the build was +1.9% in the same 7 rounds. The cause was not found. Differences this size with the same
 instructions came and went with unrelated changes during this work (below), so it is probably where code and
 data fall, which cachegrind does not model. Whether to accept it is the owner's call.
@@ -821,10 +822,10 @@ Files that the space runs showed as slower were timed the same way: GeoTopo-komp
 over 16 rounds (+4.2% in the first 7, -1.2% in the next 9), with the same instructions (84,732 million against
 84,718 million); issue12810.pdf at effort 0 -0.8% over 34 rounds; bug1743245.pdf at effort 100 +3.2% on the
 medians of 34 rounds but +1.3% on the per-round ratios (its times ran from 1.01 to 1.54 s). That file runs
-0.66% more instructions: at effort 100, 81727ac adds a counting pass over each stream.
+0.66% more instructions: at effort 100, a54f45c adds a counting pass over each stream.
 
-The review found that, merged into opt-lightweight with #6, the deflate grouping (128f885 with 1bd32b3) cost
-over 2% on issue12841_reduced, issue9262_reduced and issue6286. Measured again on 2c3ebc5, it does not: the
+The review found that, merged into opt-lightweight with #6, the deflate grouping (23594ec with d75ddc0) cost
+over 2% on issue12841_reduced, issue9262_reduced and issue6286. Measured again on 60c247d, it does not: the
 merge against opt-lightweight, 16 alternating rounds, was issue12841_reduced +2.0% at effort 0 (-0.2% in 25
 more rounds) and -1.6% at effort 100, issue9262_reduced +0.5%, issue6286 -1.1% (-2.3% in 25 more),
 PDFJS-9279-reduced -1.0%, and the sum -0.02%. It runs the same instructions (issue12841_reduced: 12,595.7
@@ -842,7 +843,7 @@ peak:
   the predictor undone, 9.3 MiB. Next to them: the input, the output and both files' parsed objects, about
   the input's size each.
 - issue12841_reduced.pdf (59.4, line 43.2): the Flate encoder on one 1 MiB segment of a 5.6 MB JPEG that Flate
-  cannot shrink: the plans' symbols 12.5 MiB (made by the copies in `exact`; without 1bd32b3's hold the peak is
+  cannot shrink: the plans' symbols 12.5 MiB (made by the copies in `exact`; without d75ddc0's hold the peak is
   48.1 MB, above), the match finder 11.0 MiB, the parse 8.7 MiB; then the input, the stream's parsed bytes and
   the output, 5.6 MiB each.
 - issue9940.pdf (46.5, line 32.8): the match finder on one segment of an image, 21.9 MiB, the parse 3.0 MiB and
