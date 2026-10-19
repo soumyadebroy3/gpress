@@ -741,11 +741,15 @@ the same commits save different amounts today; the tables above are what the who
   whole branch is +0.3% on this file (below). So e999065 should not be taken without a54f45c.
 - **058ac94**: RunLength output is sized by a first pass instead of doubling as it grows: issue19517 85,036
   to 34,764 KB.
-- **a54f45c**: the effort plan counts each stream's decoded size, holding only the last 32 KiB of it (it
-  decoded every stream whole, and the stream was then decoded again to be encoded), and a stream that does not
-  decode within the 64 MiB limit is kept at once, at every effort, instead of being decoded up to the limit
-  only to fail: enormous.pdf (one image that decodes to 243 MB) 70,352 to 5,964 KB, the two multipage files
-  79,152 to 36,120, issue9262_reduced 79,944 to 70,652.
+- **a54f45c**: the effort plan counts each stream's decoded size, holding only the end of the last stage's
+  output that later matches can reach (32 KiB, up to 128 KiB between cuts; it decoded every stream whole, and
+  the stream was then decoded again to be encoded), and a stream that does not decode within the 64 MiB limit
+  is kept at once, at every effort, instead of being decoded up to the limit only to fail: enormous.pdf (one
+  image that decodes to 243 MB) 70,352 to 5,964 KB, the two multipage files 79,152 to 36,120,
+  issue9262_reduced 79,944 to 70,652. Only the last stage is counted that way: in a chain of several general
+  filters (ASCII85 then Flate, say) the stages before it are still decoded whole. At effort 100 the plan
+  decoded nothing before, so there the counting pass is new work, one more decode of every stream (0.66% more
+  instructions on bug1743245.pdf, below); it stops counting when the time budget has run out.
 - **d782526** (main's, taken onto this work before main was merged into it, so it is no longer one of its
   commits): each object's bytes are freed once they are in the output: issue9262_reduced 70,652 to 60,444
   KB, issue19517 34,632 to 28,548.
