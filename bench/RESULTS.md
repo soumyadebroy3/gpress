@@ -551,6 +551,11 @@ spare, and 136.9, 180.9, 180.0, 263.6, 174.1 and 183.3 ms at the default effort.
 to the next by about that much: the two slow runs at effort 0 took 9 ms to compile, the others about 5. Before
 the fast tier (#1), the same test took a median of 133 ms at effort 0 there.
 
+The web module goes through the same test in `npm run test:web`. With the parts as features, one run of each
+on the 4-core machine with other work running (`GPRESS_STARTUP_LIMIT_MS=5000`, so that the load could not fail
+it): 22.7 ms at effort 0 and 112.5 ms at the default effort for the whole module, 28.5 and 135.9 ms for the
+web module. One run on a busy machine says little about the difference; both are under 50 ms at effort 0.
+
 On this machine, at d093ab4 (the rows of the table above; one core: core 3 alone, 21 processes, the other
 cores busy with other work; two cores: cores 2 and 3, both idle, 11 processes; `--quiet` kept a round only
 when its cores had been idle for a second before and after it):
