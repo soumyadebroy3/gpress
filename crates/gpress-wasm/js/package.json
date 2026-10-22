@@ -13,10 +13,10 @@
   },
   "files": ["dist/"],
   "scripts": {
-    "build:wasm": "cargo build --release -p gpress-wasm --target wasm32-unknown-unknown && mkdir -p dist && cp ../../../target/wasm32-unknown-unknown/release/gpress_wasm.wasm dist/gpress.wasm",
+    "build:wasm": "node build-wasm.mjs",
     "build:js": "tsc -p tsconfig.json",
     "build": "npm run build:wasm && npm run build:js",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test --test-concurrency=1 test/*.test.mjs"
   },
   "devDependencies": {
     "typescript": "^5.6.0"

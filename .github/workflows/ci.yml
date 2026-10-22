@@ -106,13 +106,22 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: cargo build --release -p gpress-wasm --target wasm32-unknown-unknown
-      - working-directory: crates/gpress-wasm/js
+      # binaryen's wasm-opt: the package build runs it on the module when it is on PATH, and the size check
+      # below fails without it (the module would not be the package's).
+      - run: sudo apt-get update && sudo apt-get install -y binaryen
+      - id: build
+        working-directory: crates/gpress-wasm/js
         run: |
           npm ci
-          mkdir -p dist && cp ../../../target/wasm32-unknown-unknown/release/gpress_wasm.wasm dist/gpress.wasm
-          npm run build:js
-          npm test
+          npm run build
+      # The start-up test prints its median and the distance to the 50 ms target (bench/RESULTS.md, Start-up).
+      - working-directory: crates/gpress-wasm/js
+        run: npm test
+      # The size budget, whenever the package built: fails when the web module's gzip size is more than 5% over
+      # bench/sizes.json, or over the 400 KB target. A wanted growth is recorded with `bench/sizes.py measure`;
+      # so is a module more than 5% under the record, which gets a warning on the run.
+      - if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: python3 -I bench/sizes.py check
       - uses: actions/upload-artifact@v4
         with:
           name: gpress-wasm
