@@ -1,0 +1,32 @@
+# 30 files of sample120 spread by size: the sample sorted by size (then name), every 4th file from the third
+# (657 B to 6.3 MB). bench/wasm_speed.mjs runs it at effort 50 to compare builds of the WebAssembly module.
+pdfjs/sci-notation.pdf
+pdfjs/issue1055r.pdf
+pdfjs/bitmap-template3-customat.pdf
+pdfjs/bitmap-symbol.pdf
+pdfjs/knockout_nested.pdf
+pdfjs/bug1020858.pdf
+pdfjs/issue8697.pdf
+pikepdf/tests__resources__aquamarine-cie.pdf
+pdfjs/issue11242_reduced.pdf
+pdfjs/issue7835.pdf
+pdfjs/issue15815.pdf
+pdfjs/issue1985.pdf
+pdfjs/annotation-square-circle-without-appearance.pdf
+pdfjs/issue4402_reduced.pdf
+pdfjs/issue7878.pdf
+pdfjs/issue19484_2.pdf
+pdfjs/pr4922.pdf
+pdfjs/issue15910.pdf
+pdfjs/ThuluthFeatures.pdf
+ocrmypdf/tests__resources__2400dpi.pdf
+pdfjs/bug1627427_reduced.pdf
+ocrmypdf/tests__resources__enormous.pdf
+pdfjs/issue9940.pdf
+pdfjs/issue16553.pdf
+pikepdf/tests__resources__pdfa__multipage.pdf
+pdfjs/bug1978317.pdf
+pdfjs/issue6286.pdf
+pdfjs/freeculture.pdf
+pdfjs/issue8795_reduced.pdf
+pdfjs/issue19517.pdf
