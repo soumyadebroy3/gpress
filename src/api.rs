@@ -25,7 +25,8 @@
 //! encrypted file, and for the archive `max_decoded` (what the parts of one archive may claim in all, declared
 //! in its header and refused up front when over the caller's limit) with `max_len` (the restored length,
 //! likewise). Not yet bounded by an option: cross-reference streams are decoded as far as the file's size
-//! allows, and the PDF/A check reads metadata to 16 MiB. In optimize, and in compress's planning, up to
+//! allows, the PDF/A check reads metadata to 16 MiB, and the objects parsed from object streams take more
+//! than the bytes the limits count (an array of small integers about 35 times its bytes). In optimize, and in compress's planning, up to
 //! `threads` streams are decoded at once, each with its own copies, so the peak grows with `threads`; expand
 //! runs on one thread, and compress's coding on one with its restore check beside it.
 
