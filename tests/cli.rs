@@ -111,6 +111,7 @@ fn small_pdf() -> Vec<u8> {
 
 /// `--store-budget BYTES` is the library's `store_budget`: the engine's summary (`PDFE_DEBUG`) names it, the
 /// output is the same at any budget, and a budget past `MAX_STORE_BUDGET` is refused as the library refuses it.
+/// The summary's time saved has the form bench/p5.py reads.
 #[test]
 fn the_store_budget_flag_is_the_library_option() {
     let dir = std::env::temp_dir().join(format!("gpress-cli-store-{}", std::process::id()));
@@ -133,6 +134,17 @@ fn the_store_budget_flag_is_the_library_option() {
     let (code, log, default) = run(&[]);
     assert_eq!(code, Some(0), "{log}");
     assert!(log.contains(&format!("store: budget {},", gpress::Options::default().store_budget)), "{log}");
+    // The time saved, in seconds with three decimals (whole milliseconds), as bench/p5.py reads it.
+    let summary = log.lines().find(|l| l.contains("store: budget")).unwrap_or_default();
+    let saved = summary.split(" computed, about ").nth(1).and_then(|t| t.split(" s saved").next()).unwrap_or_default();
+    let (secs, ms) = saved.split_once('.').unwrap_or_default();
+    assert!(
+        !secs.is_empty()
+            && secs.bytes().all(|b| b.is_ascii_digit())
+            && ms.len() == 3
+            && ms.bytes().all(|b| b.is_ascii_digit()),
+        "{log}"
+    );
     let default = default.unwrap();
     assert!(default.len() < std::fs::metadata(&i).unwrap().len() as usize);
     for budget in ["0", "4096", &gpress::api::MAX_STORE_BUDGET.to_string()] {
