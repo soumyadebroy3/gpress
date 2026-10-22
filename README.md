@@ -104,6 +104,12 @@ module, and the wrapper turns the trap into a `GpressError` with code 4 and mark
 a fresh one). Sizes are 32-bit inside it: the wrapper refuses inputs of 2 GiB and more. Pages that load it
 need `'wasm-unsafe-eval'` in their Content Security Policy's `script-src`.
 
+A first load compiles the module (4 to 9 ms in Node, `bench/RESULTS.md`, Start-up). `Gpress.compile(source)`
+returns the compiled module, and `Gpress.load(module)` makes an instance from it without compiling again:
+compile once, then make one instance per worker (a module can be posted to a Web Worker) or a fresh one
+after a trap. Serve the file as `application/wasm`, with no parameters, so that it compiles while it downloads
+(with any other type it is compiled once it has arrived).
+
 ### Command line
 
 ```
@@ -255,17 +261,19 @@ cargo test --release --workspace --features existing
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 cargo deny check                                  # and python3 -I bench/check_dep_sources.py
-cargo build --release -p gpress-wasm --target wasm32-unknown-unknown   # needs: rustup target add wasm32-unknown-unknown
-cd crates/gpress-wasm/js && npm ci && npm run build && npm test        # the npm package into js/dist/
+cargo build --profile wasm -p gpress-wasm --target wasm32-unknown-unknown   # needs: rustup target add wasm32-unknown-unknown
+cd crates/gpress-wasm/js && npm ci && npm run build && npm test        # the npm package into js/dist/ (with wasm-opt if on PATH)
+python3 -I bench/sizes.py check                   # the web module within 5% of its recorded size (bench/sizes.json); needs wasm-opt
 cd fuzz && cargo +nightly fuzz run expand -- -max_total_time=600      # needs cargo-fuzz; also inflate, pdf_optimize
 ```
 
 CI (`.github/workflows/ci.yml`) runs formatting, clippy with warnings as errors on both feature sets, both
 test suites, the C example against the shared library, the licence and advisory gate, the WebAssembly package
-and its tests, and a short fuzzing run of the three decoders. `tests/api.rs` proves that every option changes
-what the engine does; `tests/interaction.rs` runs every feature on one encrypted file (a JPEG, a fax image, a
-Type 1 font and a zlib stream) in both outputs; `tests/pack_format.rs` keeps an archive made by the first
-build of the format version (`tests/data/format-v8.*`), which must still restore and pack to the same bytes.
+with its tests and its size budget, and a short fuzzing run of the three decoders. `tests/api.rs` proves that
+every option changes what the engine does; `tests/interaction.rs` runs every feature on one encrypted file (a
+JPEG, a fax image, a Type 1 font and a zlib stream) in both outputs; `tests/pack_format.rs` keeps an archive
+made by the first build of the format version (`tests/data/format-v8.*`), which must still restore and pack to
+the same bytes.
 
 ## Layout
 

@@ -38,5 +38,19 @@ lto = true
 codegen-units = 1
 debug = false
 
+# The WebAssembly module (`cargo build --profile wasm -p gpress-wasm --target wasm32-unknown-unknown`, which the
+# npm package's build runs before wasm-opt): opt-level 3 like the native tool, with what makes the module smaller
+# at no cost in speed (panic = "abort", symbols stripped). The size levels cost too much speed (the brief allows
+# 10%, docs/tasks/lightweight.md, L2): "s" makes the module 19% smaller in gzip but 8%, 22% and 26% slower in
+# Node on the 30-file sample at efforts 0, 50 and 100, and "z" 28% smaller but 1.8 to 1.9 times slower. The
+# measurements are in bench/RESULTS.md, "Lightweight".
+[profile.wasm]
+inherits = "release"
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
 [profile.dev]
 opt-level = 1
