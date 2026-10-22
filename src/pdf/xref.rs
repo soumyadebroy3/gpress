@@ -274,7 +274,9 @@ pub fn open_with(data: &[u8], limits: Limits) -> Result<Doc<'_>, LoadError> {
     let sx = find_last(data, b"startxref", 2048).ok_or(LoadError::NoStartXref)?;
     let mut lx = Lexer::new(data, sx + 9);
     lx.skip_ws();
-    let off = parse_uint(lx.regular_token()).ok_or(LoadError::NoStartXref)?;
+    // An offset past what this platform addresses is past the end of the file on every platform.
+    let off = parse_u64(lx.regular_token()).ok_or(LoadError::NoStartXref)?;
+    let off = usize::try_from(off).unwrap_or(usize::MAX);
     let eof = find_last(data, b"%%EOF", 2048).ok_or(LoadError::NoStartXref)?;
     let trailing = data.len() - (eof + 5);
 
@@ -562,9 +564,10 @@ fn read_table(d: &[u8], mut pos: usize, rows_left: &mut usize) -> Result<(Vec<(u
                 _ => Err(LoadError::BadXref("trailer is not a dictionary")),
             };
         }
-        let start = parse_uint(lx.regular_token()).ok_or(LoadError::BadXref("bad subsection"))?;
+        // In 64 bits, so that every platform decides alike.
+        let start = parse_u64(lx.regular_token()).ok_or(LoadError::BadXref("bad subsection"))?;
         lx.skip_ws();
-        let count = parse_uint(lx.regular_token()).ok_or(LoadError::BadXref("bad subsection"))?;
+        let count = parse_u64(lx.regular_token()).ok_or(LoadError::BadXref("bad subsection"))?;
         // Entries start after the end of line.
         let mut p = lx.pos;
         while p < d.len() && (d[p] == b' ' || d[p] == b'\r' || d[p] == b'\n') {
@@ -575,13 +578,14 @@ fn read_table(d: &[u8], mut pos: usize, rows_left: &mut usize) -> Result<(Vec<(u
                 return Err(LoadError::BadXref("table past the end"));
             }
             count_row(rows_left)?;
-            let off = parse_uint(&d[p..p + 10]).ok_or(LoadError::BadXref("bad table entry"))?;
+            let off = parse_u64(&d[p..p + 10]).ok_or(LoadError::BadXref("bad table entry"))?;
             let gen = parse_uint(&d[p + 11..p + 16]).ok_or(LoadError::BadXref("bad table entry"))?;
             if d[p + 10] != b' ' || d[p + 16] != b' ' {
                 return Err(LoadError::BadXref("bad table entry"));
             }
             let e = match d[p + 17] {
-                b'n' => Entry::Offset(off, gen as u16),
+                // An offset past what this platform addresses is past the end of the file on every platform.
+                b'n' => Entry::Offset(usize::try_from(off).unwrap_or(usize::MAX), gen as u16),
                 b'f' => Entry::Free,
                 _ => return Err(LoadError::BadXref("bad table entry type")),
             };
