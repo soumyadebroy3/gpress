@@ -37,6 +37,17 @@ fn objstm_raw(objs: &[(u32, Vec<u8>)], len: usize) -> (Vec<u8>, usize) {
 /// A PDF with a cross-reference stream: `plain` objects at offsets, object streams (number, decoded bytes, /N,
 /// /First) behind two Flate stages, and `rows` placing objects in them (object number, object stream, index).
 fn build(plain: &[(u32, Vec<u8>)], objstms: &[(u32, Vec<u8>, usize, usize)], rows: &[(u32, u32, u32)]) -> Vec<u8> {
+    build_as(plain, objstms, rows, "/Filter [/FlateDecode /FlateDecode]", |raw| z(&z(raw)))
+}
+
+/// `build` with the object streams' filter entries, and their stored bytes from their decoded ones, as given.
+fn build_as(
+    plain: &[(u32, Vec<u8>)],
+    objstms: &[(u32, Vec<u8>, usize, usize)],
+    rows: &[(u32, u32, u32)],
+    filter: &str,
+    encode: impl Fn(&[u8]) -> Vec<u8>,
+) -> Vec<u8> {
     let mut d = b"%PDF-1.7\n".to_vec();
     let mut at: Vec<(u32, u8, u32, u32)> = Vec::new();
     for (n, b) in plain {
@@ -46,12 +57,11 @@ fn build(plain: &[(u32, Vec<u8>)], objstms: &[(u32, Vec<u8>, usize, usize)], row
         d.extend_from_slice(b"\nendobj\n");
     }
     for (sn, raw, count, first) in objstms {
-        let data = z(&z(raw));
+        let data = encode(raw);
         at.push((*sn, 1, d.len() as u32, 0));
         d.extend_from_slice(
             format!(
-                "{sn} 0 obj\n<< /Type /ObjStm /N {count} /First {first} /Filter [/FlateDecode /FlateDecode] \
-                 /Length {:>10} >>\nstream\n",
+                "{sn} 0 obj\n<< /Type /ObjStm /N {count} /First {first} {filter} /Length {:>10} >>\nstream\n",
                 data.len()
             )
             .as_bytes(),
@@ -467,6 +477,62 @@ fn each_object_of_an_object_stream_is_read_within_its_own_bytes() {
     assert!(why.contains("stream runs past the end"), "{why}");
 }
 
+#[test]
+fn object_streams_without_a_filter_or_with_a_predictor_are_held_to_the_limits() {
+    // Four objects in 64 KiB of object stream, stored three ways. Each reads back the same within the limits
+    // and is left as it is past them.
+    let objs: Vec<(u32, Vec<u8>)> = (0..4).map(|i| (1000 + i, format!("<< /K {i} >>").into_bytes())).collect();
+    let (raw, first) = objstm_raw(&objs, 64 << 10);
+    let rows: Vec<(u32, u32, u32)> = (0..4).map(|i| (1000 + i, 100, i)).collect();
+    // A PNG predictor (Up, rows of 4 bytes) on the Flate stage: the stage decodes to 80 KiB, a fifth more.
+    let up = |r: &[u8]| {
+        let mut out = Vec::with_capacity(r.len() / 4 * 5);
+        let mut prev = [0u8; 4];
+        for row in r.chunks(4) {
+            out.push(2);
+            for (k, &c) in row.iter().enumerate() {
+                out.push(c.wrapping_sub(prev[k]));
+                prev[k] = c;
+            }
+        }
+        z(&out)
+    };
+    let stored = |r: &[u8]| r.to_vec();
+    let flate = |r: &[u8]| z(r);
+    let predicted = "/Filter /FlateDecode /DecodeParms << /Predictor 12 /Columns 4 >>";
+    let files = [
+        build_as(&catalog(1000..1004, 0), &[(100, raw.clone(), 4, first)], &rows, "", stored),
+        build_as(&catalog(1000..1004, 0), &[(100, raw.clone(), 4, first)], &rows, "/Filter /FlateDecode", flate),
+        build_as(&catalog(1000..1004, 0), &[(100, raw.clone(), 4, first)], &rows, predicted, up),
+    ];
+    for (k, pdf) in files.iter().enumerate() {
+        let doc = xref::open_with(pdf, Limits::once(1 << 20)).unwrap();
+        for (n, body) in &objs {
+            assert_eq!(doc.load(*n).unwrap().1, Obj::Dict(xref_dict(body)), "file {k}, object {n}");
+        }
+        smaller(&optimize(pdf, &opt(1 << 20)), pdf);
+        let why = untouched(&optimize(pdf, &opt(48 << 10)), pdf);
+        assert!(why.contains("object stream past the stream limit"), "file {k}: {why}");
+    }
+    // The predictor's stage is held to the limit before the predictor is undone: 64 KiB of data in 80 KiB.
+    let why = untouched(&optimize(&files[2], &opt(72 << 10)), &files[2]);
+    assert!(why.contains("object stream past the stream limit"), "{why}");
+    smaller(&optimize(&files[1], &opt(72 << 10)), &files[1]);
+}
+
+#[test]
+fn a_length_in_a_refused_object_stream_gives_its_reason() {
+    // A content stream whose /Length is object 1000, an integer in 64 KiB of object stream: past the stream
+    // limit, the file is left as it is for that reason (not for an unusable /Length).
+    let (raw, first) = objstm_raw(&[(1000, b"17".to_vec())], 64 << 10);
+    let mut plain = catalog(std::iter::once(4), 0);
+    plain.push((4, b"<< /Length 1000 0 R >>\nstream\nBT (seventeen) ET\nendstream".to_vec()));
+    let pdf = build(&plain, &[(100, raw, 1, first)], &[(1000, 100, 0)]);
+    smaller(&optimize(&pdf, &opt(1 << 20)), &pdf);
+    let why = untouched(&optimize(&pdf, &opt(32 << 10)), &pdf);
+    assert!(why.contains("object stream past the stream limit"), "{why}");
+}
+
 fn xref_dict(d: &[u8]) -> gpress::pdf::object::Dict {
     match gpress::pdf::parse::Lexer::new(d, 0).parse_obj().unwrap() {
         Obj::Dict(d) => d,
@@ -529,6 +595,9 @@ fn encrypted_files_with_object_streams_read_them_again_once_the_key_is_known() {
     // The archive opens the file only within max_stream_archive: below the catalog's object stream, its streams
     // are stored encrypted, as they are; either way the bytes come back exactly.
     let catalog = xref::open_with(&alone, Limits::once(64 << 20)).unwrap().objstm_stats().largest;
+    // Optimize, below that object stream: left as it is, saying why the catalog can't be read.
+    let why = untouched(&optimize(&alone, &opt(catalog - 1)), &alone);
+    assert!(why.contains("unreadable catalog") && why.contains("object stream past the stream limit"), "{why}");
     for (max_stream, decrypted) in [(catalog - 1, false), (catalog, true)] {
         let (a, stats) = pack_with(&alone, &PackOptions { max_stream, ..PackOptions::default() });
         assert_eq!(stats.decrypted > 0, decrypted, "{max_stream}");
