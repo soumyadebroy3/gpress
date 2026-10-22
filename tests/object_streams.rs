@@ -428,6 +428,7 @@ fn each_object_of_an_object_stream_is_read_within_its_own_bytes() {
         (b"/true", 1, true),
         (b"5 0 R", 2, true),
         (b"5 %x\n0 R", 3, false),
+        (b"5 %x\n0 R", 4, false),
         (b"42", 1, false),
     ] {
         let head = format!("1000 0 1001 {second} ");
@@ -442,6 +443,14 @@ fn each_object_of_an_object_stream_is_read_within_its_own_bytes() {
             String::from_utf8_lossy(body)
         );
     }
+    // A comment that ends with the window (its end of line the next entry's first byte) hides nothing: both
+    // kinds of reader read 5, then 6.
+    let raw = b"1000 0 1001 4 5 %x\n6".to_vec();
+    let pdf = build(&catalog(1000..1002, 0), &[(5, raw, 2, 14)], &[(1000, 5, 0), (1001, 5, 1)]);
+    let doc = xref::open_with(&pdf, Limits::once(1 << 20)).unwrap();
+    assert_eq!(doc.load(1000).unwrap().1, Obj::Int(5));
+    assert_eq!(doc.load(1001).unwrap().1, Obj::Int(6));
+    smaller(&optimize(&pdf, &opt(64 << 20)), &pdf);
     // An offset past 32 bits in an entry nothing reads is no harm, on any platform.
     let raw = b"1000 0 1001 4294967296 << /A 1 >>".to_vec();
     let pdf = build(&catalog(1000..1001, 0), &[(5, raw, 2, 23)], &[(1000, 5, 0), (1001, 5, 1)]);

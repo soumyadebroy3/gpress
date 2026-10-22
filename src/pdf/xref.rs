@@ -222,8 +222,9 @@ fn runs_on(raw: &[u8], at: usize, end: usize, pos: usize, o: &Obj) -> bool {
         return false;
     }
     // Read on as a reader of the whole stream does. A comment begun before the end of the window and running
-    // past it hides the next object's bytes from such a reader; past the window, only white space and the next
-    // objects' own comments are crossed, so the look-ahead takes no more than a pass over the stream in all.
+    // past it hides the next object's bytes from such a reader (one whose end of line is the window's last byte
+    // or the next one's first hides nothing); past the window, only white space and the next objects' own
+    // comments are crossed, so the look-ahead takes no more than a pass over the stream in all.
     let skip = |lx: &mut Lexer| -> bool {
         while let Some(c) = lx.peek() {
             if is_white(c) {
@@ -233,7 +234,7 @@ fn runs_on(raw: &[u8], at: usize, end: usize, pos: usize, o: &Obj) -> bool {
                 while lx.peek().is_some_and(|c| c != b'\n' && c != b'\r') {
                     lx.pos += 1;
                 }
-                if start < end && lx.pos >= end {
+                if start < end && lx.pos > end {
                     return false;
                 }
             } else {
