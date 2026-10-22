@@ -184,13 +184,15 @@ pub struct StoreStats {
 }
 
 impl Shared {
-    /// A new pool of `threads` threads, remembering every output.
+    /// A new pool of `threads` threads, remembering every output of an input small enough to remember (at most
+    /// `REMEMBER_UP_TO` bytes and one segment, see `deflate_zlib`).
     pub fn new(threads: usize) -> Arc<Shared> {
         Shared::with_pool(Pool::new(threads), true)
     }
 
-    /// Encodes that use `pool`; with `remember`, every output is kept for later encodes of the same input
-    /// while this `Shared` lives (one per stream, say, so memory doesn't grow with the file).
+    /// Encodes that use `pool`; with `remember`, every output of an input small enough to remember is kept for
+    /// later encodes of the same input while this `Shared` lives (one per stream, say, so memory doesn't grow
+    /// with the file).
     pub fn with_pool(pool: Arc<Pool>, remember: bool) -> Arc<Shared> {
         Shared::with_memo(pool, remember.then(Memo::new))
     }

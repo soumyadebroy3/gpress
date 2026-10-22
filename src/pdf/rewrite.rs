@@ -42,7 +42,8 @@ pub struct Options {
     /// Threads to use (0: every core the machine offers, at most 8; at most 64). Never changes the output.
     pub threads: usize,
     /// Bytes of encoded outputs one file keeps, so that an input another stream or step also encodes is
-    /// encoded once. The oldest go first; 0 keeps none. Never changes the output.
+    /// encoded once: an input of at most 256 KiB, in one segment (a larger repeat is encoded again). The
+    /// oldest go first; 0 keeps none. Never changes the output.
     pub store_budget: usize,
     /// Leave files that claim a conformance or carry a signature untouched: PDF/A, PDF/X, signed, certified,
     /// usage rights (the safe default). With `false` every object's value is still kept, but those
@@ -1632,8 +1633,11 @@ impl Proof {
 /// saves work. The check costs two SHA-256 passes over the new data (here and in the self-check); decoding
 /// the stream again costs more once its filters halve the content or better (inflating then takes about 130
 /// instructions per input byte, slow ones; two SHA-256 passes 128 per byte of the smaller new data, fast
-/// ones). The streams it leaves, and JPEGs and fax images whose bytes change by design, are compared in full
-/// by the self-check.
+/// ones). That leaves out what each pass costs whatever the size (a 64-byte block at least, and the call):
+/// on many tiny streams the check costs more than it saves (100,000 distinct streams of a few bytes take
+/// about 5% more instructions and 15% more CPU time than with the self-check alone; the output is the same).
+/// The streams it leaves, and JPEGs and fax images whose bytes change by design, are compared in full by
+/// the self-check.
 fn prove(n: u32, s: &Stream, content: &Content, (d, z, change): &Reencoded) -> Option<Proof> {
     let pays = content.0.len() / 2 >= s.data.len();
     if !pays || *change != Change::default() || content_in(d, z, CHECK_LIMIT).as_ref() != Some(content) {
