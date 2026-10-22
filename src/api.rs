@@ -90,9 +90,10 @@ pub struct Options {
     /// whatever the count; this only changes speed. A thread the system refuses is no loss: the calling thread
     /// does the work.
     pub threads: usize,
-    /// Normal PDF: bytes of encoded outputs one file keeps, so that an input another stream or step also
-    /// encodes is encoded once (at most [`MAX_STORE_BUDGET`]). The oldest go first; 0 keeps none. Never
-    /// changes the output. Nothing is kept from one call to the next.
+    /// Normal PDF: bytes of encoded outputs one file keeps, so that an input of at most 256 KiB that another
+    /// stream or step also encodes is encoded once (a larger repeat is encoded again); at most
+    /// [`MAX_STORE_BUDGET`]. The oldest go first; 0 keeps none. Never changes the output. Nothing is kept
+    /// from one call to the next.
     pub store_budget: usize,
     /// Largest input accepted, in bytes. Inputs over this return [`Error::TooLarge`] at once.
     pub max_input: usize,

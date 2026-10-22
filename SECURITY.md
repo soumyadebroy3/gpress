@@ -21,7 +21,7 @@ gpress reads files that may be hostile. These are the rules the code is held to,
 | Bounded time | Decoding stops when the arithmetic decoder reads past its input or a part restores nothing; the fax work per byte follows the declared length and the model's work the declared length and decoded total; the quick settings work within a budget proportional to the file; `Options::time_budget` stops optimize, compress and expand with `Error::TimeBudget` and no output. | `src/pack/mod.rs`, `src/fax/part.rs`, `src/pdf/rewrite.rs`, `src/clock.rs` |
 | A wrong file is never returned | Archive: length and a 128-bit SHA-256 prefix of the restored bytes are checked against the header, and every archive is expanded and compared before it is returned. Normal PDF: the output is re-read and every reachable object compared with the input before it is returned; when in doubt the input comes back untouched. | `src/pack/mod.rs` (`unpack_with`, `pack_pass`), `src/pdf/rewrite.rs` (`self_check`, `gate`) |
 | Strict parsing | The Flate decoder accepts exactly what zlib accepts, nothing damaged is silently repaired; the PDF parser rejects ambiguous syntax; the JPEG, CCITT and JBIG2 codecs read back and compare before anything they wrote is used. | `src/flate/inflate.rs`, `src/pdf/parse.rs`, `src/jpeg/`, `src/fax/` |
-| Nothing is shared between calls | The normal-PDF writer keeps one store of encoded outputs per call, so that an input two streams encode with the same settings is encoded once; it is made for the file and dropped with it. It holds at most `store_budget` bytes (2 MiB by default, at most 1 GiB), each kept output counting 512 bytes besides its own, and the oldest go first. Outputs are found by a hash that is not keyed, so a crafted file can make two inputs collide; a remembered output is therefore used only after it decodes to exactly the input asked for, and a collision costs one encode, never a wrong output. There is no store across calls on purpose: a cache shared between requests is a timing side channel (a request could learn from its own speed what another one held). Any later one must be off by default and kept per tenant. | `src/pdf/rewrite.rs`, `src/flate/deflate.rs` (`deflate_zlib`), `src/par.rs` (`Memo`) |
+| Nothing is shared between calls | The normal-PDF writer keeps one store of encoded outputs per call, so that an input of at most 256 KiB that two streams encode with the same settings is encoded once; it is made for the file and dropped with it. It holds at most `store_budget` bytes (2 MiB by default, at most 1 GiB), each kept output counting 512 bytes besides its own, and the oldest go first; right after its tables grow it can take about 1.1 times what it counts (under 0.2 MB more at the default budget). Outputs are found by a hash that is not keyed, so a crafted file can make two inputs collide; a remembered output is therefore used only after it decodes to exactly the input asked for, and a collision costs one encode, never a wrong output. There is no store across calls on purpose: a cache shared between requests is a timing side channel (a request could learn from its own speed what another one held). Any later one must be off by default and kept per tenant. | `src/pdf/rewrite.rs`, `src/flate/deflate.rs` (`deflate_zlib`), `src/par.rs` (`Memo`) |
 | Deterministic | Integer arithmetic in the model; format constants fixed in code; nothing read from the environment but the `PDFE_DEBUG` print switch; the same input and options give the same bytes on every platform and thread count, with or without a time budget (a budget that runs out gives an error, not a different file). | `src/cm/`, `src/pack/mod.rs`, `src/par.rs`, `src/clock.rs` |
 | Memory safety at the C boundary | Null and length checks on every pointer; buffers and messages are only freed with the library's own functions, which take the field's address and clear it, so a double free or a part freed before the whole result is harmless by construction; an empty output is a null pointer with length 0, never a dangling one; every `unsafe` block carries its reason (`bench/security.py supply` counts them). | `crates/gpress-c/src/lib.rs` |
 | 32-bit targets | Sizes are `u64` in the format and clamped, never wrapped, in the WebAssembly module; the TypeScript wrapper refuses inputs of 2 GiB and more before they reach it. | `crates/gpress-wasm` |
@@ -30,7 +30,7 @@ gpress reads files that may be hostile. These are the rules the code is held to,
 
 ## Memory with threads
 
-With T threads (at most 64), the normal-PDF writer needs at most this for one file:
+With T threads (at most 64), the normal-PDF writer needs about this for one file (an estimate, see below):
 
     Peak(T) <= Peak(1) + (T - 1) x (J + E) + T x 2 x RANK_TOGETHER + store_budget
 
@@ -41,12 +41,19 @@ With T threads (at most 64), the normal-PDF writer needs at most this for one fi
   and up to three decoded copies of it (its content, and its new data decoded with and without its predictor;
   `self_check` says what a comparison holds), each at most `max_stream` in a job and 16 MiB in the self-check
   on the pool; for an image whose predictor is chosen again (one that decodes to at most 48 MiB), its samples
-  and one candidate's input as well.
+  and one candidate's input as well, and while the winner is encoded its filtered input, its plain encode,
+  and that encode's output and zlib copy.
 - E: one encoder's working set at the effort, about 42 MB at effort 100 (measured). The output an encode is
   making for the store, at most one per thread, is part of it.
 - RANK_TOGETHER, 8 MiB: an image's predictor candidates are ranked side by side only up to this size, and
   one after another above it.
 - `store_budget`: 2 MiB by default, the 512 bytes each kept output counts included.
+
+It is an estimate: memory the allocator keeps after a free, and jobs whose peaks fall at the same time, come
+on top. The case that holds the most per job of those measured, a file of eight RGB images of 8.3 MB of
+samples each (44.9 MB) at effort 100, took 193 MiB with 1 thread, 335 to 352 MiB with 2, 566 to 569 with 4
+and 953 with 8: up to about 10% over the formula with 2 threads, under it with 4 and 8. On the 120-file
+sample it holds by a wide margin.
 
 No more stream jobs run at once than there are threads. The stream map takes every free thread when it
 starts, so a thread comes free, or is lent by a job waiting for its helpers, only once no stream job is left
