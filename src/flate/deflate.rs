@@ -191,7 +191,6 @@ pub fn deflate(data: &[u8], opt: &Options) -> Vec<u8> {
     // segment is optimised. With more, a group has SEGMENTS_AT_ONCE segments: a thread that finishes one takes
     // the next of the group instead of waiting for the slowest.
     let at_once = if pool.is_some_and(|p| p.threads() > 1) { SEGMENTS_AT_ONCE } else { 1 };
-    let mut held = Vec::new();
     for group in bounds.chunks(at_once) {
         let plans = par::map(pool, group.len(), None, |k| {
             let (a, b) = group[k];
@@ -228,14 +227,7 @@ pub fn deflate(data: &[u8], opt: &Options) -> Vec<u8> {
                 None => write_stored(&mut w, &data[a..b], last_segment),
             }
         }
-        // With one thread, a plan is let go only once the next segment's is made: freed at once, its memory
-        // and the segment's tables went back to the system and were faulted in again for the next segment
-        // (4% more time on issue12841_reduced at the quick settings). With more, they are let go here.
-        if at_once == 1 {
-            held = plans;
-        }
     }
-    drop(held);
     w.finish()
 }
 
