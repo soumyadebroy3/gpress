@@ -1304,9 +1304,13 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     }
     if dbg {
         let st = store.stats();
+        // The time saved in whole milliseconds: formatting an f64 would put about 8 KB of gzip into the
+        // WebAssembly module, where this line is never printed.
+        let ms = st.saved.as_millis();
         eprintln!(
             "plan: {} streams, {} jobs ({} identical to an earlier one, {sharing} sharing their input); store: \
-             budget {}, peak {} bytes, {} kept, {} hits, {} computed, about {:.3} s saved; segments planned once: {}",
+             budget {}, peak {} bytes, {} kept, {} hits, {} computed, about {}.{:03} s saved; segments planned once: \
+             {}",
             streams.len(),
             unique.len(),
             streams.len() - unique.len(),
@@ -1315,7 +1319,8 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
             st.kept,
             st.hits,
             st.computed,
-            st.saved.as_secs_f64(),
+            ms / 1000,
+            ms % 1000,
             st.reused_segments
         );
     }
