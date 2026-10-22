@@ -19,13 +19,14 @@
 //!
 //! Memory on hostile input follows the options rather than what a file claims: `max_input` for the input,
 //! `max_stream` for each filter stage the rewrite decodes from a stream it may re-encode (a stream with no
-//! filter we decode, an image codec's say, is held at its stored size, within `max_input`),
-//! `max_stream_archive` for each Flate stream compress decodes, and for the archive `max_decoded` (what the
-//! parts of one archive may claim in all, declared in its header and refused up front when over the caller's
-//! limit) with `max_len` (the restored length, likewise). Not yet bounded by an option: in optimize, object
-//! streams are decoded to at most 256 MiB a stage each whatever `max_stream` is, and kept while the file is
-//! read, so the peak grows with their number; cross-reference streams are decoded as far as the file's size
-//! allows, and the PDF/A check reads metadata to 16 MiB. In optimize, and in compress's planning, up to
+//! filter we decode, an image codec's say, is held at its stored size, within `max_input`) and for the object
+//! streams it reads, which are also bounded held at once and in all (see [`Options::max_stream`]),
+//! `max_stream_archive` for each Flate stream compress decodes and for the object streams it reads to open an
+//! encrypted file, and for the archive `max_decoded` (what the parts of one archive may claim in all, declared
+//! in its header and refused up front when over the caller's limit) with `max_len` (the restored length,
+//! likewise). Not yet bounded by an option: cross-reference streams are decoded as far as the file's size
+//! allows, the PDF/A check reads metadata to 16 MiB, and the objects parsed from object streams take more
+//! than the bytes the limits count (an array of small integers about 35 times its bytes). In optimize, and in compress's planning, up to
 //! `threads` streams are decoded at once, each with its own copies, so the peak grows with `threads`; expand
 //! runs on one thread, and compress's coding on one with its restore check beside it.
 
@@ -88,9 +89,17 @@ pub struct Options {
     /// Largest input accepted, in bytes. Inputs over this return [`Error::TooLarge`] at once.
     pub max_input: usize,
     /// Normal PDF: largest decoded stream re-encoded, in bytes. A stream that decodes to more is kept as it is.
+    /// It holds the file's object streams too, which are decoded once each (in an encrypted file whose metadata
+    /// is not encrypted, the catalog's once more) and let go once their objects are read: each may decode to
+    /// this much or 256 MiB, whichever is less, at each filter stage; the ones held at once to four times that,
+    /// each header entry kept counted as 16 bytes; and all of them, their stored bytes and every stage counted,
+    /// to four times that or 64 bytes per byte of the file, whichever is more. A file past any of these is left
+    /// as it is (with 0, every file that has an object read from an object stream).
     pub max_stream: usize,
     /// Archive: largest decoded stream stored in its decoded form, in bytes. A stream that decodes to more
-    /// is stored as it is. (The decoder takes up to 2 GiB per part, whatever this was.)
+    /// is stored as it is. (The decoder takes up to 2 GiB per part, whatever this was.) The object streams
+    /// read to open an encrypted file are held to it as `max_stream` holds them; past it, the file's encrypted
+    /// streams are stored as they are.
     pub max_stream_archive: usize,
     /// Archive, both ways: the most decoded bytes the parts of one archive may claim in all (decoded streams,
     /// and Lepton data). Compress: in file order, a stream whose claim doesn't fit in what is left is stored

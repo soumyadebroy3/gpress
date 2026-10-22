@@ -344,6 +344,8 @@ pub(crate) mod tests {
         assert_eq!(threads_for(Some(DEFAULT_MAX)), DEFAULT_MAX);
         assert_eq!(threads_for(Some(DEFAULT_MAX + 1)), DEFAULT_MAX);
         assert_eq!(threads_for(Some(1024)), DEFAULT_MAX);
+        // The owner's cap until a byte budget on pool items exists (bench/security.py repeats it).
+        assert_eq!(threads_for(Some(1024)), 8);
         assert_eq!(threads_for(None), 1);
         assert_eq!(threads_for(Some(0)), 1);
         // On this machine: every core it offers, at most 8, which the options accept; a count given can be
