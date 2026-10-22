@@ -781,8 +781,10 @@ impl<'a> Doc<'a> {
             heads.push(Head { num: a, at, end: len, shared: false, read: false });
         }
         heads.shrink_to_fit();
-        // Of the entries that start at one place only the last listed is read, wherever the others are listed:
-        // an entry is shared when one listed after it (kept, or the first one after them) starts there too.
+        // Of the entries kept (up to the last one the cross-reference data points at) and the first one after
+        // them, only the last listed at each place may be read, wherever the others are listed: an entry is
+        // shared when one listed after it among those starts there too. Entries further on are never read, so
+        // they are not compared.
         let mut order: Vec<(u32, usize)> =
             heads.iter().enumerate().filter(|(_, h)| h.at != PAST).map(|(i, h)| (h.at, i)).collect();
         order.sort_unstable();
