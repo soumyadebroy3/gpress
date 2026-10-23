@@ -154,9 +154,9 @@ pub struct Doc<'a> {
     pub entries: BTreeMap<u32, Entry>,
     /// Number of cross-reference sections (more than one: incremental updates or linearisation).
     pub sections: usize,
-    /// The file keeps earlier saves: more sections than one save writes (one, or a linearised file's two), a
-    /// `startxref` the sections don't account for (a save no /Prev links), or an object two sections define
-    /// differently.
+    /// The file keeps earlier saves: more sections than one save writes (one, or two for a linearised file or for
+    /// a hybrid file whose /XRefStm sits in an empty table of its own), a `startxref` before the first section or
+    /// more of them than sections (a save no /Prev links), or an object two sections define differently.
     pub has_revisions: bool,
     /// Bytes after the last %%EOF.
     pub trailing: usize,
@@ -187,18 +187,28 @@ fn find_last(d: &[u8], pat: &[u8], window: usize) -> Option<usize> {
     (start..=d.len() - pat.len()).rev().find(|&i| &d[i..i + pat.len()] == pat)
 }
 
-/// How many times `startxref` appears in `d`: its 'x' is looked for first, the rarest of its bytes.
-fn count_startxref(d: &[u8]) -> usize {
-    let mut n = 0;
+/// Whether two trailers hold the same entries in the same order, /XRefStm and /Prev aside.
+fn same_trailer(a: &Dict, b: &Dict) -> bool {
+    fn rest(d: &Dict) -> impl Iterator<Item = &(Vec<u8>, Obj)> {
+        d.0.iter().filter(|(k, _)| k != b"XRefStm" && k != b"Prev")
+    }
+    rest(a).eq(rest(b))
+}
+
+/// How many times `startxref` appears in `d`, and where it first does: its 'x' is looked for first, the rarest of
+/// its bytes.
+fn find_startxref(d: &[u8]) -> (usize, Option<usize>) {
+    let (mut n, mut first) = (0, None);
     let mut i = 5;
     while let Some(p) = d.get(i..).and_then(|t| t.iter().position(|&b| b == b'x')) {
         let x = i + p;
         if d.get(x - 5..x + 4) == Some(b"startxref".as_slice()) {
             n += 1;
+            first = first.or(Some(x - 5));
         }
         i = x + 1;
     }
-    n
+    (n, first)
 }
 
 fn parse_uint(t: &[u8]) -> Option<usize> {
@@ -298,6 +308,7 @@ pub fn open_with(data: &[u8], limits: Limits) -> Result<Doc<'_>, LoadError> {
 
     let mut sections: Vec<(Vec<(u32, Entry)>, Dict)> = Vec::new();
     let mut starts = Vec::new();
+    let mut own_rows = Vec::new();
     let mut seen = HashSet::new();
     let mut next = Some(off);
     // Rows are counted against the file's size as they are read, before anything holds them.
@@ -307,6 +318,7 @@ pub fn open_with(data: &[u8], limits: Limits) -> Result<Doc<'_>, LoadError> {
             return Err(LoadError::BadXref("loop in /Prev"));
         }
         let (mut entries, trailer) = read_section(data, off, &mut rows_left)?;
+        own_rows.push(entries.len());
         if let Some(Obj::Int(x)) = trailer.get(b"XRefStm") {
             // Hybrid file: the stream supplements the table; table entries win.
             let (extra, _) = read_section(data, usize::try_from(*x).unwrap_or(usize::MAX), &mut rows_left)?;
@@ -332,8 +344,9 @@ pub fn open_with(data: &[u8], limits: Limits) -> Result<Doc<'_>, LoadError> {
                 None => {
                     merged.insert(n, e);
                 }
-                // An older section that lists the object as free changes nothing: a hybrid file's table lists the
-                // objects its /XRefStm puts in object streams as free, for readers without object streams.
+                // A later row that lists the object as free changes nothing: a hybrid file's table lists the objects
+                // its /XRefStm puts in object streams as free, for readers without object streams; and readers take the
+                // first of two rows a section repeats.
                 Some(&prev) => {
                     if prev != e && e != Entry::Free {
                         redefined = true;
@@ -343,12 +356,24 @@ pub fn open_with(data: &[u8], limits: Limits) -> Result<Doc<'_>, LoadError> {
         }
     }
     // One save writes one section, or two for a linearised file: the first-page section near the start, whose
-    // /Prev names the main section after it. Any other section is a later save, and so is a `startxref` that no
-    // section accounts for (a save that no /Prev links; or those bytes in a stream, where refusing loses nothing).
+    // /Prev names the main section after it. Any other section is a later save. So is a `startxref` before the
+    // first section, or more of them than sections: a save that no /Prev links (or those bytes in a stream, where
+    // refusing costs only compression).
     let linearised = sections.len() == 2
         && starts[0] < starts[1]
         && data[..data.len().min(1024)].windows(11).any(|w| w == b"/Linearized");
-    let has_revisions = redefined || !(sections.len() == 1 || linearised) || count_startxref(data) > sections.len();
+    // Microsoft Office and Prince put a hybrid file's /XRefStm in a second, empty table after the main one: no rows
+    // of its own, a stream written before the main table, and the main table's trailer otherwise. One save too.
+    let hybrid_tail = sections.len() == 2
+        && own_rows[0] == 0
+        && matches!(sections[0].1.get(b"XRefStm"), Some(Obj::Int(x)) if usize::try_from(*x).is_ok_and(|x| x < starts[1]))
+        && same_trailer(&sections[0].1, &sections[1].1);
+    let (count, first_at) = find_startxref(data);
+    let first_section = starts.iter().copied().min().unwrap_or(0);
+    let one_save = (sections.len() == 1 || linearised || hybrid_tail)
+        && count <= sections.len()
+        && first_at.is_some_and(|at| at > first_section);
+    let has_revisions = redefined || !one_save;
     let mut objstm_last: HashMap<u32, (u32, usize)> = HashMap::new();
     for e in merged.values() {
         if let &Entry::InStream(sn, idx) = e {
