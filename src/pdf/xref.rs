@@ -154,7 +154,9 @@ pub struct Doc<'a> {
     pub entries: BTreeMap<u32, Entry>,
     /// Number of cross-reference sections (more than one: incremental updates or linearisation).
     pub sections: usize,
-    /// Some object is defined differently in two sections: the file has earlier revisions.
+    /// The file keeps earlier saves: more sections than one save writes (one, or a linearised file's two), a
+    /// `startxref` the sections don't account for (a save no /Prev links), or an object two sections define
+    /// differently.
     pub has_revisions: bool,
     /// Bytes after the last %%EOF.
     pub trailing: usize,
@@ -183,6 +185,20 @@ fn find_last(d: &[u8], pat: &[u8], window: usize) -> Option<usize> {
     }
     let start = d.len().saturating_sub(window);
     (start..=d.len() - pat.len()).rev().find(|&i| &d[i..i + pat.len()] == pat)
+}
+
+/// How many times `startxref` appears in `d`: its 'x' is looked for first, the rarest of its bytes.
+fn count_startxref(d: &[u8]) -> usize {
+    let mut n = 0;
+    let mut i = 5;
+    while let Some(p) = d.get(i..).and_then(|t| t.iter().position(|&b| b == b'x')) {
+        let x = i + p;
+        if d.get(x - 5..x + 4) == Some(b"startxref".as_slice()) {
+            n += 1;
+        }
+        i = x + 1;
+    }
+    n
 }
 
 fn parse_uint(t: &[u8]) -> Option<usize> {
@@ -281,6 +297,7 @@ pub fn open_with(data: &[u8], limits: Limits) -> Result<Doc<'_>, LoadError> {
     let trailing = data.len() - (eof + 5);
 
     let mut sections: Vec<(Vec<(u32, Entry)>, Dict)> = Vec::new();
+    let mut starts = Vec::new();
     let mut seen = HashSet::new();
     let mut next = Some(off);
     // Rows are counted against the file's size as they are read, before anything holds them.
@@ -302,9 +319,10 @@ pub fn open_with(data: &[u8], limits: Limits) -> Result<Doc<'_>, LoadError> {
             _ => return Err(LoadError::BadXref("bad /Prev")),
         };
         sections.push((entries, trailer));
+        starts.push(off);
     }
     let mut merged: BTreeMap<u32, Entry> = BTreeMap::new();
-    let mut has_revisions = false;
+    let mut redefined = false;
     for (entries, _) in &sections {
         for &(n, e) in entries {
             if n == 0 {
@@ -314,14 +332,23 @@ pub fn open_with(data: &[u8], limits: Limits) -> Result<Doc<'_>, LoadError> {
                 None => {
                     merged.insert(n, e);
                 }
+                // An older section that lists the object as free changes nothing: a hybrid file's table lists the
+                // objects its /XRefStm puts in object streams as free, for readers without object streams.
                 Some(&prev) => {
-                    if prev != e {
-                        has_revisions = true;
+                    if prev != e && e != Entry::Free {
+                        redefined = true;
                     }
                 }
             }
         }
     }
+    // One save writes one section, or two for a linearised file: the first-page section near the start, whose
+    // /Prev names the main section after it. Any other section is a later save, and so is a `startxref` that no
+    // section accounts for (a save that no /Prev links; or those bytes in a stream, where refusing loses nothing).
+    let linearised = sections.len() == 2
+        && starts[0] < starts[1]
+        && data[..data.len().min(1024)].windows(11).any(|w| w == b"/Linearized");
+    let has_revisions = redefined || !(sections.len() == 1 || linearised) || count_startxref(data) > sections.len();
     let mut objstm_last: HashMap<u32, (u32, usize)> = HashMap::new();
     for e in merged.values() {
         if let &Entry::InStream(sn, idx) = e {
