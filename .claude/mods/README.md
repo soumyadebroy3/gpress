@@ -36,5 +36,8 @@ fixed procedure and makes merging wait for it.
   refused until this session has posted a PASS for that pull request, and the merge must pin the head the
   review passed (`expectedHeadSha`, or `gh pr merge <n> --match-head-commit <sha>`), so a push after the review
   means a new review. Auto-merge, which cannot pin a head, and a direct push or file write to main are refused. `/config` can turn the gate off.
+- A pull request from anyone else, or from a fork, is reviewed from its diff and its CI run on GitHub, and is
+  never checked out, built or run in a session: a session has the owner's GitHub access and loads these mods
+  from its clone. One that changes `.claude/`, a `CLAUDE.md` or `.github/` is left to the owner to merge.
 - It is a guard against skipping the review by mistake, not against a session set on getting around it.
 - Reviewers run on the session's model: cheap-route keeps any task that mentions reviewing there.
