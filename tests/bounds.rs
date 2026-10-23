@@ -257,6 +257,35 @@ fn a_dangling_reference_keeps_its_number_free() {
     assert_eq!(untouched(&quick(&pdf, &Options::effort(100)), &pdf), "object numbers far apart");
 }
 
+#[test]
+fn a_dangling_reference_to_an_object_in_the_file_leaves_it_untouched() {
+    // Object 9 is missing from the cross-reference data. When "9 0 obj" is in the file anyway (here in the
+    // page's text), some readers find it, so the file is left as it is. "19 0 obj" holds it too; "9 00 obj"
+    // and "9 1 obj" don't.
+    let texts = [
+        ("9 0 obj", true),
+        ("19 0 obj", true),
+        ("x9 0 obj", true),
+        ("9 00 obj", false),
+        ("9 1 obj", false),
+        ("9 0obj", false),
+        ("9  0 obj", false),
+    ];
+    for (text, found) in texts {
+        let mut objs = page_objects();
+        objs[0].1 = b"<< /Type /Catalog /Pages 2 0 R /Outlines << /Type /Outlines /First 9 0 R /Count 0 >> >>".to_vec();
+        let content = format!("BT /F1 12 Tf 10 10 Td ({text}) Tj ET\n").repeat(50);
+        objs[3].1 = stream("", content.as_bytes());
+        let pdf = classic(&objs, "10");
+        let r = optimize(&pdf, &Options::effort(0));
+        if found {
+            assert_eq!(untouched(&r, &pdf), "an object in the file is missing from its cross-reference data");
+        } else {
+            smaller(&r, &pdf);
+        }
+    }
+}
+
 /// The page with its content stream numbered `n` and the trailer /Size just above it.
 fn page_with_content_at(n: u64) -> Vec<u8> {
     let mut objs = page_objects();

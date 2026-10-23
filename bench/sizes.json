@@ -9,20 +9,20 @@
         "gpress-wasm": []
       },
       "tool": {
-        "raw": 2031528,
-        "gzip": 898119
+        "raw": 2100656,
+        "gzip": 930455
       },
       "c_shared": {
-        "raw": 1844568,
-        "gzip": 815137
+        "raw": 1915648,
+        "gzip": 846676
       },
       "c_static": {
-        "raw": 10634064,
-        "gzip": 2324388
+        "raw": 10749288,
+        "gzip": 2361198
       },
       "wasm": {
-        "raw": 968691,
-        "gzip": 357347
+        "raw": 1027366,
+        "gzip": 379342
       },
       "wasm_opt": "wasm-opt version 108",
       "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
