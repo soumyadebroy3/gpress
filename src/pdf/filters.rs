@@ -102,7 +102,7 @@ pub fn decode_stage(st: &Stage, data: &[u8], limit: usize) -> Result<Vec<u8>, Fi
 }
 
 /// The length of what `decode_stage` gives, or the same error, without holding the decoded bytes for Flate
-/// and RunLength (Flate holds at most 128 KiB of them, see `zlib::unwrapped_len`).
+/// and RunLength (Flate holds at most 160 KiB of them, see `zlib::unwrapped_len`).
 pub fn decoded_size(st: &Stage, data: &[u8], limit: usize) -> Result<usize, FilterError> {
     match st.name.as_slice() {
         b"FlateDecode" => match zlib::unwrapped_len(data, limit) {

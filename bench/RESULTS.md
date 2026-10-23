@@ -682,11 +682,11 @@ Peaks move from one run to the next with the same build and input, but little on
 runs at effort 0 the largest spread is 0.4 MiB with the after build (bug1308536.pdf) and 0.5 MiB with main. On
 the machine of the earlier measurements (below) spreads of 3 MiB at effort 0 and 10 MiB at effort 100 were
 seen on one file, so a difference of a few MiB in one run on one file says little, and the effort-100 columns
-are one run each. The CPU times of these runs, summed over the sample: 16.0 to 16.3 s with each build at
-effort 0 (two builds running at once on a machine with other work), 511.2 s with main and 509.3 s with the
-after build at effort 100. Timed together, main on core 0 and the after build on core 1 at the same time
-while other work used the other two (`benchmark.py time`, one thread, efforts 0, 50 and 100, normal PDF and
-archive), the two builds gave the same 720 outputs, with CPU from -1.8% to +0.7% per setting, and
+are one run each. The CPU times of these runs, summed over the sample: 16.0 to 16.3 s with main and 16.0 to
+16.4 s with the after build at effort 0 (two builds running at once on a machine with other work), 511.2 s with
+main and 509.3 s with the after build at effort 100. Timed together, main on core 0 and the after build on core
+1 at the same time while other work used the other two (`benchmark.py time`, one thread, efforts 0, 50 and 100,
+normal PDF and archive), the two builds gave the same 720 outputs, with CPU from -1.8% to +0.7% per setting, and
 `benchmark.py compare` passes.
 
 What each change saved. These and the rest of this section were measured before main's fast tier (#1) was
@@ -730,7 +730,7 @@ the same commits save different amounts today; the tables above are what the who
 - **058ac94**: RunLength output is sized by a first pass instead of doubling as it grows: issue19517 85,036
   to 34,764 KB.
 - **a54f45c**: the effort plan counts each stream's decoded size, holding only the end of the last stage's
-  output that later matches can reach (32 KiB, up to 128 KiB between cuts; it decoded every stream whole, and
+  output that later matches can reach (32 KiB, up to 160 KiB between cuts; it decoded every stream whole, and
   the stream was then decoded again to be encoded), and a stream that does not decode within the 64 MiB limit
   is kept at once, at every effort, instead of being decoded up to the limit only to fail: enormous.pdf (one
   image that decodes to 243 MB) 70,352 to 5,964 KB, the two multipage files 79,152 to 36,120,
@@ -816,8 +816,9 @@ the build was +1.9% in the same 7 rounds. The cause was not found. Differences t
 instructions came and went with unrelated changes during this work (below), so it is probably where code and
 data fall, which cachegrind does not model. On main's fast tier, merged since, it is gone: at effort 0 the
 after build runs 0.28% fewer instructions on freeculture.pdf (38,652 million against 38,761 million,
-callgrind), and over 11 rounds (both builds at once on two cores, which they swap each round) the median of
-the per-round ratios is -1.6% (4 rounds slower).
+callgrind), and over 12 rounds (both builds at once on two cores, which they swap each round) the median of
+the per-round ratios is -1.3% (5 rounds slower; in round 9 the two builds' lines came out interleaved, and
+they are told apart by their peak memory, about 32.2 MB for main and 29.9 MB for the after build).
 
 Files that the space runs showed as slower were timed the same way: GeoTopo-komprimiert.pdf at effort 0 +1.7%
 over 16 rounds (+4.2% in the first 7, -1.2% in the next 9), with the same instructions (84,732 million against

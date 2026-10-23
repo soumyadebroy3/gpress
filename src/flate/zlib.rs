@@ -53,7 +53,7 @@ pub fn unwrap(input: &[u8], limit: usize) -> Result<Unwrapped, ZlibError> {
     Ok(Unwrapped { trailing: input.len() - end, data: inf.data })
 }
 
-/// The length of the data `unwrap` gives, with the same checks and the same errors, but at most 128 KiB of
+/// The length of the data `unwrap` gives, with the same checks and the same errors, but at most 160 KiB of
 /// the data held at any time (see `inflate_len`).
 pub fn unwrapped_len(input: &[u8], limit: usize) -> Result<usize, ZlibError> {
     header(input)?;

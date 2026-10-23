@@ -168,7 +168,7 @@ pub fn inflate(input: &[u8], limit: usize) -> Result<Inflated, InflateError> {
 }
 
 /// What `inflate` would give, without keeping it: (its length, its Adler-32, the input bytes used), or the
-/// same error. Only the end of the output that later matches can reach is held (32 KiB, up to 128 KiB between
+/// same error. Only the end of the output that later matches can reach is held (32 KiB, up to 160 KiB between
 /// cuts), so a stream's decoded size can be learned without the memory to hold it. `inflate_pieces` would
 /// hold a whole block too, which can be as large as `limit` in a stream zlib did not make.
 pub fn inflate_len(input: &[u8], limit: usize) -> Result<(usize, u32, usize), InflateError> {
