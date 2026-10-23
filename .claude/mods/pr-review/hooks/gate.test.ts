@@ -167,8 +167,8 @@ test('a verdict posted through the REST comments route counts', async ($, on) =>
   ok(on)
   await bash($, `gh api repos/soumyadebroy3/gpress/issues/7/comments -f body="$(cat <<'EOF'\ngpress-review: PASS ${SHA}\n- all checks pass\nEOF\n)"`)
   expect(denied(await merge($, 7, SHA))).toBe(false)
-  await bash($, `gh api repos/soumyadebroy3/gpress/issues/8/comments -f body="$(cat <<'EOF'\ngpress-review: FINDINGS ${SHA}\nowner to merge: an outside pull request\nEOF\n)"`)
-  expect(denied(await merge($, 8, SHA))).toBe(true)
+  await bash($, `gh api repos/soumyadebroy3/gpress/issues/7/comments -f body="$(cat <<'EOF'\ngpress-review: FINDINGS ${SHA}\n- blocker, src/lib.rs:1: wrong\nEOF\n)"`)
+  expect(JSON.stringify(await merge($, 7, SHA))).toContain('found blockers')
 })
 
 test('reading comments does not record a verdict', async ($, on) => {
