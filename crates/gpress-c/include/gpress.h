@@ -37,8 +37,16 @@ enum {
   GPRESS_ERR_DECLARED_TOO_LARGE = 7,     /* expand: the archive declares more than options.max_len bytes */
   GPRESS_ERR_NEEDS_EXISTING_LIBRARY = 8, /* expand: the archive has parts made with the existing library
                                             (Lepton) and this build doesn't have it */
-  GPRESS_ERR_DECODED_TOO_LARGE = 9       /* expand: the archive declares more decoded bytes than
+  GPRESS_ERR_DECODED_TOO_LARGE = 9,      /* expand: the archive declares more decoded bytes than
                                             options.max_decoded; nothing was decoded */
+  GPRESS_ERR_NEEDS_FEATURE = 10          /* the call needs a part of gpress this build leaves out (a Cargo
+                                            feature; the message names it): compress and expand in a build
+                                            without "archive", or expand of an archive with parts that need
+                                            "fax" or "encryption" (or damaged so that it reads as such a
+                                            part: only a build with the part can tell, as with code 8).
+                                            Nothing was done. (optimize never gives it: a step whose
+                                            feature is left out is skipped, and an encrypted file is left
+                                            untouched, with the reason) */
 };
 
 /* Outcomes in gpress_result.outcome (optimize and compress). */

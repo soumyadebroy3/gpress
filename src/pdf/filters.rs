@@ -101,6 +101,20 @@ pub fn decode_stage(st: &Stage, data: &[u8], limit: usize) -> Result<Vec<u8>, Fi
     }
 }
 
+/// The length of what `decode_stage` gives, or the same error, without holding the decoded bytes for Flate
+/// and RunLength (Flate holds at most 160 KiB of them, see `zlib::unwrapped_len`).
+pub fn decoded_size(st: &Stage, data: &[u8], limit: usize) -> Result<usize, FilterError> {
+    match st.name.as_slice() {
+        b"FlateDecode" => match zlib::unwrapped_len(data, limit) {
+            Ok(n) => Ok(n),
+            Err(zlib::ZlibError::Inflate(crate::flate::InflateError::TooLarge)) => Err(FilterError::TooLarge),
+            Err(_) => Err(FilterError::Bad("flate")),
+        },
+        b"RunLengthDecode" => run_length_len(data, limit),
+        _ => decode_stage(st, data, limit).map(|d| d.len()),
+    }
+}
+
 /// Predictor settings of a stage: (predictor, colors, bits, columns).
 pub fn predictor(st: &Stage) -> Option<(i64, i64, i64, i64)> {
     Some((
@@ -380,7 +394,8 @@ pub fn ascii85_decode(data: &[u8], limit: usize) -> Result<Vec<u8>, FilterError>
 }
 
 pub fn run_length_decode(data: &[u8], limit: usize) -> Result<Vec<u8>, FilterError> {
-    let mut out = Vec::new();
+    // Sized first, so the output is made once at its size, and nothing is made for data that fails.
+    let mut out = Vec::with_capacity(run_length_len(data, limit)?);
     let mut i = 0;
     while i < data.len() {
         let l = data[i] as usize;
@@ -407,6 +422,37 @@ pub fn run_length_decode(data: &[u8], limit: usize) -> Result<Vec<u8>, FilterErr
     Ok(out)
 }
 
+/// The length `run_length_decode` gives, or its error, without decoding: the same walk over the runs.
+fn run_length_len(data: &[u8], limit: usize) -> Result<usize, FilterError> {
+    let mut n = 0usize;
+    let mut i = 0;
+    while i < data.len() {
+        let l = data[i] as usize;
+        i += 1;
+        if l == 128 {
+            break;
+        }
+        if l < 128 {
+            let end = i + l + 1;
+            if end > data.len() {
+                return Err(FilterError::Bad("RunLength literal past the end"));
+            }
+            n += l + 1;
+            i = end;
+        } else {
+            if i >= data.len() {
+                return Err(FilterError::Bad("RunLength repeat past the end"));
+            }
+            i += 1;
+            n += 257 - l;
+        }
+        if n > limit {
+            return Err(FilterError::TooLarge);
+        }
+    }
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,6 +467,43 @@ mod tests {
     fn hex_and_runlength() {
         assert_eq!(ascii_hex_decode(b"48 65 6C6c 6F7>", 100).unwrap(), b"Hellop".to_vec());
         assert_eq!(run_length_decode(&[2, b'a', b'b', b'c', 254, b'x', 128], 100).unwrap(), b"abcxxx".to_vec());
+    }
+
+    #[test]
+    fn run_length_sizes_agree_with_the_decoder() {
+        // Random runs: literals and repeats, some cut short, with and without the end marker.
+        let mut s = 3u64;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        for _ in 0..2000 {
+            let len = (next() % 40) as usize;
+            let data: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            for limit in [usize::MAX, 300, 50, 0] {
+                let full = run_length_decode(&data, limit).map(|d| d.len());
+                assert_eq!(run_length_len(&data, limit), full);
+                let st = Stage { name: b"RunLengthDecode".to_vec(), parms: None };
+                assert_eq!(decoded_size(&st, &data, limit), full);
+            }
+        }
+    }
+
+    #[test]
+    fn decoded_sizes_agree_with_the_decoders() {
+        let text = b"0 0 m 100 100 l S ".repeat(5000);
+        let z = crate::flate::deflate_zlib(&text, &crate::flate::Options::quick());
+        let flate = Stage { name: b"FlateDecode".to_vec(), parms: None };
+        let hex = Stage { name: b"ASCIIHexDecode".to_vec(), parms: None };
+        for (st, data) in [(&flate, &z[..]), (&flate, &z[..z.len() - 3]), (&hex, &b"41 42 4"[..]), (&hex, &b"4x"[..])] {
+            for limit in [usize::MAX, text.len(), text.len() - 1] {
+                assert_eq!(decoded_size(st, data, limit), decode_stage(st, data, limit).map(|d| d.len()));
+            }
+        }
+        assert_eq!(decoded_size(&flate, &z, usize::MAX), Ok(text.len()));
+        assert_eq!(decoded_size(&flate, &z, text.len() - 1), Err(FilterError::TooLarge));
     }
 
     #[test]

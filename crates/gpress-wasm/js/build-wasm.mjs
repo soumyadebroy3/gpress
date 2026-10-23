@@ -2,11 +2,13 @@
 // LTO, one codegen unit, panic = "abort", symbols stripped), then binaryen's wasm-opt when it is on PATH.
 // Without wasm-opt the module is used as cargo built it, and a message says so.
 //
-//   node build-wasm.mjs [--out FILE | --out=FILE] [cargo arguments, such as --features web]
+//   node build-wasm.mjs [--out FILE | --out=FILE] [cargo arguments, such as --no-default-features --features web]
 //
 // The output is dist/gpress.wasm unless --out names another file; every other argument goes to cargo. The
 // module is written to a temporary file next to the output and renamed over it when complete, so a failed
-// step leaves no partial module there. bench/sizes.py builds the module with this script too, so the size it
+// step leaves no partial module there. `npm run build:wasm` runs it twice: the whole module (dist/gpress.wasm,
+// every part of the engine) and the web module (dist/gpress-web.wasm, the "web" feature set: what a normal
+// PDF uses, without the archive). bench/sizes.py builds the module with this script too, so the size it
 // records is the size of the package's module.
 
 import { spawnSync } from "node:child_process";
@@ -15,7 +17,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const usage = "usage: node build-wasm.mjs [--out FILE | --out=FILE] [cargo arguments, such as --features web]";
+const usage =
+  "usage: node build-wasm.mjs [--out FILE | --out=FILE] [cargo arguments, such as --no-default-features --features web]";
 let out = join(here, "dist", "gpress.wasm");
 const args = [];
 const argv = process.argv.slice(2);

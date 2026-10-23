@@ -7,7 +7,7 @@
 //! cross-reference stream. Before anything is returned, the output is read back and compared object by object.
 
 use super::crypt::{Crypt, Method};
-use super::filters::{chain, decode_stage, is_general, Stage};
+use super::filters::{self, chain, decode_stage, is_general, Stage};
 use super::images;
 use super::object::*;
 use super::xref::{self, Doc, Entry};
@@ -437,9 +437,10 @@ fn reencode(
             return None;
         }
     }
-    let mut data = s.data.clone();
+    // The stored bytes are read where they are, not copied: with no general filter they are the data.
+    let mut data: Cow<[u8]> = Cow::Borrowed(&s.data);
     for st in &stages[..k] {
-        data = decode_stage(st, &data, opt.max_stream).ok()?;
+        data = Cow::Owned(decode_stage(st, &data, opt.max_stream).ok()?);
     }
     let carried: Option<Dict> = if k > 0 {
         stages[k - 1].parms.clone().and_then(|mut p| {
@@ -489,15 +490,16 @@ fn reencode(
         }
         _ => None,
     };
-    if let Some(j) = &jpeg {
-        if j.len() < best_len {
-            let mut d = s.dict.clone();
-            set_chain(&mut d, rest);
+    // When that JPEG alone is the smallest so far, it stays in `jpeg` (not copied while Flate is tried over it)
+    // and becomes `best` at the end if nothing smaller comes after it.
+    let jpeg_alone = match &jpeg {
+        Some(j) if j.len() < best_len => {
             best_len = j.len();
-            best = Some((d, j.clone()));
             best_retabled = true;
+            true
         }
-    }
+        _ => false,
+    };
     // Some readers decide how to read JPEG 2000 and JBIG2 images from the first filter's name (pdf.js reads
     // a JPEG 2000 image's colour and depth from the image data only when JPXDecode comes first). So for
     // those the chain keeps its shape: a lone codec stays alone, a codec behind general filters stays behind
@@ -520,7 +522,7 @@ fn reencode(
         with_flate.extend_from_slice(rest);
         let mut d = s.dict.clone();
         set_chain(&mut d, &with_flate);
-        let z = flate::deflate_zlib(jpeg.as_ref().unwrap_or(&data), &opt.flate);
+        let z = flate::deflate_zlib(jpeg.as_deref().unwrap_or(&data), &opt.flate);
         flate_len = jpeg.is_none().then_some(z.len());
         let again = opt.effort >= 100
             && jpeg.as_ref().is_some_and(|j| z.len() * 10 <= j.len() * 9 && j.len() * 10 <= data.len() * 9);
@@ -542,7 +544,7 @@ fn reencode(
         let mut d = s.dict.clone();
         set_chain(&mut d, rest);
         best_len = data.len();
-        best = Some((d, data.clone()));
+        best = Some((d, data.to_vec()));
         best_retabled = false;
     }
     // Images: try storing the samples with a different (or no) PNG predictor. The fast path tries one,
@@ -563,6 +565,12 @@ fn reencode(
             }
         }
     }
+    // Every later candidate that won went into `best`, so with none the JPEG alone is the smallest.
+    if jpeg_alone && best.is_none() {
+        let mut d = s.dict.clone();
+        set_chain(&mut d, rest);
+        best = jpeg.map(|j| (d, j));
+    }
     let best = best.map(|(d, z)| (d, z, Change { jpeg_retabled: best_retabled, ..Change::default() }));
     // The content as `content_of` decodes it: the general filters gave these same bytes (it decodes with a
     // limit no lower), and only the last of them can have a predictor (checked above). Kept when decoding
@@ -571,7 +579,7 @@ fn reencode(
     if best.is_some() && decompress && opt.max_stream <= CHECK_LIMIT {
         let samples = match stages[..k].last() {
             Some(st) if predicted(st) => super::filters::unpredict(st, &data).ok(),
-            _ => Some(data),
+            _ => Some(data.into_owned()),
         };
         *content = samples.map(|d| (d, rest.to_vec()));
     }
@@ -600,17 +608,18 @@ fn reencode_xmp(s: &Stream, opt: &Options) -> Option<Reencoded> {
 
 /// An image's geometry and its samples, whatever predictor they are stored with now; None when it is not an
 /// image we can work on (unknown geometry, a predictor that doesn't fit it, under 1 KiB, not whole rows).
-fn samples(
+fn samples<'a>(
     s: &Stream,
-    data: &[u8],
+    data: &'a [u8],
     carried: Option<&Dict>,
     resolve: &dyn Fn(&Obj) -> Option<Obj>,
-) -> Option<(images::Geometry, Vec<u8>)> {
+) -> Option<(images::Geometry, Cow<'a, [u8]>)> {
     let g = images::geometry(&s.dict, resolve)?;
     let (row, bpp) = (g.row(), g.bpp());
-    let px = match carried {
-        None => data.to_vec(),
-        Some(p) => {
+    // Without a predictor the samples are the decoded data itself: it is not copied.
+    let px: Cow<[u8]> = match carried {
+        None => Cow::Borrowed(data),
+        Some(p) => Cow::Owned({
             let pred = p.get(b"Predictor").and_then(|x| x.as_int()).unwrap_or(1);
             let pc = p.get(b"Colors").and_then(|x| x.as_int()).unwrap_or(1) as usize;
             let pb = p.get(b"BitsPerComponent").and_then(|x| x.as_int()).unwrap_or(8) as usize;
@@ -625,9 +634,9 @@ fn samples(
             } else {
                 return None;
             }
-        }
+        }),
     };
-    if px.is_empty() || px.len() % row != 0 || px.len() < 1024 {
+    if px.is_empty() || !px.len().is_multiple_of(row) || px.len() < 1024 {
         return None;
     }
     Some((g, px))
@@ -660,7 +669,7 @@ fn repredict_fast(
     let nrows = px.len() / row;
     let bands = predictor_sample(nrows, row, 0).unwrap_or_else(|| vec![(0, nrows)]);
     let (parms, bytes) = if let Some(how) = images::estimate_choice(&px, row, bpp, g.bpc, &bands) {
-        (Some(png_parms(&g)), images::png_filter(&px, row, bpp, how))
+        (Some(png_parms(&g)), Cow::Owned(images::png_filter(&px, row, bpp, how)))
     } else if carried.is_some() {
         (None, px)
     } else {
@@ -744,7 +753,7 @@ fn repredict(
     let parms = CANDIDATES[k].map(|_| png);
     let bytes = match CANDIDATES[k] {
         None => px,
-        Some(how) => images::png_filter(&px, row, bpp, how),
+        Some(how) => Cow::Owned(images::png_filter(&px, row, bpp, how)),
     };
     // The best is `data` itself (the plain samples without a predictor before, or the same predictor bytes):
     // reencode() has already tried our Flate over it.
@@ -858,15 +867,18 @@ fn identical_streams(streams: &[(u32, &Stream)]) -> (Vec<usize>, Vec<usize>, Vec
 
 /// Bytes the general filters of a stream decode to; None when they don't decode within `limit`, or the last of
 /// them not within `last` (where a caller can stop early: an earlier stage, hex text say, can be the larger).
+/// The last stage's output is only counted, not held (`filters::decoded_size`).
 fn decoded_size(s: &Stream, limit: usize, last: usize) -> Option<usize> {
     let Some(stages) = chain(&s.dict) else { return Some(s.data.len()) };
     let general = stages.iter().take_while(|st| is_general(&st.name)).count();
-    let mut data: std::borrow::Cow<[u8]> = std::borrow::Cow::Borrowed(&s.data);
-    for (i, st) in stages[..general].iter().enumerate() {
-        let limit = if i + 1 == general { limit.min(last) } else { limit };
-        data = std::borrow::Cow::Owned(decode_stage(st, &data, limit).ok()?);
+    let mut data: Cow<[u8]> = Cow::Borrowed(&s.data);
+    for st in &stages[..general.saturating_sub(1)] {
+        data = Cow::Owned(decode_stage(st, &data, limit).ok()?);
     }
-    Some(data.len())
+    match stages[..general].last() {
+        Some(st) => filters::decoded_size(st, &data, limit.min(last)).ok(),
+        None => Some(data.len()),
+    }
 }
 
 /// The fast encoder's level for image streams below `FAST_BELOW` (other streams get `flate::Options::effort`).
@@ -927,17 +939,10 @@ fn structure_flate(opt: &Options, raw: usize, input_len: usize) -> flate::Option
     }
 }
 
-/// Bytes the general filters of a stream decode to (the stored size when they don't decode).
-fn decoded_len(s: &Stream, limit: usize) -> usize {
-    let Some(stages) = chain(&s.dict) else { return s.data.len() };
-    let mut data: std::borrow::Cow<[u8]> = std::borrow::Cow::Borrowed(&s.data);
-    for st in stages.iter().take_while(|st| is_general(&st.name)) {
-        match decode_stage(st, &data, limit) {
-            Ok(d) => data = std::borrow::Cow::Owned(d),
-            Err(_) => return s.data.len(),
-        }
-    }
-    data.len()
+/// Bytes the general filters of a stream decode to, and whether they decode within `limit` (the stored size
+/// when they don't). Only counted, as in `decoded_size`.
+fn decoded_len(s: &Stream, limit: usize) -> (usize, bool) {
+    decoded_size(s, limit, usize::MAX).map_or((s.data.len(), false), |n| (n, true))
 }
 
 /// The extra work allowed below effort 100, per byte of input, in units of quick-encoding one decoded byte:
@@ -967,7 +972,8 @@ fn work_per_byte(effort: u8) -> f64 {
 }
 
 /// The settings for each distinct stream (see `Options::effort`), or None to keep it exactly as it is. At
-/// effort 100, `opt` for all of them. Below, the streams that take the most room in the file come first:
+/// effort 100, `opt` for every stream whose general filters decode within `max_stream`, None for the others
+/// (`reencode` would keep them). Below, the streams that take the most room in the file come first:
 /// each gets the quick settings while its decoded bytes fit in what is left of `quick_budget` (and is kept
 /// otherwise), then the strongest settings up to the effort (`opt` itself, or a lower step of 20) whose
 /// extra work fits in what is left of `work_budget`. Sizes decide, never time.
@@ -978,8 +984,21 @@ fn effort_plan(
     input_len: usize,
     pool: Option<&par::Pool>,
 ) -> Vec<Option<Options>> {
+    // From 20 on, what each stream decodes to is counted (`decoded_len`). A stream whose general filters don't
+    // decode within `max_stream` is kept as it is (`reencode` would find the same), so it is not decoded again
+    // only to fail; below 100 its stored size still counts in the budgets. Out of time: nothing more is
+    // counted (the whole rewrite is given up after the plan, so this changes no output).
+    let counted = || {
+        par::map(pool, unique.len(), None, |u| {
+            let s = streams[unique[u]].1;
+            if opt.deadline.passed() {
+                return (s.data.len(), false);
+            }
+            decoded_len(s, opt.max_stream)
+        })
+    };
     if opt.effort >= 100 {
-        return vec![Some(opt.clone()); unique.len()];
+        return counted().into_iter().map(|(_, decodes)| decodes.then(|| opt.clone())).collect();
     }
     let mut order: Vec<usize> = (0..unique.len()).collect();
     order.sort_by_key(|&u| (std::cmp::Reverse(streams[unique[u]].1.data.len()), u));
@@ -1043,7 +1062,7 @@ fn effort_plan(
         effort: e,
         ..opt.clone()
     };
-    let sizes = par::map(pool, unique.len(), None, |u| decoded_len(streams[unique[u]].1, opt.max_stream));
+    let sizes = counted();
     // From 20 on, every stream gets at least the strong encoder's quick settings.
     let quick = Options {
         flate: flate::Options {
@@ -1064,18 +1083,22 @@ fn effort_plan(
     }
     let mut budget = input_len as f64 * work_budget(opt.effort);
     for u in order {
-        if sizes[u] as f64 > floor {
+        let (size, decodes) = sizes[u];
+        if size as f64 > floor {
             continue;
         }
-        floor -= sizes[u] as f64;
+        floor -= size as f64;
         out[u] = Some(quick.clone());
         for (o, extra) in &steps {
-            let w = sizes[u] as f64 * extra;
+            let w = size as f64 * extra;
             if w <= budget {
                 budget -= w;
                 out[u] = Some(o.clone());
                 break;
             }
+        }
+        if !decodes {
+            out[u] = None;
         }
     }
     out
@@ -1192,8 +1215,10 @@ fn run_job(
     };
     if dbg {
         let new = r.as_ref().map_or(s.data.len(), |x| x.1.len());
-        let how =
-            job.settings.as_ref().map_or("kept, over the quick budget".to_string(), |o| format!("effort {}", o.effort));
+        let how = job
+            .settings
+            .as_ref()
+            .map_or("kept: over the quick budget, or not decodable".to_string(), |o| format!("effort {}", o.effort));
         eprintln!(
             "stream {n}: {} -> {new} bytes, {how}, {:?}{}",
             s.data.len(),
@@ -2023,6 +2048,55 @@ mod effort_tests {
     }
 
     #[test]
+    fn a_stream_that_does_not_decode_is_kept_and_its_stored_size_still_counts() {
+        // 3 MiB of noise behind Flate, over a max_stream of 2 MiB: kept at every effort without being decoded
+        // again in reencode (which would find the same). From 20 on its stored size still counts in the quick
+        // budget (4 MiB here) as it did when it was decoded only to fail: at effort 50, 1.5 MB of text after it
+        // no longer fits, 0.9 MB does. Below 20 (the fast path) a stream that does not decode takes nothing
+        // from the budget, and at 100 there is none.
+        let resolve = |o: &Obj| Some(o.clone());
+        let mut r = 9u64;
+        let noise: Vec<u8> = (0..3 << 20)
+            .map(|_| {
+                r ^= r << 13;
+                r ^= r >> 7;
+                r ^= r << 17;
+                r as u8
+            })
+            .collect();
+        let big = flate_stream(&noise, &[]);
+        for (n, fits) in [(1_500_000, false), (900_000, true)] {
+            let text: Vec<u8> = b"BT (gpress) Tj ET\n".iter().copied().cycle().take(n).collect();
+            let small = flate_stream(&text, &[]);
+            assert!(small.data.len() < big.data.len());
+            let streams: Vec<(u32, &Stream)> = vec![(1, &big), (2, &small)];
+            for e in [0u8, 50, 100] {
+                let opt = Options { max_stream: 2 << 20, ..Options::effort(e) };
+                assert!(reencode(&big, &opt, &resolve, &mut None).is_none());
+                let plan = effort_plan(&streams, &[0, 1], &opt, 1000, None);
+                assert!(plan[0].is_none(), "effort {e}");
+                assert_eq!(plan[1].is_some(), fits || e != 50, "effort {e}, {n} bytes");
+            }
+        }
+    }
+
+    #[test]
+    fn out_of_time_the_plan_decodes_nothing_more() {
+        // Once the deadline has passed no stream is decoded to be counted, at effort 100 too, where the counting
+        // pass is the plan's only decoding: a stream not counted is kept (the rewrite is given up after the plan,
+        // so no output changes). A file of many large streams would otherwise be decoded whole past the budget.
+        let text: Vec<u8> = b"BT (gpress) Tj ET\n".iter().copied().cycle().take(100_000).collect();
+        let s = flate_stream(&text, &[]);
+        let streams: Vec<(u32, &Stream)> = vec![(1, &s)];
+        for e in [0u8, 50, 100] {
+            assert!(effort_plan(&streams, &[0], &Options::effort(e), 1000, None)[0].is_some(), "effort {e}");
+            let gone = Options { deadline: Deadline::after(std::time::Duration::ZERO), ..Options::effort(e) };
+            assert!(gone.deadline.passed());
+            assert!(effort_plan(&streams, &[0], &gone, 1000, None)[0].is_none(), "effort {e}");
+        }
+    }
+
+    #[test]
     fn a_predictor_is_kept_only_when_it_saves_more_than_its_parameters() {
         let resolve = |o: &Obj| Some(o.clone());
         let image = |w: usize, h: usize, cs: &[u8], px: Vec<u8>| {
@@ -2240,6 +2314,8 @@ mod effort_tests {
         resolve: &dyn Fn(&Obj) -> Option<Obj>,
     ) -> Option<(Dict, Vec<u8>)> {
         let (g, px) = samples(s, data, carried, resolve)?;
+        // (`samples` lends the samples when it can now; this copy holds them as it did.)
+        let px = px.into_owned();
         let (row, bpp) = (g.row(), g.bpp());
         // The candidates are ranked by their size with the quick settings plus the size of their stream
         // dictionary (the predictor parameters take room too), and only the best one gets the full encode. Below
@@ -2853,6 +2929,7 @@ pub(super) mod check_tests {
     }
 
     #[test]
+    #[cfg(feature = "encryption")]
     fn an_encrypted_output_is_checked_on_its_decrypted_data() {
         for (name, pdf) in [
             ("r4_aes_128", &include_bytes!("../../tests/data/enc/r4_aes_128.pdf")[..]),
@@ -2888,6 +2965,7 @@ pub(super) mod check_tests {
 #[cfg(test)]
 pub(super) mod job_tests {
     use super::*;
+    #[cfg(feature = "fax")]
     use crate::fax::ccitt;
     use std::cell::{Cell, RefCell};
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
@@ -2945,6 +3023,7 @@ pub(super) mod job_tests {
     }
 
     /// A Group 4 fax image of `w` x `h`: rows of letter-sized blobs on white, like a scan.
+    #[cfg(feature = "fax")]
     fn fax(entries: &str, w: usize, h: usize) -> Obj {
         let mut r = 0x1234_5678u64;
         let mut next = move |k: u64| {
@@ -3026,10 +3105,14 @@ pub(super) mod job_tests {
         {
             made.push((20 + k as u32, image(entries, 32, 24, colors)));
         }
-        made.push((40, fax("/Width 10 0 R /Height 11 0 R", 200, 120)));
-        made.push((41, fax("/Width 200 /Height 12 0 R", 200, 120)));
-        made.push((42, fax("/Width 10 0 R /Height 97 0 R", 200, 120)));
-        made.push((43, fax("/Width 200 /Height 120", 200, 120)));
+        // Fax images, which look up their Width and Height too (a build without fax has no encoder for them).
+        #[cfg(feature = "fax")]
+        {
+            made.push((40, fax("/Width 10 0 R /Height 11 0 R", 200, 120)));
+            made.push((41, fax("/Width 200 /Height 12 0 R", 200, 120)));
+            made.push((42, fax("/Width 10 0 R /Height 97 0 R", 200, 120)));
+            made.push((43, fax("/Width 200 /Height 120", 200, 120)));
+        }
         let mut out = vec![made.into_iter().map(|(n, o)| (n, (0, o))).collect()];
         for dir in ["tests/data", "tests/data/enc"] {
             let mut files: Vec<_> = std::fs::read_dir(format!("{}/{dir}", env!("CARGO_MANIFEST_DIR")))
@@ -3085,11 +3168,14 @@ pub(super) mod job_tests {
                 looked_up += asked.len();
             }
         }
-        assert!(streams > 40 && looked_up >= 16, "{streams} streams, {looked_up} lookups");
+        // Without fax no image is looked at as a fax or JBIG2 one, which looks up more.
+        let least = if cfg!(feature = "fax") { 16 } else { 11 };
+        assert!(streams > 40 && looked_up >= least, "{streams} streams, {looked_up} lookups");
     }
 
     #[test]
     fn job_resolve_equals_the_table() {
+        #[cfg_attr(not(feature = "fax"), allow(unused_mut))]
         let (mut compared, mut faxes) = (0, 0);
         for objs in tables() {
             for (&n, (_, o)) in &objs {
@@ -3101,9 +3187,13 @@ pub(super) mod job_tests {
                 if let Some(cs) = s.dict.get(b"ColorSpace") {
                     assert_eq!(images::components(cs, &mine), images::components(cs, &table), "stream {n}");
                 }
-                let why = crate::fax::pdf::explain(s, &table);
-                assert_eq!(crate::fax::pdf::explain(s, &mine), why, "stream {n}");
-                faxes += why.starts_with("JBIG2") as usize;
+                // Without fax no image is written as JBIG2, whatever it looks up.
+                #[cfg(feature = "fax")]
+                {
+                    let why = crate::fax::pdf::explain(s, &table);
+                    assert_eq!(crate::fax::pdf::explain(s, &mine), why, "stream {n}");
+                    faxes += why.starts_with("JBIG2") as usize;
+                }
                 for opt in [Options { flate: flate::Options::quick(), ..Options::effort(0) }, Options::effort(0)] {
                     let (a, b) = (reencode(s, &opt, &mine, &mut None), reencode(s, &opt, &table, &mut None));
                     assert!(a == b, "stream {n}, effort {}", opt.flate.fast);
@@ -3111,7 +3201,8 @@ pub(super) mod job_tests {
                 compared += 1;
             }
         }
-        assert!(compared > 40 && faxes >= 2, "{compared} streams, {faxes} fax images made JBIG2");
+        let jbig2 = if cfg!(feature = "fax") { 2 } else { 0 };
+        assert!(compared > 40 && faxes >= jbig2, "{compared} streams, {faxes} fax images made JBIG2");
     }
 
     /// A PDF of these objects, numbered from 1 (the first is the catalog).

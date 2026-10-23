@@ -21,11 +21,13 @@
 //! settings for the effort in the deflate tools; below effort 20, where the fast encoder runs, any of them
 //! selects the strong encoder (its quick settings, fine-tuned). `--fast N` (1 to `flate::fast::LEVELS`) uses
 //! the fast encoder at level N instead, and `--fast 0` the strong encoder. The deflate tools work on a thread
-//! pool only with `--threads N` above 0.
+//! pool only with `--threads N` above 0. A build without a part of the engine (a Cargo feature) has no tools
+//! of that part: asked for one, it says which feature the tool needs and exits with 10.
 //!
 //! Exit status: 0 done; a library error exits with its code (1 input too large, 2 not an archive or damaged,
 //! 3 archive version, 4 internal error (a caught panic: a bug), 5 invalid options, 6 time budget, 7 declared
-//! length over the limit, 8 needs the existing library); 2 for a usage or file error.
+//! length over the limit, 8 needs the existing library, 9 decoded bytes over the limit, 10 needs a feature
+//! this build leaves out, such as pack and unpack without `archive`); 2 for a usage or file error.
 
 use gpress::flate::{self, Options};
 use std::io::{BufRead, Write};
@@ -38,11 +40,25 @@ fn die(msg: &str) -> ! {
 }
 
 /// A library error: its message and its stable code as the exit status (1 too large, 2 damaged, 3 version,
-/// 4 internal, 5 options, 6 time budget, 7 declared length, 8 needs the existing library). 4 is a caught
-/// panic, a bug, and the security suite counts it as one rather than as a refusal.
+/// 4 internal, 5 options, 6 time budget, 7 declared length, 8 needs the existing library, 9 decoded bytes,
+/// 10 needs a feature). 4 is a caught panic, a bug, and the security suite counts it as one rather than as
+/// a refusal.
 fn fail(e: &gpress::Error) -> ! {
     eprintln!("gpress: {e}");
     std::process::exit(e.code());
+}
+
+/// The part of the engine a measuring tool needs, when this build leaves it out.
+fn tool_needs(tool: &str) -> Option<gpress::Feature> {
+    use gpress::Feature::{Archive, Fax, Jpeg};
+    let needs: &[gpress::Feature] = match tool {
+        "repro" | "expand" | "cm-test" | "claim-archive" | "pack-batch" => &[Archive],
+        "jpeg" | "jpeg-batch" | "jpeg-info" => &[Jpeg],
+        "fax-decode" | "fax-encode" | "fax-scan" | "jbig2-encode" => &[Fax],
+        "fax-model" => &[Fax, Archive],
+        _ => &[],
+    };
+    needs.iter().copied().find(|f| !f.enabled())
 }
 
 const USAGE: &str = "\
@@ -178,6 +194,9 @@ fn main() {
     if threads > 0 {
         opt.shared = Some(flate::deflate::Shared::new(threads));
     }
+    if let Some(f) = pos.first().and_then(|t| tool_needs(t)) {
+        fail(&gpress::Error::NeedsFeature(f));
+    }
     match pos.first().map(|s| s.as_str()) {
         Some("deflate") => {
             let (i, o) = (pos.get(1).unwrap_or_else(|| die("need IN")), pos.get(2).unwrap_or_else(|| die("need OUT")));
@@ -261,6 +280,7 @@ fn main() {
                 out.flush().unwrap();
             }
         }
+        #[cfg(feature = "archive")]
         Some("repro") => {
             // stdin: paths of whole zlib streams; prints the zlib settings that rebuild each exactly.
             let stdin = std::io::stdin();
@@ -305,6 +325,7 @@ fn main() {
             let out = gpress::expand(&data, &lib).unwrap_or_else(|e| fail(&e));
             std::fs::write(o, &out).unwrap_or_else(|e| die(&format!("{o}: {e}")));
         }
+        #[cfg(feature = "archive")]
         Some("claim-archive") => {
             // For the security suite: gpress claim-archive IN OUT BYTES -> OUT is an archive of IN whose one
             // decoded part claims BYTES (see pack::crafted_claim); unpack must refuse it within its budget.
@@ -313,6 +334,7 @@ fn main() {
             let data = std::fs::read(i).unwrap_or_else(|e| die(&format!("{i}: {e}")));
             std::fs::write(o, gpress::pack::crafted_claim(&data, claim)).unwrap_or_else(|e| die(&format!("{o}: {e}")));
         }
+        #[cfg(feature = "archive")]
         Some("expand") => {
             // For measuring only: gpress expand IN OUT -> OUT is IN with rebuildable streams decoded (see
             // pack::expand); prints the bytes a restore would need on top.
@@ -322,6 +344,7 @@ fn main() {
             std::fs::write(o, &x).unwrap_or_else(|e| die(&format!("{o}: {e}")));
             println!("{i}\t{}\t{}\t{extra}", data.len(), x.len());
         }
+        #[cfg(feature = "archive")]
         Some("cm-test") => {
             // gpress cm-test FILE KIND [STRIDE BPP]: size of FILE coded by the model as KIND.
             use gpress::cm::model::{Geom, Kind, Model};
@@ -373,6 +396,7 @@ fn main() {
                 out.flush().unwrap();
             }
         }
+        #[cfg(feature = "jpeg")]
         Some("jpeg-info") => {
             for i in &pos[1..] {
                 let data = std::fs::read(i).unwrap_or_else(|e| die(&format!("{i}: {e}")));
@@ -382,6 +406,7 @@ fn main() {
                 }
             }
         }
+        #[cfg(feature = "jpeg")]
         Some("jpeg") | Some("jpeg-batch") => {
             // gpress jpeg IN OUT: one JPEG file with optimal Huffman tables (OUT is a copy of IN when refused);
             // jpeg-batch: stdin lines "IN<TAB>OUT". Prints IN, bytes in, bytes out, seconds, and why not if refused.
@@ -416,6 +441,7 @@ fn main() {
                 }
             }
         }
+        #[cfg(feature = "fax")]
         Some("fax-decode") => {
             // gpress fax-decode RAW K COLUMNS ALIGN(0|1) OUT.pbm: our CCITT decoder on raw fax data (for checking
             // it against other decoders); prints rows, why it stopped, and whether the bytes come back exactly.
@@ -440,6 +466,7 @@ fn main() {
                 p.why
             );
         }
+        #[cfg(feature = "fax")]
         Some("fax-encode") => {
             // gpress fax-encode IN.pbm K EOL(0|1) OUT.raw: our CCITT encoder (EOFB for K < 0, RTC otherwise).
             use gpress::fax::ccitt;
@@ -456,6 +483,7 @@ fn main() {
             let lay = ccitt::Layout { scheme, rule: ccitt::Rule::Standard, gaps, end, pad: 0, trailing: Vec::new() };
             std::fs::write(o, ccitt::encode(&img, &lay)).unwrap_or_else(|e| die(&e.to_string()));
         }
+        #[cfg(feature = "fax")]
         Some("fax-scan") => {
             // gpress fax-scan FILE.pdf: every CCITT image stream our reader finds, and what normal-PDF output does
             // with it.
@@ -476,6 +504,7 @@ fn main() {
                 }
             }
         }
+        #[cfg(all(feature = "fax", feature = "archive"))]
         Some("fax-model") => {
             // gpress fax-model RAW K COLUMNS ALIGN(0|1): size of a raw fax stream as an archive fax part, with
             // the time to code it and to restore it (checked).
@@ -509,6 +538,7 @@ fn main() {
                 back.as_deref() == Some(&raw[..]) && restored.as_deref() == Some(&raw[..])
             );
         }
+        #[cfg(feature = "fax")]
         Some("jbig2-encode") => {
             // gpress jbig2-encode IN.pbm OUT.jb2 [invert]: our JBIG2Decode stream (embedded form) of a PBM.
             let data =
@@ -528,6 +558,7 @@ fn main() {
     }
 }
 
+#[cfg(feature = "fax")]
 /// A binary PBM (1 is black) of a bilevel image.
 fn pbm(img: &gpress::fax::ccitt::Image) -> Vec<u8> {
     let w = img.width;
@@ -546,6 +577,7 @@ fn pbm(img: &gpress::fax::ccitt::Image) -> Vec<u8> {
     out
 }
 
+#[cfg(feature = "fax")]
 fn read_pbm(d: &[u8]) -> Option<gpress::fax::ccitt::Image> {
     // "P4", width, height, one whitespace byte, then packed rows (no comments).
     let mut fields = Vec::new();
@@ -618,4 +650,20 @@ fn describe_archive(name: &str, in_len: usize, c: &gpress::Compressed, secs: f64
         c.streams_decrypted,
         c.decoded_bytes
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use gpress::Feature;
+
+    /// A build without the archive refuses every tool that makes or reads archives up front, with code 10 (pack
+    /// and unpack get it from the library); a build with it runs them.
+    #[test]
+    fn the_archive_tools_need_the_archive() {
+        let needs = (!Feature::Archive.enabled()).then_some(Feature::Archive);
+        for tool in ["repro", "expand", "cm-test", "claim-archive", "pack-batch"] {
+            assert_eq!(super::tool_needs(tool), needs, "{tool}");
+        }
+        assert_eq!(super::tool_needs("optimize"), None);
+    }
 }

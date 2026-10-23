@@ -241,7 +241,9 @@ impl std::fmt::Debug for Shared {
     }
 }
 
-/// Segments optimised together before their blocks are written (bounds the memory held by finished plans).
+/// Segments in a group: a segment like an earlier one of its group is planned once, and with more than one
+/// thread a group's segments are optimised together before their blocks are written (this bounds the memory
+/// held by finished plans).
 const SEGMENTS_AT_ONCE: usize = 8;
 
 /// Raw Deflate data for `data`.
@@ -279,7 +281,11 @@ fn deflate_with(data: &[u8], opt: &Options, reuse: bool) -> Vec<u8> {
     let dbg = std::env::var_os("PDFE_DEBUG").is_some();
     let pool = opt.shared.as_ref().map(|s| &*s.pool);
     // Segments are optimised independently (in parallel when threads are free) and written in order, so the
-    // output is the same whatever the number of threads.
+    // output is the same whatever the number of threads. With more than one thread, a group's segments are
+    // planned side by side (a thread that finishes one takes the next of the group instead of waiting for the
+    // slowest), then written. With one thread each segment is planned and written before the next, and its
+    // plans are kept only while a later segment of the group is still to be written from them.
+    let side_by_side = pool.is_some_and(|p| p.threads() > 1);
     for group in bounds.chunks(SEGMENTS_AT_ONCE) {
         // For each segment, the first segment of the group like it (itself when there is none). Only those
         // are planned.
@@ -299,8 +305,8 @@ fn deflate_with(data: &[u8], opt: &Options, reuse: bool) -> Vec<u8> {
                 eprintln!("segments {a}..{b}: {reused} like an earlier one, planned once");
             }
         }
-        let plans = par::map(pool, todo.len(), None, |t| {
-            let (a, b) = group[todo[t]];
+        let plan = |k: usize| -> Option<Vec<Plan>> {
+            let (a, b) = group[k];
             // Out of time: this segment goes out stored, and the caller drops the whole output.
             if opt.deadline.passed() {
                 return None;
@@ -321,12 +327,13 @@ fn deflate_with(data: &[u8], opt: &Options, reuse: bool) -> Vec<u8> {
                 );
             }
             Some(plans)
-        });
-        for (k, &(a, b)) in group.iter().enumerate() {
+        };
+        // Segment `k` written from the plans of `first[k]`. Their stored blocks read that segment's bytes,
+        // which are this one's.
+        let mut write = |k: usize, plans: &Option<Vec<Plan>>| {
+            let (a, b) = group[k];
             let last_segment = b == data.len();
-            // The plans of `first[k]`, which is in `todo`. Their stored blocks read that segment's bytes,
-            // which are this one's.
-            match &plans[todo.partition_point(|&t| t < first[k])] {
+            match plans {
                 Some(plans) => {
                     let n = plans.len();
                     for (i, p) in plans.iter().enumerate() {
@@ -334,6 +341,27 @@ fn deflate_with(data: &[u8], opt: &Options, reuse: bool) -> Vec<u8> {
                     }
                 }
                 None => write_stored(&mut w, &data[a..b], last_segment),
+            }
+        };
+        if side_by_side {
+            let plans = par::map(pool, todo.len(), None, |t| plan(todo[t]));
+            for k in 0..group.len() {
+                write(k, &plans[todo.partition_point(|&t| t < first[k])]);
+            }
+        } else {
+            // The last segment of the group written from each planned segment's plans.
+            let mut last = vec![0; group.len()];
+            for k in 0..group.len() {
+                last[first[k]] = k;
+            }
+            let mut kept: Vec<Option<Option<Vec<Plan>>>> = (0..group.len()).map(|_| None).collect();
+            for k in 0..group.len() {
+                let j = first[k];
+                let plans = kept[j].take().unwrap_or_else(|| plan(j));
+                write(k, &plans);
+                if last[j] > k {
+                    kept[j] = Some(plans);
+                }
             }
         }
     }

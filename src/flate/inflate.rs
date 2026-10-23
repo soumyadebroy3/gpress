@@ -3,6 +3,7 @@
 
 use super::bits::{BitReader, EndOfInput};
 use super::tables::*;
+use super::zlib::adler32_more;
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,8 +162,108 @@ fn fixed_decoders() -> &'static (Decoder, Decoder) {
 
 /// Inflates a raw Deflate stream. `limit` caps the output size (protection against decompression bombs).
 pub fn inflate(input: &[u8], limit: usize) -> Result<Inflated, InflateError> {
-    let mut br = BitReader::new(input);
     let mut out: Vec<u8> = Vec::with_capacity((input.len() * 4).min(limit).min(1 << 26));
+    let consumed = inflate_into(input, limit, &mut out)?;
+    Ok(Inflated { data: out, consumed })
+}
+
+/// What `inflate` would give, without keeping it: (its length, its Adler-32, the input bytes used), or the
+/// same error. Only the end of the output that later matches can reach is held (32 KiB, up to 160 KiB between
+/// cuts), so a stream's decoded size can be learned without the memory to hold it. `inflate_pieces` would
+/// hold a whole block too, which can be as large as `limit` in a stream zlib did not make.
+pub fn inflate_len(input: &[u8], limit: usize) -> Result<(usize, u32, usize), InflateError> {
+    let mut tail = Tail { window: Vec::with_capacity(SLIDE_AT + WINDOW), before: 0, adler: 1 };
+    let consumed = inflate_into(input, limit, &mut tail)?;
+    Ok((tail.len(), adler32_more(tail.adler, &tail.window), consumed))
+}
+
+/// Where inflating puts its output: all of it (a `Vec`), or its last 32 KiB (`Tail`).
+trait Sink {
+    /// Bytes put out so far.
+    fn len(&self) -> usize;
+    fn push(&mut self, b: u8);
+    fn extend_from_slice(&mut self, s: &[u8]);
+    /// Repeats `len` bytes starting `dist` back (`dist` is at most `self.len()` and 32 KiB).
+    fn copy_back(&mut self, dist: usize, len: usize);
+}
+
+impl Sink for Vec<u8> {
+    #[inline]
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+    #[inline]
+    fn push(&mut self, b: u8) {
+        Vec::push(self, b)
+    }
+    #[inline]
+    fn extend_from_slice(&mut self, s: &[u8]) {
+        Vec::extend_from_slice(self, s)
+    }
+    #[inline]
+    fn copy_back(&mut self, dist: usize, len: usize) {
+        let start = Vec::len(self) - dist;
+        if dist >= len {
+            self.extend_from_within(start..start + len);
+        } else {
+            for k in 0..len {
+                let b = self[start + k];
+                Vec::push(self, b);
+            }
+        }
+    }
+}
+
+/// The window is cut back to its last 32 KiB once it holds this much.
+const SLIDE_AT: usize = 4 * WINDOW;
+
+/// The last 32 KiB (at least) of an output, its length, and the Adler-32 of what came before the window.
+struct Tail {
+    window: Vec<u8>,
+    /// Bytes put out before the window.
+    before: usize,
+    /// Adler-32 of those bytes.
+    adler: u32,
+}
+
+impl Tail {
+    #[inline]
+    fn slide(&mut self) {
+        if self.window.len() >= SLIDE_AT {
+            let cut = self.window.len() - WINDOW;
+            self.adler = adler32_more(self.adler, &self.window[..cut]);
+            self.before += cut;
+            self.window.drain(..cut);
+        }
+    }
+}
+
+impl Sink for Tail {
+    #[inline]
+    fn len(&self) -> usize {
+        self.before + self.window.len()
+    }
+    #[inline]
+    fn push(&mut self, b: u8) {
+        self.window.push(b);
+        self.slide();
+    }
+    fn extend_from_slice(&mut self, s: &[u8]) {
+        // A stored block holds up to 64 KiB: in pieces, so the window stays small.
+        for piece in s.chunks(WINDOW) {
+            self.window.extend_from_slice(piece);
+            self.slide();
+        }
+    }
+    #[inline]
+    fn copy_back(&mut self, dist: usize, len: usize) {
+        self.window.copy_back(dist, len);
+        self.slide();
+    }
+}
+
+fn inflate_into<S: Sink>(input: &[u8], limit: usize, out: &mut S) -> Result<usize, InflateError> {
+    let mut br = BitReader::new(input);
     loop {
         let last = br.get(1)?;
         let btype = br.get(2)?;
@@ -182,11 +283,11 @@ pub fn inflate(input: &[u8], limit: usize) -> Result<Inflated, InflateError> {
             }
             1 => {
                 let (ll, d) = fixed_decoders();
-                codes(&mut br, &mut out, ll, d, limit)?;
+                codes(&mut br, out, ll, d, limit)?;
             }
             2 => {
                 let (ll, d) = dynamic_tables(&mut br)?;
-                codes(&mut br, &mut out, &ll, &d, limit)?;
+                codes(&mut br, out, &ll, &d, limit)?;
             }
             _ => return Err(InflateError::BadBlockType),
         }
@@ -194,7 +295,7 @@ pub fn inflate(input: &[u8], limit: usize) -> Result<Inflated, InflateError> {
             break;
         }
     }
-    Ok(Inflated { data: out, consumed: br.byte_pos() })
+    Ok(br.byte_pos())
 }
 
 /// The number of symbols (literals and matches, not the end-of-block code) in the first block of a raw
@@ -299,7 +400,13 @@ fn dynamic_tables(br: &mut BitReader) -> Result<(Decoder, Decoder), InflateError
     Ok((ll, d))
 }
 
-fn codes(br: &mut BitReader, out: &mut Vec<u8>, ll: &Decoder, d: &Decoder, limit: usize) -> Result<(), InflateError> {
+fn codes<S: Sink>(
+    br: &mut BitReader,
+    out: &mut S,
+    ll: &Decoder,
+    d: &Decoder,
+    limit: usize,
+) -> Result<(), InflateError> {
     loop {
         let sym = ll.decode(br)?;
         if sym < 256 {
@@ -326,20 +433,13 @@ fn codes(br: &mut BitReader, out: &mut Vec<u8>, ll: &Decoder, d: &Decoder, limit
             if out.len() + len > limit {
                 return Err(InflateError::TooLarge);
             }
-            let start = out.len() - dist;
-            if dist >= len {
-                out.extend_from_within(start..start + len);
-            } else {
-                for k in 0..len {
-                    let b = out[start + k];
-                    out.push(b);
-                }
-            }
+            out.copy_back(dist, len);
         }
     }
 }
 
-/// The output `inflate_pieces` keeps behind what it hands over: as far back as a distance reaches.
+/// As far back as a distance reaches: the output `inflate_pieces` keeps behind what it hands over, and
+/// `inflate_len` behind what it has counted.
 const WINDOW: usize = 32 * 1024;
 
 /// Inflates like `inflate`, but hands the output to `sink` a piece at a time instead of returning it whole: a
@@ -407,6 +507,8 @@ pub fn inflate_pieces(
 mod tests {
     use super::*;
     use crate::flate::bits::BitWriter;
+    // zlib's own encoder, which only the archive has, makes the streams of the tests that use `streams`.
+    #[cfg(feature = "archive")]
     use crate::flate::zlibexact::{zlib_stream, Params};
 
     /// `inflate_pieces` with every piece kept: the output, the input used and the largest piece.
@@ -442,6 +544,7 @@ mod tests {
 
     /// Deflate data made by zlib's algorithm (the zlib wrapper taken off) from text, runs, noise (stored
     /// blocks) and repeats as far back as zlib reaches, with small and large blocks.
+    #[cfg(feature = "archive")]
     fn streams() -> Vec<(Params, Vec<u8>, Vec<u8>)> {
         let mut s = 5u64;
         let noise: Vec<u8> = (0..40_000).map(|_| rng(&mut s) as u8).collect();
@@ -461,6 +564,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "archive")]
     fn pieces_are_the_whole_output_cut_at_block_ends() {
         for (p, raw, d) in streams() {
             let w = same(&raw, usize::MAX).unwrap();
@@ -482,6 +586,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "archive")]
     fn damaged_streams_give_the_same_errors() {
         let mut s = 11u64;
         for (_, raw, _) in streams().into_iter().filter(|(_, raw, _)| raw.len() > 8) {
@@ -575,6 +680,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "archive")]
     fn a_sink_can_stop_it() {
         let (_, raw, d) = streams().swap_remove(13);
         let mut got = Vec::new();

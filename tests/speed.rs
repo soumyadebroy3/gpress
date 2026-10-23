@@ -1,12 +1,16 @@
 //! Speed options: the thread count never changes any output, every effort gives a checked result (a smaller
-//! file that reads back the same, or the file untouched), and damaged input is never "improved".
+//! file that reads back the same, or the file untouched), and damaged input is never "improved". A build
+//! without the archive runs the normal-PDF tests whose files don't need zlib's own bytes.
 
-use gpress::flate::zlibexact::{zlib_stream, Params};
+#[path = "common/flate.rs"]
+mod flate;
+
+#[cfg(feature = "archive")]
 use gpress::pack::{pack_with, unpack, PackOptions};
 use gpress::pdf::rewrite::{optimize, Options, Outcome};
 
 fn zlib(data: &[u8]) -> Vec<u8> {
-    zlib_stream(data, Params { level: 6, window_bits: 15, mem_level: 8, filtered: false })
+    flate::zlib(data, 6)
 }
 
 fn rng(s: &mut u64) -> u64 {
@@ -193,6 +197,7 @@ fn damaged_input_is_left_untouched_at_every_effort() {
 }
 
 #[test]
+#[cfg(feature = "archive")]
 fn pack_options_change_speed_never_the_restore() {
     let pdf = sample_pdf();
     let mut packed = Vec::new();
@@ -240,10 +245,11 @@ fn stream_obj(dict: &str, data: &[u8]) -> Vec<u8> {
 }
 
 fn zlib1(data: &[u8]) -> Vec<u8> {
-    zlib_stream(data, Params { level: 1, window_bits: 15, mem_level: 8, filtered: false })
+    flate::zlib(data, 1)
 }
 
 #[test]
+#[cfg(feature = "archive")]
 fn pack_codes_plainly_only_data_without_structure() {
     // A 512 x 512 RGB gradient: every byte value equally often, as in compressed data, but smooth.
     let (w, h) = (512usize, 512usize);
@@ -300,7 +306,10 @@ fn a_short_image_is_kept_exactly() {
     }
 }
 
+/// (The file's size, which the budget follows, is that of zlib's own level 1, so only a build with the archive
+/// makes this file.)
 #[test]
+#[cfg(feature = "archive")]
 fn low_effort_work_follows_the_file_size() {
     // A 43 KB file with a blank 3000 x 3000 image (9 MB decoded) and some text. At low effort the image is
     // beyond the quick budget (16 decoded bytes per byte of the file at effort 0, twice as much every 10

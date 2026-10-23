@@ -355,10 +355,12 @@ pub fn open_with(data: &[u8], limits: Limits) -> Result<Doc<'_>, LoadError> {
     if doc.trailer.has(b"Encrypt") {
         doc.crypt = Some(security(&doc));
         // Metadata left unencrypted is the catalog's (found with the key in place).
+        #[cfg(feature = "encryption")]
         let md = match &doc.crypt {
             Some(Ok(c)) if !c.encrypt_metadata => Some(root_metadata(&doc)),
             _ => None,
         };
+        #[cfg(feature = "encryption")]
         match md {
             Some(Ok(m)) => {
                 if let Some(Ok(c)) = doc.crypt.as_mut() {
@@ -377,7 +379,14 @@ pub fn open_with(data: &[u8], limits: Limits) -> Result<Doc<'_>, LoadError> {
     Ok(doc)
 }
 
+/// Without the `encryption` feature no encrypted file opens: it is read as stored, and left as it is.
+#[cfg(not(feature = "encryption"))]
+fn security(_doc: &Doc) -> Result<Crypt, String> {
+    Err(crate::Feature::Encryption.missing())
+}
+
 /// The standard security handler of an encrypted file, with the empty user password.
+#[cfg(feature = "encryption")]
 fn security(doc: &Doc) -> Result<Crypt, String> {
     // Read as stored: the encryption dictionary is never encrypted, nor in an object stream.
     let plain = |n: u32, g: u16| -> Result<Obj, String> {
@@ -438,6 +447,7 @@ fn security(doc: &Doc) -> Result<Crypt, String> {
 }
 
 /// The object number of the catalog's /Metadata stream, if any.
+#[cfg(feature = "encryption")]
 fn root_metadata(doc: &Doc) -> Result<Option<u32>, String> {
     let root = match doc.trailer.get(b"Root") {
         Some(&Obj::Ref(n, _)) => n,

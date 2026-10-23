@@ -5,6 +5,7 @@ use gpress::pdf::object::Obj;
 use gpress::pdf::rewrite::{optimize, Options, Outcome};
 use gpress::pdf::xref;
 
+#[cfg(feature = "jpeg")]
 const JPEG: &[u8] = include_bytes!("data/jpeg/base444.jpg");
 
 fn stream(dict: &str, data: &[u8]) -> Vec<u8> {
@@ -92,6 +93,7 @@ fn conformance_is_respected_unless_told_otherwise() {
 }
 
 #[test]
+#[cfg(feature = "jpeg")]
 fn flate_goes_in_front_of_a_jpeg_only_when_asked() {
     // A JPEG with a 4 KB comment of one letter: our Flate shrinks it far more than 1%, so with the default it
     // goes behind /FlateDecode; without `flate_over_jpeg` the chain stays a bare /DCTDecode, with the JPEG's

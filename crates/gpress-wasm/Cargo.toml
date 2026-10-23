@@ -12,6 +12,15 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 gpress = { path = "../..", default-features = false }
 
+# The parts of the engine, as in gpress's Cargo.toml: all but "existing" on by default, so a plain build is the
+# whole module (the npm package's gpress.wasm). "web" is the web compressor's module (gpress-web.wasm): what a
+# normal PDF uses, without the archive. A part left out gives error code 10, which js/gpress.ts turns into a
+# GpressFeatureError naming it.
 [features]
-default = []
-existing = ["gpress/existing"]
+default = ["archive", "jpeg", "fax", "encryption"]
+archive = ["gpress/archive"]
+jpeg = ["gpress/jpeg"]
+fax = ["gpress/fax"]
+encryption = ["gpress/encryption"]
+existing = ["archive", "gpress/existing"]
+web = ["jpeg", "fax", "encryption", "gpress/web"]

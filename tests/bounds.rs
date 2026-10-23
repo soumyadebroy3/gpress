@@ -1,16 +1,26 @@
 //! Crafted inputs: what a file claims (an object stream's /N, the trailer's /Size, an image's /Width, predictor
 //! parameters, an archive's declared length) never sizes memory or work on its own. Each case is refused, or
 //! handled from what the file holds, in well under a second, with no panic and no allocation that could fail.
+//! A build without the archive checks the normal PDF only.
 
-use gpress::flate::zlibexact::{zlib_stream, Params};
+#[path = "common/flate.rs"]
+mod flate;
+
+#[cfg(feature = "archive")]
 use gpress::pack::{pack, pack_with, unpack, unpack_with, PackOptions, UnpackError, UnpackOptions, MAGIC};
 use gpress::pdf::object::Obj;
 use gpress::pdf::rewrite::{optimize, Options, Outcome};
 use gpress::pdf::xref;
 use std::time::Instant;
 
+/// zlib's own stream at level 6, or in a build without the archive our encoder's: the cross-reference rows
+/// below must make a small file either way (`flate` would store them).
 fn z(d: &[u8]) -> Vec<u8> {
-    zlib_stream(d, Params { level: 6, window_bits: 15, mem_level: 8, filtered: false })
+    if cfg!(feature = "archive") {
+        flate::zlib(d, 6)
+    } else {
+        gpress::flate::deflate_zlib(d, &gpress::flate::Options::quick())
+    }
 }
 
 /// A classic PDF from numbered objects (bodies without "obj"/"endobj"), one xref subsection per object so the
@@ -118,12 +128,17 @@ fn smaller(r: &gpress::pdf::rewrite::Optimized, input: &[u8]) {
 }
 
 /// The archive of a file restores with both outputs' checks: packs are made and restored, whatever the file.
+#[cfg(feature = "archive")]
 fn packs_and_restores(input: &[u8]) {
     let t = Instant::now();
     let (packed, _) = pack_with(input, &PackOptions { threads: 1, ..PackOptions::default() });
     assert_eq!(unpack(&packed).unwrap(), input);
     assert!(t.elapsed().as_millis() < 2000, "pack took {:?}", t.elapsed());
 }
+
+/// A build without the archive has no packs to make.
+#[cfg(not(feature = "archive"))]
+fn packs_and_restores(_input: &[u8]) {}
 
 #[test]
 fn object_stream_headers_are_checked_before_anything_is_sized_by_them() {
@@ -357,8 +372,11 @@ fn cross_reference_rows_are_bounded_by_the_file_size() {
     assert!(why.contains("rows than the file can hold"), "{why}");
     assert!(xref::open(&bomb).is_err());
     // The pack doesn't read cross-reference data; it stores the stream's 10 MB decoded (a few seconds).
-    let (packed, _) = pack_with(&bomb, &PackOptions { threads: 1, ..PackOptions::default() });
-    assert_eq!(unpack(&packed).unwrap(), bomb);
+    #[cfg(feature = "archive")]
+    {
+        let (packed, _) = pack_with(&bomb, &PackOptions { threads: 1, ..PackOptions::default() });
+        assert_eq!(unpack(&packed).unwrap(), bomb);
+    }
     let many = with_free_rows(50_000);
     smaller(&quick(&many, &Options::effort(100)), &many);
 }
@@ -490,6 +508,7 @@ fn predictor_rows_are_cut_to_the_data() {
 }
 
 #[test]
+#[cfg(feature = "archive")]
 fn the_decoder_refuses_a_declared_length_over_its_limit() {
     // An honest archive of a 60 KB file: refused below its length, restored at it.
     let big: Vec<u8> = (0..60_000u32).map(|i| (i % 251) as u8).collect();

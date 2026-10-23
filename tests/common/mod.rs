@@ -1,14 +1,30 @@
 //! The mixed test document shared by the integration tests: an encrypted PDF (RC4 or AES) holding a JPEG,
-//! a CCITT fax image, a Type 1 font and a zlib content stream, plus readers for what came out.
+//! a CCITT fax image, a Type 1 font and a zlib content stream, plus readers for what came out. Making it
+//! needs the `fax` and `encryption` features; without the archive its zlib streams are stored blocks (`flate`).
 
 #![allow(dead_code)]
 
+mod flate;
+
+pub use flate::zlib;
 use gpress::fax::ccitt::{self, row_changes, Gap, Image, Layout, Rule, Scheme};
-use gpress::flate::zlibexact::{zlib_stream, Params};
+#[cfg(feature = "archive")]
 use gpress::pack::type1::encrypt;
 use gpress::pdf::crypt::{self, Method};
 use gpress::pdf::object::Obj;
 use gpress::pdf::xref;
+
+/// Type 1 encryption in place (`key`: 55665 for eexec, 4330 for charstrings), as the archive's
+/// `gpress::pack::type1::encrypt` does it, for a build without the archive.
+#[cfg(not(feature = "archive"))]
+fn encrypt(buf: &mut [u8], key: u16) {
+    let mut r = key;
+    for b in buf.iter_mut() {
+        let c = *b ^ (r >> 8) as u8;
+        *b = c;
+        r = (c as u16).wrapping_add(r).wrapping_mul(52845).wrapping_add(22719);
+    }
+}
 
 pub fn next(seed: &mut u32) -> u32 {
     *seed ^= *seed << 13;
@@ -117,7 +133,7 @@ pub const FAX_H: usize = 400;
 /// The streams and dictionaries of the test document, unencrypted: (object number, dictionary, stream data).
 pub fn objects() -> Vec<(u32, String, Option<Vec<u8>>)> {
     let (font, l1, l2, l3) = type1_font(FONT_GLYPHS);
-    let z = |d: &[u8]| zlib_stream(d, Params { level: 6, window_bits: 15, mem_level: 8, filtered: false });
+    let z = |d: &[u8]| zlib(d, 6);
     let fax = fax_data(&scan(FAX_W, FAX_H));
     let mut content = Vec::new();
     for i in 0..60 {

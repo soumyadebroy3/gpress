@@ -1,5 +1,8 @@
 //! The gpress archive: exact restore, and damaged files refused (never a wrong result, never a crash).
 
+// Only in a build with the archive (Cargo.toml, [features]).
+#![cfg(feature = "archive")]
+
 use gpress::flate::zlibexact::{zlib_stream, Params};
 use gpress::pack::{pack, unpack};
 

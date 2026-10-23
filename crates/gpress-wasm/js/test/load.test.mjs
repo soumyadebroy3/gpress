@@ -1,5 +1,5 @@
 // Gpress.compile and Gpress.load take the module from every kind of source the Source type names. Runs
-// against dist/ after `npm run build`.
+// against dist/ after `npm run build` (the module test/module.mjs picks).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -7,8 +7,9 @@ import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { Gpress } from "../dist/gpress.js";
+import { moduleUrl } from "./module.mjs";
 
-const url = new URL("../dist/gpress.wasm", import.meta.url);
+const url = moduleUrl;
 const wasm = readFileSync(url);
 const pdf = new TextEncoder().encode("%PDF-1.4\n1 0 obj\n<< >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
 

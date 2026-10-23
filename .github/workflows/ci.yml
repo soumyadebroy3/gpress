@@ -35,35 +35,61 @@ jobs:
           printf '%%PDF-1.4\n%%%%EOF\n' > t.pdf
           LD_LIBRARY_PATH=target/release ./roundtrip t.pdf
 
-  # `cargo test --release --workspace` (and the same with `--features existing`) in two halves that each build only
-  # what they run. Together they are what it runs: the libraries' unit tests and their doc tests in one; the
-  # binary's unit tests, every integration test (`--test '*'`, with the binary they call) and the examples, which
-  # `cargo test` only builds, in the other. bench/check_test_split.py fails when a target's settings would make the
-  # halves differ from `cargo test`, and a part with no commands fails too: a manifest change or a renamed part can't
-  # drop tests unnoticed. A change to the commands below has to keep them the same as `cargo test` by itself.
+  # `cargo test --release --workspace` for each feature set below, in two halves that each build only what they
+  # run. Together they are what it runs: the libraries' unit tests and their doc tests in one; the binary's unit
+  # tests, every integration test (`--test '*'`, with the binary they call) and the examples, which `cargo test`
+  # only builds, in the other. bench/check_test_split.py fails when a target's settings would make the halves
+  # differ from `cargo test`, and a part with no commands fails too: a manifest change or a renamed part can't drop
+  # tests unnoticed. A change to the commands below has to keep them the same as `cargo test` by itself.
   test:
     name: Tests, ${{ matrix.features }} features (${{ matrix.part }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        features: [default, existing]
+        features: [default, existing, none, web, all but jpeg, all but fax, all but encryption]
         part: [library and doc tests, integration tests]
+        # Each set's cargo flags. Besides every part (default) and Lepton (existing): builds that leave parts of the
+        # engine out (Cargo.toml, [features]), which also get clippy here (the lint job runs it on the first two):
+        # none of them, the web module's set, and every part but one. Every part but the archive is the web set, so
+        # it is not run twice.
         include:
           - features: default
             flags: ''
           - features: existing
             flags: --features existing
+          - features: none
+            flags: --no-default-features
+            clippy: true
+          - features: web
+            flags: --no-default-features --features web
+            clippy: true
+          - features: all but jpeg
+            flags: --no-default-features --features archive,fax,encryption
+            clippy: true
+          - features: all but fax
+            flags: --no-default-features --features archive,jpeg,encryption
+            clippy: true
+          - features: all but encryption
+            flags: --no-default-features --features archive,jpeg,fax
+            clippy: true
     env:
       FLAGS: ${{ matrix.flags }}
       PART: ${{ matrix.part }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.features }}-${{ matrix.part }}
       - run: python3 -I bench/check_test_split.py
+      # Clippy on the sets the lint job does not check, in the half that builds less.
+      - if: matrix.clippy && matrix.part == 'library and doc tests'
+        run: |
+          read -ra flags <<< "$FLAGS"
+          cargo clippy --workspace --all-targets "${flags[@]}" -- -D warnings
       - run: |
           read -ra flags <<< "$FLAGS"
           case "$PART" in
@@ -109,6 +135,7 @@ jobs:
       # binaryen's wasm-opt: the package build runs it on the module when it is on PATH, and the size check
       # below fails without it (the module would not be the package's).
       - run: sudo apt-get update && sudo apt-get install -y binaryen
+      # Both modules: dist/gpress.wasm (every part) and dist/gpress-web.wasm (the "web" feature set).
       - id: build
         working-directory: crates/gpress-wasm/js
         run: |
@@ -117,6 +144,10 @@ jobs:
       # The start-up test prints its median and the distance to the 50 ms target (bench/RESULTS.md, Start-up).
       - working-directory: crates/gpress-wasm/js
         run: npm test
+      # The same tests on the web module; the archive tests check that it says it needs the archive.
+      - if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        working-directory: crates/gpress-wasm/js
+        run: npm run test:web
       # The size budget, whenever the package built: fails when the web module's gzip size is more than 5% over
       # bench/sizes.json, or over the 400 KB target. A wanted growth is recorded with `bench/sizes.py measure`;
       # so is a module more than 5% under the record, which gets a warning on the run.

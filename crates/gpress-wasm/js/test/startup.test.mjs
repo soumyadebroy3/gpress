@@ -1,7 +1,7 @@
 // Start-up: from the module's bytes in memory to the first optimized PDF (compile, instantiate, the first
 // optimize call of a one-page PDF of a few KB). Each sample is a fresh Node process, because V8 reuses
-// compiled code within a process. Runs against dist/ after `npm run build`. bench/wasm_startup.mjs makes
-// the same measurement for any module file, with more detail.
+// compiled code within a process. Runs against dist/ after `npm run build` (the module test/module.mjs
+// picks). bench/wasm_startup.mjs makes the same measurement for any module file, with more detail.
 //
 // The target is a median of at most 50 ms at effort 0, and the test prints the distance to it. GitHub's
 // two-core runner meets it (bench/RESULTS.md, Start-up), but most of the first call runs while V8's
@@ -16,11 +16,12 @@ import { readFileSync } from "node:fs";
 import { availableParallelism, loadavg } from "node:os";
 import { fileURLToPath } from "node:url";
 import { onePagePdf } from "./onepage.mjs";
+import { moduleUrl } from "./module.mjs";
 
 const RUNS = 7;
 const TARGET_MS = 50;
 const LIMIT_MS = Math.max(150, Number(process.env.GPRESS_STARTUP_LIMIT_MS) || 0);
-const wasm = new URL("../dist/gpress.wasm", import.meta.url);
+const wasm = moduleUrl;
 
 /** One sample, in this (fresh) process: the times in ms and what came out. */
 async function sample(effort) {

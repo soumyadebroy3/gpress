@@ -1,11 +1,16 @@
 //! Every feature at once: an encrypted PDF (RC4 and AES) holding a JPEG, a CCITT fax image, a Type 1 font and
 //! a zlib content stream. The normal PDF keeps the encryption and still gets optimal JPEG tables, JBIG2 and
 //! our Flate; the gpress archive stores the streams decrypted, opens the font and codes the fax image, and
-//! restores every byte. Both give the same bytes for any thread count.
+//! restores every byte. Both give the same bytes for any thread count. A build without the archive runs the
+//! normal-PDF tests.
+
+// Only in a build with the jpeg, fax and encryption features (Cargo.toml, [features]).
+#![cfg(all(feature = "jpeg", feature = "fax", feature = "encryption"))]
 
 mod common;
 
 use common::*;
+#[cfg(feature = "archive")]
 use gpress::pack::{pack_with, unpack, PackOptions};
 use gpress::pdf::object::Obj;
 use gpress::pdf::rewrite::{optimize, Options, Outcome};
@@ -105,6 +110,7 @@ fn normal_pdf_keeps_the_encryption_and_applies_every_step() {
 }
 
 #[test]
+#[cfg(feature = "archive")]
 fn archive_stores_the_streams_decrypted_opened_and_coded() {
     for aes in [false, true] {
         let pdf = encrypted_pdf(aes);

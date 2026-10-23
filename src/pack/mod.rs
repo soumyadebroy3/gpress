@@ -23,6 +23,7 @@ use crate::flate::{zlib, zlibexact};
 use crate::par;
 use crate::pdf::object::{Dict, Obj};
 use crate::pdf::parse::Lexer;
+use crate::Feature;
 use std::borrow::Cow;
 
 pub const MAGIC: &[u8; 4] = b"\x89GPZ";
@@ -164,6 +165,11 @@ fn read_varint(a: &[u8], mut i: usize) -> Option<(u64, usize)> {
 }
 
 mod pipe;
+#[cfg(feature = "encryption")]
+mod sealed;
+// Without the `encryption` feature no stream is stored decrypted (see `crate::off`).
+#[cfg(not(feature = "encryption"))]
+#[path = "../off/sealed.rs"]
 mod sealed;
 mod sha256;
 pub use sha256::sha256;
@@ -203,6 +209,9 @@ pub struct PackStats {
     /// Encoder only: the decoded bytes the parts claim in all, what the header declares and what
     /// `UnpackOptions::max_decoded` must cover on restore (at most `PackOptions::max_decoded`).
     pub claimed: u64,
+    /// Restore only: the file has parts that need a part of the engine this build leaves out (fax or
+    /// encryption; see `left_out`), so the file can't be restored here.
+    pub needs: Option<Feature>,
 }
 
 #[derive(Debug)]
@@ -702,6 +711,16 @@ const T_CRYPT_KEY: u8 = 20;
 const T_CRYPT: u8 = 21;
 const T_END: u8 = 255;
 
+/// The part of the engine a part with this tag needs when this build leaves it out (`Cargo.toml`): such a
+/// part restores only in a build with it. (Lepton's parts have their own error, `UnpackError::NeedsExisting`.)
+fn left_out(tag: u8) -> Option<Feature> {
+    match tag {
+        T_FAX if !cfg!(feature = "fax") => Some(Feature::Fax),
+        T_CRYPT_KEY | T_CRYPT if !cfg!(feature = "encryption") => Some(Feature::Encryption),
+        _ => None,
+    }
+}
+
 fn table_bits(n: usize) -> u32 {
     // 16-byte buckets: up to 2^20 per context (16 MiB each) for large files.
     let mut b = 14;
@@ -752,12 +771,15 @@ enum Plan {
     /// An encrypted stream's decrypted bytes that nothing rebuilds (coded like a raw stream).
     Plain(Vec<u8>),
     /// The file key of an encrypted file, before its first encrypted stream.
+    #[cfg_attr(not(feature = "encryption"), allow(dead_code))]
     CryptKey(Vec<u8>),
     /// An encrypted stream's settings; the next part is its decrypted payload.
+    #[cfg_attr(not(feature = "encryption"), allow(dead_code))]
     Crypt(sealed::Sealed),
     /// A CCITT fax stream: the image and every choice of its encoder (see `crate::fax::part`), the byte of the
     /// file its data starts at (the work budget counts from there), and where its bytes are when they are
     /// stored as they are (None: an encrypted stream's decrypted bytes, see `sealed`).
+    #[cfg(feature = "fax")]
     Fax {
         parsed: Box<crate::fax::ccitt::Parsed>,
         at: usize,
@@ -942,6 +964,7 @@ pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
                 extra += 2;
             }
             Plan::Lepton { data, .. } => extra += data.len(),
+            #[cfg(feature = "fax")]
             Plan::Fax { parsed, .. } => {
                 out.extend_from_slice(&crate::fax::part::packed(&parsed.image));
                 out.extend_from_slice(&parsed.layout.trailing);
@@ -1269,6 +1292,7 @@ fn run<'d, C: Coder>(
     let mut idle = 0;
     let mut prev: Option<u8> = None;
     // Made at the first fax stream; the fax streams of a file share what it learns.
+    #[cfg(feature = "fax")]
     let mut fax_coder: Option<crate::fax::part::FaxCoder> = None;
     let mut si = 0;
     loop {
@@ -1281,6 +1305,7 @@ fn run<'d, C: Coder>(
             Some(Plan::Lepton { .. }) => T_LEPTON,
             Some(Plan::CryptKey(..)) => T_CRYPT_KEY,
             Some(Plan::Crypt(..)) => T_CRYPT,
+            #[cfg(feature = "fax")]
             Some(Plan::Fax { .. }) => T_FAX,
         });
         if io.damaged || out.len() > total_len || io.c.exhausted() || io.out_of_time() {
@@ -1299,6 +1324,14 @@ fn run<'d, C: Coder>(
             _ => sealing.is_none() && prev != Some(T_CRYPT_KEY),
         };
         if !in_order {
+            io.damaged = true;
+            break;
+        }
+        // Parts that need a part of the engine this build leaves out restore only in a build with it. A tag out
+        // of place is damage in any build, so this comes after the order; a damaged archive whose tag reads as
+        // such a part in its place can't be told from one, as with Lepton's parts.
+        if let Some(f) = left_out(tag) {
+            stats.needs = Some(f);
             io.damaged = true;
             break;
         }
@@ -1456,6 +1489,7 @@ fn run<'d, C: Coder>(
                     }
                 }
             }
+            #[cfg(feature = "fax")]
             T_FAX => {
                 let src = match cur.flatten() {
                     Some(Plan::Fax { parsed, .. }) => Some(&**parsed),
@@ -1705,6 +1739,7 @@ fn zlib_header(raw: &[u8]) -> bool {
 /// for guesses that are checked afterwards. Built once per file, when first needed.
 type ObjIndex = std::sync::OnceLock<std::collections::HashMap<(u32, u16), usize>>;
 
+#[cfg(any(feature = "fax", feature = "encryption"))]
 fn object_index(d: &[u8]) -> std::collections::HashMap<(u32, u16), usize> {
     let mut out = std::collections::HashMap::new();
     let mut from = 0;
@@ -1737,18 +1772,33 @@ fn object_index(d: &[u8]) -> std::collections::HashMap<(u32, u16), usize> {
 }
 
 /// Smallest CCITT stream coded as an image (measured on the test files: below this, plain coding wins).
+#[cfg(feature = "fax")]
 const MIN_FAX: usize = 64;
 
 /// A stream stored as it is in the file whose only filter is CCITTFaxDecode, when our CCITT decoder
 /// understands most of it: the image and the encoder's choices, checked to give the very same bytes back.
+#[cfg(feature = "fax")]
 fn fax(d: &[u8], a: usize, b: usize, objects: &ObjIndex) -> Option<Plan> {
     let dict = dict_before(d, a.checked_sub(1)?)?;
     let parsed = fax_parse(&d[a..b], dict, &file_resolver(d, objects))?;
     Some(Plan::Fax { parsed: Box::new(parsed), at: a, raw: Some((a, b)) })
 }
 
+/// Without the `fax` feature a fax stream is stored as it is.
+#[cfg(not(feature = "fax"))]
+fn fax(_d: &[u8], _a: usize, _b: usize, _objects: &ObjIndex) -> Option<Plan> {
+    None
+}
+
+/// Without the `fax` feature there are no fax parts to keep within a budget.
+#[cfg(not(feature = "fax"))]
+fn fax_budget(plans: Vec<Plan>) -> Vec<Plan> {
+    plans
+}
+
 /// Follows a reference to an object of the file by its bytes ("n g obj"), for guesses that are checked
 /// afterwards. The index is built once per file, when first needed.
+#[cfg(any(feature = "fax", feature = "encryption"))]
 fn file_resolver<'a>(d: &'a [u8], objects: &'a ObjIndex) -> impl Fn(&Obj) -> Option<Obj> + 'a {
     move |o: &Obj| match o {
         Obj::Ref(n, g) => {
@@ -1763,6 +1813,7 @@ fn file_resolver<'a>(d: &'a [u8], objects: &'a ObjIndex) -> impl Fn(&Obj) -> Opt
 /// None when it can't be stored that way. Parameters given by reference (/DecodeParms 13 0 R, /K 7 0 R) go
 /// through `resolve`; whatever it finds is only a guess to try, since the result is checked by writing the
 /// stream again. Shared by streams stored as they are and by decrypted ones (`sealed`).
+#[cfg(feature = "fax")]
 pub(super) fn fax_parse(
     raw: &[u8],
     mut dict: Dict,
@@ -1792,6 +1843,7 @@ pub(super) fn fax_parse(
 /// Keeps the fax streams of a file within the work budget the restore checks (`crate::fax::part::Work`), in
 /// file order; streams past it are coded plainly (a decrypted one as its CCITT bytes, which `prepare` has
 /// checked the image and layout give back exactly).
+#[cfg(feature = "fax")]
 fn fax_budget(mut plans: Vec<Plan>) -> Vec<Plan> {
     let mut work = crate::fax::part::Work::default();
     for p in plans.iter_mut() {
@@ -1932,6 +1984,9 @@ pub enum UnpackError {
     TimedOut,
     /// Parts made with the existing library (Lepton), which this build doesn't have.
     NeedsExisting,
+    /// Parts that need a part of the engine this build leaves out (fax or encryption), or damage that reads
+    /// as such a part in its place: only a build with the part can tell the two apart.
+    NeedsFeature(Feature),
     /// Damaged: what is in the file doesn't restore it (the detail says where it was found out).
     Damaged(&'static str),
 }
@@ -1954,6 +2009,9 @@ impl std::fmt::Display for UnpackError {
                 f,
                 "this gpress archive has parts made with the existing library (Lepton); restoring it needs a build with it"
             ),
+            UnpackError::NeedsFeature(feature) => {
+                write!(f, "this gpress archive has parts this build can't restore: {}", feature.missing())
+            }
             UnpackError::Damaged(why) => write!(f, "damaged gpress archive ({why})"),
         }
     }
@@ -2004,6 +2062,9 @@ pub fn unpack_with(a: &[u8], opt: &UnpackOptions) -> Result<Vec<u8>, UnpackError
             }
             if stats.needs_existing {
                 return Err(NeedsExisting);
+            }
+            if let Some(f) = stats.needs {
+                return Err(NeedsFeature(f));
             }
             if stats.damaged {
                 return Err(Damaged("a part doesn't restore"));

@@ -1,8 +1,12 @@
 //! Fax images in both outputs, on small PDFs made here: JBIG2 in normal PDFs only when nothing is uncertain
 //! (same pixels, every other case left alone), and the gpress archive restoring every CCITT layout exactly.
 
+// Only in a build with the fax feature (Cargo.toml, [features]).
+#![cfg(feature = "fax")]
+
 use gpress::fax::ccitt::{self, row_changes, Gap, Image, Layout, Rule, Scheme};
 use gpress::fax::jbig2;
+#[cfg(feature = "archive")]
 use gpress::pack::{pack, unpack};
 use gpress::pdf::object::Obj;
 use gpress::pdf::rewrite::{optimize, Options, Outcome};
@@ -289,6 +293,7 @@ fn stays_ccitt(d: &[u8]) -> bool {
 
 /// Rows of a "bomb": alternately white and with one black pixel, so that no row repeats the row above, at a few
 /// bits per row.
+#[cfg(feature = "archive")]
 fn bomb(w: usize, h: usize, x: u32) -> Image {
     let mut img = Image::new(w);
     for r in 0..h {
@@ -304,6 +309,7 @@ fn bomb(w: usize, h: usize, x: u32) -> Image {
 /// A few bytes of CCITT data can describe a huge image: the work of coding one is bounded by the size of its
 /// data (normal PDF) or of the file (gpress archive), so that a file's size bounds its time.
 #[test]
+#[cfg(feature = "archive")]
 fn fax_work_is_bounded_by_the_data() {
     // Normal PDF: 4096 rows of 131072 pixels from about 4.4 KB of Group 4 data stay CCITT.
     let img = bomb(131072, 4096, 10);
@@ -339,6 +345,7 @@ fn fax_work_is_bounded_by_the_data() {
 }
 
 /// A PDF made by `pdf_images` with its xref table rebuilt (after bytes were inserted before the objects).
+#[cfg(feature = "archive")]
 fn fix_xref(d: &[u8]) -> Vec<u8> {
     let at = |pat: &[u8], from: usize| d[from..].windows(pat.len()).position(|w| w == pat).map(|i| i + from);
     let xref = at(b"\nxref\n", 0).unwrap() + 1;
@@ -367,6 +374,7 @@ fn fix_xref(d: &[u8]) -> Vec<u8> {
 }
 
 /// A PDF with one page drawing several image XObjects (objects 4, 5, ...; the content stream is the last).
+#[cfg(feature = "archive")]
 fn pdf_images(images: &[(String, Vec<u8>)]) -> Vec<u8> {
     let n = images.len();
     let mut content = Vec::new();
@@ -407,6 +415,7 @@ fn pdf_images(images: &[(String, Vec<u8>)]) -> Vec<u8> {
 /// EncodedByteAlign data with the fill before each EOL, so that every EOL ends on a byte boundary (libtiff
 /// writes it so): stored as an image like any other fax stream, and restored exactly.
 #[test]
+#[cfg(feature = "archive")]
 fn archive_reads_eols_that_end_on_a_byte_boundary() {
     let img = page(613, 401);
     let mut lay = layout(&img, Scheme::G31D, true);
@@ -465,6 +474,7 @@ fn self_check_compares_fax_and_jbig2_by_pixels() {
 }
 
 #[test]
+#[cfg(feature = "archive")]
 fn archive_restores_every_fax_layout_exactly() {
     let img = page(500, 300);
     for scheme in [Scheme::G4, Scheme::G31D, Scheme::G32D] {
@@ -496,6 +506,7 @@ fn archive_restores_every_fax_layout_exactly() {
 }
 
 #[test]
+#[cfg(feature = "archive")]
 fn archive_refuses_damaged_fax_parts() {
     let img = page(300, 200);
     let d = fax_pdf(&img, Scheme::G4, "/ColorSpace /DeviceGray", "");

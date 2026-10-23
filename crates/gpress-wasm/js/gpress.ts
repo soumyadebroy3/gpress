@@ -17,6 +17,11 @@
  * error): load a fresh one. Work happens on the calling thread and there is no clock inside the module
  * (so no time budget); run it in a Web Worker to keep a page responsive and to end it when it has taken
  * too long. Inputs of 2 GiB and more are refused here, before they reach the module's 32-bit memory.
+ *
+ * The package has two modules: dist/gpress.wasm with every part of the engine, and dist/gpress-web.wasm, the
+ * web compressor's (everything optimize uses, without the archive; smaller to download). A call that needs a
+ * part the loaded module leaves out throws GpressFeatureError, whose `feature` names it ("archive" for
+ * compress and expand in the web module); `features` lists the parts a module has.
  */
 
 export type Outcome = "smaller" | "untouched";
@@ -87,6 +92,21 @@ export class GpressError extends Error {
   static readonly DECLARED_TOO_LARGE = 7;
   static readonly NEEDS_EXISTING_LIBRARY = 8;
   static readonly DECODED_TOO_LARGE = 9;
+  static readonly NEEDS_FEATURE = 10;
+}
+
+/** A part of the engine a module may leave out, named as its Cargo feature. */
+export type Feature = "archive" | "jpeg" | "fax" | "encryption" | "existing";
+
+/** The parts in the order of their bits in the module (archive 1, jpeg 2, fax 4, encryption 8, existing 16). */
+const FEATURES: readonly Feature[] = ["archive", "jpeg", "fax", "encryption", "existing"];
+
+/** The call needs a part of the engine the loaded module leaves out (code NEEDS_FEATURE): `feature` names it. */
+export class GpressFeatureError extends GpressError {
+  constructor(public readonly feature: Feature, message: string) {
+    super(GpressError.NEEDS_FEATURE, message);
+    this.name = "GpressFeatureError";
+  }
 }
 
 /** Largest input the 32-bit module takes: under 2 GiB. */
@@ -116,6 +136,8 @@ interface Exports {
   gpress_clear_out(): void;
   gpress_version_number(): number;
   gpress_archive_version(): number;
+  gpress_features(): number;
+  gpress_needed_feature(): number;
 }
 
 /** Where the module comes from: a fetch() Response, bytes, a compiled Module, a URL, or (in Node) a file path. */
@@ -180,9 +202,15 @@ export class Gpress {
     return `${Math.floor(n / 1_000_000)}.${Math.floor(n / 1000) % 1000}.${n % 1000}`;
   }
 
-  /** The archive format version the module writes and reads. */
+  /** The archive format version the module writes and reads, 0 for a module without the archive. */
   get archiveVersion(): number {
     return this.ex.gpress_archive_version();
+  }
+
+  /** The parts of the engine the module has ("archive" is missing from the web module). */
+  get features(): Feature[] {
+    const bits = this.ex.gpress_features();
+    return FEATURES.filter((_, i) => (bits >>> i) & 1);
   }
 
   /** A smaller PDF that any reader opens, every object's value preserved; or the input untouched. */
@@ -231,6 +259,11 @@ export class Gpress {
         throw this.dead;
       }
       const message = this.message();
+      if (code === GpressError.NEEDS_FEATURE) {
+        const bit = this.ex.gpress_needed_feature();
+        const feature = FEATURES.find((_, i) => bit === 1 << i);
+        if (feature) throw new GpressFeatureError(feature, message || `the module leaves out the ${feature} feature`);
+      }
       if (code !== 0) throw new GpressError(code, message || `gpress error ${code}`);
       // Copy out: the module reuses its result buffer on the next call.
       const data = new Uint8Array(this.ex.memory.buffer, this.ex.gpress_out_ptr(), this.ex.gpress_out_len()).slice();

@@ -35,8 +35,13 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
 
 use crate::clock::Deadline;
+#[cfg(feature = "archive")]
 use crate::pack;
+// Without the archive: its format's constants, which the options and `is_archive` use in every build.
+#[cfg(not(feature = "archive"))]
+use crate::off::pack;
 use crate::pdf::rewrite;
+use crate::Feature;
 
 /// Library version, from Cargo.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -314,6 +319,7 @@ impl Options {
     }
 
     /// The archive settings these options mean.
+    #[cfg(feature = "archive")]
     pub fn pack(&self) -> pack::PackOptions {
         pack::PackOptions {
             effort: self.effort.level(),
@@ -327,6 +333,7 @@ impl Options {
     }
 
     /// The expand settings these options mean.
+    #[cfg(feature = "archive")]
     pub fn unpack(&self) -> pack::UnpackOptions {
         pack::UnpackOptions { max_len: self.max_len, max_decoded: self.max_decoded, deadline: self.deadline() }
     }
@@ -355,6 +362,13 @@ pub enum Error {
     /// Expand: the archive's parts claim more decoded bytes in all than `Options::max_decoded`. Nothing was
     /// decoded.
     DecodedTooLarge { declared: u64, limit: u64 },
+    /// The call needs a part of the engine this build leaves out (a Cargo feature): `compress` and `expand`
+    /// without the archive, or `expand` of an archive with parts that need fax or encryption. Nothing was
+    /// done. A damaged archive whose damage reads as such a part gives it too: only a build with the part can
+    /// tell the two apart (as with `NeedsExistingLibrary`, which an archive with Lepton's parts gives).
+    /// (`optimize` skips a step whose feature is left out, and leaves an encrypted file untouched without
+    /// `encryption`.)
+    NeedsFeature(Feature),
 }
 
 impl std::fmt::Display for Error {
@@ -378,6 +392,7 @@ impl std::fmt::Display for Error {
             Error::DecodedTooLarge { declared, limit } => {
                 write!(f, "the archive's parts claim {declared} decoded bytes, more than the limit of {limit}")
             }
+            Error::NeedsFeature(feature) => f.write_str(&feature.missing()),
         }
     }
 }
@@ -397,6 +412,7 @@ impl Error {
             Error::DeclaredTooLarge { .. } => 7,
             Error::NeedsExistingLibrary => 8,
             Error::DecodedTooLarge { .. } => 9,
+            Error::NeedsFeature(_) => 10,
         }
     }
 }
@@ -516,6 +532,7 @@ pub fn optimize(input: &[u8], opt: &Options) -> Result<Optimized, Error> {
 
 /// The gpress archive: any file (a PDF gains the most), restored byte for byte by [`expand`]. Every
 /// archive is expanded and compared before it is returned.
+#[cfg(feature = "archive")]
 pub fn compress(input: &[u8], opt: &Options) -> Result<Compressed, Error> {
     check(input, opt)?;
     guard("compress", || {
@@ -542,6 +559,7 @@ pub fn compress(input: &[u8], opt: &Options) -> Result<Compressed, Error> {
 /// The original bytes from an archive. A damaged archive is an error, never a wrong file: the length and
 /// a 128-bit hash of the restored bytes are checked against the header. An archive declaring more than
 /// `Options::max_len` is refused before anything is decoded.
+#[cfg(feature = "archive")]
 pub fn expand(archive: &[u8], opt: &Options) -> Result<Vec<u8>, Error> {
     check(archive, opt)?;
     guard("expand", || {
@@ -550,10 +568,27 @@ pub fn expand(archive: &[u8], opt: &Options) -> Result<Vec<u8>, Error> {
             pack::UnpackError::TooLong { declared, limit } => Error::DeclaredTooLarge { declared, limit },
             pack::UnpackError::TooMuchDecoded { declared, limit } => Error::DecodedTooLarge { declared, limit },
             pack::UnpackError::NeedsExisting => Error::NeedsExistingLibrary,
+            pack::UnpackError::NeedsFeature(f) => Error::NeedsFeature(f),
             pack::UnpackError::TimedOut => Error::TimeBudget(opt.time_budget.unwrap_or_default()),
             other => Error::Damaged(other.to_string()),
         })
     })
+}
+
+/// Without the `archive` feature: the options and the input are checked as always, then
+/// [`Error::NeedsFeature`].
+#[cfg(not(feature = "archive"))]
+pub fn compress(input: &[u8], opt: &Options) -> Result<Compressed, Error> {
+    check(input, opt)?;
+    Err(Error::NeedsFeature(Feature::Archive))
+}
+
+/// Without the `archive` feature: the options and the input are checked as always, then
+/// [`Error::NeedsFeature`].
+#[cfg(not(feature = "archive"))]
+pub fn expand(archive: &[u8], opt: &Options) -> Result<Vec<u8>, Error> {
+    check(archive, opt)?;
+    Err(Error::NeedsFeature(Feature::Archive))
 }
 
 /// True when the bytes start like a gpress archive (cheap; no decoding).
@@ -594,6 +629,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "archive")]
     fn anything_round_trips_and_garbage_is_refused() {
         let opt = Options::default();
         for input in [b"".to_vec(), b"%PDF-1.7\n%%EOF".to_vec(), (0..3000u32).map(|i| (i * 7919 % 251) as u8).collect()]
@@ -622,9 +658,10 @@ mod tests {
             Error::DeclaredTooLarge { declared: 2, limit: 1 },
             Error::NeedsExistingLibrary,
             Error::DecodedTooLarge { declared: 2, limit: 1 },
+            Error::NeedsFeature(Feature::Archive),
         ];
         let codes: Vec<i32> = errors.iter().map(Error::code).collect();
-        assert_eq!(codes, (1..=9).collect::<Vec<i32>>());
+        assert_eq!(codes, (1..=10).collect::<Vec<i32>>());
         for e in &errors {
             let m = e.to_string();
             assert!(!m.is_empty() && !m.contains("src/") && !m.contains(".rs:"), "{m}");
@@ -678,13 +715,16 @@ mod tests {
         assert_eq!((r.effort, r.threads, r.store_budget, r.max_stream, r.objstm_size), (40, 3, 4096, 1000, 7));
         assert!(!r.respect_conformance && !r.flate_over_jpeg && !r.jpeg_tables && !r.jbig2 && !r.rewrite_encrypted);
         assert!(r.deadline.is_set() && r.flate.deadline == Deadline::NONE, "the pool sets the Flate deadline");
-        let p = opt.pack();
-        assert_eq!((p.effort, p.threads, p.max_stream, p.max_decoded), (40, 3, 2000, 2500));
-        assert!(!p.decrypt && !p.existing && p.deadline.is_set());
-        let u = opt.unpack();
-        assert_eq!((u.max_len, u.max_decoded), (3000, 2500));
-        assert!(u.deadline.is_set() && !Options::default().unpack().deadline.is_set());
         assert!(!Options::default().rewrite().deadline.is_set());
-        assert_eq!(Options::default().pack().existing, Options::has_existing_libraries());
+        #[cfg(feature = "archive")]
+        {
+            let p = opt.pack();
+            assert_eq!((p.effort, p.threads, p.max_stream, p.max_decoded), (40, 3, 2000, 2500));
+            assert!(!p.decrypt && !p.existing && p.deadline.is_set());
+            let u = opt.unpack();
+            assert_eq!((u.max_len, u.max_decoded), (3000, 2500));
+            assert!(u.deadline.is_set() && !Options::default().unpack().deadline.is_set());
+            assert_eq!(Options::default().pack().existing, Options::has_existing_libraries());
+        }
     }
 }

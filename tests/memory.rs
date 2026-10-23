@@ -3,7 +3,9 @@
 //! outputs up to a budget, dropped with the file). The allocator below counts the bytes in use, so this file
 //! holds a single test.
 
-use gpress::flate::zlibexact::{zlib_stream, Params};
+#[path = "common/flate.rs"]
+mod flate;
+
 use gpress::pdf::rewrite::{optimize, Options, Outcome};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -55,7 +57,7 @@ fn peak_during(f: impl FnOnce()) -> usize {
 }
 
 /// A page with `k` different photo-like RGB images (a gradient plus noise, so Flate shrinks them only a
-/// little), stored with zlib level 1.
+/// little), stored with zlib level 1 (in stored blocks in a build without the archive, see `flate`).
 fn pdf_with_images(k: usize, w: usize, h: usize) -> Vec<u8> {
     let mut objs: Vec<Vec<u8>> =
         vec![b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(), b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()];
@@ -69,7 +71,7 @@ fn pdf_with_images(k: usize, w: usize, h: usize) -> Vec<u8> {
         o.extend_from_slice(b"\nendstream");
         o
     };
-    let z = |d: &[u8]| zlib_stream(d, Params { level: 1, window_bits: 15, mem_level: 8, filtered: false });
+    let z = |d: &[u8]| flate::zlib(d, 1);
     objs.push(stream("/Filter /FlateDecode", &z(content.as_bytes())));
     let mut s = 0x9E37_79B9_7F4A_7C15u64;
     for i in 0..k {
