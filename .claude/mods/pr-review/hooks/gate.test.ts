@@ -206,9 +206,9 @@ test('/review-pr sends the protocol to the model by itself', async ($, on) => {
   await clock.advance(10)
   expect(sent.join('')).toContain('Review gpress pull request #12')
   expect(sent.join('')).toContain('gpress-review: PASS <head sha>')
-  expect(sent.join('')).toContain('leave the merge to the owner')
+  expect(sent.join('')).toContain('owner to merge: an outside pull request')
   expect(sent.join('')).toContain('gpress/pulls/12 ')
-  expect(sent.join('')).not.toContain('#12 --')
+  expect(sent.join('')).not.toMatch(/`gh [^`]*#12/)
 })
 
 test('the rule goes in the main prompt, not a subagent', async ($, on) => {
