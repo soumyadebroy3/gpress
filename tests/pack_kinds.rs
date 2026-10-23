@@ -168,21 +168,22 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// The archives' SHA-256, measured before the encoder stopped building its restored copy: (document, effort,
-/// hash), for a build without and with the existing library.
+/// The archives' SHA-256 as format version 9 first wrote them (version 8's held from before the encoder
+/// stopped building its restored copy): (document, effort, hash), for a build without and with the existing
+/// library.
 #[cfg(all(feature = "fax", feature = "encryption"))]
 const PINNED: [(&str, u8, &str); 4] = [
-    ("every kind", 100, "d681059e102278ccbc783738c4323d2b8ab501d40629241ad6d43c88388b6f31"),
-    ("every kind", 0, "ef468383de3cf2ff3f5ff91d3fa4f8da88ba95890e51cfeb105e2cb76906f6e2"),
-    ("encrypted RC4", 100, "24391f712443cd366bb346271b899cccb2504154873eb7c758c0d98fd27e42b4"),
-    ("encrypted AES", 100, "33942533ff293ae637209b657b9ebd4d0d632954a2c78acf39cccd2dd207a707"),
+    ("every kind", 100, "a597ee7d45ac7d1293cfeae8355ca4e155f61cc175f480e06840b22a2cdfb1f2"),
+    ("every kind", 0, "45a8a5e19dcc83a166386aa4c66b79b1646eb28804e297adab9831fc6f5fa6d6"),
+    ("encrypted RC4", 100, "27d5ff3f4b887912399e247e4cf84ec0adcb1dba538f4fda3b11c47e2e549201"),
+    ("encrypted AES", 100, "e401c9add2299a3040dd278227473f267856867a84883c92436a39b7b0ef0ece"),
 ];
 #[cfg(all(feature = "fax", feature = "encryption"))]
 const PINNED_EXISTING: [(&str, u8, &str); 4] = [
-    ("every kind", 100, "9a63213f5bb64ea7536220b62b446ffcf347d35cea936c56074c1f3888cad54a"),
-    ("every kind", 0, "b67813c4f7a1bb10e99d9f12c6d4325b8a0b37bc48991fe8eda5249b31355e55"),
-    ("encrypted RC4", 100, "86e897de0fca1345754213355bda60317cf6b40f5b01b9b5b818f0d0c292ece5"),
-    ("encrypted AES", 100, "ab0454759ee6ccb52841ad937a1b6c0087bb3e2cdba56297f4790754e073e192"),
+    ("every kind", 100, "bee400708657889f173d3c5582695695c24898697c971626a1f64ca2b5b3731c"),
+    ("every kind", 0, "9cdf819b2ad260595b16ad21c2b2c7bc9b8c43eaf398c73d3375a405b6e16b4f"),
+    ("encrypted RC4", 100, "695c4fd91d12ff492e93ee798bce5a97c7f74dba79918f84a6e260e900137450"),
+    ("encrypted AES", 100, "edd621f69b24de30368c3d1b412c0da3b43f19a03212d5fc16d521400ad5df6c"),
 ];
 
 #[test]
@@ -248,11 +249,11 @@ fn stream_objects(objs: &[(String, Vec<u8>)]) -> Vec<u8> {
     d
 }
 
-/// Measured before the encoder took rebuilt streams in pieces (the same with or without the existing
-/// library): (effort, hash).
+/// As format version 9 first wrote them (version 8's held from before the encoder took rebuilt streams in
+/// pieces), the same with or without the existing library: (effort, hash).
 const PINNED_IMAGES: [(u8, &str); 2] = [
-    (100, "12cce703a3eece9c07d3fb58f1ded7bc9b43bf41d934112cbb2b340aea8d5a05"),
-    (0, "12cce703a3eece9c07d3fb58f1ded7bc9b43bf41d934112cbb2b340aea8d5a05"),
+    (100, "3c279949f4bbd23d6664b1e311b7b91c4d1d464a98fdd7f51060e95f94294241"),
+    (0, "3c279949f4bbd23d6664b1e311b7b91c4d1d464a98fdd7f51060e95f94294241"),
 ];
 
 #[test]
@@ -279,8 +280,9 @@ fn png_batches() -> Vec<u8> {
     stream_objects(&objs)
 }
 
-/// Measured before the encoder coded PNG rows in batches, and the same with base-bin-199.
-const PINNED_BATCHES: &str = "bf6cadb326a3d76cd4cffd3df11576e26e68cebf785da99de8a02b6876a83829";
+/// As format version 9 first wrote it (version 8's held from before the encoder coded PNG rows in batches, and
+/// was the same with base-bin-199).
+const PINNED_BATCHES: &str = "af0e606f45f36a1427cc8f0ee2e70a5ea7a55fe4cdd0743f11c737cdde776789";
 
 #[test]
 fn png_rows_coded_in_batches_pack_to_the_pinned_bytes() {

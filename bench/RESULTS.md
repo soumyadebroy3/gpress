@@ -395,6 +395,33 @@ the engine rewrites.
 - Calibration is the CPU time of `xz -9e` on 4 MiB of fixed text, the smallest of three, taken at the start of
   each run (section 6).
 
+## Archive format version 9
+
+The model's logistic tables (squash and stretch) and its adaptive probability maps were written again from
+their formulas, by implementers kept from the PAQ code the earlier ones followed, so the coded bytes changed
+and the archive format went from version 8 to 9 (`src/cm/mod.rs`). `bench/benchmark.py time` on
+`--set sample120-size30` (30 files, 19,942,458 bytes), `--modes archive --threads 1`, version 8 built from
+87b5d80 (the archive code of 74114cf) against version 9:
+
+| Effort | Version 8 | Version 9 | Change |
+| ---: | ---: | ---: | ---: |
+| 0 | 13,534,508 | 13,519,969 | -0.107% |
+| 100 | 12,964,725 | 12,946,411 | -0.141% |
+
+- Every archive restored byte for byte. One file grew, at both efforts: ocrmypdf's
+  `tests__resources__2400dpi.pdf`, 73,708 to 73,801 bytes (+93, +0.13%). The largest saving was pdf.js's
+  `issue6286.pdf`, 1,589,127 to 1,580,606 bytes.
+- Of the other designs measured on the same files, steps of 1/32 or 1/128 instead of 1/64, or the same ends
+  with steps rounded from a half, gave larger totals over the two efforts. Maps stepping toward 0 and 65535,
+  rounded from a half and with their output clamped to 1 to 4095, came out 8 and 11 bytes smaller; the ends used
+  (16 and 65520) keep the output in that range with no clamp.
+- CPU: two runs of each, alternating, on a 4-core cloud machine with other work on it (calibration 3.82 to
+  4.26 s): version 9 took 62.3 and 64.7 s at effort 0 against 61.3 and 63.6 s, and 109.0 and 115.3 s at
+  effort 100 against 109.3 and 112.6 s, within the 3 to 6% that two runs of one build differ by.
+- The normal PDF is unchanged: the MQ decoder, written again from T.88 Annex E.3, reads back what the engine
+  writes as before, and the 19 corpus files with CCITT images give the same outputs at efforts 0 and 100.
+- The whole-set archive figure in section 3 is from earlier builds and was not measured again.
+
 ## Lightweight
 
 The download and the start-up are part of the time a person waits (`docs/tasks/lightweight.md`). Measured on

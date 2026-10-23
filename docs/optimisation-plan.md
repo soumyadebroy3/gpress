@@ -618,7 +618,7 @@ arrays with masked indices, the ten contexts' state lookups unrolled, the mixer 
 halves, or a plain loop on `[i32; 16]` that the compiler vectorises; the sums are integer, so the result
 is bit-identical, including on WebAssembly without SIMD). Expected: 1.4 to 1.7x on the model = 30 to 40%
 of every pack and unpack. Memory: none. Format: none (same arithmetic). Proof: the format fixture
-(`tests/pack_format.rs` with `tests/data/format-v8.*`) and `compare` on the archive outputs (identical bytes).
+(`tests/pack_format.rs` with `tests/data/format-v9.*`) and `compare` on the archive outputs (identical bytes).
 
 **D2. Prefetch the next nibble's buckets (pure).** At the nibble boundary the ten slots are computed and
 read at once; issue prefetches for all ten before the first prediction, and compute the next byte's

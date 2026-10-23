@@ -6,7 +6,7 @@
 //!
 //! The engine is part of this crate: Flate encoder and decoder, zlib re-creation, PDF reader and writer, JPEG
 //! Huffman tables, CCITT and JBIG2 fax coding, Type 1 font opening, and the context-mixing model. Most of it
-//! is our own code; the parts that follow another project's code (zlib, libdeflate, pdf.js, the LZMA SDK)
+//! is our own code; the parts that follow another project's code (zlib, libdeflate, the LZMA SDK)
 //! say so and keep its licence notice. Encrypted PDFs use RustCrypto's AES, MD5 and SHA-2. The optional
 //! existing library (feature `existing`, Lepton for JPEG streams) adds a candidate the engine keeps only when
 //! it is smaller and verified. See `docs/reference.md` ("Code from other projects", "Existing library").
