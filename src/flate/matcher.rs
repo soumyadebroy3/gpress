@@ -135,6 +135,8 @@ pub fn find_matches_keeping_all(data: &[u8], from: usize, to: usize, max_depth: 
     search::<true>(data, from, to, max_depth, true)
 }
 
+// The tree's insertion and search follow LzFind.c's GetMatchesSpec1 (Igor Pavlov's LZMA SDK, public domain);
+// fast.rs's Tree::walk does too.
 fn search<const ALT: bool>(data: &[u8], from: usize, to: usize, max_depth: usize, keep_all: bool) -> Matches {
     const NIL: u32 = u32::MAX;
     let hist = from.saturating_sub(WINDOW);

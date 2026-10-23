@@ -165,6 +165,11 @@ impl Default for MqEncoder {
     }
 }
 
+// The MQ decoder below (`MqDecoder`, to the end of its `impl`) is a Rust translation of ArithmeticDecoder in
+// pdf.js (src/core/arithmetic_decoder.js), Copyright 2012 Mozilla Foundation, licensed under the Apache
+// License, Version 2.0 (LICENSE-APACHE). Changed by the gpress authors: written in Rust, and it reads 0xFF
+// past the end of the data.
+
 /// The MQ decoder (T.88 E.3, with the code register split in two halves).
 pub struct MqDecoder<'a> {
     data: &'a [u8],

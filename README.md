@@ -16,9 +16,10 @@ tool. It makes two kinds of output, and checks each one before returning it:
   context-mixing model and restored byte for byte. Every archive is restored and checked before it is
   returned, and a damaged archive is refused with an error, never restored wrongly.
 
-The engine is our own code, apart from the archive's re-creation of zlib's deflate, which follows zlib's own
-code and keeps its licence notice (`src/flate/zlibexact.rs`). A default build's only outside libraries are
-RustCrypto's AES, MD5 and SHA-2, for encrypted PDFs.
+Most of the engine is our own code; the parts that follow another project's code (zlib, libdeflate, pdf.js,
+the LZMA SDK) say so and keep its licence notice, as listed in
+[Code from other projects](docs/reference.md#code-from-other-projects). A default build's only outside
+libraries are RustCrypto's AES, MD5 and SHA-2, for encrypted PDFs.
 
 ## Status
 
@@ -328,8 +329,8 @@ gpress is licensed under either of
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
 - MIT licence ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
 
-at your option. `src/flate/zlibexact.rs` is an altered version of zlib's code and also carries zlib's own
-licence notice, which it must keep.
+at your option. The files listed in [Code from other projects](docs/reference.md#code-from-other-projects)
+also carry the licence notices of the projects they follow, which apply to those parts too and must be kept.
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in gpress by
 you, as defined in the Apache-2.0 licence, shall be dual licensed as above, without any additional terms or

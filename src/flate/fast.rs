@@ -23,6 +23,30 @@
 //! Memory per segment in flight: the match finder's tables (at most 640 KiB), the symbols of one block (at
 //! most 1.3 MB), for levels 8 to 12 the candidate matches and the parse arrays of one block (at most 8 MB),
 //! and the segment's output.
+//!
+//! Several parts are adapted from libdeflate's compressor (lib/deflate_compress.c, hc_matchfinder.h,
+//! bt_matchfinder.h and matchfinder_common.h), rewritten in Rust with their constants tuned again: the
+//! statistics that end a block, the hash-chain search, the lazy-match gain, the symbol costs taken from a
+//! block's codes, the cheapest-path parse, and the pass that gathers statistics and skips past a long
+//! match. The segments, the threads and the bit splicing are ours. libdeflate's licence:
+//!
+//! Copyright 2016 Eric Biggers
+//! Copyright 2024 Google LLC
+//!
+//! Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+//! associated documentation files (the "Software"), to deal in the Software without restriction, including
+//! without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//! copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the
+//! following conditions:
+//!
+//! The above copyright notice and this permission notice shall be included in all copies or substantial
+//! portions of the Software.
+//!
+//! THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+//! LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
+//! EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+//! IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR
+//! THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 use super::bits::BitWriter;
 use super::block::{
