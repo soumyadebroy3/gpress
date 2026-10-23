@@ -8,6 +8,7 @@
 #![cfg(feature = "archive")]
 
 use gpress::flate::zlibexact::{zlib_stream, Params};
+#[cfg(feature = "encryption")]
 use gpress::pack::{pack_with, unpack, PackOptions};
 use gpress::pdf::object::Obj;
 use gpress::pdf::rewrite::{optimize, Optimized, Options, Outcome};
@@ -563,6 +564,7 @@ fn our_own_object_streams_are_read_back_whatever_max_stream() {
 }
 
 #[test]
+#[cfg(feature = "encryption")]
 fn encrypted_files_with_object_streams_read_them_again_once_the_key_is_known() {
     let file = |name: &str| std::fs::read(format!("{}/tests/data/enc/{name}.pdf", env!("CARGO_MANIFEST_DIR"))).unwrap();
     // Metadata left unencrypted: the catalog is read while the file is opened, before its key is complete, and
