@@ -206,7 +206,7 @@ jobs:
       # A pinned release, checked against the Go checksum database by `go install`.
       - run: |
           go install github.com/zricethezav/gitleaks/v8@v8.30.1
-          "$(go env GOPATH)/bin/gitleaks" git --redact --no-banner --log-opts=--all .
+          "$(go env GOPATH)/bin/gitleaks" git --redact --no-banner -v --log-opts=--all .
 
   workflows:
     name: Workflow security (zizmor)
@@ -216,14 +216,13 @@ jobs:
         with:
           persist-credentials: false
       # The workflows and dependabot.yml: unpinned actions, injection through ${{ }} in scripts, credentials left
-      # in the checkout, over-broad token permissions and the rest of zizmor's audits. The token (read-only, as
-      # everywhere here) lets it also check that every pinned commit belongs to the action it names.
-      - env:
-          GH_TOKEN: ${{ github.token }}
-        run: pipx run --spec zizmor==1.31.1 zizmor .github
+      # in the checkout, over-broad token permissions and the rest of zizmor's offline audits. The online ones are
+      # left out: they would fail this check whenever an action moves a tag such as dtolnay/rust-toolchain's v1,
+      # with nothing changed here.
+      - run: pipx run --spec zizmor==1.31.1 zizmor --offline .github
 
-  # The one check the main branch requires: it passes only when every job above passed, so a job added above
-  # is required as soon as it is listed here.
+  # The check the main branch requires of this workflow (CodeQL's are required on their own): it passes only when
+  # every job above passed, so a job added above is required as soon as it is listed here.
   all:
     name: All checks passed
     if: ${{ always() }}

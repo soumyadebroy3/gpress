@@ -2,6 +2,9 @@
 
 ## Commits
 
+This section is for the owner's own sessions, working for soumyadebroy3. If you work for anyone else, commit as
+the person you work for and skip the rest of it.
+
 Every commit you make is authored and committed as the owner:
 
 ```sh
