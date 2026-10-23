@@ -1,5 +1,5 @@
-//! Flate (Deflate + zlib wrapper): the decoder and the encoders. Parts follow zlib and libdeflate, as each
-//! file says.
+//! Flate (Deflate + zlib wrapper): the decoder and the encoders. Parts follow zlib, libdeflate and the LZMA
+//! SDK, as each file says.
 
 pub mod bits;
 pub mod block;

@@ -362,6 +362,39 @@ NEW has not measured every file of BASE (an unfinished run compares only the fil
 `--scale`) and checks they are caught. Measuring a new build is `benchmark.py time RUN --set all --who ours`;
 `report RUN --with all907-speed-ca8fa92` and `compare` take the competitors from the stored rows.
 
+## Effort levels
+
+The README's effort table: two runs of `bench/benchmark.py time` on the 120-file sample, normal PDF, one
+thread. CPU time is summed over the files; output is the total size as a share of the input on the 90 files
+the engine rewrites.
+
+| Effort | CPU s, first measured | CPU s, current code | Output |
+| ---: | ---: | ---: | ---: |
+| 0 | 16.1 | 16.8 | 87.02% |
+| 5 | 23.0 | | 86.70% |
+| 10 | 40.7 | | 86.11% |
+| 15 | 111.2 | | 85.74% |
+| 19 | 183.2 | | 85.59% |
+| 20 | 243.8 | | 85.43% |
+| 50 | 333.8 | 175.7 | 85.17% |
+| 100 | 983.1 | 511.7 | 85.01% |
+| qpdf 11.9.0, strongest lossless setting | 25.3 | | 87.23% |
+
+- First measured in October 2026 for the change that added the fast path (#1), on a 4-core 2.1 GHz Xeon cloud
+  machine. Efforts 0 to 19 are commit 52a91f0; 20, 50 and 100 are 20f8e69 (at effort 20 its 120 outputs are
+  52a91f0's byte for byte). Calibration: 2.675 s (efforts 0, 5 and 10), 2.674 s (15 and 19), 2.870, 2.819 and
+  2.845 s (20, 50 and 100). Before that change, effort 0 took 195.5 s (main 066b65e, calibration 2.972 s).
+  qpdf's 87.23% counts the 85 outputs `verify_pdf.py` finds the same as their input apart from the trailer's
+  /ID, and the other 5 files at their input size.
+- The current code measured again in October 2026 at efforts 0, 50 and 100 only: the lightweight change (#15)
+  merged with main c8e9f1a, the code of main 37bd3f3, on a 4-core cloud machine, with c8e9f1a timed beside it
+  on another core and other work on the other two. Calibration 3.315 s, about 1.2 times the first run's, so
+  the two columns compare only roughly; c8e9f1a, timed beside it (calibration 3.169 s), took 16.6, 178.9 and
+  512.0 s. The outputs total the first run's bytes exactly at each effort (71,470,799, 70,493,915 and
+  70,408,873), and the 120 outputs are byte-identical to c8e9f1a's.
+- Calibration is the CPU time of `xz -9e` on 4 MiB of fixed text, the smallest of three, taken at the start of
+  each run (section 6).
+
 ## Lightweight
 
 The download and the start-up are part of the time a person waits (`docs/tasks/lightweight.md`). Measured on

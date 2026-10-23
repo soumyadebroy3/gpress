@@ -8,7 +8,7 @@ Lossless PDF compression as a library, written in Rust, with C and WebAssembly b
 tool. It makes two kinds of output, and checks each one before returning it:
 
 - **Normal PDF** (`optimize`): a smaller PDF that any PDF reader opens, with every object's value preserved.
-  Streams are compressed again with our own Flate encoder, images get a better PNG predictor, JPEGs get
+  Streams are compressed again with gpress's Flate encoders, images get a better PNG predictor, JPEGs get
   optimal Huffman tables (the same coefficients), CCITT fax images become JBIG2 (the same pixels), and objects
   go into compressed object streams. The output is read back and compared with the input before it is
   returned; anything uncertain is left as it was.
@@ -19,7 +19,8 @@ tool. It makes two kinds of output, and checks each one before returning it:
 Most of the engine is our own code; the parts that follow another project's code (zlib, libdeflate, pdf.js,
 the LZMA SDK) say so and keep its licence notice, as listed in
 [Code from other projects](docs/reference.md#code-from-other-projects). A default build's only outside
-libraries are RustCrypto's AES, MD5 and SHA-2, for encrypted PDFs.
+libraries are RustCrypto's AES, MD5 and SHA-2, for encrypted PDFs, and the small crates they use (typenum,
+cfg-if, and libc on some targets), all MIT OR Apache-2.0.
 
 ## Status
 
@@ -133,9 +134,11 @@ slowest, the largest and random files) on one thread; output is the total size a
 input apart from the trailer's /ID, and the other 5 files at their input size. The first measurement was made
 in October 2026 for the change that added the fast path, on a 4-core 2.1 GHz Xeon virtual machine. Later
 changes made efforts 20, 50 and 100 faster without changing a byte of their output, and the current code was
-measured again at efforts 0, 50 and 100 on the same kind of machine (with another build timed beside it), its
-outputs byte for byte the same; the other levels were not measured again. In the archive, data that already
-looks compressed is coded plainly below effort 50. The [reference](docs/reference.md#options) has the details.
+measured again at efforts 0, 50 and 100, its outputs the same size to the byte, on a machine about 1.2 times
+slower by the benchmark's calibration, so the two columns compare only roughly; the other levels were not
+measured again. Both runs, with their builds and calibrations, are in
+[bench/RESULTS.md](bench/RESULTS.md#effort-levels). In the archive, data that already looks compressed is
+coded plainly below effort 50. The [reference](docs/reference.md#options) has the details.
 
 ## Using it from code
 
@@ -199,7 +202,8 @@ means its default).
 ```ts
 import { Gpress } from "./dist/gpress.js";                         // built in crates/gpress-wasm/js; not on npm yet
 const g = await Gpress.load(fetch("/gpress.wasm"));                 // or gpress-web.wasm: no archive, smaller
-// In Node, pass a path instead: await Gpress.load("dist/gpress.wasm")
+// In Node, pass a file URL (or a path from the working directory) instead:
+// await Gpress.load(new URL("./dist/gpress.wasm", import.meta.url))
 const smaller = g.optimize(bytes, { effort: 70, jbig2: false });   // { data, outcome, reason? }
 const archive = g.compress(bytes);
 const original = g.expand(archive.data, { maxLenMiB: 512 });       // throws GpressError on a damaged archive

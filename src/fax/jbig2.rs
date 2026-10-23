@@ -166,8 +166,9 @@ impl Default for MqEncoder {
 }
 
 // The MQ decoder below (`MqDecoder`, to the end of its `impl`) is a Rust translation of ArithmeticDecoder in
-// pdf.js (src/core/arithmetic_decoder.js). Changed by the gpress authors: written in Rust, and it reads 0xFF
-// past the end of the data. The Apache License's text is in LICENSE-APACHE. pdf.js's notice:
+// pdf.js (src/core/arithmetic_decoder.js, as in pdf.js v5.6.205, the last release with that file). Changed by
+// the gpress authors: written in Rust, and it reads 0xFF past the end of the data. The Apache License's text
+// is in LICENSE-APACHE. pdf.js's notice:
 //
 // Copyright 2012 Mozilla Foundation
 //
