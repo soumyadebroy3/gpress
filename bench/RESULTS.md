@@ -366,11 +366,12 @@ NEW has not measured every file of BASE (an unfinished run compares only the fil
 
 The download and the start-up are part of the time a person waits (`docs/tasks/lightweight.md`). Measured on
 a 4-core cloud machine in October 2026 with Rust 1.99.1 (the compiler CI uses), binaryen's wasm-opt 108 and
-Node 22: the sizes on main at dcd8a8b with PR #8 and this work, in CI's image (Ubuntu 24.04, x86_64); the
-choice of the module's build and its start-up on main at d093ab4 (the fast tier, #1, and the Flate parse, #9)
-with PR #8; the memory on main at dcd8a8b with PR #8 and this work. Main's later changes, the archive model
-(#3) and the decode limit (#12), add code to the module; on the optimize path that the speeds and start-up
-measure, #3 changes nothing and #12 only a few limit checks.
+Node 22: the sizes and the memory on this work merged with main at c8e9f1a (main with the Flate fixed costs,
+#2, the object-stream fix, #13, and the pure gains, #14), in an Ubuntu 24.04 x86_64 container like CI's image
+(built from #14's 8e6a108 and this work merged with it: their code is c8e9f1a's but for comments);
+the choice of the module's build and its start-up on main at d093ab4 (the fast tier, #1, and the Flate parse,
+#9) with PR #8. Main's later changes add code to the module (Sizes, below); the start-up is measured again by
+CI on every push (Start-up, below).
 
 ### Sizes
 
@@ -382,43 +383,45 @@ is built with `--no-default-features`, so that it is exactly what is named: "def
 part of the engine (`archive`, `jpeg`, `fax` and `encryption`); "web" is the web module's set, every part but
 the archive; "existing" is the archive and Lepton and nothing else; "default,existing" is every part and
 Lepton, which is what "existing" built before the parts were features. "Before" is the same build without
-this work (PR #8 on main at dcd8a8b), where the engine had no parts and "existing" was every part and Lepton,
-so its sizes are the "Before" of "default,existing".
+this work (main at c8e9f1a), where the engine had no parts and "existing" was every part and Lepton, so its
+sizes are the "Before" of "default,existing".
 
 | Build | Feature set | Raw bytes | Gzip bytes | Before: raw, gzip | Gzip change |
 | --- | --- | ---: | ---: | ---: | ---: |
-| WebAssembly module | web | 613,209 | 229,312 | | |
-| WebAssembly module | default | 938,444 | 343,709 | 928,095, 339,845 | +1.1% |
-| WebAssembly module | default,existing | 1,351,828 | 479,536 | 1,341,370, 475,431 | +0.9% |
-| WebAssembly module | existing | 1,098,257 | 386,912 | | |
-| Native tool `gpress` | web | 1,376,880 | 617,497 | | |
-| Native tool `gpress` | default | 1,981,664 | 879,783 | 1,970,816, 871,899 | +0.9% |
-| Native tool `gpress` | default,existing | 2,599,144 | 1,113,726 | 2,588,944, 1,108,665 | +0.5% |
-| Native tool `gpress` | existing | 2,140,096 | 897,021 | | |
-| C library, shared (`libgpress_c.so`) | web | 1,246,272 | 560,448 | | |
-| C library, shared (`libgpress_c.so`) | default | 1,794,208 | 795,338 | 1,783,872, 789,167 | +0.8% |
-| C library, shared (`libgpress_c.so`) | default,existing | 2,412,416 | 1,031,341 | 2,401,936, 1,023,515 | +0.8% |
-| C library, shared (`libgpress_c.so`) | existing | 2,033,312 | 848,934 | | |
-| C library, static (`libgpress_c.a`) | web | 9,634,544 | 2,029,262 | | |
-| C library, static (`libgpress_c.a`) | default | 10,558,472 | 2,302,665 | 10,541,448, 2,295,057 | +0.3% |
-| C library, static (`libgpress_c.a`) | default,existing | 11,641,144 | 2,572,911 | 11,623,992, 2,566,394 | +0.3% |
-| C library, static (`libgpress_c.a`) | existing | 11,034,000 | 2,370,729 | | |
+| WebAssembly module | web | 710,751 | 267,937 | | |
+| WebAssembly module | default | 1,038,544 | 383,303 | 1,027,366, 379,342 | +1.0% |
+| WebAssembly module | default,existing | 1,451,939 | 519,213 | 1,440,744, 513,825 | +1.0% |
+| WebAssembly module | existing | 1,197,498 | 424,699 | | |
+| Native tool `gpress` | web | 1,508,088 | 675,533 | | |
+| Native tool `gpress` | default | 2,112,816 | 936,953 | 2,100,656, 930,455 | +0.7% |
+| Native tool `gpress` | default,existing | 2,729,704 | 1,172,549 | 2,718,240, 1,165,193 | +0.6% |
+| Native tool `gpress` | existing | 2,269,816 | 954,665 | | |
+| C library, shared (`libgpress_c.so`) | web | 1,379,032 | 617,707 | | |
+| C library, shared (`libgpress_c.so`) | default | 1,927,608 | 853,947 | 1,915,648, 846,676 | +0.9% |
+| C library, shared (`libgpress_c.so`) | default,existing | 2,545,248 | 1,089,217 | 2,533,096, 1,083,769 | +0.5% |
+| C library, shared (`libgpress_c.so`) | existing | 2,162,480 | 906,551 | | |
+| C library, static (`libgpress_c.a`) | web | 9,846,120 | 2,095,285 | | |
+| C library, static (`libgpress_c.a`) | default | 10,769,696 | 2,367,811 | 10,749,288, 2,361,198 | +0.3% |
+| C library, static (`libgpress_c.a`) | default,existing | 11,850,824 | 2,638,632 | 11,830,272, 2,630,541 | +0.3% |
+| C library, static (`libgpress_c.a`) | existing | 11,238,056 | 2,435,855 | | |
 
-With every part built in, this work (the features, and the memory changes of L3) adds 0.3% to 1.1% of gzip
-to each build: 3,864 bytes to the module and 7,884 to the tool. The web module is 325,235 bytes (34.7%)
-smaller than the whole one, 114,397 bytes (33.3%) of gzip; the next section says where the bytes go.
+With every part built in, this work (the features, and the memory changes of L3) adds 0.3% to 1.0% of gzip
+to each build: 3,961 bytes to the module and 6,498 to the tool. The web module is 327,793 bytes (31.6%)
+smaller than the whole one, 115,366 bytes (30.1%) of gzip; the next section says where the bytes go.
 
-The target for the web module is 400 KB gzip (400,000 bytes): at 229,312 bytes it is 170,688 bytes (43%) under
-it, and the whole module is 56,291 bytes under it. Built at opt-level "s", before the choice below, the web
-module was 185,288 bytes of gzip (on f34ba33): opt-level 3 adds 24%. Lepton adds 135,827 bytes of gzip to the
-module with every part. The static library carries Rust's standard library whole, so it is far larger than
-what a program linked with it gets. The module grows with main: the whole module was 305,524 bytes of gzip at
-d093ab4, the archive model (#3) added 33,893 bytes and the decode limit (#12) 428.
+The target for the web module is 400 KB gzip (400,000 bytes): at 267,937 bytes it is 132,063 bytes (33%) under
+it, and the whole module is 16,697 bytes under it. Built at opt-level "s", before the choice below, the web
+module was 185,288 bytes of gzip (on f34ba33, before main's later changes): opt-level 3 added 24% there.
+Lepton adds 135,910 bytes of gzip to the module with every part. The static library carries Rust's standard
+library whole, so it is far larger than what a program linked with it gets. The module grows with main: the
+whole module was 305,524 bytes of gzip at d093ab4, the archive model (#3) added 33,893 bytes, the decode limit
+(#12) 428, and #2, #13 and #14 together 39,497 (379,342 at c8e9f1a, without this work). The web module grows
+with main's normal-PDF code the same way: it was 229,312 bytes of gzip on main at dcd8a8b with this work.
 
 The budget: CI's WebAssembly job runs `python3 -I bench/sizes.py check`, which builds the web module as the
-package does and fails when its gzip size is more than 5% over the recorded one (240,777 bytes today) or over
+package does and fails when its gzip size is more than 5% over the recorded one (281,333 bytes today) or over
 400,000 bytes. A growth that is wanted is recorded with `measure --features web`. When the module is more than
-5% under the record (under 217,846 bytes today), the check passes with a warning to record the new size, since
+5% under the record (under 254,540 bytes today), the check passes with a warning to record the new size, since
 the 5% is counted from the record and would otherwise allow more. The whole module (`dist/gpress.wasm`) has no
 budget of its own; `measure --features default` records it with the other sets.
 
@@ -429,48 +432,49 @@ gzip level 9) for each set of parts:
 
 | Build | Module raw | Module gzip | Tool raw | Tool gzip |
 | --- | ---: | ---: | ---: | ---: |
-| Every part (default) | 938,444 | 343,709 | 1,981,664 | 879,783 |
-| `web`: every part but `archive` | 613,209 | 229,312 | 1,376,880 | 617,497 |
-| Every part but `jpeg` | 887,547 | 325,639 | 1,898,576 | 840,244 |
-| Every part but `fax` | 852,500 | 307,805 | 1,755,728 | 774,000 |
-| Every part but `encryption` | 820,578 | 303,564 | 1,832,112 | 804,799 |
-| None (`--no-default-features`) | 439,986 | 166,722 | 1,092,640 | 484,292 |
-| Every part and `existing` | 1,351,828 | 479,536 | 2,599,144 | 1,113,726 |
+| Every part (default) | 1,038,544 | 383,303 | 2,112,816 | 936,953 |
+| `web`: every part but `archive` | 710,751 | 267,937 | 1,508,088 | 675,533 |
+| Every part but `jpeg` | 987,579 | 363,779 | 2,029,664 | 896,619 |
+| Every part but `fax` | 952,569 | 348,107 | 1,889,648 | 832,440 |
+| Every part but `encryption` | 920,646 | 343,616 | 1,960,376 | 863,308 |
+| None (`--no-default-features`) | 537,008 | 204,635 | 1,222,312 | 542,657 |
+| Every part and `existing` | 1,451,939 | 519,213 | 2,729,704 | 1,172,549 |
 
-Naming the three parts (`--features jpeg,fax,encryption`) instead of `web` compiles the same code: a module 2
-bytes smaller raw and 5 bytes larger gzip, and 560 bytes less tool (symbol names).
+Naming the three parts (`--features jpeg,fax,encryption`) instead of `web` compiles the same code: a module 1
+byte larger raw and 15 bytes larger gzip, and 624 bytes less tool (symbol names).
 
 What a part costs is the bytes the build with every part has over the build with every part but that one
 (for Lepton, every part and `existing` over every part). "Sample gain" is what the part saves on the
 normal-PDF output of the 120-file sample at effort 0: the native tool's total output without the part, less
-its total with every part (71,470,799 bytes from 78,313,418). One run each on f34ba33, the start of this work,
-one process per file, `gpress optimize IN OUT --effort 0 --threads 1`, with main's fast tier at effort 0; the
-outputs with every part are byte for byte the same on this branch and on main at dcd8a8b (Memory, below).
+its total with every part (71,470,799 bytes from 78,313,418). One run each, one process per file, `gpress
+optimize IN OUT --effort 0 --threads 1`, with main's fast tier at effort 0: on f34ba33, the start of this work,
+and again on this work merged with main at c8e9f1a, which gave the same bytes for every build; the outputs with
+every part are byte for byte main's (Memory, below).
 
 | Feature | Module raw | Module gzip | Tool raw | Tool gzip | Sample gain, bytes | Files changed |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `archive` | 325,235 | 114,397 | 604,784 | 262,286 | (not used by normal PDF) | |
-| `jpeg` | 50,897 | 18,070 | 83,088 | 39,539 | 27,906 (0.04%) | 10 |
-| `fax` | 85,944 | 35,904 | 225,936 | 105,783 | 220,632 (0.31%) | 4 |
-| `encryption` | 117,866 | 40,145 | 149,552 | 74,984 | 2,758 (0.004%) | 1 |
-| `existing` | 413,384 | 135,827 | 617,480 | 233,943 | (archive only) | |
+| `archive` | 327,793 | 115,366 | 604,728 | 261,420 | (not used by normal PDF) | |
+| `jpeg` | 50,965 | 19,524 | 83,152 | 40,334 | 27,906 (0.04%) | 10 |
+| `fax` | 85,975 | 35,196 | 223,168 | 104,513 | 220,632 (0.31%) | 4 |
+| `encryption` | 117,898 | 39,687 | 152,440 | 73,645 | 2,758 (0.004%) | 1 |
+| `existing` | 413,395 | 135,910 | 616,888 | 235,596 | (archive only) | |
 
-The four costs add up to more than the 498,458 raw bytes (176,987 gzip) between every part and none, because
+The four costs add up to more than the 501,536 raw bytes (178,668 gzip) between every part and none, because
 some code is there only with two parts: the archive's fax parts and its decrypted streams.
 
 - `jpeg` saves 27,906 bytes on 10 files (freeculture.pdf 12,198, issue19971.pdf 8,524); one file,
-  issue13931.pdf, comes out 1,479 bytes larger with the step than without it. It costs 18,070 bytes of gzip in
+  issue13931.pdf, comes out 1,479 bytes larger with the step than without it. It costs 19,524 bytes of gzip in
   the module, about two thirds of what it saves on the whole sample. Kept.
-- `fax` saves 220,632 bytes on 4 files (freeculture.pdf 191,828, the OCRmyPDF ccitt.pdf 27,583) for 35,904
+- `fax` saves 220,632 bytes on 4 files (freeculture.pdf 191,828, the OCRmyPDF ccitt.pdf 27,583) for 35,196
   bytes of gzip: worth its cost. Kept.
-- `encryption` costs the most of the three, 40,145 bytes of gzip in the whole module, and saves the least: the
+- `encryption` costs the most of the three, 39,687 bytes of gzip in the whole module, and saves the least: the
   sample has three encrypted files, one of which the engine rewrites (issue17215.pdf, 2,758 bytes smaller);
   the other two are left untouched in every build (one needs a password, one has a handler the engine doesn't
   take). On this sample it costs far more than it saves. It stays in the default and in `web`: without it an
   encrypted file the engine can rewrite is left untouched, so the web compressor would give a different
-  answer from the native tool for those files, and the web module is 43% under its budget with it.
-- `archive` is most of the difference between the two modules (114,397 bytes of gzip), and Lepton (`existing`,
-  135,827 bytes) would cost more than the three normal-PDF parts together (94,119); neither is in `web`.
+  answer from the native tool for those files, and the web module is 33% under its budget with it.
+- `archive` is most of the difference between the two modules (115,366 bytes of gzip), and Lepton (`existing`,
+  135,910 bytes) would cost more than the three normal-PDF parts together (94,407); neither is in `web`.
 
 ### Choosing the module's build
 
@@ -486,7 +490,8 @@ opt-level-3 build (the first three rows), and the CPU columns are medians of all
 instantiate and the first optimize of the one-page PDF (Start-up, below), median of fresh Node processes:
 21 on one core (`taskset -c 3`, the other three busy with other work) and 11 on two idle cores (`taskset -c
 2-3`, as GitHub gives a private repository's runner). Opt-level 3, 2, "s" and "z" are the `wasm` profile at
-that opt-level (symbols stripped, `panic = "abort"`); "dependencies z" builds the other crates at "z".
+that opt-level (symbols stripped, `panic = "abort"`, which changes nothing on wasm32-unknown-unknown: that
+target aborts on a panic anyway); "dependencies z" builds the other crates at "z".
 
 | opt-level | wasm-opt | Raw bytes | Gzip bytes | Effort 0, CPU s | vs 3 | Effort 50, CPU s | vs 3 | Effort 100, CPU s | vs 3 | First call, effort 0, one core / two cores, ms | Effort 100, one core / two cores, ms |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -512,21 +517,24 @@ Every output of every run was byte-identical to the native tool's on the same co
 outputs at effort 0, 1,680 at 50 and 1,680 at 100.
 
 - Neither size level meets the rule. "s" is 19% smaller in gzip than opt-level 3 and 8% slower at effort 0,
-  but 22% slower at effort 50 and 26% at effort 100; "z" is 28% smaller and 1.8 to 1.9 times slower at every
-  effort. Opt-level 2 is not a size level, and is 15% slower at effort 0 anyway. So the profile keeps
-  opt-level 3 and takes only what costs no speed: `panic = "abort"` and stripped symbols (4.5% less gzip than
-  the release profile) and wasm-opt (2.6% less again). An earlier measurement, on main before its Flate work
-  (A5, A6 and B3 of the plan, then the fast tier), had "s" 3% to 5% slower at effort 0, inside the rule, and
-  this branch used "s" until main's changes widened the gap.
+  but 22% slower at effort 50 and 26% at effort 100 (at d093ab4; on #8's head it was 13.9% slower at effort
+  50, still over the rule); "z" is 28% smaller and 1.8 to 1.9 times slower at every effort. Opt-level 2 is not
+  a size level, and is 15% slower at effort 0 anyway. So the profile keeps opt-level 3 and takes only what
+  costs little or no speed: stripped symbols (4.5% less gzip than the release profile; the module is the same
+  bytes without `panic = "abort"`) and wasm-opt (2.6% less again). Together they cost a little time at the
+  higher efforts: on #8's head, 4 paired rounds of the package's module against main's release module (cores
+  swapped, the same outputs) gave -0.8% at effort 0, +2.4% at effort 50 and +2.9% at effort 100. An earlier
+  measurement, on main before its Flate work (A5, A6 and B3 of the plan, then the fast tier), had "s" 3% to 5%
+  slower at effort 0, inside the rule, and this branch used "s" until main's changes widened the gap.
 - wasm-opt: -O1 leaves the smallest gzip at every opt-level. -O2, -Os and -Oz take more off the raw bytes (-Oz
   10% at opt-level 3, against 7% for -O1) but less off the gzip, which is what a browser downloads, so the
   package build runs -O1 (the brief named -Oz; it is one word in `crates/gpress-wasm/js/build-wasm.mjs`).
   Without wasm-opt on PATH the build uses cargo's module as it is and says so.
-- What opt-level 3 costs: 58 KB more to download than "s" (305,524 against 247,366 bytes of gzip here;
-  339,845 against 269,742 on main at f5f9701), and a slower first call at the default effort, where
-  V8's optimizing compiler has more code to work on (below): 304 against 165 ms on one core, 178 against 129
-  on two idle cores. At effort 0 the first call is 6 to 8 ms slower (43.1 against 36.6 ms on one core, 34.8
-  against 26.6 on two cores).
+- What opt-level 3 costs: 58 KB more to download than "s" (305,524 against 247,366 bytes of gzip here, at
+  d093ab4; 269,742 for "s" on main at f5f9701, against 339,845 for opt-level 3 on main at dcd8a8b), and a
+  slower first call at the default effort, where V8's optimizing compiler has more code to work on (below):
+  304 against 165 ms on one core, 178 against 129 on two idle cores. At effort 0 the first call is 6 to 8 ms
+  slower (43.1 against 36.6 ms on one core, 34.8 against 26.6 on two cores).
 
 ### Start-up (the WebAssembly module in Node)
 
@@ -622,16 +630,14 @@ there.
 
 The target (L3): at effort 0, a peak of at most 32 MiB (32 x 2^20 bytes) plus twice the input. The peak is the
 resident set that `wait4` gives (bench/measure.c) for `optimize` with 1 thread, one process per file, on the
-120-file sample, measured by `benchmark.py space` (`--verify 0`) in the Linux aarch64 container of a shared
-4-core machine (2 GiB), every feature on (`--features existing`). Two builds:
+120-file sample, measured by `benchmark.py space` (`--verify 0`) in an x86_64 container of a 4-core cloud
+machine (16 GB), every feature on (`--features existing`). Two builds, whose runs were started together:
 
-- before: main at dcd8a8b (with main's fast tier, #1, and session 2's Flate lists in less memory, #6); three
-  runs at effort 0, and at effort 100 one run made earlier the same day on the same machine by
-  `benchmark.py time`, which takes the peak the same way;
-- after: this branch at 3c86c02 (main with PR #8 and this work); three runs at effort 0, one at effort 100.
+- before: main at c8e9f1a (with the Flate fixed costs, #2, the object-stream fix, #13, and the pure gains, #14);
+- after: this work merged with it.
 
-Each file's peak is the median of its runs. Every output of the after build is byte for byte main's (the same
-SHA-256): 120 files in every run at efforts 0 and 100.
+Three runs of each at effort 0 and one at effort 100. Each file's peak is the median of its runs. Every output
+of the after build is byte for byte main's (the same SHA-256): 120 files in every run at efforts 0 and 100.
 
 Each build fitted as a fixed cost plus bytes per input byte, by least squares and as the lowest line (on
 average over the files) with every file on or under it (MiB; "at slope 2" is the fixed cost every file would
@@ -639,51 +645,55 @@ need with the target's 2 bytes per input byte):
 
 | Effort | Build | Median | Peak (file, MiB in) | Least squares | Every file under | At slope 2 | Files over the target |
 | --- | --- | ---: | --- | --- | --- | ---: | ---: |
-| 0 | before | 3.4 | 78.7 (issue19517.pdf, 5.97) | 3.95 + 7.01 x input | 11.26 + 15.22 x input | 66.72 | 3 |
-| 0 | after | 3.4 | 66.2 (GeoTopo.pdf, 5.07) | 4.14 + 5.46 x input | 11.53 + 15.03 x input | 56.04 | 2 |
-| 100 | before | 4.0 | 131.0 (issue12963.pdf, 0.58) | 10.14 + 8.65 x input | 130.99 + 0.00 x input | 129.84 | 19 |
-| 100 | after | 4.0 | 107.3 (issue12963.pdf, 0.58) | 8.81 + 6.62 x input | 107.25 + 0.00 x input | 106.10 | 12 |
+| 0 | before | 4.6 | 80.0 (issue19517.pdf, 5.97) | 5.14 + 6.61 x input | 12.88 + 11.23 x input | 68.01 | 3 |
+| 0 | after | 4.5 | 50.9 (GeoTopo.pdf, 5.07) | 5.23 + 4.77 x input | 12.96 + 8.92 x input | 40.79 | 2 |
+| 100 | before | 5.3 | 109.6 (issue12963.pdf, 0.58) | 10.84 + 8.55 x input | 109.60 + 0.00 x input | 108.45 | 18 |
+| 100 | after | 5.3 | 81.3 (issue12963.pdf, 0.58) | 9.80 + 5.80 x input | 81.30 + 0.00 x input | 80.15 | 12 |
 
 The fixed cost stays small: on the empty one-page PDF (420 bytes, left untouched; the smallest wall time of 5
-runs) the peak is 2,800 KB with main and 2,972 to 2,988 KB with the after build at effort 0, and 3,832 KB with
-the after build at effort 100.
+runs) the peak is 4,232 to 4,332 KB with main and 4,028 to 4,184 KB with the after build at effort 0 (one
+measurement in each run), and 5,092 and 5,196 KB at effort 100.
 
-The target is not met at effort 0: 2 files are over the line after the changes (3 before), by 11.3 and 24.0
-MiB. The files over it with either build, in MiB ("after runs": the lowest and the highest of the three):
+The target is not met at effort 0: 2 files are over the line after the changes (3 before), by 8.8 and 3.5
+MiB. The files over it with either build, in MiB ("runs": the lowest and the highest of the three):
 
-| File | MiB in | Line | Before | After | After runs | After - line |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| GeoTopo.pdf | 5.07 | 42.1 | 66.0 | 66.2 | 66.2 to 66.2 | +24.0 |
-| issue9262_reduced.pdf | 5.28 | 42.6 | 60.8 | 53.9 | 53.7 to 53.9 | +11.3 |
-| issue19517.pdf | 5.97 | 43.9 | 78.7 | 26.8 | 26.8 to 26.9 | -17.2 |
+| File | MiB in | Line | Before | Before runs | After | After runs | After - line |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| GeoTopo.pdf | 5.07 | 42.1 | 54.5 | 54.5 to 54.6 | 50.9 | 50.9 to 51.0 | +8.8 |
+| issue9262_reduced.pdf | 5.28 | 42.6 | 61.5 | 61.4 to 61.5 | 46.0 | 45.9 to 46.0 | +3.5 |
+| issue19517.pdf | 5.97 | 43.9 | 80.0 | 79.9 to 80.0 | 27.9 | 27.8 to 28.0 | -16.0 |
 
-Main's fast tier changed what effort 0 holds: the strong encoder no longer runs there, so issue12841_reduced.pdf
-and issue9940.pdf, over the line before the fast tier, are under it with both builds: issue12841_reduced.pdf
-38.3 MiB with main and 35.4 after (line 43.2), issue9940.pdf about 14 MiB with both (line 32.8). For issue9940.pdf, whose peak an earlier review found about 3 MB higher with this
-work: 10 runs of each build in alternation give 14,408 to 14,468 KB with main (median 14,454) and 14,084 to
-15,016 KB with the after build (median 14,994; the runs fall on two levels, about 14,100 and 15,000 KB, 5
-each), so the difference is under 1 MB either way and the file is 18 MiB under its line. At effort 100 it
-is 54.2 MiB with main and 45.7 after.
+Two files that were over the line earlier in this work are under it with both builds: issue12841_reduced.pdf
+37.6 MiB with main and 32.0 after (line 43.2), issue9940.pdf 15.1 and 14.5 (line 32.8). The largest increase
+at effort 0 is 0.7 MiB, on a file far under its line (issue6931_reduced.pdf, 12.8 to 13.4, line 32.1); no
+other file is more than 0.3 MiB above main.
 
-At effort 100 the 12 files over the line after the changes are issue12963.pdf (+74.1 MiB), GeoTopo.pdf
-(+40.7), 2400dpi.pdf (+22.8), base64image.pdf (+17.6), issue1905.pdf (+16.6), issue9262_reduced.pdf (+15.5),
-issue12841_reduced.pdf (+14.5), issue13931.pdf (+13.0), issue9940.pdf (+12.9), the two multipage files
-(+4.9 and +4.0) and issue12810.pdf (+4.0). The changes took enormous.pdf (67.3 to 4.6 MiB), issue19517.pdf
-(81.8 to 26.9), issue6931_reduced.pdf, issue19971.pdf, 3small.pdf, freeculture.pdf and PDFJS-9279-reduced.pdf
-under it.
+At effort 100 the 12 files over the line after the changes are issue12963.pdf (+48.2 MiB), GeoTopo.pdf
+(+31.7), issue9940.pdf (+21.8), 2400dpi.pdf (+21.4), base64image.pdf (+14.9), issue1905.pdf (+14.5),
+issue13931.pdf (+12.2), issue9262_reduced.pdf (+8.0), issue12810.pdf (+5.0), issue12841_reduced.pdf (+3.3) and
+the two multipage files (+0.8 each). The changes took enormous.pdf (68.7 to 5.8 MiB), issue19517.pdf (83.1 to
+28.2), PDFJS-9279-reduced.pdf (40.0 to 33.9), issue6931_reduced.pdf (33.0 to 30.8), freeculture.pdf (37.7 to
+36.2) and issue19971.pdf (35.3 to 35.2, on its line before) under it. Other large savings at effort 100: the
+two multipage files (70.2 and 70.6 to 34.9), issue12841_reduced.pdf (75.8 to 46.5), issue12963.pdf (109.6 to
+81.3), issue9262_reduced.pdf (70.3 to 50.6) and issue13931.pdf (59.1 to 44.8). No file is more than 0.4 MiB
+above main there (issue5804.pdf and issue17215.pdf, about 5 MiB each).
 
-Peaks move from one run to the next with the same build and input. Over the three runs at effort 0 the
-largest spread is 0.9 MiB with the after build (issue9940.pdf) and 2.6 MiB with main (issue1905.pdf, 17,128 to
-19,756 KB). Before the fast tier, spreads of 3 MiB at effort 0 and 10 MiB at effort 100 were seen on one file
-(issue9940.pdf again), so a difference of a few MiB in one run on one file says little, and the effort-100
-columns are one run each. The CPU times of these runs say nothing either: the machine was shared, and the
-sum over the sample moved by 20% from one run of a build to the next.
+Peaks move from one run to the next with the same build and input, but little on this machine: over the three
+runs at effort 0 the largest spread is 0.4 MiB with the after build (bug1308536.pdf) and 0.5 MiB with main. On
+the machine of the earlier measurements (below) spreads of 3 MiB at effort 0 and 10 MiB at effort 100 were
+seen on one file, so a difference of a few MiB in one run on one file says little, and the effort-100 columns
+are one run each. The CPU times of these runs, summed over the sample: 16.0 to 16.3 s with each build at
+effort 0 (two builds running at once on a machine with other work), 511.2 s with main and 509.3 s with the
+after build at effort 100. Timed together, main on core 0 and the after build on core 1 at the same time
+while other work used the other two (`benchmark.py time`, one thread, efforts 0, 50 and 100, normal PDF and
+archive), the two builds gave the same 720 outputs, with CPU from -1.8% to +0.7% per setting, and
+`benchmark.py compare` passes.
 
 What each change saved. These and the rest of this section were measured before main's fast tier (#1) was
-merged, when effort 0 ran the strong encoder's quick settings. The commits from before the merge were measured
-one at a time before #6 was merged,
-on opt-lightweight e220e03 ("start"), each column adding one commit; in KB, the median of 3 runs, 1 thread
-(one run for GeoTopo.pdf and issue12963.pdf), every output the same. With #6 the match finder holds less, so
+merged, in the Linux aarch64 container of a shared 4-core machine (2 GiB), when effort 0 ran the strong
+encoder's quick settings. The commits from before the merge were measured one at a time before #6 was
+merged, on opt-lightweight e220e03 ("start"), each column adding one commit; in KB, the median of 3 runs, 1
+thread (one run for GeoTopo.pdf and issue12963.pdf), every output the same. With #6 the match finder holds less, so
 the same commits save different amounts today; the tables above are what the whole branch gives now.
 
 | File | Effort | start | +23594ec | +e999065 | +058ac94 | +a54f45c | +d782526 | +8a6906e | +d75ddc0 |
@@ -736,12 +746,13 @@ the same commits save different amounts today; the tables above are what the who
 - **8a6906e**: a stream with no general filter is read in place before it is re-encoded, not copied:
   issue12841_reduced 59,400 to 53,652 KB, issue9262_reduced 60,444 to 55,108, PDFJS-9279-reduced 39,592 to
   36,844.
-- **d75ddc0**: with one thread, a segment's plan is held until the next one's is made. Freed at once
-  (23594ec), its memory and the segment's tables went back to the system after every segment and were faulted
-  in again: twice the page faults (40,508 against 20,110 on issue12841_reduced, 64,006 against 24,647 on
-  issue9262_reduced) and 4 to 5% more CPU time at effort 0. Held, the faults are as before, and so is the
-  time. This gives back part of 23594ec's saving on the files with several segments (issue12841_reduced 53,652
-  to 69,116 KB, issue9262_reduced 55,108 to 71,120: still 14,408 and 21,036 KB under the start).
+- **d75ddc0** (taken out again by da52656, below): with one thread, a segment's plan is held until the next
+  one's is made. Freed at once (23594ec), its memory and the segment's tables went back to the system after
+  every segment and were faulted in again: twice the page faults (40,508 against 20,110 on issue12841_reduced,
+  64,006 against 24,647 on issue9262_reduced) and 4 to 5% more CPU time at effort 0. Held, the faults are as
+  before, and so is the time. This gives back part of 23594ec's saving on the files with several segments
+  (issue12841_reduced 53,652 to 69,116 KB, issue9262_reduced 55,108 to 71,120: still 14,408 and 21,036 KB under
+  the start).
 - **6752422**: the JPEG with new tables is not copied while Flate is tried over it; it goes into the result at
   the end when nothing smaller came after it. On a PDF with one 3000 x 2400 JPEG (4.2 MB, 3.9 MB with new
   tables), 3 runs: 53.6 to 49.7 MB at effort 0 and 62.2 to 58.3 MB at effort 100, the same time. The sample's
@@ -756,8 +767,10 @@ d75ddc0 measured again on top of #6, against the same build without it (16 alter
 without the hold the peak is lower (issue12841_reduced 48.1 MB instead of 60.9 at effort 0 and 57.2 instead of
 67.9 at effort 100, issue6286 28.8 instead of 34.2, issue9262_reduced 57.5 instead of 59.4) and the CPU time
 within 1%, but issue9262_reduced's page faults double again (48,101 against 21,492) and its system time with
-them (0.18 against 0.09 s). The hold stays. Giving up about 0.1 s of system time on such files for up to 13 MB
-on files like issue12841_reduced is the owner's choice.
+them (0.18 against 0.09 s). Giving up about 0.1 s of system time on such files for up to 13 MB on files like
+issue12841_reduced was the owner's choice, and the owner chose the memory: da52656 takes the hold out, so a
+segment's plan is let go as soon as it is written, as with 23594ec alone. The outputs are the same (the hold
+only decided when the plans were freed), and the tables at the top of this section are without it.
 
 Time (before the fast tier, and not measured again on this base). CPU-time medians with 1 thread,
 opt-lightweight (60c247d) and the after build run back to back in
@@ -801,7 +814,10 @@ million, +0.02%) and, in cachegrind's cache model, has as many first-level data 
 fewer last-level ones (0.68 against 0.99 million). Nor is it 8a6906e: with its in-place read undone (one line),
 the build was +1.9% in the same 7 rounds. The cause was not found. Differences this size with the same
 instructions came and went with unrelated changes during this work (below), so it is probably where code and
-data fall, which cachegrind does not model. Whether to accept it is the owner's call.
+data fall, which cachegrind does not model. On main's fast tier, merged since, it is gone: at effort 0 the
+after build runs 0.28% fewer instructions on freeculture.pdf (38,652 million against 38,761 million,
+callgrind), and over 11 rounds (both builds at once on two cores, which they swap each round) the median of
+the per-round ratios is -1.6% (4 rounds slower).
 
 Files that the space runs showed as slower were timed the same way: GeoTopo-komprimiert.pdf at effort 0 +1.7%
 over 16 rounds (+4.2% in the first 7, -1.2% in the next 9), with the same instructions (84,732 million against
@@ -819,29 +835,28 @@ against 57.6 million, last level 1.59 against 1.92 million). The same merge with
 the same instructions again and was 3.5% slower over those files: on this machine a few percent come and go
 with code that does the same work.
 
-What is left. Before the fast tier, heaptrack on the after build at effort 0 showed what the four files then
-over the line held at their peak; the first two are the two still over it:
+What is left. massif (valgrind's heap profiler) on the after build, 1 thread, shows what the files over the
+line hold at their peak (MB of heap; the resident peaks above are lower where a buffer is reserved but not all
+used):
 
-- issue9262_reduced.pdf (60.6 MiB, line 42.6) and GeoTopo.pdf (70.5, line 42.1): the self-check decodes the
-  stream as it was and as it is written, each whole, to compare them: 20.6 and 19.9 MiB on issue9262_reduced,
-  18.3 and 11.9 MiB on GeoTopo.pdf (there Flate's output grows by doubling), plus GeoTopo.pdf's samples with
-  the predictor undone, 9.3 MiB. Next to them: the input, the output and both files' parsed objects, about
-  the input's size each.
-- issue12841_reduced.pdf (59.4, line 43.2): the Flate encoder on one 1 MiB segment of a 5.6 MB JPEG that Flate
-  cannot shrink: the plans' symbols 12.5 MiB (made by the copies in `exact`; without d75ddc0's hold the peak is
-  48.1 MB, above), the match finder 11.0 MiB, the parse 8.7 MiB; then the input, the stream's parsed bytes and
-  the output, 5.6 MiB each.
-- issue9940.pdf (46.5, line 32.8): the match finder on one segment of an image, 21.9 MiB, the parse 3.0 MiB and
-  a predictor candidate 2.8 MiB.
+- GeoTopo.pdf at effort 0 (50.9 MiB, line 42.1): the job of one image stream, which decodes the stream (11.1
+  MB, Flate's output grown by doubling), undoes its predictor (9.7 MB of samples) and decodes the re-encoded
+  stream again to check it (12.5 MB, grown the same way); next to it the input (5.3 MB) and its parsed objects
+  (5.0 MB).
+- issue9262_reduced.pdf at effort 0 (46.0 MiB, line 42.6): the self-check at the end, which decodes one stream
+  as it was and as it is written, each whole (two buffers of 16 MiB: made at four times the compressed size,
+  then doubled); next to it the input and the output (5.5 MB each) and both files' parsed objects (5.4 and 5.3
+  MB).
+- issue12963.pdf at effort 100 (81.3 MiB, line 33.2): one image's job: the decoded image (30.0 MB, grown by
+  doubling), the filtered candidate being encoded (26.1 MB), the encoder's steps for it (12.6 MB), its output
+  so far (13.0 MB) and the parse's tables (4.2 MB). Before the fast tier the best candidate and the one being
+  tried were both held there (49.8 MiB together); since main's #14 only the candidates' scores are kept, and
+  the winner is filtered again at the end.
 
-So the next steps are a self-check that compares the two streams as they are decoded, a piece at a time
-(`self_check` in src/pdf/rewrite.rs, which PR #1 rewrites), PR #2's match finder tables kept per thread, and
-plans that hold less than 12.5 MiB of symbols for 1 MiB of input. At effort 100 the largest peak
-(issue12963.pdf, 110.4 MiB) is no longer the match finder (11 MiB there, the parse 4) but the image predictor
-search: the best filtered candidate and the one being tried, 49.8 MiB together for an image of about 25 MiB,
-the decoded image 28.6 MiB (its buffer grown by doubling) and the encoded output 12.4 MiB. Ranking the
-candidates while holding only the one being tried, and filtering the winner again at the end, would hold one
-candidate less; that is code PR #1 rewrites too.
+So the next steps are decoding the two streams of a check a piece at a time and comparing them as they go (the
+stream jobs' check and `self_check`, src/pdf/rewrite.rs), an output buffer made at a stream's decoded length
+where it is known instead of grown by doubling, and plans that hold less than 12 MiB of steps for a 1 MiB
+segment.
 
 ## Security (hostile input)
 
