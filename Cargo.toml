@@ -3,7 +3,7 @@ name = "gpress"
 version = "0.1.0"
 edition = "2021"
 publish = false
-license = "UNLICENSED"
+license = "MIT OR Apache-2.0"
 description = "Lossless PDF compression: smaller PDFs that any reader opens, and the gpress archive that restores byte for byte."
 repository = "https://github.com/soumyadebroy3/gpress"
 
