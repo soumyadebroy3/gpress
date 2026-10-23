@@ -165,125 +165,24 @@ impl Default for MqEncoder {
     }
 }
 
-// The MQ decoder below (`MqDecoder`, to the end of its `impl`) is a Rust translation of ArithmeticDecoder in
-// pdf.js (src/core/arithmetic_decoder.js, as in pdf.js v5.6.205, the last release with that file). Changed by
-// the gpress authors: written in Rust, and it reads 0xFF past the end of the data. The Apache License's text
-// is in LICENSE-APACHE. pdf.js's notice:
+// CLEAN-ROOM CONTRACT (to be replaced by the implementation; see the brief).
 //
-// Copyright 2012 Mozilla Foundation
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-/// The MQ decoder (T.88 E.3, with the code register split in two halves).
+// `pub struct MqDecoder<'a>`: the MQ arithmetic decoder of ITU-T T.88 Annex E (E.3: INITDEC, DECODE,
+// RENORMD, BYTEIN), the inverse of `MqEncoder` above, over the bytes of one coded segment. Past the end of the
+// data it reads 0xFF bytes (as T.88 E.3.4 allows for a missing marker), so a truncated stream decodes to
+// something rather than panicking. `QE` above is T.88 Table E.1; a context is a `Cx` (index << 1 | mps).
+//   pub fn new(data: &'a [u8]) -> MqDecoder<'a>     (INITDEC)
+//   pub fn decode(&mut self, cx: &mut Cx) -> u32     (DECODE: one decision in context cx, updating cx)
 pub struct MqDecoder<'a> {
-    data: &'a [u8],
-    bp: usize,
-    chigh: u32,
-    clow: u32,
-    ct: u32,
-    a: u32,
+    _data: &'a [u8],
 }
 
 impl<'a> MqDecoder<'a> {
-    pub fn new(data: &'a [u8]) -> MqDecoder<'a> {
-        let mut d = MqDecoder { data, bp: 0, chigh: *data.first().unwrap_or(&0xFF) as u32, clow: 0, ct: 0, a: 0 };
-        d.byte_in();
-        d.chigh = ((d.chigh << 7) & 0xFFFF) | ((d.clow >> 9) & 0x7F);
-        d.clow = (d.clow << 7) & 0xFFFF;
-        d.ct -= 7;
-        d.a = 0x8000;
-        d
+    pub fn new(_data: &'a [u8]) -> MqDecoder<'a> {
+        todo!()
     }
-
-    #[inline]
-    fn at(&self, i: usize) -> u32 {
-        // Past the end the decoder reads 0xFF (the end marker's role).
-        *self.data.get(i).unwrap_or(&0xFF) as u32
-    }
-
-    fn byte_in(&mut self) {
-        if self.at(self.bp) == 0xFF {
-            if self.at(self.bp + 1) > 0x8F {
-                self.clow += 0xFF00;
-                self.ct = 8;
-            } else {
-                self.bp += 1;
-                self.clow += self.at(self.bp) << 9;
-                self.ct = 7;
-            }
-        } else {
-            self.bp += 1;
-            self.clow += self.at(self.bp) << 8;
-            self.ct = 8;
-        }
-        if self.clow > 0xFFFF {
-            self.chigh += self.clow >> 16;
-            self.clow &= 0xFFFF;
-        }
-    }
-
-    #[inline]
-    pub fn decode(&mut self, cx: &mut Cx) -> u32 {
-        let (qe, nmps, nlps, switch) = QE[(*cx >> 1) as usize];
-        let mut mps = (*cx & 1) as u32;
-        let mut a = self.a.wrapping_sub(qe);
-        let d;
-        let next;
-        if self.chigh < qe {
-            if a < qe {
-                a = qe;
-                d = mps;
-                next = nmps;
-            } else {
-                a = qe;
-                d = 1 - mps;
-                if switch {
-                    mps = d;
-                }
-                next = nlps;
-            }
-        } else {
-            self.chigh -= qe;
-            if a & 0x8000 != 0 {
-                self.a = a;
-                return mps;
-            }
-            if a < qe {
-                d = 1 - mps;
-                if switch {
-                    mps = d;
-                }
-                next = nlps;
-            } else {
-                d = mps;
-                next = nmps;
-            }
-        }
-        loop {
-            if self.ct == 0 {
-                self.byte_in();
-            }
-            a <<= 1;
-            self.chigh = ((self.chigh << 1) & 0xFFFF) | ((self.clow >> 15) & 1);
-            self.clow = (self.clow << 1) & 0xFFFF;
-            self.ct -= 1;
-            if a & 0x8000 != 0 {
-                break;
-            }
-        }
-        self.a = a;
-        *cx = next << 1 | mps as u8;
-        d
+    pub fn decode(&mut self, _cx: &mut Cx) -> u32 {
+        todo!()
     }
 }
 

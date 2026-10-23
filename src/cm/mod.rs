@@ -6,60 +6,29 @@ pub mod model;
 
 // ---------------------------------------------------------------- logistic helpers (12-bit domain)
 
-const SQUASH_T: [i32; 33] = [
-    1, 2, 3, 6, 10, 16, 27, 45, 73, 120, 194, 310, 488, 747, 1101, 1546, 2047, 2549, 2994, 3348, 3607, 3785, 3901,
-    3975, 4024, 4050, 4068, 4079, 4085, 4089, 4092, 4093, 4094,
-];
-
-/// 1 / (1 + e^-x): x is ln-odds scaled by 256 (-2047..2047), result is a 12-bit probability.
-#[inline]
-pub const fn squash(d: i32) -> i32 {
-    if d > 2047 {
-        return 4095;
-    }
-    if d < -2047 {
-        return 1;
-    }
-    let w = d & 127;
-    let i = ((d >> 7) + 16) as usize;
-    (SQUASH_T[i] * (128 - w) + SQUASH_T[i + 1] * w + 64) >> 7
+// CLEAN-ROOM CONTRACT (to be replaced by the implementation; see the brief).
+//
+// `pub const fn squash(d: i32) -> i32`: the logistic function on gpress's fixed-point scales. `d` is
+// ln-odds times 256; the result is a 12-bit probability (of a 1 bit). Defined for every i32: below -2047 it
+// is 1, above 2047 it is 4095, and within -2047..=2047 it must be within 1 of 4096 / (1 + e^(-d/256)),
+// clamped to 1..=4095, non-decreasing in d, with squash(-d) + squash(d) == 4096 for 0 < d <= 2047 where the
+// clamp allows and squash(0) == 2048. Must be usable in const contexts and must give the same value on every
+// platform (no floating point evaluated at run time).
+//
+// `static SQUASH: [u16; 4095]`: squash(d) for d in -2047..=2047 (index d + 2047), made when compiling; the
+// mixer reads it (`Mixer::mix`).
+//
+// `pub fn stretch(p: i32) -> i32`: the inverse of squash: for a 12-bit probability p (callers pass 0..=4095;
+// clamp anything else), ln(p / (4096 - p)) times 256, rounded, clamped to -2047..=2047, from a table made when
+// compiling. squash(stretch(p)) must stay close to p.
+pub const fn squash(_d: i32) -> i32 {
+    todo!()
 }
 
-/// `squash` of every value of -2047..2047, worked out when compiling.
-static SQUASH: [u16; 4095] = {
-    let mut t = [0u16; 4095];
-    let mut i = 0;
-    while i < 4095 {
-        t[i] = squash(i as i32 - 2047) as u16;
-        i += 1;
-    }
-    t
-};
+static SQUASH: [u16; 4095] = [0; 4095];
 
-/// `stretch` of every 12-bit probability: the inverse of `squash`, worked out when compiling.
-static STRETCH: [i16; 4096] = {
-    let mut t = [0i16; 4096];
-    let mut pi = 0usize;
-    let mut x = -2047;
-    while x <= 2047 {
-        let v = squash(x) as usize;
-        while pi <= v {
-            t[pi] = x as i16;
-            pi += 1;
-        }
-        x += 1;
-    }
-    while pi < 4096 {
-        t[pi] = 2047;
-        pi += 1;
-    }
-    t
-};
-
-/// ln(p / (1 - p)) scaled by 256 (-2047..2047) of a 12-bit probability: the inverse of `squash`.
-#[inline]
-pub fn stretch(p: i32) -> i32 {
-    STRETCH[p.clamp(0, 4095) as usize] as i32
+pub fn stretch(_p: i32) -> i32 {
+    todo!()
 }
 
 /// `N` copies of `v` in a boxed array, made on the heap (a large array would not fit on the stack first).
@@ -351,44 +320,31 @@ impl<const N: usize> Mixer<N> {
     }
 }
 
-/// Adaptive probability map (secondary estimation): refines a probability within a context (below `N`, a
-/// power of two) by interpolating between 33 buckets over the stretched probability.
+// CLEAN-ROOM CONTRACT (to be replaced by the implementation; see the brief).
+//
+// `pub struct Apm<const N: usize>`: an adaptive probability map (secondary estimation). For each of N
+// contexts (N a power of two; a context number is reduced modulo N) it keeps a piecewise-linear map from a
+// stretched probability (-2047..=2047) to a 12-bit probability, starting as the identity (squash). `p(st, cx)`
+// returns the map's value for `st` in context `cx`, in 1..=4095, and remembers what it needs for the update;
+// `update(bit)` then moves the map in that context toward the coded bit (0 or 1) at a speed set by `rate`
+// (a shift: larger is slower). Integer arithmetic only. The model calls new, p and update in that order:
+//   pub fn new(rate: i32) -> Apm<N>
+//   pub fn p(&mut self, st: i32, cx: usize) -> i32
+//   pub fn update(&mut self, bit: u32)
+// Memory per context should not exceed 66 bytes (the model makes one with N = 65536).
 pub struct Apm<const N: usize> {
-    t: Box<[[u16; 33]; N]>,
-    row: usize,
-    j: usize,
-    rate: i32,
+    _todo: (),
 }
 
 impl<const N: usize> Apm<N> {
-    pub fn new(rate: i32) -> Apm<N> {
-        const { assert!(N.is_power_of_two()) };
-        let mut r = [0u16; 33];
-        for (j, v) in r.iter_mut().enumerate() {
-            *v = (squash((j as i32 - 16) * 128) * 16) as u16;
-        }
-        Apm { t: boxed(r), row: 0, j: 0, rate }
+    pub fn new(_rate: i32) -> Apm<N> {
+        todo!()
     }
-    /// `st` is the stretched probability (-2047..2047).
-    #[inline]
-    pub fn p(&mut self, st: i32, cx: usize) -> i32 {
-        let s = st + 2048;
-        // s is 1..4095 and cx below N: the masks change nothing but spare the bounds checks.
-        let lo = (s >> 7) as usize & 31;
-        let w = s & 127;
-        self.row = cx & (N - 1);
-        let r = &self.t[self.row];
-        let a = r[lo] as i32;
-        let b = r[lo + 1] as i32;
-        self.j = lo + (w >= 64) as usize;
-        ((a * (128 - w) + b * w) >> 11).clamp(1, 4095)
+    pub fn p(&mut self, _st: i32, _cx: usize) -> i32 {
+        todo!()
     }
-    #[inline]
-    pub fn update(&mut self, bit: u32) {
-        let target: i32 = if bit == 1 { 65535 } else { 0 };
-        // The bucket is at most 32 (see `p`): the minimum changes nothing.
-        let v = &mut self.t[self.row & (N - 1)][self.j.min(32)];
-        *v = (*v as i32 + ((target - *v as i32) >> self.rate)) as u16;
+    pub fn update(&mut self, _bit: u32) {
+        todo!()
     }
 }
 
@@ -450,31 +406,6 @@ mod tests {
         for &(wide, p, b) in &items {
             let got = if wide { d.code16(None, p) } else { d.code(None, p as i32) };
             assert_eq!(got, b);
-        }
-    }
-
-    #[test]
-    fn stretch_table_is_the_one_built_at_run_time() {
-        // The loop that made the table when the program started, before the table was made when compiling.
-        let mut t = [0i16; 4096];
-        let mut pi = 0usize;
-        for x in -2047..=2047 {
-            let v = squash(x) as usize;
-            for e in t.iter_mut().take(v + 1).skip(pi) {
-                *e = x as i16;
-            }
-            pi = v + 1;
-        }
-        for e in t.iter_mut().skip(pi) {
-            *e = 2047;
-        }
-        assert!(t == STRETCH);
-    }
-
-    #[test]
-    fn squash_table_is_squash() {
-        for d in -2047..=2047 {
-            assert_eq!(SQUASH[(d + 2047) as usize] as i32, squash(d), "{d}");
         }
     }
 
