@@ -187,12 +187,15 @@ fn find_last(d: &[u8], pat: &[u8], window: usize) -> Option<usize> {
     (start..=d.len() - pat.len()).rev().find(|&i| &d[i..i + pat.len()] == pat)
 }
 
-/// Whether two trailers hold the same entries in the same order, /XRefStm and /Prev aside.
-fn same_trailer(a: &Dict, b: &Dict) -> bool {
-    fn rest(d: &Dict) -> impl Iterator<Item = &(Vec<u8>, Obj)> {
-        d.0.iter().filter(|(k, _)| k != b"XRefStm" && k != b"Prev")
-    }
-    rest(a).eq(rest(b))
+/// Trailer keys that describe the cross-reference structure itself (rewritten, not copied); the others are about
+/// the document.
+pub const STRUCTURAL: [&[u8]; 9] =
+    [b"Size", b"Prev", b"XRefStm", b"Index", b"W", b"Type", b"Filter", b"DecodeParms", b"Length"];
+
+/// Whether trailer `a` says nothing about the document that `b` doesn't say too: some readers fill in what the
+/// newest trailer lacks from older ones.
+fn adds_nothing(a: &Dict, b: &Dict) -> bool {
+    a.0.iter().all(|(k, v)| STRUCTURAL.contains(&k.as_slice()) || b.get(k) == Some(v))
 }
 
 /// How many times `startxref` appears in `d`, and where it first does: its 'x' is looked for first, the rarest of
@@ -336,38 +339,44 @@ pub fn open_with(data: &[u8], limits: Limits) -> Result<Doc<'_>, LoadError> {
     let mut merged: BTreeMap<u32, Entry> = BTreeMap::new();
     let mut redefined = false;
     for (entries, _) in &sections {
+        let mut here = HashSet::new();
         for &(n, e) in entries {
             if n == 0 {
                 continue;
             }
+            let repeat = !here.insert(n);
             match merged.get(&n) {
                 None => {
                     merged.insert(n, e);
                 }
-                // A later row that lists the object as free changes nothing: a hybrid file's table lists the objects
-                // its /XRefStm puts in object streams as free, for readers without object streams; and readers take the
-                // first of two rows a section repeats.
+                // An older section that lists the object as free changes nothing: a hybrid file's table lists the
+                // objects its /XRefStm puts in object streams as free, for readers without object streams. A row a
+                // section repeats always counts: readers differ on which of the two they take.
                 Some(&prev) => {
-                    if prev != e && e != Entry::Free {
+                    if prev != e && (e != Entry::Free || repeat) {
                         redefined = true;
                     }
                 }
             }
         }
     }
-    // One save writes one section, or two for a linearised file: the first-page section near the start, whose
-    // /Prev names the main section after it. Any other section is a later save. So is a `startxref` before the
-    // first section, or more of them than sections: a save that no /Prev links (or those bytes in a stream, where
-    // refusing costs only compression).
+    // One save writes one section, or two: a linearised file's first-page section near the start, whose /Prev
+    // names the main section after it, or an Office hybrid file's empty table (below). Any other section is a later
+    // save. So is a `startxref` before the first section, or more of them than sections: a save that no /Prev links
+    // (or those bytes in a stream, where refusing costs only compression).
     let linearised = sections.len() == 2
         && starts[0] < starts[1]
-        && data[..data.len().min(1024)].windows(11).any(|w| w == b"/Linearized");
+        && data[..data.len().min(1024)].windows(11).any(|w| w == b"/Linearized")
+        && adds_nothing(&sections[1].1, &sections[0].1);
     // Microsoft Office and Prince put a hybrid file's /XRefStm in a second, empty table after the main one: no rows
     // of its own, a stream written before the main table, and the main table's trailer otherwise. One save too.
+    // (In both shapes the document is read from the newest trailer alone, so the older one must add nothing.)
+    let stream = sections[0].1.get(b"XRefStm").and_then(Obj::as_int).and_then(|x| usize::try_from(x).ok());
     let hybrid_tail = sections.len() == 2
         && own_rows[0] == 0
-        && matches!(sections[0].1.get(b"XRefStm"), Some(Obj::Int(x)) if usize::try_from(*x).is_ok_and(|x| x < starts[1]))
-        && same_trailer(&sections[0].1, &sections[1].1);
+        && stream.is_some_and(|x| x < starts[1])
+        && adds_nothing(&sections[1].1, &sections[0].1)
+        && adds_nothing(&sections[0].1, &sections[1].1);
     let (count, first_at) = find_startxref(data);
     let first_section = starts.iter().copied().min().unwrap_or(0);
     let one_save = (sections.len() == 1 || linearised || hybrid_tail)

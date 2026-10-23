@@ -78,6 +78,27 @@ fn untouched(input: &[u8]) {
     assert_eq!(r.data, input);
 }
 
+/// `input` is rewritten smaller, and objects 1 to 5 read back the same (streams by their decoded bytes).
+fn rewritten(input: &[u8]) {
+    let doc = xref::open(input).unwrap();
+    assert_eq!(doc.sections, 2);
+    let r = optimize(input, &Options::effort(0));
+    assert!(matches!(r.outcome, Outcome::Smaller(_)), "{:?}", r.outcome);
+    let out = xref::open(&r.data).unwrap();
+    for n in 1..=5 {
+        match doc.load(n).unwrap().1 {
+            Obj::Stream(s) => match out.load(n).unwrap().1 {
+                Obj::Stream(t) => assert_eq!(
+                    xref::decode_fully(&s.dict, &s.data, 1 << 20),
+                    xref::decode_fully(&t.dict, &t.data, 1 << 20)
+                ),
+                o => panic!("object {n} is {o:?}"),
+            },
+            o => assert_eq!(out.load(n).unwrap().1, o),
+        }
+    }
+}
+
 #[test]
 fn a_save_that_only_adds_objects_is_a_revision() {
     // The update writes a new catalog, pages, page and content and names the new catalog: no number is defined
@@ -125,6 +146,17 @@ fn a_save_no_section_links_is_a_revision() {
     untouched(&p.d);
 }
 
+#[test]
+fn a_save_that_a_later_startxref_skips_is_a_revision() {
+    // An update with its own table and `startxref`, then a `startxref` that names the first save's table again:
+    // the chain is one section, and the update is still in the file.
+    let (mut p, x) = first_save();
+    p.obj(6, b"<< /Title (Second save) >>");
+    p.table(6, 1, &format!("/Size 7 /Root 1 0 R /Info 6 0 R /Prev {x}"), None);
+    p.d.extend_from_slice(format!("startxref\n{x}\n%%EOF\n").as_bytes());
+    untouched(&p.d);
+}
+
 /// One save, linearised and hybrid, as Acrobat writes it: the linearisation dictionary (10); the first-page
 /// section, whose /XRefStm (11) gives the objects in object stream 12 (font 5 here) and whose /Prev names the main
 /// section at the end; and the main section, a table that lists font 5 as free for readers without object streams.
@@ -166,24 +198,7 @@ fn linearised_save(mut p: Pdf, first_startxref: bool) -> (Pdf, usize) {
 #[test]
 fn one_linearised_hybrid_save_is_rewritten_with_every_object() {
     for first_startxref in [true, false] {
-        let (p, _) = linearised_save(Pdf::new(), first_startxref);
-        let doc = xref::open(&p.d).unwrap();
-        assert_eq!(doc.sections, 2);
-        let r = optimize(&p.d, &Options::effort(0));
-        assert!(matches!(r.outcome, Outcome::Smaller(_)), "{:?}", r.outcome);
-        let out = xref::open(&r.data).unwrap();
-        for n in 1..=5 {
-            match doc.load(n).unwrap().1 {
-                Obj::Stream(s) => match out.load(n).unwrap().1 {
-                    Obj::Stream(t) => assert_eq!(
-                        xref::decode_fully(&s.dict, &s.data, 1 << 20),
-                        xref::decode_fully(&t.dict, &t.data, 1 << 20)
-                    ),
-                    o => panic!("object {n} is {o:?}"),
-                },
-                o => assert_eq!(out.load(n).unwrap().1, o),
-            }
-        }
+        rewritten(&linearised_save(Pdf::new(), first_startxref).0.d);
     }
 }
 
@@ -263,10 +278,18 @@ fn a_linearisation_dictionary_past_1024_bytes_does_not_count() {
     untouched(&p.d);
 }
 
-/// One save written as Microsoft Office and Prince write a hybrid file: an object stream (12) holding font 5 and its cross-reference
-/// stream (11), then the table, which lists font 5 as free, then an empty table whose trailer adds /XRefStm (and
-/// `more`, which they never add).
+/// One save written as Microsoft Office and Prince write a hybrid file: an object stream (12) holding font 5 and its
+/// cross-reference stream (11), then the table, which lists font 5 as free, then an empty table whose trailer adds
+/// /XRefStm (and `more`, which they never add).
 fn hybrid_tail(more: &str) -> Pdf {
+    let (mut p, main) = hybrid_main();
+    let xs = p.at[&11];
+    p.table(0, 0, &format!("/XRefStm {xs} /Prev {main} /Size 13 /Root 1 0 R{more}"), None);
+    p
+}
+
+/// That save up to its main table. Returns where the table is.
+fn hybrid_main() -> (Pdf, usize) {
     let mut p = Pdf::new();
     p.obj(1, b"<< /Type /Catalog /Pages 2 0 R >>");
     p.obj(2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
@@ -275,22 +298,22 @@ fn hybrid_tail(more: &str) -> Pdf {
     p.obj(12, &stream("/Type /ObjStm /N 1 /First 4", b"5 0 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"));
     p.obj(11, &stream("/Type /XRef /Size 13 /Index [5 1] /W [1 1 1]", &[2, 12, 0]));
     let main = p.table(0, 13, "/Size 13 /Root 1 0 R", None);
-    let xs = p.at[&11];
-    p.table(0, 0, &format!("/XRefStm {xs} /Prev {main} /Size 13 /Root 1 0 R{more}"), None);
-    p
+    (p, main)
 }
 
 #[test]
 fn one_hybrid_save_with_an_empty_last_table_is_rewritten_with_every_object() {
-    let p = hybrid_tail("");
-    let doc = xref::open(&p.d).unwrap();
-    assert_eq!(doc.sections, 2);
-    let r = optimize(&p.d, &Options::effort(0));
-    assert!(matches!(r.outcome, Outcome::Smaller(_)), "{:?}", r.outcome);
-    let out = xref::open(&r.data).unwrap();
-    for n in [1, 2, 3, 5] {
-        assert_eq!(out.load(n).unwrap().1, doc.load(n).unwrap().1);
-    }
+    rewritten(&hybrid_tail("").d);
+}
+
+#[test]
+fn a_table_with_rows_after_an_office_hybrid_save_is_a_revision() {
+    // The second table has a row of its own (a new font 5) and otherwise looks like the empty one.
+    let (mut p, main) = hybrid_main();
+    p.obj(5, b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>");
+    let xs = p.at[&11];
+    p.table(5, 1, &format!("/XRefStm {xs} /Prev {main} /Size 13 /Root 1 0 R"), None);
+    untouched(&p.d);
 }
 
 #[test]
@@ -308,6 +331,88 @@ fn an_empty_table_whose_stream_comes_later_is_a_revision() {
     let xs = p.at[&8];
     p.table(0, 0, &format!("/XRefStm {xs} /Prev {x} /Size 6 /Root 1 0 R"), None);
     untouched(&p.d);
+}
+
+#[test]
+fn a_linearised_chain_of_three_sections_is_a_revision() {
+    // A first-page section at the start whose /Prev names a main table at the end, whose /Prev names a table in the
+    // middle (the first save, with catalog 1): three sections, the first before the second.
+    let mut p = Pdf::new();
+    p.obj(10, b"<< /Linearized 1 /L 0 /O 8 /E 0 /N 1 /T 0 /H [0 0] >>");
+    let first = p.d.len();
+    p.d.extend_from_slice(&[b' '; 200]);
+    p.d.push(b'\n');
+    page(&mut p, "ORIGINAL SECRET TEXT");
+    let old = p.table(0, 11, "/Size 11 /Root 1 0 R", None);
+    p.obj(6, b"<< /Type /Catalog /Pages 7 0 R >>");
+    p.obj(7, b"<< /Type /Pages /Kids [8 0 R] /Count 1 >>");
+    p.obj(8, b"<< /Type /Page /Parent 7 0 R /MediaBox [0 0 200 200] /Contents 9 0 R /Resources << /Font << /F1 5 0 R >> >> >>");
+    p.obj(9, &text("NEW VERSION"));
+    let main = p.table(6, 4, &format!("/Size 11 /Prev {old}"), Some(first));
+    let head = format!(
+        "xref\n10 1\n{:010} 00000 n \ntrailer\n<< /Size 11 /Root 6 0 R /Prev {main} >>\nstartxref\n0\n%%EOF",
+        p.at[&10]
+    );
+    assert!(head.len() <= 200);
+    p.d[first..first + head.len()].copy_from_slice(head.as_bytes());
+    assert_eq!(xref::open(&p.d).unwrap().sections, 3);
+    untouched(&p.d);
+}
+
+#[test]
+fn an_empty_table_after_an_update_is_a_revision() {
+    // The first save (catalog 1), an update that adds catalog 6 and names it, then the Office-style empty table
+    // with an /XRefStm written before the update's table and the update's trailer repeated: three sections.
+    let (mut p, x) = first_save();
+    p.obj(6, b"<< /Type /Catalog /Pages 7 0 R >>");
+    p.obj(7, b"<< /Type /Pages /Kids [8 0 R] /Count 1 >>");
+    p.obj(8, b"<< /Type /Page /Parent 7 0 R /MediaBox [0 0 200 200] /Contents 9 0 R /Resources << /Font << /F1 13 0 R >> >> >>");
+    p.obj(9, &text("NEW VERSION"));
+    p.obj(12, &stream("/Type /ObjStm /N 1 /First 5", b"13 0 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"));
+    p.obj(11, &stream("/Type /XRef /Size 14 /Index [13 1] /W [1 1 1]", &[2, 12, 0]));
+    let t2 = p.table(6, 8, &format!("/Size 14 /Root 6 0 R /Prev {x}"), None);
+    let xs = p.at[&11];
+    p.table(0, 0, &format!("/XRefStm {xs} /Prev {t2} /Size 14 /Root 6 0 R"), None);
+    assert_eq!(xref::open(&p.d).unwrap().sections, 3);
+    untouched(&p.d);
+}
+
+#[test]
+fn a_linearised_file_whose_main_trailer_adds_an_entry_is_a_revision() {
+    // The main trailer names document information the first-page trailer lacks; some readers merge the two.
+    let mut p = Pdf::new();
+    p.obj(10, b"<< /Linearized 1 /L 0 /O 3 /E 0 /N 1 /T 0 /H [0 0] >>");
+    let first = p.d.len();
+    p.d.extend_from_slice(&[b' '; 200]);
+    p.d.push(b'\n');
+    page(&mut p, "ONE SAVE");
+    p.obj(6, b"<< /Title (Main trailer only) >>");
+    let main = p.table(0, 11, "/Size 11 /Info 6 0 R", Some(first));
+    let head = format!(
+        "xref\n10 1\n{:010} 00000 n \ntrailer\n<< /Size 11 /Root 1 0 R /Prev {main} >>\nstartxref\n0\n%%EOF",
+        p.at[&10]
+    );
+    assert!(head.len() <= 200);
+    p.d[first..first + head.len()].copy_from_slice(head.as_bytes());
+    untouched(&p.d);
+}
+
+#[test]
+fn a_stream_that_repeats_a_row_as_free_is_left_untouched() {
+    // One cross-reference stream lists content 4 twice, the second time as free: PDFium takes the second row, other
+    // readers the first.
+    let mut p = Pdf::new();
+    page(&mut p, "FIRST ROW");
+    let mut rows = vec![0, 0, 0, 255];
+    for n in 1..6 {
+        rows.extend_from_slice(&[1, (p.at[&n] >> 8) as u8, p.at[&n] as u8, 0]);
+    }
+    rows.extend_from_slice(&[0, 0, 0, 0]);
+    let x = p.d.len();
+    p.obj(6, &stream("/Type /XRef /Size 7 /Root 1 0 R /Index [0 6 4 1] /W [1 2 1]", &rows));
+    p.d.extend_from_slice(format!("startxref\n{x}\n%%EOF\n").as_bytes());
+    let r = optimize(&p.d, &Options::effort(0));
+    assert!(matches!(r.outcome, Outcome::Untouched(_)), "{:?}", r.outcome);
 }
 
 #[test]
