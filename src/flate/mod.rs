@@ -1,4 +1,5 @@
-//! Flate (Deflate + zlib wrapper): our own decoder and encoder.
+//! Flate (Deflate + zlib wrapper): the decoder and the encoders. Parts follow zlib and libdeflate, as each
+//! file says.
 
 pub mod bits;
 pub mod block;

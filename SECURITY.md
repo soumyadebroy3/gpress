@@ -86,4 +86,5 @@ needs more is compared afterwards, one at a time, which Peak(1) counts.
 Please report a vulnerability privately, not in a public issue: open a private security advisory with
 [Report a vulnerability](https://github.com/soumyadebroy3/gpress/security/advisories/new) on the repository's
 Security tab. Include the file that triggers the problem, the command or call and options you used, and what
-happened.
+happened. If that button is missing, open an issue that asks for a private contact, without any details of the
+problem.

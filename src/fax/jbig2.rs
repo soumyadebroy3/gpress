@@ -166,9 +166,22 @@ impl Default for MqEncoder {
 }
 
 // The MQ decoder below (`MqDecoder`, to the end of its `impl`) is a Rust translation of ArithmeticDecoder in
-// pdf.js (src/core/arithmetic_decoder.js), Copyright 2012 Mozilla Foundation, licensed under the Apache
-// License, Version 2.0 (LICENSE-APACHE). Changed by the gpress authors: written in Rust, and it reads 0xFF
-// past the end of the data.
+// pdf.js (src/core/arithmetic_decoder.js). Changed by the gpress authors: written in Rust, and it reads 0xFF
+// past the end of the data. The Apache License's text is in LICENSE-APACHE. pdf.js's notice:
+//
+// Copyright 2012 Mozilla Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 /// The MQ decoder (T.88 E.3, with the code register split in two halves).
 pub struct MqDecoder<'a> {

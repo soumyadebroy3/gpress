@@ -4,7 +4,7 @@
 //! Two parts follow zlib's own code and are altered versions of it: the checks and the sort of a code's
 //! lengths (`Kind` and `Decoder::new`) follow zlib's inftrees.c, Copyright (C) 1995-2026 Mark Adler, under
 //! zlib's licence (quoted in full in zlibexact.rs); the bit-by-bit decode (`Decoder::slow`) follows Mark
-//! Adler's puff.c, which keeps this notice:
+//! Adler's puff.c, whose notice (in puff.h) is:
 //!
 //! Copyright (C) 2002-2013 Mark Adler, all rights reserved
 //!

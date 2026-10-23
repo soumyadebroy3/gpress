@@ -27,8 +27,10 @@
 //! Several parts are adapted from libdeflate's compressor (lib/deflate_compress.c, hc_matchfinder.h,
 //! bt_matchfinder.h and matchfinder_common.h), rewritten in Rust with their constants tuned again: the
 //! statistics that end a block, the hash-chain search, the lazy-match gain, the symbol costs taken from a
-//! block's codes, the cheapest-path parse, and the pass that gathers statistics and skips past a long
-//! match. The segments, the threads and the bit splicing are ours. libdeflate's licence:
+//! block's codes, the cheapest-path parse, the pass that gathers statistics and skips past a long match, and
+//! the binary trees of levels 8 to 12 (`Tree::walk`, which like matcher.rs's search also follows LzFind.c's
+//! GetMatchesSpec1 from Igor Pavlov's LZMA SDK, public domain). The segments, the threads and the bit
+//! splicing are ours. libdeflate's licence:
 //!
 //! Copyright 2016 Eric Biggers
 //! Copyright 2024 Google LLC

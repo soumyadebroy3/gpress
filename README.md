@@ -199,6 +199,7 @@ means its default).
 ```ts
 import { Gpress } from "./dist/gpress.js";                         // built in crates/gpress-wasm/js; not on npm yet
 const g = await Gpress.load(fetch("/gpress.wasm"));                 // or gpress-web.wasm: no archive, smaller
+// In Node, pass a path instead: await Gpress.load("dist/gpress.wasm")
 const smaller = g.optimize(bytes, { effort: 70, jbig2: false });   // { data, outcome, reason? }
 const archive = g.compress(bytes);
 const original = g.expand(archive.data, { maxLenMiB: 512 });       // throws GpressError on a damaged archive

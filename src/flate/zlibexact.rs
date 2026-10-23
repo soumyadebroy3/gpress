@@ -7,7 +7,7 @@
 //! match search, lazy matching, Huffman tree construction and choice of block type, under zlib's names. It is
 //! an altered version of that code, not the original, and keeps zlib's licence notice:
 //!
-//! Copyright (C) 1995-2024 Jean-loup Gailly and Mark Adler
+//! Copyright (C) 1995-2026 Jean-loup Gailly and Mark Adler
 //!
 //! This software is provided 'as-is', without any express or implied warranty. In no event will the authors
 //! be held liable for any damages arising from the use of this software.
