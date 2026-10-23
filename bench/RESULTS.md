@@ -378,7 +378,7 @@ CI on every push (Start-up, below).
 `python3 -I bench/sizes.py measure [--features SET]` builds each part and records its size in
 `bench/sizes.json`: the native tool and the C library with the release profile, the WebAssembly module the
 way the npm package builds it (cargo's `wasm` profile, opt-level 3, then `wasm-opt -O1`; see below). Gzip is
-level 9. Each part of the engine is a Cargo feature (README, "Building only what a product needs"), and a set
+level 9. Each part of the engine is a Cargo feature (docs/reference.md, "Building only what a product needs"), and a set
 is built with `--no-default-features`, so that it is exactly what is named: "default" is a plain build, every
 part of the engine (`archive`, `jpeg`, `fax` and `encryption`); "web" is the web module's set, every part but
 the archive; "existing" is the archive and Lepton and nothing else; "default,existing" is every part and

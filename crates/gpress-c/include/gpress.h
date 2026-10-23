@@ -69,7 +69,8 @@ typedef struct gpress_options {
   uint64_t max_decoded;           /* archive: most decoded bytes the parts of one archive may claim in all;
                                      compress stores streams past it as they are, expand refuses an archive
                                      declaring more before anything is decoded (its memory follows this
-                                     and max_len, see README "Options"); 0 = 256 MiB */
+                                     and max_len, see docs/reference.md, "Options");
+                                     0 = 256 MiB */
   uint64_t max_len;               /* expand: largest file restored; an archive declaring more is refused
                                      before anything is decoded; 0 = 1 GiB */
   uint32_t objects_per_stream;    /* normal PDF: most objects per object stream; 0 = 200 */

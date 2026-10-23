@@ -644,7 +644,7 @@ pub struct PackOptions {
     /// left is stored as it is; decided from sizes alone, so the output is the same on any machine. The
     /// header declares the total, and a decoder refuses an archive declaring more than its own
     /// `UnpackOptions::max_decoded`: an archive made with this budget restores wherever that budget is
-    /// allowed. The memory of a pack or a restore follows this and the file's length (see `README.md`).
+    /// allowed. The memory of a pack or a restore follows this and the file's length (see `docs/reference.md`).
     pub max_decoded: u64,
     /// Try the existing library (Lepton, for JPEG streams) when the build includes it (`--features existing`).
     /// A file with parts it made restores only with such a build (`unpack` says so); the default is what the
