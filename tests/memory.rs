@@ -1,6 +1,7 @@
 //! Memory: optimizing a PDF with many images takes memory in proportion to the file, a few copies of it at
-//! most, never a remembered copy of every encode (outputs are remembered per stream, and dropped with it).
-//! The allocator below counts the bytes in use, so this file holds a single test.
+//! most, never a remembered copy of every encode beyond the file's store (`Options::store_budget`: encoded
+//! outputs up to a budget, dropped with the file). The allocator below counts the bytes in use, so this file
+//! holds a single test.
 
 #[path = "common/flate.rs"]
 mod flate;
@@ -116,22 +117,27 @@ fn memory_follows_the_file_not_every_encode() {
     let per_image = (many.len() - few.len()) / 8;
     for effort in [0u8, 100] {
         for threads in [1usize, 2] {
-            let opt = Options { threads, ..Options::effort(effort) };
-            let peak = |pdf: &[u8]| {
-                peak_during(|| {
-                    let r = optimize(pdf, &opt);
-                    assert!(matches!(r.outcome, Outcome::Smaller(_)), "{:?}", r.outcome);
-                })
-            };
-            let (p_few, p_many) = (peak(&few), peak(&many));
-            // Each image is held a few times: parsed, written, in the output and read back for the check
-            // (about 2 times its stored size, measured). Remembering every encode of every image took 5 to 7.
-            let extra = p_many.saturating_sub(p_few) / 8;
-            eprintln!("effort {effort}, {threads} threads: peak {p_few} for 3 images, {p_many} for 11: {extra} per image of {per_image} bytes");
-            assert!(
-                extra <= 4 * per_image,
-                "effort {effort}, {threads} threads: {extra} bytes per image of {per_image}"
-            );
+            // Without the store (0) and with the default one, whose 2 MiB hold every encode of these files.
+            for store_budget in [0, Options::default().store_budget] {
+                let opt = Options { threads, store_budget, ..Options::effort(effort) };
+                let peak = |pdf: &[u8]| {
+                    peak_during(|| {
+                        let r = optimize(pdf, &opt);
+                        assert!(matches!(r.outcome, Outcome::Smaller(_)), "{:?}", r.outcome);
+                    })
+                };
+                let (p_few, p_many) = (peak(&few), peak(&many));
+                // Each image is held a few times: parsed, written, in the output and read back for the check
+                // (about 2 times its stored size, measured). Remembering every encode of every image took 5
+                // to 7. The store keeps them too, but only up to its budget, whatever the number of images:
+                // about 2 times more per image here, where everything fits.
+                let extra = p_many.saturating_sub(p_few) / 8;
+                eprintln!("effort {effort}, {threads} threads, store {store_budget}: peak {p_few} for 3 images, {p_many} for 11: {extra} per image of {per_image} bytes");
+                assert!(
+                    extra <= 4 * per_image + store_budget / 8,
+                    "effort {effort}, {threads} threads, store {store_budget}: {extra} bytes per image of {per_image}"
+                );
+            }
         }
     }
 }

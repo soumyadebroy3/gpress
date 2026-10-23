@@ -9,6 +9,7 @@
 mod common;
 
 use common::*;
+use gpress::api::MAX_STORE_BUDGET;
 #[cfg(feature = "archive")]
 use gpress::Compressed;
 use gpress::{compress, expand, optimize, Error, Options, Outcome, Report};
@@ -75,6 +76,22 @@ fn threads_never_change_the_output() {
     assert_eq!(pack(&pdf, &base().threads(1)).data, pack(&pdf, &base().threads(2)).data);
     assert!(matches!(optimize(&pdf, &base().threads(65)), Err(Error::InvalidOptions(_))));
     assert!(optimize(&pdf, &base().threads(64)).is_ok());
+}
+
+#[test]
+fn options_check_bounds_store_budget() {
+    let pdf = plain_pdf();
+    assert_eq!(Options::default().store_budget, 2 << 20);
+    assert_eq!(base().store_budget(MAX_STORE_BUDGET).check(), Ok(()));
+    let e = optimize(&pdf, &base().store_budget(MAX_STORE_BUDGET + 1)).unwrap_err();
+    assert!(matches!(e, Error::InvalidOptions(_)), "{e}");
+    assert_eq!(base().store_budget(MAX_STORE_BUDGET + 1).check(), Err(e));
+    assert_eq!(base().store_budget(4096).rewrite().store_budget, 4096);
+    // No store, the default one and the largest: the same bytes, at one thread and at two.
+    let none = optimize(&pdf, &base().store_budget(0)).unwrap().data;
+    for opt in [base(), base().store_budget(MAX_STORE_BUDGET), base().threads(2), base().store_budget(0).threads(2)] {
+        assert!(optimize(&pdf, &opt).unwrap().data == none, "{opt:?}");
+    }
 }
 
 #[test]

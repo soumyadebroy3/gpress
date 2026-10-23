@@ -37,6 +37,8 @@ pub mod pdf;
 use off::fax;
 #[cfg(not(feature = "jpeg"))]
 use off::jpeg;
+#[cfg(not(feature = "archive"))]
+use off::pack;
 
 pub use api::{
     compress, expand, is_archive, optimize, Compressed, Effort, Error, Optimized, Options, Outcome, Report, VERSION,

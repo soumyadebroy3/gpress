@@ -19,15 +19,17 @@
 //!
 //! Memory on hostile input follows the options rather than what a file claims: `max_input` for the input,
 //! `max_stream` for each filter stage the rewrite decodes from a stream it may re-encode (a stream with no
-//! filter we decode, an image codec's say, is held at its stored size, within `max_input`),
-//! `max_stream_archive` for each Flate stream compress decodes, and for the archive `max_decoded` (what the
-//! parts of one archive may claim in all, declared in its header and refused up front when over the caller's
-//! limit) with `max_len` (the restored length, likewise). Not yet bounded by an option: in optimize, object
-//! streams are decoded to at most 256 MiB a stage each whatever `max_stream` is, and kept while the file is
-//! read, so the peak grows with their number; cross-reference streams are decoded as far as the file's size
-//! allows, and the PDF/A check reads metadata to 16 MiB. In optimize, and in compress's planning, up to
+//! filter we decode, an image codec's say, is held at its stored size, within `max_input`) and for the object
+//! streams it reads, which are also bounded held at once and in all (see [`Options::max_stream`]),
+//! `max_stream_archive` for each Flate stream compress decodes and for the object streams it reads to open an
+//! encrypted file, and for the archive `max_decoded` (what the parts of one archive may claim in all, declared
+//! in its header and refused up front when over the caller's limit) with `max_len` (the restored length,
+//! likewise). Not yet bounded by an option: cross-reference streams are decoded as far as the file's size
+//! allows, the PDF/A check reads metadata to 16 MiB, and the objects parsed from object streams take more
+//! than the bytes the limits count (an array of small integers about 35 times its bytes). In optimize, and in compress's planning, up to
 //! `threads` streams are decoded at once, each with its own copies, so the peak grows with `threads`; expand
 //! runs on one thread, and compress's coding on one with its restore check beside it.
+//! The encoded outputs optimize keeps for a file are bounded by `store_budget`.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
@@ -47,8 +49,11 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The archive format version this build writes and reads.
 pub const ARCHIVE_VERSION: u8 = pack::VERSION;
 
-/// Most worker threads a caller may ask for.
-pub const MAX_THREADS: usize = 64;
+/// Most worker threads a caller may ask for (a thread pool never runs more).
+pub const MAX_THREADS: usize = crate::par::MAX_THREADS;
+
+/// The largest `store_budget` a caller may ask for (a store never keeps more).
+pub const MAX_STORE_BUDGET: usize = crate::flate::deflate::MAX_STORE_BUDGET;
 
 /// How hard to try, 0 to 100. 0 is the fast path: our fast Flate encoder (a near-optimal parse for page
 /// content and fonts, one pass of it for a stream over 4 MiB, a lazy one for images), image predictors
@@ -90,12 +95,25 @@ pub struct Options {
     /// whatever the count; this only changes speed. A thread the system refuses is no loss: the calling thread
     /// does the work.
     pub threads: usize,
+    /// Normal PDF: bytes of encoded outputs one file keeps, so that an input of at most 256 KiB that another
+    /// stream or step also encodes is encoded once (a larger repeat is encoded again); at most
+    /// [`MAX_STORE_BUDGET`]. The oldest go first; 0 keeps none. Never changes the output. Nothing is kept
+    /// from one call to the next.
+    pub store_budget: usize,
     /// Largest input accepted, in bytes. Inputs over this return [`Error::TooLarge`] at once.
     pub max_input: usize,
     /// Normal PDF: largest decoded stream re-encoded, in bytes. A stream that decodes to more is kept as it is.
+    /// It holds the file's object streams too, which are decoded once each (in an encrypted file whose metadata
+    /// is not encrypted, the catalog's once more) and let go once their objects are read: each may decode to
+    /// this much or 256 MiB, whichever is less, at each filter stage; the ones held at once to four times that,
+    /// each header entry kept counted as 16 bytes; and all of them, their stored bytes and every stage counted,
+    /// to four times that or 64 bytes per byte of the file, whichever is more. A file past any of these is left
+    /// as it is (with 0, every file that has an object read from an object stream).
     pub max_stream: usize,
     /// Archive: largest decoded stream stored in its decoded form, in bytes. A stream that decodes to more
-    /// is stored as it is. (The decoder takes up to 2 GiB per part, whatever this was.)
+    /// is stored as it is. (The decoder takes up to 2 GiB per part, whatever this was.) The object streams
+    /// read to open an encrypted file are held to it as `max_stream` holds them; past it, the file's encrypted
+    /// streams are stored as they are.
     pub max_stream_archive: usize,
     /// Archive, both ways: the most decoded bytes the parts of one archive may claim in all (decoded streams,
     /// and Lepton data). Compress: in file order, a stream whose claim doesn't fit in what is left is stored
@@ -146,6 +164,7 @@ impl Default for Options {
         Options {
             effort: Effort::MAX,
             threads: 0,
+            store_budget: 2 << 20,
             max_input: 1 << 30,
             max_stream: 64 << 20,
             max_stream_archive: 256 << 20,
@@ -174,6 +193,10 @@ impl Options {
     }
     pub fn threads(mut self, n: usize) -> Options {
         self.threads = n;
+        self
+    }
+    pub fn store_budget(mut self, bytes: usize) -> Options {
+        self.store_budget = bytes;
         self
     }
     pub fn max_input(mut self, bytes: usize) -> Options {
@@ -238,6 +261,12 @@ impl Options {
         if self.threads > MAX_THREADS {
             return Err(Error::InvalidOptions(format!("threads is {}, more than {MAX_THREADS}", self.threads)));
         }
+        if self.store_budget > MAX_STORE_BUDGET {
+            return Err(Error::InvalidOptions(format!(
+                "store_budget is {}, more than {MAX_STORE_BUDGET}",
+                self.store_budget
+            )));
+        }
         if self.time_budget == Some(Duration::ZERO) {
             return Err(Error::InvalidOptions("a time budget of zero would stop at once".into()));
         }
@@ -279,6 +308,7 @@ impl Options {
             max_stream: self.max_stream,
             effort: self.effort.level(),
             threads: self.threads,
+            store_budget: self.store_budget,
             respect_conformance: self.respect_conformance,
             flate_over_jpeg: self.flate_over_jpeg,
             jbig2: self.jbig2,
@@ -583,6 +613,7 @@ mod tests {
     fn options_outside_the_engine_are_refused_with_a_code() {
         let bad = [
             Options::new().threads(MAX_THREADS + 1),
+            Options::new().store_budget(MAX_STORE_BUDGET + 1),
             Options::new().time_budget(Some(Duration::ZERO)),
             Options::new().max_input(0),
             Options::new().objects_per_stream(0),
@@ -666,6 +697,7 @@ mod tests {
         let opt = Options::new()
             .effort(40)
             .threads(3)
+            .store_budget(4096)
             .max_stream(1000)
             .max_stream_archive(2000)
             .max_decoded(2500)
@@ -680,7 +712,7 @@ mod tests {
             .use_existing_libraries(false)
             .time_budget(Some(Duration::from_secs(9)));
         let r = opt.rewrite();
-        assert_eq!((r.effort, r.threads, r.max_stream, r.objstm_size), (40, 3, 1000, 7));
+        assert_eq!((r.effort, r.threads, r.store_budget, r.max_stream, r.objstm_size), (40, 3, 4096, 1000, 7));
         assert!(!r.respect_conformance && !r.flate_over_jpeg && !r.jpeg_tables && !r.jbig2 && !r.rewrite_encrypted);
         assert!(r.deadline.is_set() && r.flate.deadline == Deadline::NONE, "the pool sets the Flate deadline");
         assert!(!Options::default().rewrite().deadline.is_set());

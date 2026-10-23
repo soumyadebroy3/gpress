@@ -183,6 +183,72 @@ fn the_trailer_size_sizes_nothing() {
     assert_eq!(untouched(&quick(&pdf, &Options::effort(100)), &pdf), "object numbers beyond /Size");
 }
 
+/// The page's objects behind a cross-reference stream whose offsets take 5 bytes, object 4's moved `far` on.
+fn with_wide_xref_stream(far: u64) -> Vec<u8> {
+    let mut d = b"%PDF-1.5\n".to_vec();
+    let mut rows = vec![0u8; 8];
+    for (n, body) in page_objects() {
+        let off = d.len() as u64 + if n == 4 { far } else { 0 };
+        rows.push(1);
+        rows.extend_from_slice(&off.to_be_bytes()[3..]);
+        rows.extend_from_slice(&[0, 0]);
+        d.extend_from_slice(format!("{n} 0 obj\n").as_bytes());
+        d.extend_from_slice(&body);
+        d.extend_from_slice(b"\nendobj\n");
+    }
+    let x = d.len();
+    rows.push(1);
+    rows.extend_from_slice(&(x as u64).to_be_bytes()[3..]);
+    rows.extend_from_slice(&[0, 0]);
+    d.extend_from_slice(b"5 0 obj\n");
+    d.extend_from_slice(&stream("/Type /XRef /Size 6 /W [1 5 2] /Root 1 0 R", &rows));
+    d.extend_from_slice(format!("\nendobj\nstartxref\n{x}\n%%EOF\n").as_bytes());
+    d
+}
+
+#[test]
+fn offsets_past_32_bits_are_past_the_end_on_every_platform() {
+    // Offsets are read in 64 bits: on a 32-bit build, one past what it addresses is past the end of the file
+    // as on a 64-bit one, never a parse error of its own, so both decide alike.
+    const FAR: u64 = 1 << 32;
+    let pdf = classic(&page_objects(), "5");
+    let replace = |pdf: &[u8], from: &str, to: &str| -> Vec<u8> {
+        let text = String::from_utf8_lossy(pdf);
+        assert_eq!(text.matches(from).count(), 1, "{from}");
+        text.replacen(from, to, 1).into_bytes()
+    };
+    // A table entry: that object is past the end, and the rest of the file is read.
+    let at = String::from_utf8_lossy(&pdf).find("\n4 1\n").unwrap() + 5;
+    let off: u64 = std::str::from_utf8(&pdf[at..at + 10]).unwrap().parse().unwrap();
+    let far = replace(&pdf, &format!("4 1\n{off:010}"), &format!("4 1\n{:010}", off + FAR));
+    let doc = xref::open(&far).unwrap();
+    assert!(doc.load(3).is_ok());
+    assert_eq!(doc.load(4), Err(xref::LoadError::BadObject(4, "offset past the end")));
+    assert!(untouched(&quick(&far, &Options::effort(0)), &far).contains("unreadable"));
+    // A table subsection numbered past 32 bits with no entries is read (and adds nothing).
+    let x = String::from_utf8_lossy(&pdf).find("xref\n0 1\n").unwrap();
+    let mut empty = pdf[..x].to_vec();
+    empty.extend_from_slice(format!("xref\n{FAR} 0\n").as_bytes());
+    empty.extend_from_slice(&pdf[x + 5..]);
+    assert!(xref::open(&empty).unwrap().load(3).is_ok());
+    // startxref, /Prev and /XRefStm past 32 bits: the section is past the end.
+    let x = String::from_utf8_lossy(&pdf).rfind("startxref\n").unwrap() + 10;
+    let x: u64 = String::from_utf8_lossy(&pdf[x..]).lines().next().unwrap().parse().unwrap();
+    let far = replace(&pdf, &format!("startxref\n{x}\n"), &format!("startxref\n{}\n", x + FAR));
+    assert_eq!(xref::open(&far).err(), Some(xref::LoadError::BadXref("offset past the end")));
+    for key in ["Prev", "XRefStm"] {
+        let far = replace(&pdf, "/Root 1 0 R >>", &format!("/Root 1 0 R /{key} {} >>", x + FAR));
+        assert_eq!(xref::open(&far).err(), Some(xref::LoadError::BadXref("offset past the end")), "/{key}");
+    }
+    // A cross-reference stream's offset: that object is past the end.
+    let wide = with_wide_xref_stream(0);
+    assert!(xref::open(&wide).unwrap().load(4).is_ok());
+    let far = with_wide_xref_stream(FAR);
+    let doc = xref::open(&far).unwrap();
+    assert!(doc.load(3).is_ok());
+    assert_eq!(doc.load(4), Err(xref::LoadError::BadObject(4, "offset past the end")));
+}
+
 #[test]
 fn a_dangling_reference_keeps_its_number_free() {
     // The catalog refers to an outline object that doesn't exist (a null reference, as in a Kodak test file
@@ -204,6 +270,35 @@ fn a_dangling_reference_keeps_its_number_free() {
         b"<< /Type /Catalog /Pages 2 0 R /Outlines << /Type /Outlines /First 4000000000 0 R /Count 0 >> >>".to_vec();
     let pdf = classic(&objs, "4000000001");
     assert_eq!(untouched(&quick(&pdf, &Options::effort(100)), &pdf), "object numbers far apart");
+}
+
+#[test]
+fn a_dangling_reference_to_an_object_in_the_file_leaves_it_untouched() {
+    // Object 9 is missing from the cross-reference data. When "9 0 obj" is in the file anyway (here in the
+    // page's text), some readers find it, so the file is left as it is. "19 0 obj" holds it too; "9 00 obj"
+    // and "9 1 obj" don't.
+    let texts = [
+        ("9 0 obj", true),
+        ("19 0 obj", true),
+        ("x9 0 obj", true),
+        ("9 00 obj", false),
+        ("9 1 obj", false),
+        ("9 0obj", false),
+        ("9  0 obj", false),
+    ];
+    for (text, found) in texts {
+        let mut objs = page_objects();
+        objs[0].1 = b"<< /Type /Catalog /Pages 2 0 R /Outlines << /Type /Outlines /First 9 0 R /Count 0 >> >>".to_vec();
+        let content = format!("BT /F1 12 Tf 10 10 Td ({text}) Tj ET\n").repeat(50);
+        objs[3].1 = stream("", content.as_bytes());
+        let pdf = classic(&objs, "10");
+        let r = optimize(&pdf, &Options::effort(0));
+        if found {
+            assert_eq!(untouched(&r, &pdf), "an object in the file is missing from its cross-reference data");
+        } else {
+            smaller(&r, &pdf);
+        }
+    }
 }
 
 /// The page with its content stream numbered `n` and the trailer /Size just above it.

@@ -298,6 +298,55 @@ fn inflate_into<S: Sink>(input: &[u8], limit: usize, out: &mut S) -> Result<usiz
     Ok(br.byte_pos())
 }
 
+/// The number of symbols (literals and matches, not the end-of-block code) in the first block of a raw
+/// Deflate stream, or None when that block is stored or the final one. Reads only that block and keeps no
+/// output; counting stops past `max`, so the count is at most `max + 1`.
+pub fn first_block_symbols(input: &[u8], max: usize) -> Result<Option<usize>, InflateError> {
+    let mut br = BitReader::new(input);
+    let last = br.get(1)?;
+    let btype = br.get(2)?;
+    if btype == 3 {
+        return Err(InflateError::BadBlockType);
+    }
+    if last == 1 || btype == 0 {
+        return Ok(None);
+    }
+    let dynamic;
+    let (ll, d) = if btype == 1 {
+        fixed_decoders()
+    } else {
+        dynamic = dynamic_tables(&mut br)?;
+        &dynamic
+    };
+    // The same checks as `codes`, with the output's length in place of the output.
+    let (mut count, mut out_len) = (0usize, 0usize);
+    while count <= max {
+        let sym = ll.decode(&mut br)?;
+        if sym < 256 {
+            out_len += 1;
+        } else if sym == END_OF_BLOCK {
+            break;
+        } else {
+            let c = sym - 257;
+            if c >= 29 {
+                return Err(InflateError::BadSymbol);
+            }
+            let len = LEN_BASE[c] as usize + br.get(LEN_EXTRA[c] as u32)? as usize;
+            let dc = d.decode(&mut br)?;
+            if dc >= 30 {
+                return Err(InflateError::BadSymbol);
+            }
+            let dist = DIST_BASE[dc] as usize + br.get(DIST_EXTRA[dc] as u32)? as usize;
+            if dist > out_len {
+                return Err(InflateError::TooFarBack);
+            }
+            out_len += len;
+        }
+        count += 1;
+    }
+    Ok(Some(count))
+}
+
 fn dynamic_tables(br: &mut BitReader) -> Result<(Decoder, Decoder), InflateError> {
     let hlit = br.get(5)? as usize + 257;
     let hdist = br.get(5)? as usize + 1;

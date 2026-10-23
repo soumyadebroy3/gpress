@@ -30,7 +30,7 @@ pub(super) fn crypt_plans(d: &[u8], plans: Vec<Plan>, opt: &PackOptions) -> Vec<
     if find(d, b"/Encrypt", 0).is_none() {
         return plans;
     }
-    let doc = match xref::open(d) {
+    let doc = match xref::open_with(d, xref::Limits::once(opt.max_stream)) {
         Ok(doc) => doc,
         Err(_) => return plans,
     };
