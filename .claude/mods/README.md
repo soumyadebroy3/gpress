@@ -39,7 +39,8 @@ fixed procedure and makes merging wait for it.
 - The protocol (not the gate) treats a pull request opened by anyone but the owner, soumyadebroy3, or from a
   fork as an outside one, because a session has the owner's GitHub access and loads these mods from its clone:
   it is reviewed from its diff and its CI run on GitHub, never checked out, built or run in a session. Only a
-  Dependabot version update whose CI run passes is merged by a session; any other outside pull request gets a
+  Dependabot update to the versions of Rust packages already in the root `Cargo.lock` whose CI run passes is
+  merged by a session; any other outside pull request (Actions, `fuzz/` and npm updates among them) gets a
   FINDINGS verdict that leaves the merge to the owner, so the gate refuses it too. The gate itself checks
   neither the author nor the files. This assumes no one but the owner can push to the repository.
 - It is a guard against skipping the review by mistake, not against a session set on getting around it.
