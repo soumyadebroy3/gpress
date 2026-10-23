@@ -197,7 +197,7 @@ means its default).
 [`js/gpress.ts`](crates/gpress-wasm/js/gpress.ts):
 
 ```ts
-import { Gpress } from "gpress";
+import { Gpress } from "./dist/gpress.js";                         // built in crates/gpress-wasm/js; not on npm yet
 const g = await Gpress.load(fetch("/gpress.wasm"));                 // or gpress-web.wasm: no archive, smaller
 const smaller = g.optimize(bytes, { effort: 70, jbig2: false });   // { data, outcome, reason? }
 const archive = g.compress(bytes);
