@@ -215,6 +215,7 @@ test('/review-pr sends the protocol to the model by itself', async ($, on) => {
   expect(sent.join('')).toContain('Review gpress pull request #12')
   expect(sent.join('')).toContain('gpress-review: PASS <head sha>')
   expect(sent.join('')).toContain('owner to merge: an outside pull request')
+  expect(sent.join('')).toContain('Neither this session nor any subagent checks out, builds, tests or runs its code')
   expect(sent.join('')).toContain('gpress/pulls/12 ')
   expect(sent.join('')).not.toMatch(/`gh [^`]*#12/)
 })
@@ -226,4 +227,7 @@ test('the rule goes in the main prompt, not a subagent', async ($, on) => {
   const sub: any = await $.prompt.compose({ ...base, tools: ['Bash'] } as any)
   expect(main.sections.map((s: any) => s.id)).toContain('pr-review')
   expect(sub.sections.map((s: any) => s.id)).not.toContain('pr-review')
+  const rule = main.sections.find((s: any) => s.id === 'pr-review').text
+  expect(rule).toContain('neither this session nor its subagents check out, build or run its code')
+  expect(rule).toContain('or a lookup that fails, makes it outside')
 })
