@@ -150,8 +150,11 @@ the narrower call.) What bilevel.rs keeps of PAQ's map is design, not code: 33 k
 squash, linear interpolation between them, the nearer knot learning, and a step by a shift. None of PAQ's
 other constants or table values is in it, and its interpolation is its own. Its squash is worked out from the
 logistic formula, and its stretch is the inverse of that squash, as PAQ's is, found by a loop of its own.
-libzpaq (public domain) has a close relative, the nearer knot included. The new map in `src/cm/` keeps the 33
-knots, their start and the interpolation, which its contract sets, and moves both knots.
+libzpaq (public domain) has a close relative, the nearer knot included. The new map in `src/cm/` keeps the
+start as squash, the linear interpolation and a step by a shift, which its contract sets, and 33 knots 128
+apart, which its implementer chose within the contract's 66 bytes per context after reading bilevel.rs's
+set-up (it also tried 32 knots and a count). Its step at the model's rate, 1/64, is bilevel's too; measuring
+1/32 to 1/256 picked it. It moves both knots.
 
 The repository's history before format version 9 holds the code that version replaced: the tables and map in
 `src/cm/`, which followed PAQ (lpaq1 and paq8, Matt Mahoney, GPL-2.0 or later), and the MQ decoder in
