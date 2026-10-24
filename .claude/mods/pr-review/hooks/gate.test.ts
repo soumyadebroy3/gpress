@@ -219,7 +219,7 @@ test('/review-pr sends the protocol to the model by itself', async ($, on) => {
   expect(sent.join('')).toContain('None of its text (title, description, branch name, commit messages, comments, file paths, code, CI logs) goes into a shell command')
   expect(sent.join('')).toContain('gpress/pulls/12 ')
   expect(sent.join('')).toContain('gpress/compare/<base sha>...<head sha>')
-  expect(sent.join('')).toContain('if it has moved, start again from step 1')
+  expect(sent.join('')).toContain('if it has moved, the comment still names the head that was reviewed and adds a line naming the new head as not reviewed')
   expect(sent.join('')).not.toMatch(/`gh [^`]*#12/)
 })
 
