@@ -157,18 +157,34 @@ fn a_save_that_a_later_startxref_skips_is_a_revision() {
     untouched(&p.d);
 }
 
+#[test]
+fn one_startxref_more_than_sections_is_a_revision() {
+    // An update whose table has no `startxref` of its own, then one that names the first save's table again: one
+    // section, two `startxref`.
+    let (mut p, x) = first_save();
+    p.obj(6, b"<< /Title (Second save) >>");
+    let row = format!("{:010} 00000 n \n", p.at[&6]);
+    p.d.extend_from_slice(
+        format!("xref\n6 1\n{row}trailer\n<< /Size 7 /Root 1 0 R /Info 6 0 R /Prev {x} >>\n").as_bytes(),
+    );
+    p.d.extend_from_slice(format!("startxref\n{x}\n%%EOF\n").as_bytes());
+    assert_eq!(xref::open(&p.d).unwrap().sections, 1);
+    untouched(&p.d);
+}
+
 /// One save, linearised and hybrid, as Acrobat writes it: the linearisation dictionary (10); the first-page
 /// section, whose /XRefStm (11) gives the objects in object stream 12 (font 5 here) and whose /Prev names the main
 /// section at the end; and the main section, a table that lists font 5 as free for readers without object streams.
 /// Returns where the first-page section is.
 fn linearised_hybrid() -> (Pdf, usize) {
-    linearised_save(Pdf::new(), true)
+    linearised_save(Pdf::new(), true, b"")
 }
 
 /// The same save written after what `p` holds; without `first_startxref` no `startxref` follows the first-page
-/// section, as qpdf writes it.
-fn linearised_save(mut p: Pdf, first_startxref: bool) -> (Pdf, usize) {
+/// section, as qpdf writes it. `between` goes between the linearisation dictionary and that section.
+fn linearised_save(mut p: Pdf, first_startxref: bool, between: &[u8]) -> (Pdf, usize) {
     p.obj(10, b"<< /Linearized 1 /L 0 /O 3 /E 0 /N 1 /T 0 /H [0 0] >>");
+    p.d.extend_from_slice(between);
     // Room for the first-page section, written once the offsets are known.
     let first = p.d.len();
     p.d.extend_from_slice(&[b' '; 200]);
@@ -198,7 +214,7 @@ fn linearised_save(mut p: Pdf, first_startxref: bool) -> (Pdf, usize) {
 #[test]
 fn one_linearised_hybrid_save_is_rewritten_with_every_object() {
     for first_startxref in [true, false] {
-        rewritten(&linearised_save(Pdf::new(), first_startxref).0.d);
+        rewritten(&linearised_save(Pdf::new(), first_startxref, b"").0.d);
     }
 }
 
@@ -214,9 +230,9 @@ fn an_update_to_a_linearised_file_is_a_revision() {
 fn a_linearised_save_appended_without_prev_is_a_revision() {
     // Two qpdf-style linearised saves, the second appended whole with no /Prev: as many `startxref` as the newest
     // save has sections, but the first one comes before them.
-    let (mut p, _) = linearised_save(Pdf::new(), false);
+    let (mut p, _) = linearised_save(Pdf::new(), false, b"");
     p.d.extend_from_slice(b"%PDF-1.5\n");
-    let (p, _) = linearised_save(p, false);
+    let (p, _) = linearised_save(p, false, b"");
     untouched(&p.d);
 }
 
@@ -278,38 +294,37 @@ fn a_linearisation_dictionary_past_1024_bytes_does_not_count() {
     untouched(&p.d);
 }
 
-/// One save written as Microsoft Office and Prince write a hybrid file: an object stream (12) holding font 5 and its
-/// cross-reference stream (11), then the table, which lists font 5 as free, then an empty table whose trailer adds
-/// /XRefStm (and `more`, which they never add).
-fn hybrid_tail(more: &str) -> Pdf {
-    let (mut p, main) = hybrid_main();
+/// One save written after what `p` holds as Microsoft Office and Prince write a hybrid file: an object stream (12)
+/// holding font 5 and its cross-reference stream (11, its dictionary given `side` too), then the table, which lists
+/// font 5 as free, then an empty table whose trailer adds /XRefStm (and `more`, which they never add).
+fn hybrid_tail(p: Pdf, more: &str, side: &str) -> Pdf {
+    let (mut p, main) = hybrid_main(p, "", side);
     let xs = p.at[&11];
     p.table(0, 0, &format!("/XRefStm {xs} /Prev {main} /Size 13 /Root 1 0 R{more}"), None);
     p
 }
 
-/// That save up to its main table. Returns where the table is.
-fn hybrid_main() -> (Pdf, usize) {
-    let mut p = Pdf::new();
+/// That save up to its main table, whose trailer gets `main_more` too. Returns where the table is.
+fn hybrid_main(mut p: Pdf, main_more: &str, side: &str) -> (Pdf, usize) {
     p.obj(1, b"<< /Type /Catalog /Pages 2 0 R >>");
     p.obj(2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
     p.obj(3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>");
     p.obj(4, &text("ONE SAVE"));
     p.obj(12, &stream("/Type /ObjStm /N 1 /First 4", b"5 0 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"));
-    p.obj(11, &stream("/Type /XRef /Size 13 /Index [5 1] /W [1 1 1]", &[2, 12, 0]));
-    let main = p.table(0, 13, "/Size 13 /Root 1 0 R", None);
+    p.obj(11, &stream(&format!("/Type /XRef /Size 13 /Index [5 1] /W [1 1 1]{side}"), &[2, 12, 0]));
+    let main = p.table(0, 13, &format!("/Size 13 /Root 1 0 R{main_more}"), None);
     (p, main)
 }
 
 #[test]
 fn one_hybrid_save_with_an_empty_last_table_is_rewritten_with_every_object() {
-    rewritten(&hybrid_tail("").d);
+    rewritten(&hybrid_tail(Pdf::new(), "", "").d);
 }
 
 #[test]
 fn a_table_with_rows_after_an_office_hybrid_save_is_a_revision() {
     // The second table has a row of its own (a new font 5) and otherwise looks like the empty one.
-    let (mut p, main) = hybrid_main();
+    let (mut p, main) = hybrid_main(Pdf::new(), "", "");
     p.obj(5, b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>");
     let xs = p.at[&11];
     p.table(5, 1, &format!("/XRefStm {xs} /Prev {main} /Size 13 /Root 1 0 R"), None);
@@ -318,7 +333,59 @@ fn a_table_with_rows_after_an_office_hybrid_save_is_a_revision() {
 
 #[test]
 fn an_empty_table_that_changes_the_trailer_is_a_revision() {
-    untouched(&hybrid_tail(" /ID [<01> <02>]").d);
+    untouched(&hybrid_tail(Pdf::new(), " /ID [<01> <02>]", "").d);
+}
+
+#[test]
+fn a_main_trailer_that_adds_an_entry_to_the_empty_tables_is_a_revision() {
+    // The main table's trailer names document information the empty table's lacks; some readers merge the two.
+    let mut p = Pdf::new();
+    p.obj(6, b"<< /Title (Main trailer only) >>");
+    let (mut p, main) = hybrid_main(p, " /Info 6 0 R", "");
+    let xs = p.at[&11];
+    p.table(0, 0, &format!("/XRefStm {xs} /Prev {main} /Size 13 /Root 1 0 R"), None);
+    untouched(&p.d);
+}
+
+#[test]
+fn trailers_that_give_a_key_two_values_are_a_revision() {
+    let (mut p, main) = hybrid_main(Pdf::new(), " /ID [<01> <02>]", "");
+    let xs = p.at[&11];
+    p.table(0, 0, &format!("/XRefStm {xs} /Prev {main} /Size 13 /Root 1 0 R /ID [<03> <04>]"), None);
+    untouched(&p.d);
+}
+
+#[test]
+fn a_cross_reference_stream_that_names_an_xrefstm_is_left_untouched() {
+    // The Office shape, but its empty newest section is a cross-reference stream: most readers follow /XRefStm only
+    // from a table, and find no font 5.
+    let (mut p, main) = hybrid_main(Pdf::new(), "", "");
+    let (xs, x) = (p.at[&11], p.d.len());
+    p.obj(
+        13,
+        &stream(&format!("/Type /XRef /Size 14 /Index [] /W [1 1 1] /Root 1 0 R /Prev {main} /XRefStm {xs}"), b""),
+    );
+    p.d.extend_from_slice(format!("startxref\n{x}\n%%EOF\n").as_bytes());
+    untouched(&p.d);
+}
+
+#[test]
+fn an_xrefstm_stream_with_a_prev_is_left_untouched() {
+    // The Office shape, but the stream /XRefStm names links a table before it by a /Prev of its own: pdf.js reads
+    // that table too, gpress doesn't.
+    let mut p = Pdf::new();
+    p.obj(6, b"<< /Title (Earlier save) >>");
+    let old = p.d.len();
+    p.d.extend_from_slice(format!("xref\n6 1\n{:010} 00000 n \ntrailer\n<< /Size 7 >>\n", p.at[&6]).as_bytes());
+    untouched(&hybrid_tail(p, "", &format!(" /Prev {old}")).d);
+}
+
+#[test]
+fn an_xrefstm_stream_that_adds_to_the_trailer_is_left_untouched() {
+    // PDFium fills in what the newest trailer lacks from the dictionary of the stream /XRefStm names.
+    let mut p = Pdf::new();
+    p.obj(6, b"<< /Title (Only in the stream's dictionary) >>");
+    untouched(&hybrid_tail(p, "", " /Info 6 0 R").d);
 }
 
 #[test]
@@ -398,6 +465,44 @@ fn a_linearised_file_whose_main_trailer_adds_an_entry_is_a_revision() {
 }
 
 #[test]
+fn a_linearised_file_whose_first_page_section_is_not_first_is_a_revision() {
+    // Readers that take the file as linearised start at the table right after the linearisation dictionary (an
+    // earlier save's), not at the first-page section that `startxref` names.
+    let between = b"xref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size 13 /Root 1 0 R >>\n";
+    untouched(&linearised_save(Pdf::new(), true, between).0.d);
+}
+
+#[test]
+fn a_linearisation_dictionary_with_endobj_in_a_string_is_a_revision() {
+    // pdf.js and Poppler start after the first `endobj` in the file, here inside the dictionary; PDFium after it.
+    let mut d = linearised_hybrid().0.d;
+    let at = d.windows(18).position(|w| w == b"/N 1 /T 0 /H [0 0]").unwrap();
+    d[at..at + 18].copy_from_slice(b"/K (endobj)       ");
+    untouched(&d);
+}
+
+#[test]
+fn a_linearisation_dictionary_that_ends_past_1024_bytes_is_left_untouched() {
+    // pdf.js finds no `endobj` in the first 1024 bytes, so it rebuilds the file from its objects instead.
+    let mut p = Pdf::new();
+    p.obj(10, format!("<< /Linearized 1 /Pad ({}) >>", "-".repeat(1100)).as_bytes());
+    page(&mut p, "ONE SAVE");
+    p.table(0, 11, "/Size 11 /Root 1 0 R", None);
+    untouched(&p.d);
+}
+
+#[test]
+fn a_linearisation_dictionary_that_is_not_the_first_object_does_not_count() {
+    // Readers take a file as linearised only when its first object is the linearisation dictionary.
+    let mut p = Pdf::new();
+    p.obj(6, b"<< /Title (One save) >>");
+    p.obj(10, b"<< /Linearized 1 /L 0 /O 3 /E 0 /N 1 /T 0 /H [0 0] >>");
+    page(&mut p, "ONE SAVE");
+    p.table(0, 11, "/Size 11 /Root 1 0 R /Info 6 0 R", None);
+    assert!(matches!(optimize(&p.d, &Options::effort(0)).outcome, Outcome::Smaller(_)));
+}
+
+#[test]
 fn a_stream_that_repeats_a_row_as_free_is_left_untouched() {
     // One cross-reference stream lists content 4 twice, the second time as free: PDFium takes the second row, other
     // readers the first.
@@ -411,8 +516,7 @@ fn a_stream_that_repeats_a_row_as_free_is_left_untouched() {
     let x = p.d.len();
     p.obj(6, &stream("/Type /XRef /Size 7 /Root 1 0 R /Index [0 6 4 1] /W [1 2 1]", &rows));
     p.d.extend_from_slice(format!("startxref\n{x}\n%%EOF\n").as_bytes());
-    let r = optimize(&p.d, &Options::effort(0));
-    assert!(matches!(r.outcome, Outcome::Untouched(_)), "{:?}", r.outcome);
+    untouched(&p.d);
 }
 
 #[test]
