@@ -181,9 +181,9 @@ fn one_startxref_more_than_sections_is_a_revision() {
 }
 
 /// One save, linearised as qpdf writes it, after what `p` holds: the linearisation dictionary (10); the first-page
-/// section, with its row and a /Prev naming the main section at the end; and the main section, with the page's
-/// rows. Without `first_startxref` no `startxref` follows the first-page section, as qpdf writes it. Returns where
-/// the first-page section is.
+/// section, with its row, the /Size of the whole file and a /Prev naming the main section at the end; and the main
+/// section, with the page's rows and a /Size of its own. Without `first_startxref` no `startxref` follows the
+/// first-page section, as qpdf writes it. Returns where the first-page section is.
 fn linearised_save(mut p: Pdf, first_startxref: bool) -> (Pdf, usize) {
     p.obj(10, b"<< /Linearized 1 /L 0 /O 3 /E 0 /N 1 /T 0 /H [0 0] >>");
     // Room for the first-page section, written once the offsets are known.
@@ -191,7 +191,7 @@ fn linearised_save(mut p: Pdf, first_startxref: bool) -> (Pdf, usize) {
     p.d.extend_from_slice(&[b' '; 200]);
     p.d.push(b'\n');
     page(&mut p, "ONE SAVE");
-    let main = p.table(0, 10, "/Size 11", Some(first));
+    let main = p.table(0, 10, "/Size 10", Some(first));
     let mut head =
         format!("xref\n10 1\n{:010} 00000 n \ntrailer\n<< /Size 11 /Root 1 0 R /Prev {main} >>\n", p.at[&10]);
     if first_startxref {
@@ -207,6 +207,38 @@ fn one_linearised_save_is_rewritten_with_every_object() {
     for first_startxref in [true, false] {
         rewritten(&linearised_save(Pdf::new(), first_startxref).0.d);
     }
+}
+
+/// Rows of a cross-reference stream with /W [1 3 1] for the numbers in `ns`, in use if written, free if not.
+fn stream_rows(p: &Pdf, ns: std::ops::Range<u32>) -> Vec<u8> {
+    ns.flat_map(|n| match p.at.get(&n) {
+        Some(&off) if n > 0 => [1, (off >> 16) as u8, (off >> 8) as u8, off as u8, 0],
+        _ => [0; 5],
+    })
+    .collect()
+}
+
+#[test]
+fn one_linearised_save_of_cross_reference_streams_is_rewritten_with_every_object() {
+    // As qpdf writes it with object streams: the first-page stream (13) after the linearisation dictionary, the main
+    // stream (14) at the end. Their dictionaries differ only in the keys about the cross-reference data.
+    let mut p = Pdf::new();
+    p.obj(10, b"<< /Linearized 1 /L 0 /O 3 /E 0 /N 1 /T 0 /H [0 0] >>");
+    let first = p.d.len();
+    p.d.extend_from_slice(&[b' '; 200]);
+    p.d.push(b'\n');
+    page(&mut p, "ONE SAVE");
+    let rows = stream_rows(&p, 0..6);
+    let main = p.d.len();
+    p.obj(14, &stream("/Type /XRef /Size 6 /Index [0 6] /W [1 3 1]", &rows));
+    p.d.extend_from_slice(format!("startxref\n{first}\n%%EOF\n").as_bytes());
+    let dict = format!("/Type /XRef /Size 15 /Index [10 1] /W [1 3 1] /Root 1 0 R /Prev {main}");
+    let mut head = b"13 0 obj\n".to_vec();
+    head.extend_from_slice(&stream(&dict, &stream_rows(&p, 10..11)));
+    head.extend_from_slice(b"\nendobj\n");
+    assert!(head.len() <= 200, "{}", head.len());
+    p.d[first..first + head.len()].copy_from_slice(&head);
+    rewritten(&p.d);
 }
 
 #[test]
@@ -262,28 +294,23 @@ fn linearised_sections_that_define_an_object_differently_are_a_revision() {
     untouched(&p.d);
 }
 
-#[test]
-fn a_linearisation_dictionary_past_1024_bytes_does_not_count() {
-    // A linearised file's two sections, but /Linearized only past the first 1024 bytes, where gpress doesn't look
-    // for it: to gpress the two sections are two saves.
+/// A linearised save whose /Linearized starts at byte `at`, after a comment that pads the header.
+fn linearised_at(at: usize) -> Vec<u8> {
     let mut p = Pdf::new();
     p.d.push(b'%');
-    p.d.extend_from_slice(&[b'a'; 1100]);
+    p.d.extend(std::iter::repeat_n(b'a', at - 23));
     p.d.push(b'\n');
-    p.obj(10, b"<< /Linearized 1 /L 0 /O 3 /E 0 /N 1 /T 0 /H [0 0] >>");
-    let first = p.d.len();
-    p.d.extend_from_slice(&[b' '; 200]);
-    p.d.push(b'\n');
-    page(&mut p, "ONE SAVE");
-    let main = p.table(0, 11, "/Size 11", Some(first));
-    let head = format!(
-        "xref\n10 1\n{:010} 00000 n \ntrailer\n<< /Size 11 /Root 1 0 R /Prev {main} >>\nstartxref\n0\n%%EOF",
-        p.at[&10]
-    );
-    assert!(head.len() <= 200);
-    p.d[first..first + head.len()].copy_from_slice(head.as_bytes());
-    assert_eq!(xref::open(&p.d).unwrap().sections, 2);
-    untouched(&p.d);
+    let (p, _) = linearised_save(p, true);
+    assert_eq!(&p.d[at..at + 11], b"/Linearized");
+    p.d
+}
+
+#[test]
+fn a_linearisation_dictionary_counts_only_within_the_first_1024_bytes() {
+    // gpress looks for /Linearized in bytes 0 to 1023 only: ending on byte 1023, it makes the two sections one save;
+    // a byte later, they are two saves.
+    rewritten(&linearised_at(1013));
+    untouched(&linearised_at(1014));
 }
 
 /// One save written after what `p` holds as Prince writes a hybrid file: an object stream (12) holding font 5 and
@@ -344,6 +371,26 @@ fn trailers_that_give_a_key_two_values_are_a_revision() {
     let (mut p, main) = hybrid_main(Pdf::new(), " /ID [<01> <02>]");
     let xs = p.at[&11];
     p.table(0, 0, &format!("/XRefStm {xs} /Prev {main} /Size 13 /Root 1 0 R /ID [<03> <04>]"), None);
+    untouched(&p.d);
+}
+
+#[test]
+fn an_empty_update_that_changes_nothing_is_a_revision() {
+    // An empty table with the first save's trailer and no /XRefStm: an update, though it changes nothing.
+    let (mut p, x) = first_save();
+    p.table(0, 0, &format!("/Size 6 /Root 1 0 R /Prev {x}"), None);
+    untouched(&p.d);
+}
+
+#[test]
+fn an_empty_cross_reference_stream_that_names_an_xrefstm_is_a_revision() {
+    // The hybrid shape, but its empty newest section is a cross-reference stream: most readers follow /XRefStm only
+    // from a table's trailer, and find no font 5.
+    let (mut p, main) = hybrid_main(Pdf::new(), "");
+    let (xs, x) = (p.at[&11], p.d.len());
+    let dict = format!("/Type /XRef /Size 14 /Index [] /W [1 1 1] /Root 1 0 R /Prev {main} /XRefStm {xs}");
+    p.obj(13, &stream(&dict, b""));
+    p.d.extend_from_slice(format!("startxref\n{x}\n%%EOF\n").as_bytes());
     untouched(&p.d);
 }
 

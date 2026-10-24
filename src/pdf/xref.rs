@@ -155,10 +155,10 @@ pub struct Doc<'a> {
     /// Number of cross-reference sections (more than one: incremental updates or linearisation).
     pub sections: usize,
     /// The file keeps earlier saves: more sections than one save writes, a `startxref` before the first section or
-    /// more of them than sections (a save no /Prev links), or an object two sections define differently. One save
-    /// writes one section, or two: a linearised file's (/Linearized in the first 1024 bytes, the newer section first,
-    /// the older trailer adding nothing to the newer), or a hybrid file's whose /XRefStm sits in an empty newest
-    /// table (its stream before the older table, the two trailers alike).
+    /// more of them than sections (a save no /Prev links), or an object two sections, or one section twice, define
+    /// differently. One save writes one section, or two: a linearised file's (/Linearized in the first 1024 bytes,
+    /// the newer section first, the older trailer adding nothing to the newer), or a hybrid file's whose /XRefStm
+    /// sits in an empty newest table (its stream before the older section, the two trailers alike).
     pub has_revisions: bool,
     /// Bytes after the last %%EOF.
     pub trailing: usize,
@@ -372,6 +372,7 @@ pub fn open_with(data: &[u8], limits: Limits) -> Result<Doc<'_>, LoadError> {
     // both shapes the document is read from the newest trailer alone, so the older one must add nothing.
     let stream = sections[0].1.get(b"XRefStm").and_then(Obj::as_int).and_then(|x| usize::try_from(x).ok());
     let hybrid_tail = sections.len() == 2
+        && data[starts[0]..].starts_with(b"xref")
         && own_rows[0] == 0
         && stream.is_some_and(|x| x < starts[1])
         && adds_nothing(&sections[1].1, &sections[0].1)
