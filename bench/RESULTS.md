@@ -415,7 +415,8 @@ built from 74114cf against version 9 (1b43830), one run of each after the other 
 - Two files grew, which `benchmark.py compare` reports as a failure: ocrmypdf's
   `tests__resources__2400dpi.pdf`, 73,708 to 73,801 bytes (+93, +0.13%) at every effort, and pdf.js's
   `issue5567.pdf`, 2,169,428 to 2,169,612 bytes (+184, +0.008%) at efforts 50 and 100 (at effort 0 it is 8
-  bytes smaller). Every other file is smaller at every effort; the largest saving is pypdf's
+  bytes smaller). The owner accepted both in writing on 2026-10-24, as the price of code free of PAQ's
+  licence. Every other file is smaller at every effort; the largest saving is pypdf's
   `009-pdflatex-geotopo__GeoTopo.pdf`, 2,195,852 to 2,174,038 bytes.
 - CPU: the two runs above, one after the other with other work on the machine, differ by 5 to 6%. Packing the
   37 files that take over a second with both builds in turn, file by file and pinned to one core, gives 316.0
