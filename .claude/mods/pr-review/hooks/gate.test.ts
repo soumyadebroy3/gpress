@@ -232,4 +232,5 @@ test('the rule goes in the main prompt, not a subagent', async ($, on) => {
   expect(rule).toContain('neither this session nor its subagents check out, build or run its code')
   expect(rule).toContain('or a lookup that fails, makes it outside')
   expect(rule).toContain("a session whose `gh api user --jq .login` prints someone else's login skips this rule")
+  expect(rule).toContain('Only a Dependabot update (opened by dependabot[bot]) that changes nothing but')
 })
