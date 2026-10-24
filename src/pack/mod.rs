@@ -31,7 +31,8 @@ pub const MAGIC: &[u8; 4] = b"\x89GPZ";
 /// is version 8 with the model's logistic tables and adaptive probability maps written anew, so the coded body
 /// differs; the header is the same. Version 8 is version 7 (version 6, the first with Type 1 fonts, fax images
 /// and decrypted streams together, without the preflate part) with the decoded total in the header. Nothing
-/// earlier shipped, so earlier versions are refused.
+/// earlier shipped, so earlier versions are refused. The fallback form is coded with this version's model, so a
+/// version-0 file from a build before version 9 is refused as damaged.
 pub const VERSION: u8 = 9;
 const HASH_LEN: usize = 16;
 

@@ -400,24 +400,30 @@ the engine rewrites.
 The model's logistic tables (squash and stretch) and its adaptive probability maps were written again from
 their formulas, by implementers kept from the PAQ code the earlier ones followed, so the coded bytes changed
 and the archive format went from version 8 to 9 (`src/cm/mod.rs`). `bench/benchmark.py time` on
-`--set sample120-size30` (30 files, 19,942,458 bytes), `--modes archive --threads 1`, version 8 built from
-87b5d80 (the archive code of 74114cf) against version 9:
+`--set sample120` (120 files, 78,313,418 bytes), `--modes archive --efforts 0,50,100 --threads 1`, version 8
+built from 74114cf against version 9 (1b43830), one run of each after the other on a 4-core cloud machine
+(calibration 4.212 s before the version 8 run, 4.237 s before version 9):
 
-| Effort | Version 8 | Version 9 | Change |
-| ---: | ---: | ---: | ---: |
-| 0 | 13,534,508 | 13,519,969 | -0.107% |
-| 100 | 12,964,725 | 12,946,411 | -0.141% |
+| Effort | Version 8 | Version 9 | Change | CPU, version 8 | CPU, version 9 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 48,015,564 | 47,883,482 | -0.28% | 315.2 s | 332.4 s |
+| 50 | 47,164,857 | 47,013,243 | -0.32% | 442.7 s | 470.3 s |
+| 100 | 47,164,857 | 47,013,243 | -0.32% | 422.1 s | 445.9 s |
 
-- Every archive restored byte for byte. One file grew, at both efforts: ocrmypdf's
-  `tests__resources__2400dpi.pdf`, 73,708 to 73,801 bytes (+93, +0.13%). The largest saving was pdf.js's
-  `issue6286.pdf`, 1,589,127 to 1,580,606 bytes.
-- Of the other designs measured on the same files, steps of 1/32 or 1/128 instead of 1/64, or the same ends
-  with steps rounded from a half, gave larger totals over the two efforts. Maps stepping toward 0 and 65535,
-  rounded from a half and with their output clamped to 1 to 4095, came out 8 and 11 bytes smaller; the ends used
-  (16 and 65520) keep the output in that range with no clamp.
-- CPU: two runs of each, alternating, on a 4-core cloud machine with other work on it (calibration 3.82 to
-  4.26 s): version 9 took 62.3 and 64.7 s at effort 0 against 61.3 and 63.6 s, and 109.0 and 115.3 s at
-  effort 100 against 109.3 and 112.6 s, within the 3 to 6% that two runs of one build differ by.
+- Every archive restored byte for byte, and peak memory stayed at 262 MB. Efforts 50 and 100 give the same
+  archives, as before.
+- Two files grew, which `benchmark.py compare` reports as a failure: ocrmypdf's
+  `tests__resources__2400dpi.pdf`, 73,708 to 73,801 bytes (+93, +0.13%) at every effort, and pdf.js's
+  `issue5567.pdf`, 2,169,428 to 2,169,612 bytes (+184, +0.008%) at efforts 50 and 100 (at effort 0 it is 8
+  bytes smaller). Every other file is smaller at every effort; the largest saving is pypdf's
+  `009-pdflatex-geotopo__GeoTopo.pdf`, 2,195,852 to 2,174,038 bytes.
+- CPU: the two runs above, one after the other with other work on the machine, differ by 5 to 6%. Packing the
+  37 files that take over a second with both builds in turn, file by file and pinned to one core, gives 316.0
+  against 315.7 s at effort 0 (-0.1%) and 426.9 against 439.0 s at effort 100 (+2.8%).
+- Of the other designs measured on 30 of these files (`--set sample120-size30`), steps of 1/32 or 1/128
+  instead of 1/64, or the same ends with steps rounded from a half, gave larger totals over efforts 0 and 100.
+  Maps stepping toward 0 and 65535, rounded from a half and with their output clamped to 1 to 4095, came out 8
+  and 11 bytes smaller; the ends used (16 and 65520) keep the output in that range with no clamp.
 - The normal PDF is unchanged: the MQ decoder, written again from T.88 Annex E.3, reads back what the engine
   writes as before, and the 19 corpus files with CCITT images give the same outputs at efforts 0 and 100.
 - The whole-set archive figure in section 3 is from earlier builds and was not measured again.

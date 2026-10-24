@@ -4,8 +4,9 @@ Where this stands (added when the plan went into the repository, 2026-10-08): it
 `speed` (commit ca8fa92), which is the engine now on `main` with these differences. preflate-rs is gone
 (its dependency `cabac` is LGPL), so item D6 and the preflate planning costs in sections 4 and 7 no longer
 apply, and the non-zlib streams it rebuilt are stored as they are (D5's failed parameter search still
-applies to them). The archive is the gpress archive, format version 8, written as `.gpz`, where the text
-below says "peyaji format" or "version 4" (the model and the parts it measures are the same; version 8 adds
+applies to them). The archive is the gpress archive, format version 9, written as `.gpz`, where the text
+below says "peyaji format" or "version 4" (the model and the parts it measures are the same, except that
+version 9 works out the logistic tables and probability maps from their formulas; version 8 adds
 the decoded total to the header and a `max_decoded` budget on both sides, and its planner keeps no decoded
 data and its residual history lives per segment, so the archive memory figures of sections 5 and 8 (D4) are
 from before those two of D4's four copies went). The JPEG
