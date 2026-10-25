@@ -165,125 +165,98 @@ impl Default for MqEncoder {
     }
 }
 
-// The MQ decoder below (`MqDecoder`, to the end of its `impl`) is a Rust translation of ArithmeticDecoder in
-// pdf.js (src/core/arithmetic_decoder.js, as in pdf.js v5.6.205, the last release with that file). Changed by
-// the gpress authors: written in Rust, and it reads 0xFF past the end of the data. The Apache License's text
-// is in LICENSE-APACHE. pdf.js's notice:
-//
-// Copyright 2012 Mozilla Foundation
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-/// The MQ decoder (T.88 E.3, with the code register split in two halves).
+/// The MQ decoder (T.88 E.3), the inverse of `MqEncoder`. C holds the code value less the base of the
+/// interval: its high half (Chigh) lines up with A, its low half holds the CT code bits not yet shifted up.
+/// Past the end of the data it reads 0xFF bytes, which BYTEIN takes as a marker: 1 bits from there on, as
+/// after the encoder's 0xFF 0xAC, so any bytes (empty, truncated) decode to something.
 pub struct MqDecoder<'a> {
     data: &'a [u8],
+    /// The index of the byte read last (B in the flowcharts).
     bp: usize,
-    chigh: u32,
-    clow: u32,
-    ct: u32,
     a: u32,
+    c: u32,
+    ct: u32,
 }
 
 impl<'a> MqDecoder<'a> {
+    /// INITDEC.
     pub fn new(data: &'a [u8]) -> MqDecoder<'a> {
-        let mut d = MqDecoder { data, bp: 0, chigh: *data.first().unwrap_or(&0xFF) as u32, clow: 0, ct: 0, a: 0 };
+        let mut d = MqDecoder { data, bp: 0, a: 0x8000, c: 0, ct: 0 };
+        d.c = d.byte(0) << 16;
         d.byte_in();
-        d.chigh = ((d.chigh << 7) & 0xFFFF) | ((d.clow >> 9) & 0x7F);
-        d.clow = (d.clow << 7) & 0xFFFF;
+        d.c <<= 7;
         d.ct -= 7;
-        d.a = 0x8000;
         d
     }
 
     #[inline]
-    fn at(&self, i: usize) -> u32 {
-        // Past the end the decoder reads 0xFF (the end marker's role).
-        *self.data.get(i).unwrap_or(&0xFF) as u32
+    fn byte(&self, i: usize) -> u32 {
+        self.data.get(i).map_or(0xFF, |&b| b as u32)
     }
 
-    fn byte_in(&mut self) {
-        if self.at(self.bp) == 0xFF {
-            if self.at(self.bp + 1) > 0x8F {
-                self.clow += 0xFF00;
-                self.ct = 8;
-            } else {
-                self.bp += 1;
-                self.clow += self.at(self.bp) << 9;
-                self.ct = 7;
-            }
-        } else {
-            self.bp += 1;
-            self.clow += self.at(self.bp) << 8;
-            self.ct = 8;
-        }
-        if self.clow > 0xFFFF {
-            self.chigh += self.clow >> 16;
-            self.clow &= 0xFFFF;
-        }
-    }
-
+    /// DECODE: one decision in context cx, updating cx as the encoder did.
     #[inline]
     pub fn decode(&mut self, cx: &mut Cx) -> u32 {
         let (qe, nmps, nlps, switch) = QE[(*cx >> 1) as usize];
-        let mut mps = (*cx & 1) as u32;
-        let mut a = self.a.wrapping_sub(qe);
-        let d;
-        let next;
-        if self.chigh < qe {
-            if a < qe {
-                a = qe;
-                d = mps;
-                next = nmps;
-            } else {
-                a = qe;
-                d = 1 - mps;
-                if switch {
-                    mps = d;
-                }
-                next = nlps;
-            }
+        let mps = (*cx & 1) as u32;
+        self.a -= qe;
+        // The interval's lower Qe is the LPS's and the rest the MPS's, unless the rest is the smaller (A < Qe
+        // now): then the two swap (the conditional exchange).
+        let d = if self.c >> 16 < qe {
+            let d = if self.a < qe { mps } else { 1 - mps };
+            self.a = qe;
+            d
         } else {
-            self.chigh -= qe;
-            if a & 0x8000 != 0 {
-                self.a = a;
+            self.c -= qe << 16;
+            if self.a & 0x8000 != 0 {
                 return mps;
             }
-            if a < qe {
-                d = 1 - mps;
-                if switch {
-                    mps = d;
-                }
-                next = nlps;
+            if self.a < qe {
+                1 - mps
             } else {
-                d = mps;
-                next = nmps;
+                mps
             }
+        };
+        if d == mps {
+            *cx = nmps << 1 | mps as u8;
+        } else {
+            let m = if switch { 1 - mps } else { mps };
+            *cx = nlps << 1 | m as u8;
         }
+        // RENORMD.
         loop {
             if self.ct == 0 {
                 self.byte_in();
             }
-            a <<= 1;
-            self.chigh = ((self.chigh << 1) & 0xFFFF) | ((self.clow >> 15) & 1);
-            self.clow = (self.clow << 1) & 0xFFFF;
+            self.a <<= 1;
+            self.c <<= 1;
             self.ct -= 1;
-            if a & 0x8000 != 0 {
+            if self.a & 0x8000 != 0 {
                 break;
             }
         }
-        self.a = a;
-        *cx = next << 1 | mps as u8;
         d
+    }
+
+    /// BYTEIN: the next byte into the low half of C. After 0xFF the encoder put only 7 bits in the
+    /// next byte (bit stuffing); 0xFF and then a byte above 0x8F is a marker, which is not read: 1 bits instead.
+    fn byte_in(&mut self) {
+        if self.byte(self.bp) == 0xFF {
+            if self.byte(self.bp + 1) > 0x8F {
+                self.c += 0xFF00;
+                self.ct = 8;
+            } else {
+                self.bp += 1;
+                // The stuffed bit lands in Chigh. Wrapping, so that no bytes can make this panic (an encoder's
+                // never carry out of C).
+                self.c = self.c.wrapping_add(self.byte(self.bp) << 9);
+                self.ct = 7;
+            }
+        } else {
+            self.bp += 1;
+            self.c += self.byte(self.bp) << 8;
+            self.ct = 8;
+        }
     }
 }
 
@@ -531,6 +504,70 @@ mod tests {
             for &(c, b) in &bits {
                 assert_eq!(d.decode(&mut cx_d[c]), b);
             }
+        }
+    }
+
+    #[test]
+    fn mq_coder_round_trips_changing_probabilities() {
+        // 1000 contexts, each with its own chance of a 1, from 1 in 4096 to even and on either side of it
+        // (so the MPS switches), drawn again for every context at each of 40 phases.
+        let mut s = 12345;
+        let mut p = [0u64; 1000];
+        let mut bits = Vec::new();
+        for _ in 0..40 {
+            for q in p.iter_mut() {
+                let x = 1 << (rng(&mut s) % 12);
+                *q = if rng(&mut s) & 1 == 0 { x } else { 4096 - x };
+            }
+            for _ in 0..50_000 {
+                // The low-numbered contexts come up more often.
+                let c = ((rng(&mut s) % 1000) & (rng(&mut s) % 1000)) as usize;
+                bits.push((c, (rng(&mut s) % 4096 < p[c]) as u32));
+            }
+        }
+        let mut cx_e = [0u8; 1000];
+        let mut e = MqEncoder::new();
+        for &(c, b) in &bits {
+            e.encode(&mut cx_e[c], b);
+        }
+        let data = e.finish();
+        let mut cx_d = [0u8; 1000];
+        let mut d = MqDecoder::new(&data);
+        for (i, &(c, b)) in bits.iter().enumerate() {
+            assert_eq!(d.decode(&mut cx_d[c]), b, "decision {i}");
+        }
+        assert_eq!(cx_d, cx_e);
+    }
+
+    #[test]
+    fn mq_decoder_takes_any_bytes() {
+        let mut s = 5;
+        let bits: Vec<(usize, u32)> =
+            (0..3000).map(|_| ((rng(&mut s) % 8) as usize, rng(&mut s).is_multiple_of(5) as u32)).collect();
+        let mut cx = [0u8; 8];
+        let mut e = MqEncoder::new();
+        for &(c, b) in &bits {
+            e.encode(&mut cx[c], b);
+        }
+        let data = e.finish();
+        let decode = |data: &[u8], n: usize| -> Vec<u32> {
+            let mut cx = [0u8; 8];
+            let mut d = MqDecoder::new(data);
+            bits.iter().cycle().take(n).map(|&(c, _)| d.decode(&mut cx[c])).collect()
+        };
+        // Past the end it reads 0xFF, so the data decodes the same without its 0xFF 0xAC marker.
+        let want: Vec<u32> = bits.iter().map(|&(_, b)| b).collect();
+        assert_eq!(decode(&data[..data.len() - 1], bits.len()), want);
+        assert_eq!(decode(&data[..data.len() - 2], bits.len()), want);
+        // Empty and truncated data, and junk heavy in 0xFF and 0x80 to 0x8F (after 0xFF, a carry into it), decode
+        // to something, well past their end.
+        for cut in 0..data.len() {
+            decode(&data[..cut], 2 * bits.len());
+        }
+        for _ in 0..200 {
+            let junk: Vec<u8> =
+                (0..rng(&mut s) % 64).map(|_| [0xFF, 0x80, 0x8F, 0x7F, 0][rng(&mut s) as usize % 5]).collect();
+            decode(&junk, 2 * bits.len());
         }
     }
 

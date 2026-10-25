@@ -16,8 +16,8 @@ tool. It makes two kinds of output, and checks each one before returning it:
   context-mixing model and restored byte for byte. Every archive is restored and checked before it is
   returned, and a damaged archive is refused with an error, never restored wrongly.
 
-Most of the engine is our own code; the parts that follow another project's code (zlib, libdeflate, pdf.js,
-the LZMA SDK) say so and keep its licence notice, as listed in
+Most of the engine is our own code; the parts that follow another project's code (zlib, libdeflate, the LZMA
+SDK) say so and keep its licence notice, as listed in
 [Code from other projects](docs/reference.md#code-from-other-projects). A default build's only outside
 libraries are RustCrypto's AES, MD5 and SHA-2, for encrypted PDFs, and the small crates they use (typenum,
 cfg-if, and libc on some targets), all MIT OR Apache-2.0.
@@ -25,7 +25,7 @@ cfg-if, and libc on some targets), all MIT OR Apache-2.0.
 ## Status
 
 Version 0.1.0, in active development: the API may still change, and nothing is published to crates.io or npm
-yet, so everything below builds from this repository. The archive format is version 8; archives from earlier
+yet, so everything below builds from this repository. The archive format is version 9; archives from earlier
 development versions are refused. CI builds and tests on Linux (x86-64).
 
 ## Install
@@ -99,7 +99,7 @@ archive's statistics:
 
 ```
 in.pdf	SMALLER	8791	4955	0.15	objects=6 streams=2 reencoded=2 kept=0 objstms=1 dropped=1 jpegs_retabled=0 fax_to_jbig2=0
-in.pdf	8791	6975	0.10	PACKED streams=3 rebuilt=3 rebuilt_bytes=7909 lepton=0 type1=0 fax=0 decrypted=0 decoded_bytes=54664
+in.pdf	8791	6963	0.10	PACKED streams=3 rebuilt=3 rebuilt_bytes=7909 lepton=0 type1=0 fax=0 decrypted=0 decoded_bytes=54664
 ```
 
 A file `optimize` can't make smaller or can't safely touch (a signed file, PDF/A, a file with earlier
@@ -311,7 +311,7 @@ without it, and the other test files run in every build each test whose parts it
 `speed.rs` and `memory.rs` test the normal PDF in the web build too); `tests/api.rs` proves
 that every option changes what the engine does; `tests/interaction.rs` runs every feature on one encrypted
 file (a JPEG, a fax image, a Type 1 font and a zlib stream) in both outputs; `tests/pack_format.rs` keeps an
-archive made by the first build of the format version (`tests/data/format-v8.*`), which must still restore and
+archive made by the first build of the format version (`tests/data/format-v9.*`), which must still restore and
 pack to the same bytes.
 
 The benchmark suite, the security suite and the independent checks are in `bench/` (described in the

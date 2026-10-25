@@ -332,7 +332,7 @@ mod tests {
             assert!(gpress_message_len() > 0);
             gpress_free_input(r, 5);
         }
-        assert_eq!(gpress_archive_version(), 8);
+        assert_eq!(gpress_archive_version(), 9);
         assert_eq!(gpress_features(), gpress::feature::enabled_bits());
         assert_ne!(gpress_features() & gpress::Feature::Archive.bit(), 0);
     }

@@ -6,26 +6,69 @@ pub mod model;
 
 // ---------------------------------------------------------------- logistic helpers (12-bit domain)
 
-const SQUASH_T: [i32; 33] = [
-    1, 2, 3, 6, 10, 16, 27, 45, 73, 120, 194, 310, 488, 747, 1101, 1546, 2047, 2549, 2994, 3348, 3607, 3785, 3901,
-    3975, 4024, 4050, 4068, 4079, 4085, 4089, 4092, 4093, 4094,
-];
+// Stretched probabilities are ln(p / (1 - p)) times 256, within +-2047; probabilities are 12-bit. The tables
+// are worked out in floating point when compiling (so every platform gets the same integers) by the two
+// series below; nothing at run time uses floating point.
 
-/// 1 / (1 + e^-x): x is ln-odds scaled by 256 (-2047..2047), result is a 12-bit probability.
-#[inline]
-pub const fn squash(d: i32) -> i32 {
-    if d > 2047 {
-        return 4095;
+/// e^x for 0 <= x <= 8, by its Taylor series: every term is positive, so nothing cancels, and 64 terms take
+/// it far below f64 precision.
+const fn exp(x: f64) -> f64 {
+    let (mut sum, mut term, mut n) = (1.0, 1.0, 1.0);
+    while n < 64.0 {
+        term = term * x / n;
+        sum += term;
+        n += 1.0;
     }
-    if d < -2047 {
-        return 1;
-    }
-    let w = d & 127;
-    let i = ((d >> 7) + 16) as usize;
-    (SQUASH_T[i] * (128 - w) + SQUASH_T[i + 1] * w + 64) >> 7
+    sum
 }
 
-/// `squash` of every value of -2047..2047, worked out when compiling.
+/// ln(x) for x >= 1: x = m 2^e with m in [1, 2), and ln(m) = 2 atanh(z) with z = (m - 1) / (m + 1) below 1/3,
+/// by the series 2 (z + z^3/3 + z^5/5 + ...).
+const fn ln(x: f64) -> f64 {
+    let (mut m, mut e) = (x, 0.0);
+    while m >= 2.0 {
+        m /= 2.0;
+        e += 1.0;
+    }
+    let z = (m - 1.0) / (m + 1.0);
+    let (mut sum, mut zk, mut k) = (0.0, z, 1.0);
+    while k < 60.0 {
+        sum += zk / k;
+        zk *= z * z;
+        k += 2.0;
+    }
+    e * std::f64::consts::LN_2 + 2.0 * sum
+}
+
+/// squash(d) for d in 0..=2047: 4096 / (1 + e^(-x)) = 4096 e^x / (1 + e^x) with x = d / 256, rounded, at most
+/// 4095.
+const SQUASH_HALF: [u16; 2048] = {
+    let mut t = [0u16; 2048];
+    let mut d = 0;
+    while d < 2048 {
+        let e = exp(d as f64 / 256.0);
+        let p = (4096.0 * e / (1.0 + e) + 0.5) as u16;
+        t[d] = if p > 4095 { 4095 } else { p };
+        d += 1;
+    }
+    t
+};
+
+/// The logistic function: the 12-bit probability whose stretched value is `d`, 1 below -2047 and 4095 above
+/// 2047. The negative half mirrors the positive one, so squash(-d) + squash(d) == 4096.
+pub const fn squash(d: i32) -> i32 {
+    if d > 2047 {
+        4095
+    } else if d < -2047 {
+        1
+    } else if d >= 0 {
+        SQUASH_HALF[d as usize] as i32
+    } else {
+        4096 - SQUASH_HALF[-d as usize] as i32
+    }
+}
+
+/// squash(d) for d in -2047..=2047, at index d + 2047.
 static SQUASH: [u16; 4095] = {
     let mut t = [0u16; 4095];
     let mut i = 0;
@@ -36,27 +79,22 @@ static SQUASH: [u16; 4095] = {
     t
 };
 
-/// `stretch` of every 12-bit probability: the inverse of `squash`, worked out when compiling.
+/// stretch(p) for p in 0..=4095: 256 (ln(p) - ln(4096 - p)) rounded half away from 0 (swapping p and 4096 - p
+/// only negates it, exactly), within +-2047.
 static STRETCH: [i16; 4096] = {
-    let mut t = [0i16; 4096];
-    let mut pi = 0usize;
-    let mut x = -2047;
-    while x <= 2047 {
-        let v = squash(x) as usize;
-        while pi <= v {
-            t[pi] = x as i16;
-            pi += 1;
-        }
-        x += 1;
-    }
-    while pi < 4096 {
-        t[pi] = 2047;
-        pi += 1;
+    let mut t = [-2047i16; 4096];
+    let mut p = 1;
+    while p < 4096 {
+        let x = 256.0 * (ln(p as f64) - ln((4096 - p) as f64));
+        let d = if x < 0.0 { x - 0.5 } else { x + 0.5 } as i32;
+        t[p] = if d.abs() > 2047 { 2047 * d.signum() } else { d } as i16;
+        p += 1;
     }
     t
 };
 
-/// ln(p / (1 - p)) scaled by 256 (-2047..2047) of a 12-bit probability: the inverse of `squash`.
+/// The inverse of squash: ln(p / (4096 - p)) times 256, rounded, within +-2047, for a 12-bit probability p
+/// (clamped to 0..=4095; 0 gives -2047).
 #[inline]
 pub fn stretch(p: i32) -> i32 {
     STRETCH[p.clamp(0, 4095) as usize] as i32
@@ -351,44 +389,54 @@ impl<const N: usize> Mixer<N> {
     }
 }
 
-/// Adaptive probability map (secondary estimation): refines a probability within a context (below `N`, a
-/// power of two) by interpolating between 33 buckets over the stretched probability.
+/// Knots of each map: at stretched values -2048, -1920, ..., 2048 (128 apart, half a unit of ln-odds).
+const APM_KNOTS: usize = 33;
+
+/// An adaptive probability map (secondary estimation): for each of `N` contexts (a power of two; a context
+/// number is taken modulo `N`), a piecewise-linear map from a stretched probability to a 12-bit probability.
+/// Each map is 33 knots of 16-bit probability (66 bytes), each starting as squash of its place; `p` interpolates
+/// between the two knots around its input, and `update` moves both the same fraction of the way toward the coded
+/// bit, so that each knot learns the probability of the inputs within one spacing of it.
 pub struct Apm<const N: usize> {
-    t: Box<[[u16; 33]; N]>,
-    row: usize,
-    j: usize,
-    rate: i32,
+    t: Box<[[u16; APM_KNOTS]; N]>,
+    /// A step moves a knot by (end - knot) >> shift: 1/2^shift of the way to the bit's end of the scale (16 or
+    /// 65520: 1/4096 or 4095/4096), rounded up from a quarter (`ends` are offset to do it, mirroring each other),
+    /// so a knot gets to within a quarter step of the end (rounding from a half stops it up to half a step short:
+    /// measured, slightly larger archives).
+    shift: u32,
+    ends: [i32; 2],
+    /// Where the last `p` looked: the knot below its input, counted over all the contexts' knots.
+    at: usize,
 }
 
 impl<const N: usize> Apm<N> {
+    /// `rate`: each step is 1/2^(rate - 1) of the way, as two knots learn from every bit (with the model's rate
+    /// of 7, steps of 1/64 gave the smallest archives over the benchmark sample: 1/128 gave larger ones at both
+    /// efforts measured, 1/32 smaller ones at the lower effort but larger ones at the higher).
     pub fn new(rate: i32) -> Apm<N> {
         const { assert!(N.is_power_of_two()) };
-        let mut r = [0u16; 33];
-        for (j, v) in r.iter_mut().enumerate() {
-            *v = (squash((j as i32 - 16) * 128) * 16) as u16;
-        }
-        Apm { t: boxed(r), row: 0, j: 0, rate }
+        let knots = std::array::from_fn(|j| (squash(j as i32 * 128 - 2048) * 16) as u16);
+        let shift = (rate - 1).clamp(2, 15) as u32;
+        let quarter = 1 << (shift - 2);
+        Apm { t: boxed(knots), shift, ends: [16 + quarter - 1, 65520 + 3 * quarter], at: 0 }
     }
-    /// `st` is the stretched probability (-2047..2047).
+    /// The knots stay within 16..=65520, so the result is within 1..=4095.
     #[inline]
     pub fn p(&mut self, st: i32, cx: usize) -> i32 {
-        let s = st + 2048;
-        // s is 1..4095 and cx below N: the masks change nothing but spare the bounds checks.
-        let lo = (s >> 7) as usize & 31;
-        let w = s & 127;
-        self.row = cx & (N - 1);
-        let r = &self.t[self.row];
-        let a = r[lo] as i32;
-        let b = r[lo + 1] as i32;
-        self.j = lo + (w >= 64) as usize;
-        ((a * (128 - w) + b * w) >> 11).clamp(1, 4095)
+        let x = st.clamp(-2047, 2047) + 2048;
+        let (at, w) = ((cx & (N - 1)) * APM_KNOTS + (x >> 7) as usize, x & 127);
+        self.at = at;
+        let k = self.t.as_flattened();
+        let p16 = (k[at] as i32 * (128 - w) + k[at + 1] as i32 * w) >> 7;
+        (p16 + 8) >> 4
     }
+    /// A step never passes the bit's end, so the knots stay within 16..=65520.
     #[inline]
     pub fn update(&mut self, bit: u32) {
-        let target: i32 = if bit == 1 { 65535 } else { 0 };
-        // The bucket is at most 32 (see `p`): the minimum changes nothing.
-        let v = &mut self.t[self.row & (N - 1)][self.j.min(32)];
-        *v = (*v as i32 + ((target - *v as i32) >> self.rate)) as u16;
+        let end = self.ends[bit as usize & 1];
+        let k = &mut self.t.as_flattened_mut()[self.at..self.at + 2];
+        k[0] = (k[0] as i32 + ((end - k[0] as i32) >> self.shift)) as u16;
+        k[1] = (k[1] as i32 + ((end - k[1] as i32) >> self.shift)) as u16;
     }
 }
 
@@ -454,35 +502,121 @@ mod tests {
     }
 
     #[test]
-    fn stretch_table_is_the_one_built_at_run_time() {
-        // The loop that made the table when the program started, before the table was made when compiling.
-        let mut t = [0i16; 4096];
-        let mut pi = 0usize;
-        for x in -2047..=2047 {
-            let v = squash(x) as usize;
-            for e in t.iter_mut().take(v + 1).skip(pi) {
-                *e = x as i16;
-            }
-            pi = v + 1;
-        }
-        for e in t.iter_mut().skip(pi) {
-            *e = 2047;
-        }
-        assert!(t == STRETCH);
-    }
-
-    #[test]
-    fn squash_table_is_squash() {
-        for d in -2047..=2047 {
-            assert_eq!(SQUASH[(d + 2047) as usize] as i32, squash(d), "{d}");
-        }
-    }
-
-    #[test]
     fn squash_stretch_are_inverse_enough() {
         for p in (1..4095).step_by(7) {
             let back = squash(stretch(p));
             assert!((back - p).abs() <= 40, "{p} -> {back}");
+        }
+    }
+
+    #[test]
+    fn squash_is_the_logistic_function() {
+        for d in -2047..=2047 {
+            let f = (4096.0 / (1.0 + (-d as f64 / 256.0).exp())).clamp(1.0, 4095.0);
+            assert!((squash(d) as f64 - f).abs() <= 1.0, "{d}: {} for {f}", squash(d));
+            assert!(squash(d) >= squash(d - 1), "{d}");
+            assert_eq!(SQUASH[(d + 2047) as usize] as i32, squash(d), "{d}");
+        }
+        for d in 1..=2047 {
+            assert_eq!(squash(-d) + squash(d), 4096, "{d}");
+        }
+        assert_eq!(squash(0), 2048);
+        for d in [-2048, -2049, -100_000, i32::MIN] {
+            assert_eq!(squash(d), 1, "{d}");
+        }
+        for d in [2048, 2049, 100_000, i32::MAX] {
+            assert_eq!(squash(d), 4095, "{d}");
+        }
+        // Usable when compiling.
+        const _: () = assert!(squash(0) == 2048 && squash(2047) == 4095);
+    }
+
+    #[test]
+    fn stretch_is_the_ln_odds() {
+        for p in 0..=4095 {
+            let f = (256.0 * (p as f64 / (4096 - p) as f64).ln()).round().clamp(-2047.0, 2047.0);
+            assert!((stretch(p) as f64 - f).abs() <= 1.0, "{p}: {} for {f}", stretch(p));
+            assert!(p == 0 || stretch(p) >= stretch(p - 1), "{p}");
+        }
+        assert_eq!(stretch(2048), 0);
+        for p in [-1, -4096, i32::MIN] {
+            assert_eq!(stretch(p), stretch(0), "{p}");
+        }
+        for p in [4096, 5000, i32::MAX] {
+            assert_eq!(stretch(p), stretch(4095), "{p}");
+        }
+        for p in 1..=4095 {
+            let back = squash(stretch(p));
+            assert!((back - p).abs() <= 2, "{p} -> {back}");
+        }
+    }
+
+    #[test]
+    fn apm_starts_as_squash() {
+        let mut a = Apm::<4>::new(7);
+        for st in -2047..=2047 {
+            let p = a.p(st, st as usize);
+            // Linear between knots half a unit of ln-odds apart: at most 13 away where the curve bends most.
+            assert!((p - squash(st)).abs() <= 13, "{st}: {p} for {}", squash(st));
+        }
+        for j in -16..=16 {
+            assert!((a.p(j * 128, 0) - squash(j * 128)).abs() <= 1, "{j}");
+        }
+    }
+
+    #[test]
+    fn apm_moves_toward_the_bits() {
+        let mut a = Apm::<16>::new(7);
+        let p0 = a.p(300, 5);
+        for _ in 0..50 {
+            a.p(300, 5);
+            a.update(1);
+        }
+        let p1 = a.p(300, 5);
+        assert!(p1 > p0 + 100, "{p0} -> {p1}");
+        // The other contexts are untouched.
+        assert_eq!(a.p(300, 6), p0);
+        for _ in 0..200 {
+            a.p(300, 5);
+            a.update(0);
+        }
+        let p2 = a.p(300, 5);
+        assert!(p2 < p0 - 100, "{p1} -> {p2}");
+        // A context number is reduced modulo N.
+        assert_eq!(a.p(300, 5 + 16), p2);
+    }
+
+    #[test]
+    fn apm_stays_in_range() {
+        let mut a = Apm::<64>::new(7);
+        let mut s = 99u64;
+        let sts = [-2047, -2000, -1000, -1, 0, 1, 777, 2000, 2047];
+        for round in 0..3u32 {
+            for i in 0..300_000u32 {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                let st = if i % 2 == 0 { sts[(s % 9) as usize] } else { (s >> 8) as i32 % 2048 };
+                let cx = (s >> 32) as usize;
+                let p = a.p(st, cx);
+                assert!((1..=4095).contains(&p), "{st} {cx}: {p}");
+                // Runs of 0s, runs of 1s, then alternating bits.
+                let bit = match round {
+                    0 => 0,
+                    1 => 1,
+                    _ => i & 1,
+                };
+                a.update(bit);
+            }
+            for cx in 0..64 {
+                for st in -2047..=2047 {
+                    assert!((1..=4095).contains(&a.p(st, cx)), "{st} {cx}");
+                }
+                // Every map has learned the runs.
+                let p = a.p(0, cx);
+                assert!(round != 0 || p < 50, "{cx}: {p}");
+                assert!(round != 1 || p > 4045, "{cx}: {p}");
+            }
         }
     }
 }

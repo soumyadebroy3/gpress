@@ -122,7 +122,7 @@ Parts that follow another project's code are listed in [Code from other projects
 | JBIG2 | `src/fax/jbig2.rs` | MQ coder; generic-region encoder and decoder (T.88, template 0, nominal adaptive pixels, typical prediction); the embedded stream PDF reads. jbig2dec decodes our output exactly. |
 | Fax images, normal PDF | `src/fax/pdf.rs` | A CCITT image becomes JBIG2 when that is at least 5% smaller and nothing is uncertain: one CCITT filter with direct parameters, a DeviceGray image or a mask, the width and height the data holds, at most 2^30 pixels (width rounded up to 32; PDFium's JBIG2 decoder, which pdf.js also uses, shows nothing above 2^31), no byte alignment, EOLs where every reader expects them, every row written back bit for bit, end codes or 0 bits at the end, coding work of at most 2048 pixels per byte of data, and our JBIG2 decoder giving the same pixels. JBIG2Decode's output is the same bits as CCITTFaxDecode's (BlackIs1 handled), so Decode, ImageMask and masks keep their meaning. |
 | Encrypted PDFs | `src/pdf/crypt.rs`, `src/pack/sealed.rs` | The standard security handler with the empty user password (see below). RC4 and the key derivations are ours; AES, MD5 and SHA-2 come from RustCrypto. |
-| gpress archive | `src/pack/`, `src/cm/` | Any PDF, packed with our context-mixing model (bit-history states, mixers, SSE) with PDF-aware contexts: syntax, predicted object numbers and xref offsets, drawing instructions, image samples coded as residuals. Streams are recognised by their bytes (zlib, JPEG), not only by their dictionaries. Format version 8: a long repeat is coded as one 16-bit-precision decision instead of eight model decisions (huge flat images, duplicates); palette and packed-pixel images are modelled by their exact neighbours; an image's row length is confirmed from its data length; a JPEG behind Flate goes through Lepton when that beats the Flate bytes. Restored byte for byte; every archive is restored and checked before it is returned (with a second thread, the restore decodes the bytes while the encoder writes them). A damaged archive is refused with an error, never restored wrong: the header declares the restored length and the decoded bytes the parts claim in all (`max_len` and `max_decoded` refuse a file declaring more than the caller can afford, before anything is decoded); what a part restores is bounded by what is left of the declared length and what it claims by what is left of the declared decoded total, so the decoder's work and memory follow the two numbers the caller allowed, not what a damaged body says; decoding stops when the data runs out; and the file's checksum is checked at the end. The model's settings, the part kinds and how each is coded are constants of the format version; nothing earlier shipped, so versions before 8 are refused. |
+| gpress archive | `src/pack/`, `src/cm/` | Any PDF, packed with our context-mixing model (bit-history states, mixers, SSE) with PDF-aware contexts: syntax, predicted object numbers and xref offsets, drawing instructions, image samples coded as residuals. Streams are recognised by their bytes (zlib, JPEG), not only by their dictionaries. Format version 9: the model's logistic tables are worked out from their formulas, and its secondary estimation moves both knots around the input at each bit; a long repeat is coded as one 16-bit-precision decision instead of eight model decisions (huge flat images, duplicates); palette and packed-pixel images are modelled by their exact neighbours; an image's row length is confirmed from its data length; a JPEG behind Flate goes through Lepton when that beats the Flate bytes. Restored byte for byte; every archive is restored and checked before it is returned (with a second thread, the restore decodes the bytes while the encoder writes them). A damaged archive is refused with an error, never restored wrong: the header declares the restored length and the decoded bytes the parts claim in all (`max_len` and `max_decoded` refuse a file declaring more than the caller can afford, before anything is decoded); what a part restores is bounded by what is left of the declared length and what it claims by what is left of the declared decoded total, so the decoder's work and memory follow the two numbers the caller allowed, not what a damaged body says; decoding stops when the data runs out; and the file's checksum is checked at the end. The model's settings, the part kinds and how each is coded are constants of the format version; nothing earlier shipped, so versions before 9 are refused. The fallback form (version 0: the whole file coded by the model alone, written only when the archive fails its own restore check) uses the current model too, so a fallback file from a build before version 9 is refused as damaged. |
 | Type 1 fonts | `src/pack/type1.rs`, `src/cm/model.rs` | Type 1 font programs (FontFile with /Length1 /Length2 /Length3, typical of TeX) lose both layers of encryption before coding: the eexec layer (binary, PFB, and hex when its lines are regular) and the charstring layer inside it (lenIV honoured). Both ciphers are reversible byte for byte and are put back on restore; a font that would not come back exactly is coded as it is. On restore, a layout that doesn't fit inside the font's length is refused before anything is decoded for it. The charstrings get their own model kind, which follows their tokens. |
 | Fax images, archive | `src/fax/bilevel.rs`, `part.rs` | A CCITT stream is stored as its image, coded by a bilevel context-mixing model (templates up to four rows high, vertical runs, two mixers, two probability maps, 16-bit precision, typical prediction, a fast path for white areas), plus the encoder's choices; on restore our CCITT encoder writes the original bytes back. Streams under 64 bytes stay plain. The model's work is bounded by the file's size (2^24 plus 512 pixels per byte up to any point of the file); streams past it are coded plainly, and a restore that would go past it is refused. |
 | SHA-256 | `src/pack/sha256.rs` | For the restore check. |
@@ -139,7 +139,27 @@ keeps that project's licence notice, and every one of these licences allows it.
 | `src/flate/inflate.rs` | The checks and the sort of a code's lengths; the bit-by-bit decode | zlib's inftrees.c and puff.c (Mark Adler) | Zlib |
 | `src/flate/fast.rs` | The statistics that end a block, the hash-chain search, the lazy-match gain, the symbol costs, the cheapest-path parse, the statistics pass, the binary tree | libdeflate (Eric Biggers, Google) | MIT |
 | `src/flate/matcher.rs`, `src/flate/fast.rs` | The binary tree's insertion and search | LzFind.c of the LZMA SDK (Igor Pavlov) | Public domain |
-| `src/fax/jbig2.rs` | The MQ decoder | pdf.js's arithmetic_decoder.js (Mozilla), up to pdf.js v5.6.205 | Apache-2.0 |
+
+`src/fax/bilevel.rs` is not in the table, but its probability map has a history: it was adapted from the
+earlier map in `src/cm/`, which format version 9 replaced because it followed PAQ (GPL). The call on it is
+made on what its code says, not on where it came from. Its update moves the nearer of the two knots around the
+input toward 0 or 65535, by a fixed shift. That comes from the earlier map, and no PAQ program does it: lpaq1
+also moves the nearer knot, but at a rate set by a count, and paq8 moves both knots toward a target that
+depends on the rate. (The commit that took the earlier map out counted its update as following PAQ; this is
+the narrower call.) What bilevel.rs keeps of PAQ's map is design, not code: 33 knots per context that start as
+squash, linear interpolation between them, the nearer knot learning, and a step by a shift. None of PAQ's
+other constants or table values is in it, and its interpolation is its own. Its squash is worked out from the
+logistic formula, and its stretch is the inverse of that squash, as PAQ's is, found by a loop of its own.
+libzpaq (public domain) has a close relative, the nearer knot included. The new map in `src/cm/` keeps the
+start as squash, the linear interpolation and a step by a shift, which its contract sets, and 33 knots 128
+apart, which its implementer chose within the contract's 66 bytes per context after reading bilevel.rs's
+set-up (it also tried 32 knots and a count). Its step at the model's rate, 1/64, is bilevel's too; measuring
+1/32 to 1/256 picked it. It moves both knots.
+
+The repository's history before format version 9 holds the code that version replaced: the tables and map in
+`src/cm/`, which followed PAQ (lpaq1 and paq8, Matt Mahoney, GPL-2.0 or later), and the MQ decoder in
+`src/fax/jbig2.rs`, translated from pdf.js's `arithmetic_decoder.js` (Apache-2.0, Mozilla). Those earlier
+versions are altered versions of that code, and its licences apply to them.
 
 ## Encrypted PDFs
 
@@ -193,8 +213,8 @@ or LGPL. `deny.toml` holds the rule and `cargo deny check` (installed with `carg
 RustSec advisories, version bans and the source of every crate; `cargo deny` skips crates marked `publish =
 false`, so `bench/check_dep_sources.py` (CI and `supply` too) refuses any dependency that is not from
 crates.io. A default build depends on `aes`, `md-5` and `sha2` (RustCrypto, MIT or Apache-2.0, for the
-`encryption` feature) and nothing else; `--features existing` adds `lepton_jpeg` and what it needs (MIT,
-Apache-2.0, Zlib, BSD-2-Clause, Unicode-3.0).
+`encryption` feature) and the small crates they use, all MIT or Apache-2.0; `--features existing` adds
+`lepton_jpeg` and what it needs (MIT, Apache-2.0, Zlib, BSD-2-Clause, Unicode-3.0).
 
 ## Layout
 
@@ -207,7 +227,7 @@ Apache-2.0, Zlib, BSD-2-Clause, Unicode-3.0).
 | `src/jpeg/` | JPEG parsing and the optimal Huffman tables. |
 | `src/fax/` | CCITT and JBIG2 codecs, the fax steps of both outputs, the bilevel model. |
 | `src/cm/` | The context-mixing model and arithmetic coder. |
-| `src/pack/` | The gpress archive (format version 8), Type 1 fonts, encrypted streams, SHA-256. |
+| `src/pack/` | The gpress archive (format version 9), Type 1 fonts, encrypted streams, SHA-256. |
 | `src/par.rs` | The thread pool. |
 | `src/bin/gpress.rs` | The command-line tool. |
 | `crates/gpress-c/` | C API, header, example. |
