@@ -84,8 +84,8 @@ the reason.
 `gpress` without arguments lists every option, and the engine's measuring commands (`deflate`, `inflate`,
 `batch`, `jpeg`, `fax-decode`, `expand` (it decodes streams; restoring an archive is `unpack`), ...) used for checks
 and benchmarks; the comments at the top of
-[`src/bin/gpress.rs`](src/bin/gpress.rs) name them. The exit status is 0 when the call worked, 2 for a
-usage or file error, and otherwise the library's error code (for example 2 for a damaged archive, 6 when
+[`src/bin/gpress.rs`](src/bin/gpress.rs) name them. For `optimize`, `pack` and `unpack` the exit status is 0 when the call worked,
+2 for a usage or file error, and otherwise the library's error code (for example 2 for a damaged archive, 6 when
 `--time-budget` ran out; the full list is in the same comments).
 
 </details>
@@ -265,11 +265,13 @@ gpress_result_free(&r);
 ```
 
 Every function is thread-safe and never reads outside the buffers it is given. It never aborts the process on
-bad input, and a bug that panics comes back as an error. Like any Rust code it does abort if memory runs out, so set
+bad input if the calling thread has enough stack (the work runs on that thread and parses objects nested up to
+256 deep by recursion; a 128 KiB thread stack, musl's default, may be too small), and a bug that panics comes
+back as an error. Like any Rust code it does abort if memory runs out, so set
 the size limits to what the host can afford. Every buffer it hands out is freed with `gpress_result_free` (or
 `gpress_free` / `gpress_free_message`, each given the field's address), which are safe on null and on a result
-already freed: a free clears what it freed, so a double free or a part freed before the whole result is
-harmless by construction. An empty output is a null pointer with length 0. The options struct has the same
+already freed: a free clears what it freed, so freeing the same result twice, or a part before the whole
+result, is harmless by construction. An empty output is a null pointer with length 0. The options struct has the same
 fields as the Rust `Options` but `store_budget`, which stays at its default (fill it with
 `gpress_options_default` first; a size left at 0 means its default).
 [`crates/gpress-c/examples/roundtrip.c`](crates/gpress-c/examples/roundtrip.c) is a complete program, and
@@ -336,7 +338,7 @@ encrypted PDFs are handled and what each part of the engine does are in the [ref
 
 Measured on 907 public test PDFs (130.5 MB: the pdf.js, pypdf, OCRmyPDF and pikepdf test suites, many of them
 deliberately broken or unusual), fetched and pinned by `bench/fetch_corpus.sh`, and on a deliberately hard
-120-file sample of them (`bench/sets/sample120.txt`, 78.3 MB). Sizes were the same on every machine they were measured on.
+120-file sample of them (`bench/sets/sample120.txt`, 78.3 MB).
 
 <p align="center">
   <img src="docs/assets/archive.svg" width="880" alt="Archive size as a share of the original on 907 public test PDFs: gpress 60.9%; the best of Brotli 11, xz -9e and Zstandard 19 file by file 76.3%; Brotli 11 76.5%; xz -9e 76.8%; Zstandard 19 --long 77.0%.">
@@ -363,8 +365,9 @@ are not figures for the current code.
 - **Normal PDF on all 907 files, maximum effort:** 16.0% smaller on the 697 files it rewrote; qpdf (object
   streams, Flate at level 9) made the same files 9.3% smaller. Every one of those 697 outputs was compared with
   its original by tools we didn't write: qpdf, pikepdf, PDFium, Poppler and pdf.js.
-- **Every distinct Flate stream on its own (7,280 streams):** 41.05 MB; Zopfli (15 iterations) 0.67% larger,
-  libdeflate 12 1.40% larger, zlib 9 6.95% larger.
+- **Flate streams on their own, maximum effort (7,280 distinct streams from the test files, each decoding to at
+  most 4 MiB):** gpress 41.05 MB; Zopfli (15 iterations) 0.67% larger, libdeflate 12 1.40% larger, zlib 9 6.95%
+  larger.
 
 `bench/benchmark.py` measures any build.
 
@@ -380,8 +383,8 @@ are not figures for the current code.
   `expand` panics across the library boundary. What no option bounds yet: cross-reference streams decode as far as the file's size allows, the
   PDF/A check reads metadata up to 16 MiB, and objects parsed from object streams take more memory than the bytes
   the limits count (see `max_stream` in the [reference](docs/reference.md#options)).
-- **Deterministic.** The same bytes for any thread count and with or without a time budget (tested); the model
-  uses integer arithmetic only, its constants are fixed in code and never read from the environment, and the
+- **Deterministic.** The same bytes for any thread count and with or without a time budget (tested); the archive's
+  context-mixing model uses integer arithmetic only, its constants are fixed in code and never read from the environment, and the
   WebAssembly module is checked against the native library's bytes.
 - **Licences.** Libraries under MIT, Apache-2.0, BSD, ISC, Zlib, Unicode or MPL-2.0 only
   ([the licence rule](docs/reference.md#the-licence-rule)): `cargo deny` checks every dependency's licence and
