@@ -199,8 +199,9 @@ measurement (builds 52a91f0 and 20f8e69) was made in October 2026 for the change
 4-core 2.1 GHz Xeon virtual machine. Later changes made the strong encoder faster. Build 37bd3f3 was measured
 again at efforts 0, 50 and 100, and at each effort its outputs total exactly the first run's bytes. It ran on a
 machine about 1.2 times slower by the benchmark's calibration, so the two time columns compare only roughly.
-The current code gives the same outputs; its one later change on this path, the JBIG2 decoder that reads fax
-images back (717bf45), was not timed. The other levels were not measured again. Both runs, with their builds and calibrations,
+At those three efforts the current code gives the same outputs; its one later change on this path, the JBIG2
+decoder that reads fax images back (717bf45), was not timed. The other levels were not measured again: their
+times and outputs are the first run's. Both runs, with their builds and calibrations,
 are in [bench/RESULTS.md](bench/RESULTS.md#effort-levels). In the archive, data that already looks compressed
 is coded plainly below effort 50. The [reference](docs/reference.md#options) has the details.
 
@@ -297,11 +298,12 @@ The module gives the same bytes as the native library (the web module too, for `
 single-threaded and has no clock (so no time budget: run it in a Web Worker to keep a page responsive and to
 end it when it has taken too long). It is built with `panic = "abort"` (`wasm32-unknown-unknown` aborts on a
 panic anyway), so the panic guard that turns a bug into `Error::Internal` natively catches nothing there: a bug,
-or a failed memory growth, traps the module, and the wrapper turns the trap into a `GpressError` with code 4 and
+or a failed memory growth in the engine, traps the module, and the wrapper turns the trap into a `GpressError` with code 4 and
 marks the instance dead (load a fresh one). Sizes are 32-bit inside it: the wrapper refuses inputs of 2 GiB and
 more. Pages with a Content Security Policy need `'wasm-unsafe-eval'` in its `script-src`.
 
-A first load compiles the module (4 to 9 ms in Node when last measured, `bench/RESULTS.md`, Start-up).
+A first load compiles the module (4 to 9 ms in Node for the 818 KB module of d093ab4 with #8, `bench/RESULTS.md`,
+Start-up; CI's WebAssembly job measures it again in every run).
 `Gpress.compile(source)` returns the compiled module, and `Gpress.load(module)` makes an instance from it
 without compiling again: compile once, then make one instance per worker (a module can be posted to a Web
 Worker) or a fresh one after a trap. Serve the file as `application/wasm`, with no parameters, so that it
