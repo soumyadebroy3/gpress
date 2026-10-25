@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1760" height="908" viewBox="0 0 1760 908" role="img" aria-label="Archive size as a share of the original on 907 test PDFs: gpress 60.9%, best of Brotli, xz and Zstandard file by file 76.3%, Brotli 11 76.5%, xz -9e 76.8%, Zstandard 19 77.0%">
+<rect width="1760" height="908" rx="36" fill="#0b1220"/>
+<rect x="1" y="1" width="1758" height="906" rx="35" fill="none" stroke="#1f2a44" stroke-width="2"/>
+<text x="96" y="104" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="44" font-weight="700" fill="#f8fafc" text-anchor="start">Archive size</text>
+<text x="96" y="152" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="26" font-weight="400" fill="#7c8aa5" text-anchor="start">907 public test PDFs, 130.5 MB. Share of the original size: lower is better.</text>
+<text x="96" y="270" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="28" font-weight="600" fill="#f8fafc" text-anchor="start">gpress, effort 100</text>
+<rect x="560" y="238" width="1000" height="48" rx="10" fill="#111a2e"/>
+<rect x="560" y="238" width="609.0" height="48" rx="10" fill="#2dd4bf"/>
+<text x="1185.0" y="272" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="26" font-weight="700" fill="#f8fafc" text-anchor="start">60.9%</text>
+<text x="96" y="366" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="28" font-weight="400" fill="#cbd5e1" text-anchor="start">Best of the three, file by file</text>
+<rect x="560" y="334" width="1000" height="48" rx="10" fill="#111a2e"/>
+<rect x="560" y="334" width="763.0" height="48" rx="10" fill="#475569"/>
+<text x="1339.0" y="368" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="26" font-weight="500" fill="#cbd5e1" text-anchor="start">76.3%</text>
+<text x="96" y="462" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="28" font-weight="400" fill="#cbd5e1" text-anchor="start">Brotli 11</text>
+<rect x="560" y="430" width="1000" height="48" rx="10" fill="#111a2e"/>
+<rect x="560" y="430" width="765.0" height="48" rx="10" fill="#475569"/>
+<text x="1341.0" y="464" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="26" font-weight="500" fill="#cbd5e1" text-anchor="start">76.5%</text>
+<text x="96" y="558" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="28" font-weight="400" fill="#cbd5e1" text-anchor="start">xz -9e</text>
+<rect x="560" y="526" width="1000" height="48" rx="10" fill="#111a2e"/>
+<rect x="560" y="526" width="768.0" height="48" rx="10" fill="#475569"/>
+<text x="1344.0" y="560" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="26" font-weight="500" fill="#cbd5e1" text-anchor="start">76.8%</text>
+<text x="96" y="654" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="28" font-weight="400" fill="#cbd5e1" text-anchor="start">Zstandard 19 --long</text>
+<rect x="560" y="622" width="1000" height="48" rx="10" fill="#111a2e"/>
+<rect x="560" y="622" width="770.0" height="48" rx="10" fill="#475569"/>
+<text x="1346.0" y="656" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="26" font-weight="500" fill="#cbd5e1" text-anchor="start">77.0%</text>
+<text x="96" y="760" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="21" font-weight="400" fill="#7c8aa5" text-anchor="start">gpress format 9, one thread, built with --features existing (Lepton for JPEGs). Every archive was restored byte for</text>
+<text x="96" y="794" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="21" font-weight="400" fill="#7c8aa5" text-anchor="start">byte. The other tools ran on the same 907 files. Sources: bench/RESULTS.md, Archive format version 9 (gpress: 79,409,935</text>
+<text x="96" y="828" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="21" font-weight="400" fill="#7c8aa5" text-anchor="start">of 130,469,001 bytes), and section 7 with bench/results/all907-speed-ca8fa92 (the other tools).</text>
+</svg>

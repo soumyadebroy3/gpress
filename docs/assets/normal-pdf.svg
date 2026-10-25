@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1760" height="812" viewBox="0 0 1760 812" role="img" aria-label="Bytes saved on 90 PDFs: gpress effort 100 15.0%, effort 50 14.8%, effort 0 13.0%, qpdf 11.9.0 strongest lossless 12.8%">
+<rect width="1760" height="812" rx="36" fill="#0b1220"/>
+<rect x="1" y="1" width="1758" height="810" rx="35" fill="none" stroke="#1f2a44" stroke-width="2"/>
+<text x="96" y="104" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="44" font-weight="700" fill="#f8fafc" text-anchor="start">Normal PDF: bytes saved</text>
+<text x="96" y="152" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="26" font-weight="400" fill="#7c8aa5" text-anchor="start">The 90 files gpress rewrites from a hard 120-file sample (78.3 MB). Share of the input removed: higher is better.</text>
+<text x="96" y="270" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="28" font-weight="600" fill="#f8fafc" text-anchor="start">gpress, effort 100 (default)</text>
+<rect x="560" y="238" width="936.9" height="48" rx="10" fill="#2dd4bf"/>
+<text x="1512.875" y="272" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="26" font-weight="700" fill="#f8fafc" text-anchor="start">15.0%</text>
+<text x="96" y="366" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="28" font-weight="600" fill="#f8fafc" text-anchor="start">gpress, effort 50</text>
+<rect x="560" y="334" width="926.9" height="48" rx="10" fill="#2dd4bf"/>
+<text x="1502.875" y="368" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="26" font-weight="700" fill="#f8fafc" text-anchor="start">14.8%</text>
+<text x="96" y="462" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="28" font-weight="600" fill="#f8fafc" text-anchor="start">gpress, effort 0 (--quick)</text>
+<rect x="560" y="430" width="811.2" height="48" rx="10" fill="#2dd4bf"/>
+<text x="1387.25" y="464" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="26" font-weight="700" fill="#f8fafc" text-anchor="start">13.0%</text>
+<text x="96" y="558" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="28" font-weight="400" fill="#cbd5e1" text-anchor="start">qpdf 11.9.0, strongest lossless</text>
+<rect x="560" y="526" width="798.1" height="48" rx="10" fill="#475569"/>
+<text x="1374.125" y="560" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="26" font-weight="500" fill="#cbd5e1" text-anchor="start">12.8%</text>
+<text x="96" y="664" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="21" font-weight="400" fill="#7c8aa5" text-anchor="start">One thread. The sample's other 30 files come back unchanged (UNTOUCHED). qpdf: the 85 outputs bench/verify_pdf.py</text>
+<text x="96" y="698" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="21" font-weight="400" fill="#7c8aa5" text-anchor="start">finds the same as their input apart from the trailer's /ID, the other 5 at their input size. The scale starts at zero.</text>
+<text x="96" y="732" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="21" font-weight="400" fill="#7c8aa5" text-anchor="start">Source: bench/RESULTS.md, Effort levels.</text>
+</svg>
