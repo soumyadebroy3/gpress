@@ -84,7 +84,7 @@ the reason.
 `gpress` without arguments lists every option, and the engine's measuring commands (`deflate`, `inflate`,
 `batch`, `jpeg`, `fax-decode`, `expand` (it decodes streams; restoring an archive is `unpack`), ...) used for checks
 and benchmarks; the comments at the top of
-[`src/bin/gpress.rs`](src/bin/gpress.rs) describe them. The exit status is 0 when the call worked, 2 for a
+[`src/bin/gpress.rs`](src/bin/gpress.rs) name them. The exit status is 0 when the call worked, 2 for a
 usage or file error, and otherwise the library's error code (for example 2 for a damaged archive, 6 when
 `--time-budget` ran out; the full list is in the same comments).
 
@@ -229,8 +229,8 @@ let original = gpress::expand(&archive.data, &opt)?;
 assert_eq!(original, pdf_bytes);
 ```
 
-`optimize`, `compress` and `expand` each run inside a panic guard, so a bug comes back as `Error::Internal`
-rather than a panic (in a build with `panic = "abort"`, such as the WebAssembly module below, it aborts). The
+`optimize`, `compress` and `expand` each run inside a panic guard, so a bug that panics comes back as
+`Error::Internal` (in a build with `panic = "abort"`, such as the WebAssembly module below, it aborts). The
 engine's own types, public too for measuring ([reference](docs/reference.md#options)), have no guard.
 
 <details>
@@ -249,7 +249,7 @@ Errors are a plain `Error` enum with a stable numeric code and a message without
 `Optimized.outcome` says what happened: `Smaller` with a `Report` (objects, streams re-encoded and kept, object
 streams, JPEGs given new tables, fax images written as JBIG2, how the file is encrypted), or `Untouched` with
 the reason. `Compressed` carries the archive's statistics (streams rebuilt, through Lepton, Type 1 fonts opened,
-fax images, streams stored decrypted, decoded bytes, or `stored` when nothing could be made smaller).
+fax images, streams stored decrypted, decoded bytes, and `stored` when nothing could be made smaller).
 
 </details>
 
@@ -265,7 +265,7 @@ gpress_result_free(&r);
 ```
 
 Every function is thread-safe and never reads outside the buffers it is given. It never aborts the process on
-bad input or a bug: a panic comes back as an error. Like any Rust code it does abort if memory runs out, so set
+bad input, and a bug that panics comes back as an error. Like any Rust code it does abort if memory runs out, so set
 the size limits to what the host can afford. Every buffer it hands out is freed with `gpress_result_free` (or
 `gpress_free` / `gpress_free_message`, each given the field's address), which are safe on null and on a result
 already freed: a free clears what it freed, so a double free or a part freed before the whole result is
@@ -302,8 +302,9 @@ or a failed memory growth in the engine, traps the module, and the wrapper turns
 marks the instance dead (load a fresh one). Sizes are 32-bit inside it: the wrapper refuses inputs of 2 GiB and
 more. Pages with a Content Security Policy need `'wasm-unsafe-eval'` in its `script-src`.
 
-A first load compiles the module (4 to 9 ms in Node for the 818 KB module of d093ab4 with #8, `bench/RESULTS.md`,
-Start-up; CI's WebAssembly job measures it again in every run).
+A first load compiles the module (4 to 9 ms in Node for the module of [PR #8](https://github.com/soumyadebroy3/gpress/pull/8),
+[bench/RESULTS.md](bench/RESULTS.md#start-up-the-webassembly-module-in-node), Start-up; CI's WebAssembly job measures it
+again in every run).
 `Gpress.compile(source)` returns the compiled module, and `Gpress.load(module)` makes an instance from it
 without compiling again: compile once, then make one instance per worker (a module can be posted to a Web
 Worker) or a fresh one after a trap. Serve the file as `application/wasm`, with no parameters, so that it
@@ -335,7 +336,7 @@ encrypted PDFs are handled and what each part of the engine does are in the [ref
 
 Measured on 907 public test PDFs (130.5 MB: the pdf.js, pypdf, OCRmyPDF and pikepdf test suites, many of them
 deliberately broken or unusual), fetched and pinned by `bench/fetch_corpus.sh`, and on a deliberately hard
-120-file sample of them (`bench/sets/sample120.txt`, 78.3 MB). Sizes don't depend on the machine.
+120-file sample of them (`bench/sets/sample120.txt`, 78.3 MB). Sizes were the same on every machine they were measured on.
 
 <p align="center">
   <img src="docs/assets/archive.svg" width="880" alt="Archive size as a share of the original on 907 public test PDFs: gpress 60.9%; the best of Brotli 11, xz -9e and Zstandard 19 file by file 76.3%; Brotli 11 76.5%; xz -9e 76.8%; Zstandard 19 --long 77.0%.">
@@ -362,7 +363,7 @@ are not figures for the current code.
 - **Normal PDF on all 907 files, maximum effort:** 16.0% smaller on the 697 files it rewrote; qpdf (object
   streams, Flate at level 9) made the same files 9.3% smaller. Every one of those 697 outputs was compared with
   its original by tools we didn't write: qpdf, pikepdf, PDFium, Poppler and pdf.js.
-- **Every Flate stream on its own (7,280 streams):** 41.05 MB; Zopfli (15 iterations) 0.67% larger,
+- **Every distinct Flate stream on its own (7,280 streams):** 41.05 MB; Zopfli (15 iterations) 0.67% larger,
   libdeflate 12 1.40% larger, zlib 9 6.95% larger.
 
 `bench/benchmark.py` measures any build.
