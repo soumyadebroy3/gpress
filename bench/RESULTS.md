@@ -362,6 +362,83 @@ NEW has not measured every file of BASE (an unfinished run compares only the fil
 `--scale`) and checks they are caught. Measuring a new build is `benchmark.py time RUN --set all --who ours`;
 `report RUN --with all907-speed-ca8fa92` and `compare` take the competitors from the stored rows.
 
+## Effort levels
+
+The README's effort table: two runs of `bench/benchmark.py time` on the 120-file sample, normal PDF, one
+thread. CPU time is summed over the files; output is the total size as a share of the input on the 90 files
+the engine rewrites.
+
+| Effort | CPU s, first measured | CPU s, current code | Output |
+| ---: | ---: | ---: | ---: |
+| 0 | 16.1 | 16.8 | 87.02% |
+| 5 | 23.0 | | 86.70% |
+| 10 | 40.7 | | 86.11% |
+| 15 | 111.2 | | 85.74% |
+| 19 | 183.2 | | 85.59% |
+| 20 | 243.8 | | 85.43% |
+| 50 | 333.8 | 175.7 | 85.17% |
+| 100 | 983.1 | 511.7 | 85.01% |
+| qpdf 11.9.0, strongest lossless setting | 25.3 | | 87.23% |
+
+- First measured in October 2026 for the change that added the fast path (#1), on a 4-core 2.1 GHz Xeon cloud
+  machine. Efforts 0 to 19 are commit 52a91f0; 20, 50 and 100 are 20f8e69 (at effort 20 its 120 outputs are
+  52a91f0's byte for byte). Calibration: 2.675 s (efforts 0, 5 and 10), 2.674 s (15 and 19), 2.870, 2.819 and
+  2.845 s (20, 50 and 100). Before that change, effort 0 took 195.5 s (main 066b65e, calibration 2.972 s).
+  qpdf's 87.23% counts the 85 outputs `verify_pdf.py` finds the same as their input apart from the trailer's
+  /ID, and the other 5 files at their input size.
+- The current code measured again in October 2026 at efforts 0, 50 and 100 only: the lightweight change (#15)
+  merged with main c8e9f1a, the code of main 37bd3f3, on a 4-core cloud machine, with c8e9f1a timed beside it
+  on another core and other work on the other two. Calibration 3.315 s, about 1.2 times the first run's, so
+  the two columns compare only roughly; c8e9f1a, timed beside it (calibration 3.169 s), took 16.6, 178.9 and
+  512.0 s. The outputs total the first run's bytes exactly at each effort (71,470,799, 70,493,915 and
+  70,408,873), and the 120 outputs are byte-identical to c8e9f1a's.
+- Calibration is the CPU time of `xz -9e` on 4 MiB of fixed text, the smallest of three, taken at the start of
+  each run (section 6).
+
+## Archive format version 9
+
+The model's logistic tables (squash and stretch) and its adaptive probability maps were written again, by
+implementers kept from the PAQ code the earlier ones followed: the tables from their formulas, and maps in
+which each bit moves both knots around the input. So the coded bytes changed and the archive format went from
+version 8 to 9 (`src/cm/mod.rs`). Both versions were built as docs/tasks/README.md's step 1 builds
+(`cargo build --release --features existing`), version 8 from 74114cf and version 9 from 439694f, and
+measured by `bench/benchmark.py time --modes archive --threads 1` at the same time on a 4-core cloud machine,
+each run on two cores of its own. On `--set sample120` (120 files, 78,313,418 bytes; calibration 4.439 s
+before the version 8 run, 4.538 s before version 9):
+
+| Effort | Version 8 | Version 9 | Change | CPU, version 8 | CPU, version 9 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 45,890,745 | 45,764,071 | -0.28% | 329.6 s | 333.0 s |
+| 50 | 45,282,181 | 45,150,863 | -0.29% | 415.4 s | 417.8 s |
+| 100 | 45,282,181 | 45,150,863 | -0.29% | 397.9 s | 401.2 s |
+
+On `--set all` (907 files, 130,469,001 bytes) at effort 100 (calibration 4.159 s and 4.215 s): 79,650,831 to
+79,409,935 bytes (-0.30%), CPU 680.1 s and 683.3 s.
+
+- Every archive of both runs restored byte for byte, and peak memory stayed between 262.4 and 262.7 MB in
+  every run. Efforts 50 and 100 give the same archives, as before.
+- Two files grew, on the sample and on the whole set, which `benchmark.py compare` reports as a failure:
+  ocrmypdf's `tests__resources__2400dpi.pdf`, 73,708 to 73,801 bytes (+93, +0.13%) at every effort, and
+  pdf.js's `issue5567.pdf`, 2,169,428 to 2,169,612 bytes (+184, +0.008%) at efforts 50 and 100 (at effort 0
+  it is 8 bytes smaller). The owner accepted both in writing on 2026-10-24, as the price of code free of PAQ's
+  licence. Every other file of the sample is smaller at every effort; of the whole set's other 905 files, 902
+  are smaller at effort 100 and 3 whose archives are under 200 bytes stay the same. The largest saving is
+  pypdf's `009-pdflatex-geotopo__GeoTopo.pdf`, 2,195,852 to 2,174,038 bytes.
+- A build without Lepton (default features), measured the same way but one run after the other, gave the
+  same two growths and no other: 48,015,564 to 47,883,482 bytes at effort 0 and 47,164,857 to 47,013,243 at
+  efforts 50 and 100.
+- CPU: in the runs above version 9 takes 0.5% to 1.0% more. Packing with both builds in turn, file by file on
+  one core (`taskset -c 2`), the files that take over a second in the version 8 run at each effort: 342.4
+  against 343.8 s at effort 0 (38 files, +0.4%) and 461.0 against 473.1 s at effort 100 (43 files, +2.6%).
+- Of the other designs measured on 30 of these files (`--set sample120-size30`, default features), steps of
+  1/32 or 1/128 instead of 1/64, or the same ends with steps rounded from a half, gave larger totals over
+  efforts 0 and 100. Maps stepping toward 0 and 65535, rounded from a half and with their output clamped to 1
+  to 4095, came out 8 and 11 bytes smaller; the ends used (16 and 65520) keep the output in that range with no
+  clamp.
+- The normal PDF is unchanged: the MQ decoder, written again from T.88 Annex E.3, reads back what the engine
+  writes as before, and the 19 corpus files with CCITT images give the same outputs at efforts 0 and 100.
+- Section 3's archive figures are from earlier builds.
+
 ## Lightweight
 
 The download and the start-up are part of the time a person waits (`docs/tasks/lightweight.md`). Measured on
@@ -378,7 +455,7 @@ CI on every push (Start-up, below).
 `python3 -I bench/sizes.py measure [--features SET]` builds each part and records its size in
 `bench/sizes.json`: the native tool and the C library with the release profile, the WebAssembly module the
 way the npm package builds it (cargo's `wasm` profile, opt-level 3, then `wasm-opt -O1`; see below). Gzip is
-level 9. Each part of the engine is a Cargo feature (README, "Building only what a product needs"), and a set
+level 9. Each part of the engine is a Cargo feature (docs/reference.md, "Building only what a product needs"), and a set
 is built with `--no-default-features`, so that it is exactly what is named: "default" is a plain build, every
 part of the engine (`archive`, `jpeg`, `fax` and `encryption`); "web" is the web module's set, every part but
 the archive; "existing" is the archive and Lepton and nothing else; "default,existing" is every part and

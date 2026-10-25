@@ -27,11 +27,13 @@ use crate::Feature;
 use std::borrow::Cow;
 
 pub const MAGIC: &[u8; 4] = b"\x89GPZ";
-/// The format version this build writes and reads (plus 0 and 2, the fallback and stored forms). Version 8
-/// is version 7 (version 6, the first with Type 1 fonts, fax images and decrypted streams together, without
-/// the preflate part) with the decoded total in the header; the coded body is the same. Nothing earlier
-/// shipped, so earlier versions are refused.
-pub const VERSION: u8 = 8;
+/// The format version this build writes and reads (plus 0 and 2, the fallback and stored forms). Version 9
+/// is version 8 with the model's logistic tables and adaptive probability maps written anew, so the coded body
+/// differs; the header is the same. Version 8 is version 7 (version 6, the first with Type 1 fonts, fax images
+/// and decrypted streams together, without the preflate part) with the decoded total in the header. Nothing
+/// earlier shipped, so earlier versions are refused. The fallback form is coded with this version's model, so a
+/// version-0 file from a build before version 9 is refused as damaged.
+pub const VERSION: u8 = 9;
 const HASH_LEN: usize = 16;
 
 /// A typical PDF fragment both sides feed to the model first, so small files don't pay for a cold start.
@@ -644,7 +646,7 @@ pub struct PackOptions {
     /// left is stored as it is; decided from sizes alone, so the output is the same on any machine. The
     /// header declares the total, and a decoder refuses an archive declaring more than its own
     /// `UnpackOptions::max_decoded`: an archive made with this budget restores wherever that budget is
-    /// allowed. The memory of a pack or a restore follows this and the file's length (see `README.md`).
+    /// allowed. The memory of a pack or a restore follows this and the file's length (see `docs/reference.md`).
     pub max_decoded: u64,
     /// Try the existing library (Lepton, for JPEG streams) when the build includes it (`--features existing`).
     /// A file with parts it made restores only with such a build (`unpack` says so); the default is what the

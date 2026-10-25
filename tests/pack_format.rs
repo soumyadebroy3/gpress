@@ -85,14 +85,14 @@ fn refuses_damaged_files() {
     }
 }
 
-/// A PDF packed by the first build of the current format version (`tests/data/format-v8.*`: syntax, a content
-/// stream, an image, long repeats and noise; the same PDF and coded body as the version 7 fixture, with the
-/// decoded total in the header). It must still restore, and packing it again must give the same bytes: the
-/// model is part of the format, so a faster model has to compute exactly the same thing.
+/// A PDF packed by the first build of the current format version (`tests/data/format-v9.*`: syntax, a content
+/// stream, an image, long repeats and noise; the same PDF as the version 7 and 8 fixtures, coded with the
+/// model's new logistic tables and maps). It must still restore, and packing it again must give the same
+/// bytes: the model is part of the format, so a faster model has to compute exactly the same thing.
 #[test]
 fn stored_format_files_still_restore_and_pack_the_same() {
-    let pdf = include_bytes!("data/format-v8.pdf");
-    let gpz = include_bytes!("data/format-v8.gpz");
+    let pdf = include_bytes!("data/format-v9.pdf");
+    let gpz = include_bytes!("data/format-v9.gpz");
     assert_eq!(unpack(gpz).unwrap(), pdf);
     assert!(pack(pdf).0 == gpz);
     assert_eq!(gpz[4], gpress::pack::VERSION);

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Lossless PDF compression in the browser and Node: smaller PDFs that any reader opens, and the gpress archive that restores byte for byte.",
-  "license": "UNLICENSED",
+  "license": "(MIT OR Apache-2.0)",
   "type": "module",
   "main": "./dist/gpress.js",
   "types": "./dist/gpress.d.ts",
