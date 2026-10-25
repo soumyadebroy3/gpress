@@ -229,9 +229,10 @@ let original = gpress::expand(&archive.data, &opt)?;
 assert_eq!(original, pdf_bytes);
 ```
 
-`optimize`, `compress` and `expand` each run inside a panic guard, so a bug that panics comes back as
-`Error::Internal` (in a build with `panic = "abort"`, such as the WebAssembly module below, it aborts). The
-engine's own types, public too for measuring ([reference](docs/reference.md#options)), have no guard.
+`optimize`, `compress` and `expand` each run inside a panic guard, so a bug that panics never reaches the
+caller: it comes back as an error, usually `Error::Internal`, or gpress takes its fallback (after a failed restore
+check, for example). In a build with `panic = "abort"`, such as the WebAssembly module
+below, it aborts. The engine's own types, public too for measuring ([reference](docs/reference.md#options)), have no guard.
 
 <details>
 <summary><b>Errors and outcomes</b></summary>
@@ -265,9 +266,9 @@ gpress_result_free(&r);
 ```
 
 Every function is thread-safe and never reads outside the buffers it is given. It never aborts the process on
-bad input if the calling thread has enough stack (the work runs on that thread and parses objects nested up to
-256 deep by recursion; a 128 KiB thread stack, musl's default, may be too small), and a bug that panics comes
-back as an error. Like any Rust code it does abort if memory runs out, so set
+bad input if the calling thread has enough stack (part of the work, which parses objects nested up to 256 deep
+by recursion, runs on that thread; a 128 KiB thread stack, musl's default, may be too small), and a bug that
+panics never reaches the host: the panic guard above applies. Like any Rust code it does abort if memory runs out, so set
 the size limits to what the host can afford. Every buffer it hands out is freed with `gpress_result_free` (or
 `gpress_free` / `gpress_free_message`, each given the field's address), which are safe on null and on a result
 already freed: a free clears what it freed, so freeing the same result twice, or a part before the whole
