@@ -53,7 +53,7 @@ of output, and checks each one before it returns it, except the archive's rare f
 | **Takes** | a PDF | any file, a PDF above all |
 | **Gives** | a smaller PDF that standard readers open, with every reachable object's value preserved (objects the trailer can't reach, directly or through other objects, are dropped) | an archive that restores the original byte for byte |
 | **How** | streams compressed again with gpress's Flate encoders, a better PNG predictor for images, optimal Huffman tables for JPEGs (the same coefficients), CCITT fax images as JBIG2 (the same pixels), objects in compressed object streams | a PDF-aware context-mixing model |
-| **Checked** | the output is read back and compared with the input before it is returned; anything uncertain is left as it was | the archive is restored and compared before it is returned; if that check ever fails, gpress writes a simpler model-only archive instead (not checked again), or the file as it is when that is smaller. `expand` checks every archive's restored length and a 128-bit SHA-256 prefix against its header |
+| **Checked** | the output is read back and compared with the input before it is returned; anything uncertain is left as it was | the archive is restored and compared before it is returned; if that check ever fails, gpress writes a simpler model-only archive instead (not checked again). Either way the file is stored as it is when that is smaller. `expand` checks every archive's restored length and a 128-bit SHA-256 prefix against its header |
 | **On bad input** | a file it can't safely touch comes back unchanged, with the reason | a damaged archive is refused with an error, or restored exactly when the damage misses what it needs; it is never restored wrongly |
 
 ## Quick start
@@ -67,7 +67,7 @@ gpress unpack in.gpz back.pdf             # the original, byte for byte
 
 `optimize` prints one tab-separated line: the input, `SMALLER` or `UNTOUCHED`, bytes in, bytes out, seconds and
 the details. `pack` prints the input, bytes in, bytes out, seconds, then `PACKED` or `STORED` with the archive's
-statistics. For `tests/data/format-v9.pdf`:
+statistics. For `tests/data/format-v9.pdf`, copied to `in.pdf`:
 
 ```
 in.pdf	SMALLER	8791	4955	0.15	objects=6 streams=2 reencoded=2 kept=0 objstms=1 dropped=1 jpegs_retabled=0 fax_to_jbig2=0
@@ -101,7 +101,7 @@ cargo install --locked --git https://github.com/soumyadebroy3/gpress gpress
 ```
 
 Add `--features existing` to also use [Lepton](https://crates.io/crates/lepton_jpeg) (Apache-2.0) for JPEG
-streams in the archive.
+streams in the archive. An archive with parts Lepton made restores only with such a build.
 
 <details>
 <summary><b>From a clone</b></summary>
@@ -170,7 +170,7 @@ checked the same way. The output is the same for any thread count.
   <img src="docs/assets/normal-pdf.svg" width="880" alt="Normal PDF, bytes saved on the 90 files gpress rewrites from a hard 120-file sample: gpress effort 100 15.0%, effort 50 14.8%, effort 0 13.0%; qpdf 11.9.0 at its strongest lossless setting 12.8%.">
 </p>
 
-| Effort | What runs (normal PDF) | CPU time, first measured | CPU time, current code | Output |
+| Effort | What runs (normal PDF) | CPU time, first measured | CPU time, build 37bd3f3 | Output |
 | --- | --- | ---: | ---: | ---: |
 | 0 (`--quick`) | The fast path: our fast Flate encoder, image predictors chosen from an estimate, and the cheap steps (object streams, the cross-reference stream, JPEG tables, JBIG2) | 16.1 s | 16.8 s | 87.02% |
 | 5 | The bridge: closer parses for images | 23.0 s | | 86.70% |
@@ -190,16 +190,17 @@ slowest, the largest and random files) on one thread; output is the total size a
 files the engine rewrites. For qpdf it counts the 85 outputs `bench/verify_pdf.py` finds the same as their input
 apart from the trailer's /ID, and the other 5 files at their input size; its setting is `--object-streams=generate
 --compress-streams=y --recompress-flate --compression-level=9 --decode-level=specialized`. On the 118 files qpdf can open
-(it refused 2 of the sample's 3 encrypted files) the comparison turns around: qpdf rewrites each of them, dropping earlier
+(it refused 2 encrypted files) the comparison turns around: qpdf rewrites each of them, dropping earlier
 revisions, unreferenced objects and whatever it cannot read, while gpress returns the files it can't safely touch
 unchanged. Counting those as they are, an
 earlier build (ca8fa92) gave 90.2% of the input at effort 100 on those 118 files, against 74.7% for qpdf with
 object streams and Flate at level 9. The first
-measurement was made in October 2026 for the change that added the fast path, on a 4-core 2.1 GHz Xeon virtual
-machine. Later changes made the strong encoder faster. The current code was measured again at efforts 0, 50 and
-100, and at each effort its outputs total exactly the first run's bytes. It ran on a machine about 1.2 times
-slower by the benchmark's calibration, so the two time columns compare only roughly. The other levels were not
-measured again. Both runs, with their builds and calibrations,
+measurement (builds 52a91f0 and 20f8e69) was made in October 2026 for the change that added the fast path, on a
+4-core 2.1 GHz Xeon virtual machine. Later changes made the strong encoder faster. Build 37bd3f3 was measured
+again at efforts 0, 50 and 100, and at each effort its outputs total exactly the first run's bytes. It ran on a
+machine about 1.2 times slower by the benchmark's calibration, so the two time columns compare only roughly.
+The current code gives the same outputs; its one later change on this path, the JBIG2 decoder that reads fax
+images back (717bf45), was not timed. The other levels were not measured again. Both runs, with their builds and calibrations,
 are in [bench/RESULTS.md](bench/RESULTS.md#effort-levels). In the archive, data that already looks compressed
 is coded plainly below effort 50. The [reference](docs/reference.md#options) has the details.
 
@@ -217,7 +218,7 @@ let opt = Options::new().effort(80).threads(4);
 // A smaller PDF that standard readers open.
 let r = gpress::optimize(&pdf_bytes, &opt)?;
 match r.outcome {
-    Outcome::Smaller(report) => std::fs::write("out.pdf", &r.data)?,
+    Outcome::Smaller(_report) => std::fs::write("out.pdf", &r.data)?,
     Outcome::Untouched(why) => println!("left as it was: {why}"),
 }
 
@@ -227,8 +228,9 @@ let original = gpress::expand(&archive.data, &opt)?;
 assert_eq!(original, pdf_bytes);
 ```
 
-The library never panics across its boundary: every call runs inside a panic guard, and a bug comes back as
-`Error::Internal`.
+`optimize`, `compress` and `expand` each run inside a panic guard, so a bug comes back as `Error::Internal`
+rather than a panic (in a build with `panic = "abort"`, such as the WebAssembly module below, it aborts). The
+engine's own types, public too for measuring ([reference](docs/reference.md#options)), have no guard.
 
 <details>
 <summary><b>Errors and outcomes</b></summary>
@@ -309,7 +311,7 @@ compiles while it downloads (with any other type it is compiled once it has arri
 
 ## Options
 
-Everything a caller can tune is a field of `Options`, and every field is a flag of the command-line tool. The
+Everything a caller of `optimize`, `compress` and `expand` can tune is a field of `Options`, and every field is a flag of the command-line tool. The
 ones most callers need:
 
 | Option | Flag | Default | What it does |
@@ -343,7 +345,7 @@ deliberately broken or unusual), fetched and pinned by `bench/fetch_corpus.sh`, 
 | Archive, the 120-file sample, effort 100, default build (no Lepton) | 60.0% | the best of the three, file by file: 74.5% |
 | Normal PDF, the 90 files gpress rewrites from the sample, default effort | 85.01% of the input | qpdf 11.9.0, strongest lossless setting: 87.23% |
 
-Every archive in those runs was restored byte for byte, and the competitors ran on the same files. All three
+Every archive in those runs was restored by a separate process and compared byte for byte, and the competitors ran on the same files. All three
 rows are the current code: the archive rows are format 9, and the current code's normal-PDF outputs total exactly
 the bytes behind its row (see [Effort levels](#effort-levels), which also says how qpdf does when every file it opens is
 counted).
@@ -371,8 +373,8 @@ are not figures for the current code.
   leaves that stream or file untouched. A damaged archive is refused with an error, or restored exactly when the damage misses what it needs; it is never
   restored wrongly.
 - **Untrusted input.** Sizes are bounded by `Options`, by the file's own size or by a fixed limit, decoding stops
-  when data runs out, nothing a file claims sizes memory on its own, and no code path panics across the library
-  boundary. What no option bounds yet: cross-reference streams decode as far as the file's size allows, the
+  when data runs out, nothing a file claims sizes memory on its own, and no call to `optimize`, `compress` or
+  `expand` panics across the library boundary. What no option bounds yet: cross-reference streams decode as far as the file's size allows, the
   PDF/A check reads metadata up to 16 MiB, and objects parsed from object streams take more memory than the bytes
   the limits count (see `max_stream` in the [reference](docs/reference.md#options)).
 - **Deterministic.** The same bytes for any thread count and with or without a time budget (tested); the model
@@ -412,10 +414,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 cargo deny check                                  # and python3 -I bench/check_dep_sources.py
 cargo build --profile wasm -p gpress-wasm --target wasm32-unknown-unknown   # needs: rustup target add wasm32-unknown-unknown
-cd crates/gpress-wasm/js && npm ci && npm run build && npm test        # the npm package into js/dist/ (with wasm-opt if on PATH)
-npm run test:web                                  # (in crates/gpress-wasm/js) the same tests on the web module
+(cd crates/gpress-wasm/js && npm ci && npm run build && npm test)      # the npm package into js/dist/ (with wasm-opt if on PATH)
+(cd crates/gpress-wasm/js && npm run test:web)    # the same tests on the web module
 python3 -I bench/sizes.py check                   # fails if the web module's gzip size is over 400 KB or more than 5% over bench/sizes.json; needs wasm-opt
-cd fuzz && cargo +nightly fuzz run expand -- -max_total_time=600      # needs cargo-fuzz; also inflate, pdf_optimize
+(cd fuzz && cargo +nightly fuzz run expand -- -max_total_time=600)    # needs cargo-fuzz; also inflate, pdf_optimize
 ```
 
 </details>
@@ -444,8 +446,8 @@ The benchmark suite, the security suite and the independent checks are in `bench
 
 ## Contributing
 
-Pull requests are welcome. Every pull request runs the CI and CodeQL above, and the pull request template lists
-what to run locally first. A change must keep outputs exact (the archive restores byte for byte, a normal PDF
+Pull requests are welcome. Every pull request runs the CI and CodeQL above and is merged only once they pass; the
+pull request template lists what to run locally first. A change must keep outputs exact (the archive restores byte for byte, a normal PDF
 keeps every reachable object's value), and any speed, size or memory figure in a pull request must be measured,
 saying how and on which files. New dependencies must come from crates.io under a licence on `deny.toml`'s list. Dependabot proposes dependency and action updates every week. To report a vulnerability, see
 [SECURITY.md](SECURITY.md) rather than opening an issue.
