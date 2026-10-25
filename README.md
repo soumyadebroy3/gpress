@@ -38,12 +38,12 @@
 ---
 
 gpress is a library written in Rust, with C and WebAssembly bindings and a command-line tool. It makes two kinds
-of output, and checks each one before it returns it (the archive's rare fallback, below, is the one exception).
+of output, and checks each one before it returns it, except the archive's rare fallback and a file stored as it is (below).
 
 > [!IMPORTANT]
 > Version 0.1.0, in active development: the API may still change, and nothing is published to crates.io or npm
-> yet, so everything below builds from this repository. The archive format is version 9: archives compressed by
-> earlier development versions are refused (one an earlier build stored uncompressed still restores). CI builds and tests on Linux (x86-64).
+> yet, so everything below builds from this repository. The archive format is version 9: archives from earlier
+> development versions are refused, except one a format-8 build stored uncompressed, which still restores. CI builds and tests on Linux (x86-64).
 
 ## Two outputs
 
@@ -190,7 +190,7 @@ slowest, the largest and random files) on one thread; output is the total size a
 files the engine rewrites. For qpdf it counts the 85 outputs `bench/verify_pdf.py` finds the same as their input
 apart from the trailer's /ID, and the other 5 files at their input size; its setting is `--object-streams=generate
 --compress-streams=y --recompress-flate --compression-level=9 --decode-level=specialized`. On the 118 files qpdf can open
-(it refused the sample's 2 encrypted files) the comparison turns around: qpdf rewrites each of them, dropping earlier
+(it refused 2 of the sample's 3 encrypted files) the comparison turns around: qpdf rewrites each of them, dropping earlier
 revisions, unreferenced objects and whatever it cannot read, while gpress returns the files it can't safely touch
 unchanged. Counting those as they are, an
 earlier build (ca8fa92) gave 90.2% of the input at effort 100 on those 118 files, against 74.7% for qpdf with
