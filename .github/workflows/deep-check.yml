@@ -172,11 +172,11 @@ jobs:
             echo "$mark"
             echo "## Deep check of \`$PR_HEAD\`"
             echo
-            echo "[Run $GITHUB_RUN_ID]($RUN_URL), attempt $GITHUB_RUN_ATTEMPT: this pull request merged into main, against main at \`${BASE:-?}\`. It reports and does not gate. Everything under this paragraph was written by the pull request's own code (its build of the tool and its \`bench/\` scripts)."
+            echo "[Run $GITHUB_RUN_ID]($RUN_URL), attempt $GITHUB_RUN_ATTEMPT: this pull request merged into main, against main at \`${BASE:-?}\`. It reports and does not gate."
             echo
           } > "$body"
           if [ "$SAME" = true ]; then
-            echo "**Nothing to measure:** the tool built from this pull request is byte for byte the tool built from main. The C library and the WebAssembly module are not compared." > "$parts"
+            echo "**Nothing to measure:** the tool built from this pull request is byte for byte the tool built from main. The C library and the WebAssembly module are not compared." >> "$body"
           else
             for part in pdf archive hostile; do
               if [ -s "$dir/deep-check-report-$part/$part.md" ]; then
@@ -186,9 +186,13 @@ jobs:
               fi
               echo
             done > "$parts"
+            {
+              echo "The reports below were written by the pull request's own code (its build of the tool and its \`bench/\` scripts)."
+              echo
+              # A name after an @ would notify its owner, and a report can hold any text.
+              sed 's/@/@<!-- -->/g' "$parts"
+            } >> "$body"
           fi
-          # A name after an @ would notify its owner, and a report can hold any text.
-          sed 's/@/@<!-- -->/g' "$parts" >> "$body"
           if [ "$(wc -c < "$body")" -gt 60000 ]; then
             head -n 5 "$body" > "$body.short"
             echo "The reports are too long for a comment: they are on the run's page." >> "$body.short"
