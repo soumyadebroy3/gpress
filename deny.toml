@@ -3,7 +3,7 @@
 #
 # The rule: our own code plus libraries under permissive licences only. Anything not on the allow list is an
 # error, so a GPL, AGPL or LGPL crate from crates.io anywhere in the dependency tree fails the check. Our own
-# crates are not published and carry no licence of their own; `private.ignore` leaves them out. That skip
+# crates (MIT OR Apache-2.0, like the repository) are not published; `private.ignore` leaves them out. That skip
 # applies to every crate whose manifest says `publish = false`, a path or git dependency too, which is why CI
 # and `bench/security.py supply` also run `bench/check_dep_sources.py`: every dependency must come from
 # crates.io, where nothing is marked that way.
@@ -43,7 +43,7 @@ allow = [
 confidence-threshold = 0.9
 # The list is the rule, not a record of what the tree has today: a licence on it that no crate uses is fine.
 unused-allowed-license = "allow"
-# Our own crates (publish = false): no licence of their own; everything from crates.io must match the list
+# Our own crates (publish = false) are left out; everything from crates.io must match the list
 # above. A path or git crate with publish = false would be skipped too: bench/check_dep_sources.py refuses it.
 private = { ignore = true }
 

@@ -2,7 +2,7 @@
 //!
 //! Everything a caller can tune lives in [`Options`]. The only constants that are not options are the
 //! ones that define the file formats (a decoder must agree with its encoder on those), the ones PDF readers
-//! set, and measured thresholds; `README.md` lists them.
+//! set, and measured thresholds; `docs/reference.md` lists them.
 //!
 //! The three operations:
 //! - [`optimize`]: a smaller PDF that any PDF reader opens, with every object's value preserved.

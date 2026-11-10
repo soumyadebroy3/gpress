@@ -3,7 +3,7 @@ name = "gpress-wasm"
 version = "0.1.0"
 edition = "2021"
 publish = false
-license = "UNLICENSED"
+license = "MIT OR Apache-2.0"
 description = "gpress for the browser and Node: a plain WebAssembly module (no bindgen) with a TypeScript wrapper in js/."
 
 [lib]

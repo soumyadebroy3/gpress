@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1760" height="930" viewBox="0 0 1760 930" role="img" aria-label="gpress: archive 60.9% of the original size against 76.3% for the best of xz, Brotli and Zstandard on 907 test PDFs; normal PDF 85.0% of the input against qpdf 11.9.0's 87.2% on the 90 files gpress rewrites; web module 268 KB gzipped">
+<rect width="1760" height="930" rx="36" fill="#0b1220"/>
+<rect x="1" y="1" width="1758" height="928" rx="35" fill="none" stroke="#1f2a44" stroke-width="2"/>
+<text x="96" y="118" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="26" font-weight="600" fill="#2dd4bf" text-anchor="start" letter-spacing="6">LOSSLESS PDF COMPRESSION</text>
+<text x="96" y="206" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="76" font-weight="700" fill="#f8fafc" text-anchor="start">Smaller PDFs. Exact archives.</text>
+<text x="96" y="266" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="30" font-weight="400" fill="#cbd5e1" text-anchor="start">Every effort level is lossless. A damaged archive is never restored wrongly.</text>
+<rect x="96" y="330" width="496" height="400" rx="24" fill="#111a2e"/>
+<text x="136" y="396" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="22" font-weight="600" fill="#7c8aa5" text-anchor="start" letter-spacing="4">ARCHIVE</text>
+<text x="132" y="520" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="116" font-weight="700" fill="#f8fafc" text-anchor="start">60.9%</text>
+<text x="136" y="576" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="26" font-weight="400" fill="#cbd5e1" text-anchor="start">of the original size</text>
+<rect x="136" y="610" width="416" height="2" fill="#1f2a44"/>
+<text x="136" y="656" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="24" font-weight="500" fill="#2dd4bf" text-anchor="start">best of xz, Brotli, Zstandard: 76.3%</text>
+<text x="136" y="694" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="21" font-weight="400" fill="#7c8aa5" text-anchor="start">907 public test PDFs, 130.5 MB</text>
+<rect x="632" y="330" width="496" height="400" rx="24" fill="#111a2e"/>
+<text x="672" y="396" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="22" font-weight="600" fill="#7c8aa5" text-anchor="start" letter-spacing="4">NORMAL PDF</text>
+<text x="668" y="520" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="116" font-weight="700" fill="#f8fafc" text-anchor="start">85.0%</text>
+<text x="672" y="576" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="26" font-weight="400" fill="#cbd5e1" text-anchor="start">of the input size</text>
+<rect x="672" y="610" width="416" height="2" fill="#1f2a44"/>
+<text x="672" y="656" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="24" font-weight="500" fill="#2dd4bf" text-anchor="start">qpdf 11.9.0, strongest lossless: 87.2%</text>
+<text x="672" y="694" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="21" font-weight="400" fill="#7c8aa5" text-anchor="start">the 90 of 120 files gpress rewrites</text>
+<rect x="1168" y="330" width="496" height="400" rx="24" fill="#111a2e"/>
+<text x="1208" y="396" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="22" font-weight="600" fill="#7c8aa5" text-anchor="start" letter-spacing="4">WEB MODULE</text>
+<text x="1204" y="520" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="116" font-weight="700" fill="#f8fafc" text-anchor="start">268 KB</text>
+<text x="1208" y="576" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="26" font-weight="400" fill="#cbd5e1" text-anchor="start">of gzipped WebAssembly</text>
+<rect x="1208" y="610" width="416" height="2" fill="#1f2a44"/>
+<text x="1208" y="656" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="24" font-weight="500" fill="#2dd4bf" text-anchor="start">same output as the native library</text>
+<text x="1208" y="694" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="21" font-weight="400" fill="#7c8aa5" text-anchor="start">normal PDF; 383 KB with the archive</text>
+<text x="96" y="800" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" font-weight="400" fill="#7c8aa5" text-anchor="start">Archive: format 9, effort 100, one thread, built with --features existing (Lepton for JPEGs). Normal PDF: default effort 100, one thread.</text>
+<text x="96" y="834" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" font-weight="400" fill="#7c8aa5" text-anchor="start">Sizes are shares of the input: lower is better. Web module: gzip sizes recorded in bench/sizes.json on 2026-10-22, before archive format 9.</text>
+<text x="96" y="868" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" font-weight="400" fill="#7c8aa5" text-anchor="start">Sources and method: bench/RESULTS.md and bench/sizes.json.</text>
+</svg>

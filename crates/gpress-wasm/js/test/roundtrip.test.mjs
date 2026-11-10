@@ -22,7 +22,7 @@ function archiveTest(name, body) {
 
 test("version is set", () => {
   assert.match(g.version, /^\d+\.\d+\.\d+$/);
-  assert.equal(g.archiveVersion, archive ? 8 : 0);
+  assert.equal(g.archiveVersion, archive ? 9 : 0);
 });
 
 test("the module lists its parts: every one, or the web set without the archive", () => {
@@ -116,10 +116,10 @@ archiveTest("an image row past 2^32 bits packs as on 64 bits", () => {
     "9VGvj3p91OujXh+eXgcA3Qs2Zg==",
     "base64");
   const native = new Uint8Array(Buffer.from(
-    "iUdQWgjMBYAyBENBpi9DdDhPGJOUIHBd+//eKHN3mebmY6fk0OE2Ym5ZeHz1mO6U6sMaa2pMtt8eOtjgM4mJoG9w6QBKczEKkr+qe4y/" +
-    "mrw6gTSre6PXak51dccCXDpCJSnPKcv8cwROxwfURAFk5OSANAVK0/kuEatnfWgJUXXcujXOOLbTw9kws/af77XVpMM6941/b9NdgV43" +
-    "G/Xx/ZrLvDpTu9t2vIgzTS5je7+/uQc9bcgyjKl9R35X5mSUWBq88D1qJ/pQo2OpUWciag4OjzMxiRlLnRvIQjNO9XSuDHhu4pWnxeRu" +
-    "HA6SHU+6VNBYJ5NtD/JVlSirRil/u9xtyn6apGoA29mnGT0yRhhIMjLxr8UA",
+    "iUdQWgnMBYAyBENBpi9DdDhPGJOUIHBd+//eTVOxq/EJd/9f/wS+POojRQACS1LH6qwBe9BGlfeZUU2Bs8EKFzA/CrpDYbUhhAOFpf2q" +
+    "xMpxbc7zQTcNvDM2jKqK5aNN467QH9gAOuy86jOpKvZy9q8BC1MKumN13L9FtpiuPLnotI16hkf6fHRLwqWQjJoWe95/MQFKXfb2GtD2" +
+    "XO37+A3ZLMClVSN9jn3cIQQotqH6woOaNCUEWb0z41QEP2PnFxO58gJYi0rqMz1t58u9IiN9CgVbrYsqWo/8EZFw9B4UiwQCdGgFky3G" +
+    "D1g1/Igz8UOOtaGN08wDBzEF4jDtj+PxLfUAj9586jnQEH01jEHZ3q0A",
     "base64"));
   const names = Array.from({ length: 32 }, (_, i) => `/C${i}`).join(" ");
   const head = enc.encode("%PDF-1.4\n1 0 obj\n<< /Type /XObject /Subtype /Image /Width 8388609 /Height 100 " +

@@ -1,5 +1,25 @@
-//! Our own Deflate decoder (RFC 1951). It accepts exactly what zlib accepts for complete streams and reports
+//! A Deflate decoder (RFC 1951). It accepts exactly what zlib accepts for complete streams and reports
 //! everything else as an error, so the engine never "repairs" a stream silently.
+//!
+//! Two parts follow zlib's own code and are altered versions of it: the checks and the sort of a code's
+//! lengths (`Kind` and `Decoder::new`) follow zlib's inftrees.c, Copyright (C) 1995-2026 Mark Adler, under
+//! zlib's licence (quoted in full in zlibexact.rs); the bit-by-bit decode (`Decoder::slow`) follows Mark
+//! Adler's puff.c, whose notice (in puff.h) is:
+//!
+//! Copyright (C) 2002-2013 Mark Adler, all rights reserved
+//!
+//! This software is provided 'as-is', without any express or implied warranty. In no event will the author
+//! be held liable for any damages arising from the use of this software.
+//!
+//! Permission is granted to anyone to use this software for any purpose, including commercial applications,
+//! and to alter it and redistribute it freely, subject to the following restrictions:
+//!
+//! 1. The origin of this software must not be misrepresented; you must not claim that you wrote the original
+//!    software. If you use this software in a product, an acknowledgment in the product documentation would
+//!    be appreciated but is not required.
+//! 2. Altered source versions must be plainly marked as such, and must not be misrepresented as being the
+//!    original software.
+//! 3. This notice may not be removed or altered from any source distribution.
 
 use super::bits::{BitReader, EndOfInput};
 use super::tables::*;

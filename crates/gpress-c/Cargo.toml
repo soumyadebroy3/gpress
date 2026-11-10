@@ -3,7 +3,7 @@ name = "gpress-c"
 version = "0.1.0"
 edition = "2021"
 publish = false
-license = "UNLICENSED"
+license = "MIT OR Apache-2.0"
 description = "C API for gpress (shared and static library plus include/gpress.h)."
 
 [lib]

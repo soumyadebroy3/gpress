@@ -1810,7 +1810,7 @@ mod tests {
         assert!(bypassed > 1000, "long repeats: {bypassed}");
         let out = e.finish();
         let fnv = out.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3));
-        assert_eq!((input.len(), out.len(), fnv), (30_806, 10_764, 0x3720_ab6b_a31b_18ca));
+        assert_eq!((input.len(), out.len(), fnv), (30_806, 10_679, 0x7d04_75da_59dd_0748));
         let mut d = Decoder::new(&out);
         let (decoded, _) = run_script(&steps, &mut d, false);
         assert!(decoded == input);

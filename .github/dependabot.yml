@@ -1,0 +1,36 @@
+# Weekly update pull requests for the Rust crates (the workspace and the fuzz package, which has its own lock
+# file), the npm package's development tools and the pinned GitHub Actions. Minor and patch updates come as one
+# pull request per ecosystem, major ones each on their own. Every update waits a week after its release before it
+# is proposed, so a release that is pulled for being broken or malicious is usually gone by then. Each pull
+# request runs the full CI, cargo deny's licence and advisory gate included.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directories: ["/", "/fuzz"]
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      cargo:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /crates/gpress-wasm/js
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      npm:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        update-types: [minor, patch]

@@ -31,7 +31,7 @@ full sample. Work on a branch named `opt-model-loops`.
 
 Two pure speed-ups of the context-mixing model (`src/cm/`), from `docs/optimisation-plan.md` section 8,
 group D. The model is part of the archive format: a faster model has to compute exactly the same thing, and
-`tests/pack_format.rs` holds a stored archive (`tests/data/format-v8.*`) that must still pack to the same
+`tests/pack_format.rs` holds a stored archive (`tests/data/format-v9.*`) that must still pack to the same
 bytes and restore.
 
 **D1. The model without bounds checks and with a vector mixer.** About 30% of the model's 1,400

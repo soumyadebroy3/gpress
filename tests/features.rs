@@ -14,7 +14,7 @@ const FAX_PDF: &[u8] = include_bytes!("data/features/fax.pdf");
 const FAX_GPZ: &[u8] = include_bytes!("data/features/fax.gpz");
 const ENC_PDF: &[u8] = include_bytes!("data/enc/r3_rc4_128.pdf");
 const ENC_GPZ: &[u8] = include_bytes!("data/features/r3_rc4_128.gpz");
-const PLAIN_PDF: &[u8] = include_bytes!("data/format-v8.pdf");
+const PLAIN_PDF: &[u8] = include_bytes!("data/format-v9.pdf");
 const JPEG: &[u8] = include_bytes!("data/jpeg/base444.jpg");
 
 fn quick() -> Options {
@@ -80,7 +80,7 @@ fn every_build_knows_its_features_and_optimizes_a_plain_pdf() {
         assert_eq!(f.enabled(), on, "{f}");
     }
     // The archive format's constants are the same with or without the archive.
-    assert_eq!(gpress::api::ARCHIVE_VERSION, 8);
+    assert_eq!(gpress::api::ARCHIVE_VERSION, 9);
     assert_eq!(Options::default().max_decoded, 256 << 20);
     assert!(is_archive(FAX_GPZ) && is_archive(ENC_GPZ) && !is_archive(FAX_PDF));
     // A PDF that needs no part a build may leave out comes out the same way in every build.
