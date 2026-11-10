@@ -1,0 +1,9 @@
+{
+  "name": "gpress-checkers",
+  "private": true,
+  "description": "pdf.js and its canvas, the reader behind bench/verify_pdfjs.mjs, at the versions the Deep check workflow installs (npm ci --prefix bench/checkers; PDFJS_MODULES=bench/checkers/node_modules)",
+  "dependencies": {
+    "@napi-rs/canvas": "1.1.0",
+    "pdfjs-dist": "6.5.438"
+  }
+}

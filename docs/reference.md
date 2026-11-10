@@ -259,6 +259,20 @@ crates.io. A default build depends on `aes`, `md-5` and `sha2` (RustCrypto, MIT 
   the 20 slowest and the 20 largest files, 34 with 6 in both lists, then 86 random ones, in two sections
   `--set sample120:random` and `:slowest-and-largest` select); the engine comes from `GPRESS` and the
   corpus from `CORPUS` (default `bench/corpus`, where `fetch_corpus.sh` puts it).
+- `deep_check.py`: what a change does to the outputs, on two builds of the tool side by side (base, the
+  build a change starts from, and head, the build with it). `pdf` runs both over all 907 files as normal PDFs
+  at efforts 0, 50 and 100, head again with 4 threads, and puts head's rewritten outputs whose bytes are not
+  base's before every reader (`verify_pdf.py`, `verify_render.py`); `archive` runs both over the 120-file
+  sample as archives; `hostile` runs `security.py`'s damaged archives, hostile PDFs and self-check on head,
+  and the hostile PDFs on base for their cost. A part ends with a finding (exit 1) for what a script can
+  decide on any machine: an output larger than base's, a file one build rewrites and the other leaves
+  untouched, lost exactness, a file failing on head only, other bytes with other thread counts, a reader that
+  shows a changed output differently from its original, a failing hostile case, a checking tool that is
+  missing. Other bytes than base's are listed, not findings; CPU time and peak memory are printed as
+  `benchmark.py compare` gives them, as an indication. `selftest` plants each finding. The "Deep check"
+  workflow (`.github/workflows/deep-check.yml`) builds both tools for every pull request, runs the three
+  parts and posts their reports as one comment; `checkers/` pins the readers it installs (pikepdf,
+  pypdfium2 and Pillow in `requirements.txt`, pdf.js and its canvas in `package.json`).
 - `p5.py`: what the threads and the store do for a normal PDF, file by file. `run NAME --engine BIN`
   optimizes each file of a list (`--set`, `--files`; `--limit N` takes the N smallest) at each effort and
   thread count, one process at a time with `PDFE_DEBUG` set, and keeps the child's wall and CPU time, peak

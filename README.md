@@ -407,6 +407,9 @@ are RustCrypto's AES, MD5 and SHA-2, for encrypted PDFs, and the small crates th
 CI (`.github/workflows/ci.yml`) runs on every pull request and every push to `main`, and its last job,
 "All checks passed", passes only when every other job did. CodeQL (`.github/workflows/codeql.yml`) scans the
 Rust, TypeScript, Python and workflow code on every pull request and weekly.
+Deep check (`.github/workflows/deep-check.yml`) builds every pull request and the commit it starts from, runs
+both builds over the whole corpus and posts what changed in the outputs as one comment on the pull request
+(`bench/deep_check.py`, in the [reference](docs/reference.md#benchmarks-bench)); it reports and does not gate a merge.
 
 <details>
 <summary><b>The commands</b></summary>
