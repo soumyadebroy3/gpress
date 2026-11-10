@@ -156,9 +156,9 @@ pub struct Doc<'a> {
     pub sections: usize,
     /// The file keeps earlier saves: more sections than one save writes, a `startxref` before the first section or
     /// more of them than sections (a save no /Prev links), or an object two sections, or one section twice, define
-    /// differently. One save writes one section, or two: a linearised file's (/Linearized in the first 1024 bytes,
-    /// the newer section first, the older trailer adding nothing to the newer), or a hybrid file's whose /XRefStm
-    /// sits in an empty newest table (its stream before the older section, the two trailers alike).
+    /// differently. One save writes one section, or two: those of a linearised file (/Linearized in the first 1024
+    /// bytes, the newer section first, the older trailer adding nothing to the newer), or of a hybrid file whose
+    /// newest section is an empty table naming an /XRefStm (what it names before the older section, trailers alike).
     pub has_revisions: bool,
     /// Bytes after the last %%EOF.
     pub trailing: usize,
@@ -361,7 +361,7 @@ pub fn open_with(data: &[u8], limits: Limits) -> Result<Doc<'_>, LoadError> {
     // One save writes one section, or two: a linearised file's first-page section near the start, whose /Prev
     // names the main section after it, or a hybrid file's empty table (below). Any other section is a later save.
     // So is a `startxref` before the first section, or more of them than sections: a save that no /Prev links (or
-    // those bytes in a stream, where refusing costs only compression).
+    // those bytes anywhere else in the file, where refusing costs only compression).
     let linearised = sections.len() == 2
         && data[..data.len().min(1024)].windows(11).any(|w| w == b"/Linearized")
         && starts[0] < starts[1]

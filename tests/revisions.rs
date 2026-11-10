@@ -180,10 +180,11 @@ fn one_startxref_more_than_sections_is_a_revision() {
     untouched(&p.d);
 }
 
-/// One save, linearised as qpdf writes it, after what `p` holds: the linearisation dictionary (10); the first-page
+/// One save, linearised in qpdf's layout, after what `p` holds: the linearisation dictionary (10); the first-page
 /// section, with its row, the /Size of the whole file and a /Prev naming the main section at the end; and the main
-/// section, with the page's rows and a /Size of its own. Without `first_startxref` no `startxref` follows the
-/// first-page section, as qpdf writes it. Returns where the first-page section is.
+/// section, with the page's rows and a /Size of its own. With `first_startxref` a `startxref` follows the
+/// first-page section, as qpdf writes one after a table; without it none does, as qpdf writes none after a
+/// cross-reference stream. Returns where the first-page section is.
 fn linearised_save(mut p: Pdf, first_startxref: bool) -> (Pdf, usize) {
     p.obj(10, b"<< /Linearized 1 /L 0 /O 3 /E 0 /N 1 /T 0 /H [0 0] >>");
     // Room for the first-page section, written once the offsets are known.
@@ -218,26 +219,58 @@ fn stream_rows(p: &Pdf, ns: std::ops::Range<u32>) -> Vec<u8> {
     .collect()
 }
 
+/// `rows` of `width` bytes as a cross-reference stream holds them under /Filter /FlateDecode with /Predictor 12 and
+/// /Columns `width`: each row after a 0, the tag of PNG's filter "none".
+fn predicted(rows: &[u8], width: usize) -> Vec<u8> {
+    let tagged: Vec<u8> = rows.chunks(width).flat_map(|r| [&[0], r].concat()).collect();
+    gpress::flate::deflate_zlib(&tagged, &gpress::flate::Options::quick())
+}
+
 #[test]
 fn one_linearised_save_of_cross_reference_streams_is_rewritten_with_every_object() {
     // As qpdf writes it with object streams: the first-page stream (13) after the linearisation dictionary, the main
-    // stream (14) at the end. Their dictionaries differ only in the keys about the cross-reference data.
+    // stream (14) at the end. The main stream's dictionary says nothing about the document, and the keys about the
+    // cross-reference data differ: /W and /DecodeParms too, as in pdfjs/empty.pdf of the corpus.
     let mut p = Pdf::new();
     p.obj(10, b"<< /Linearized 1 /L 0 /O 3 /E 0 /N 1 /T 0 /H [0 0] >>");
     let first = p.d.len();
     p.d.extend_from_slice(&[b' '; 200]);
     p.d.push(b'\n');
     page(&mut p, "ONE SAVE");
-    let rows = stream_rows(&p, 0..6);
+    let rows = predicted(&stream_rows(&p, 0..6), 5);
     let main = p.d.len();
-    p.obj(14, &stream("/Type /XRef /Size 6 /Index [0 6] /W [1 3 1]", &rows));
+    let flate = "/Filter /FlateDecode /DecodeParms << /Predictor 12 /Columns";
+    p.obj(14, &stream(&format!("/Type /XRef /Size 6 /Index [0 6] /W [1 3 1] {flate} 5 >>"), &rows));
     p.d.extend_from_slice(format!("startxref\n{first}\n%%EOF\n").as_bytes());
-    let dict = format!("/Type /XRef /Size 15 /Index [10 1] /W [1 3 1] /Root 1 0 R /Prev {main}");
+    let dict = format!("/Type /XRef /Size 15 /Index [10 1] /W [1 2 1] {flate} 4 >> /Root 1 0 R /Prev {main}");
+    let at = p.at[&10];
     let mut head = b"13 0 obj\n".to_vec();
-    head.extend_from_slice(&stream(&dict, &stream_rows(&p, 10..11)));
+    head.extend_from_slice(&stream(&dict, &predicted(&[1, (at >> 8) as u8, at as u8, 0], 4)));
     head.extend_from_slice(b"\nendobj\n");
     assert!(head.len() <= 200, "{}", head.len());
     p.d[first..first + head.len()].copy_from_slice(&head);
+    rewritten(&p.d);
+}
+
+#[test]
+fn a_main_stream_after_a_first_page_table_is_rewritten_with_every_object() {
+    // The first-page trailer has none of the keys that only a cross-reference stream has (/Type, /Index, /W, /Filter,
+    // /DecodeParms, /Length), so none of them may count as the older trailer saying more.
+    let mut p = Pdf::new();
+    p.obj(10, b"<< /Linearized 1 /L 0 /O 3 /E 0 /N 1 /T 0 /H [0 0] >>");
+    let first = p.d.len();
+    p.d.extend_from_slice(&[b' '; 200]);
+    p.d.push(b'\n');
+    page(&mut p, "ONE SAVE");
+    let rows = predicted(&stream_rows(&p, 0..6), 5);
+    let main = p.d.len();
+    let dict =
+        "/Type /XRef /Size 6 /Index [0 6] /W [1 3 1] /Filter /FlateDecode /DecodeParms << /Predictor 12 /Columns 5 >>";
+    p.obj(14, &stream(dict, &rows));
+    p.d.extend_from_slice(format!("startxref\n{first}\n%%EOF\n").as_bytes());
+    let head = format!("xref\n10 1\n{:010} 00000 n \ntrailer\n<< /Size 15 /Root 1 0 R /Prev {main} >>\n", p.at[&10]);
+    assert!(head.len() <= 200, "{}", head.len());
+    p.d[first..first + head.len()].copy_from_slice(head.as_bytes());
     rewritten(&p.d);
 }
 
@@ -251,8 +284,8 @@ fn an_update_to_a_linearised_file_is_a_revision() {
 
 #[test]
 fn a_linearised_save_appended_without_prev_is_a_revision() {
-    // Two qpdf-style linearised saves, the second appended whole with no /Prev: as many `startxref` as the newest
-    // save has sections, but the first one comes before them.
+    // Two linearised saves, the second appended whole with no /Prev: as many `startxref` as the newest save has
+    // sections, but the first one comes before them.
     let (mut p, _) = linearised_save(Pdf::new(), false);
     p.d.extend_from_slice(b"%PDF-1.5\n");
     let (p, _) = linearised_save(p, false);
