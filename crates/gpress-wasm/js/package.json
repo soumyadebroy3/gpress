@@ -21,7 +21,7 @@
     "test:web": "GPRESS_WASM=dist/gpress-web.wasm node --test --test-concurrency=1 test/*.test.mjs"
   },
   "devDependencies": {
-    "typescript": "^5.6.0"
+    "typescript": "^7.0.2"
   },
   "engines": { "node": ">=20" }
 }
