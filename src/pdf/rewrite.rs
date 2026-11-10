@@ -1546,7 +1546,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     xd.set(b"W", Obj::Array(vec![Obj::Int(1), Obj::Int(w1 as i64), Obj::Int(w2 as i64)]));
     // Every trailer entry that isn't about the old cross-reference structure carries over.
     for (k, v) in &doc.trailer.0 {
-        if !STRUCTURAL.contains(&k.as_slice()) {
+        if !xref::STRUCTURAL.contains(&k.as_slice()) {
             xd.set(k, v.clone());
         }
     }
@@ -1583,10 +1583,6 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     }
     Ok((out, stats))
 }
-
-/// Trailer keys that describe the cross-reference structure itself (rewritten, not copied).
-const STRUCTURAL: [&[u8]; 9] =
-    [b"Size", b"Prev", b"XRefStm", b"Index", b"W", b"Type", b"Filter", b"DecodeParms", b"Length"];
 
 fn bytes_for(v: u64) -> usize {
     let mut n = 1;
@@ -1712,7 +1708,7 @@ fn self_check(
         return Err("self-check: encryption differs".into());
     }
     for (k, v) in &trailer.0 {
-        if !STRUCTURAL.contains(&k.as_slice()) && doc2.trailer.get(k) != Some(v) {
+        if !xref::STRUCTURAL.contains(&k.as_slice()) && doc2.trailer.get(k) != Some(v) {
             return Err("self-check: trailer differs".into());
         }
     }

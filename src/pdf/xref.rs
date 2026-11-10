@@ -154,7 +154,11 @@ pub struct Doc<'a> {
     pub entries: BTreeMap<u32, Entry>,
     /// Number of cross-reference sections (more than one: incremental updates or linearisation).
     pub sections: usize,
-    /// Some object is defined differently in two sections: the file has earlier revisions.
+    /// The file keeps earlier saves: more sections than one save writes, a `startxref` before the first section or
+    /// more of them than sections (a save no /Prev links), or an object two sections, or one section twice, define
+    /// differently. One save writes one section, or two: a linearised file's (/Linearized in the first 1024 bytes,
+    /// the newer section first, the older trailer adding nothing to the newer), or a hybrid file's whose /XRefStm
+    /// sits in an empty newest table (its stream before the older section, the two trailers alike).
     pub has_revisions: bool,
     /// Bytes after the last %%EOF.
     pub trailing: usize,
@@ -183,6 +187,34 @@ fn find_last(d: &[u8], pat: &[u8], window: usize) -> Option<usize> {
     }
     let start = d.len().saturating_sub(window);
     (start..=d.len() - pat.len()).rev().find(|&i| &d[i..i + pat.len()] == pat)
+}
+
+/// Trailer keys that describe the cross-reference structure itself (rewritten, not copied); the others are about
+/// the document.
+pub const STRUCTURAL: [&[u8]; 9] =
+    [b"Size", b"Prev", b"XRefStm", b"Index", b"W", b"Type", b"Filter", b"DecodeParms", b"Length"];
+
+/// Whether trailer `a` says nothing about the document that `b` doesn't say too: some readers fill in what the
+/// newest trailer lacks from older ones.
+fn adds_nothing(a: &Dict, b: &Dict) -> bool {
+    let b: HashMap<&[u8], &Obj> = b.0.iter().map(|(k, v)| (k.as_slice(), v)).collect();
+    a.0.iter().all(|(k, v)| STRUCTURAL.contains(&k.as_slice()) || b.get(k.as_slice()) == Some(&v))
+}
+
+/// How many times `startxref` appears in `d`, and where it first does: its 'x' is looked for first, the rarest of
+/// its bytes.
+fn find_startxref(d: &[u8]) -> (usize, Option<usize>) {
+    let (mut n, mut first) = (0, None);
+    let mut i = 5;
+    while let Some(p) = d.get(i..).and_then(|t| t.iter().position(|&b| b == b'x')) {
+        let x = i + p;
+        if d.get(x - 5..x + 4) == Some(b"startxref".as_slice()) {
+            n += 1;
+            first = first.or(Some(x - 5));
+        }
+        i = x + 1;
+    }
+    (n, first)
 }
 
 fn parse_uint(t: &[u8]) -> Option<usize> {
@@ -281,6 +313,8 @@ pub fn open_with(data: &[u8], limits: Limits) -> Result<Doc<'_>, LoadError> {
     let trailing = data.len() - (eof + 5);
 
     let mut sections: Vec<(Vec<(u32, Entry)>, Dict)> = Vec::new();
+    let mut starts = Vec::new();
+    let mut own_rows = Vec::new();
     let mut seen = HashSet::new();
     let mut next = Some(off);
     // Rows are counted against the file's size as they are read, before anything holds them.
@@ -290,6 +324,7 @@ pub fn open_with(data: &[u8], limits: Limits) -> Result<Doc<'_>, LoadError> {
             return Err(LoadError::BadXref("loop in /Prev"));
         }
         let (mut entries, trailer) = read_section(data, off, &mut rows_left)?;
+        own_rows.push(entries.len());
         if let Some(Obj::Int(x)) = trailer.get(b"XRefStm") {
             // Hybrid file: the stream supplements the table; table entries win.
             let (extra, _) = read_section(data, usize::try_from(*x).unwrap_or(usize::MAX), &mut rows_left)?;
@@ -302,6 +337,7 @@ pub fn open_with(data: &[u8], limits: Limits) -> Result<Doc<'_>, LoadError> {
             _ => return Err(LoadError::BadXref("bad /Prev")),
         };
         sections.push((entries, trailer));
+        starts.push(off);
     }
     let mut merged: BTreeMap<u32, Entry> = BTreeMap::new();
     let mut has_revisions = false;
@@ -322,6 +358,31 @@ pub fn open_with(data: &[u8], limits: Limits) -> Result<Doc<'_>, LoadError> {
             }
         }
     }
+    // One save writes one section, or two: a linearised file's first-page section near the start, whose /Prev
+    // names the main section after it, or a hybrid file's empty table (below). Any other section is a later save.
+    // So is a `startxref` before the first section, or more of them than sections: a save that no /Prev links (or
+    // those bytes in a stream, where refusing costs only compression).
+    let linearised = sections.len() == 2
+        && data[..data.len().min(1024)].windows(11).any(|w| w == b"/Linearized")
+        && starts[0] < starts[1]
+        && adds_nothing(&sections[1].1, &sections[0].1);
+    // Microsoft Office and Prince put a hybrid file's /XRefStm in a second, empty table after the main one: no rows
+    // of its own, a stream written before the main table, and the main table's trailer otherwise. One save too
+    // (Office's main table lists the objects in object streams as free, so those still count as defined twice). In
+    // both shapes the document is read from the newest trailer alone, so the older one must add nothing.
+    let stream = sections[0].1.get(b"XRefStm").and_then(Obj::as_int).and_then(|x| usize::try_from(x).ok());
+    let hybrid_tail = sections.len() == 2
+        && data[starts[0]..].starts_with(b"xref")
+        && own_rows[0] == 0
+        && stream.is_some_and(|x| x < starts[1])
+        && adds_nothing(&sections[1].1, &sections[0].1)
+        && adds_nothing(&sections[0].1, &sections[1].1);
+    let (count, first_at) = find_startxref(data);
+    let first_section = starts.iter().copied().min().unwrap_or(0);
+    let one_save = (sections.len() == 1 || linearised || hybrid_tail)
+        && count <= sections.len()
+        && first_at.is_some_and(|at| at > first_section);
+    has_revisions |= !one_save;
     let mut objstm_last: HashMap<u32, (u32, usize)> = HashMap::new();
     for e in merged.values() {
         if let &Entry::InStream(sn, idx) = e {
