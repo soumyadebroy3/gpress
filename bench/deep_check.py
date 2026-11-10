@@ -370,6 +370,8 @@ def part_hostile(a):
 def red(res):
     """The findings of a part, as short phrases; empty when there are none."""
     out = list(res.get('errors') or [])
+    if any(not s['files'] for s in (res.get('settings') or {}).values()) or any(not t['rows'] for t in (res.get('tables') or {}).values()):
+        out.append('a setting or a suite measured nothing')  # silence must not read as "no finding"
     names = dict((k, title) for k, title, _ in GROUPS)
     for k, n in findings(res.get('settings') or {}).items():
         if n:
@@ -555,6 +557,8 @@ def selftest():
     res.update(settings={'a': dict(judge(base[:2], head[:2]), effort=0)}, threads={}, readers={'control': [], 'changed': 0, 'results': []})
     res['machine']['missing_tools'] = []
     assert not red(res) and '**No finding.**' in render_pdf(res)
+    assert red(dict(res, settings={'a': dict(judge([], []), effort=0)})) == ['a setting or a suite measured nothing']
+    assert red({'tables': {'pdfs': {'rows': 0, 'failures': [], 'skipped': None}}}) == ['a setting or a suite measured nothing']
     print('deep check selftest: every planted finding is caught, and a clean run has none')
 
 
