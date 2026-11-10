@@ -229,8 +229,8 @@ fn predicted(rows: &[u8], width: usize) -> Vec<u8> {
 #[test]
 fn one_linearised_save_of_cross_reference_streams_is_rewritten_with_every_object() {
     // As qpdf writes it with object streams: the first-page stream (13) after the linearisation dictionary, the main
-    // stream (14) at the end. Their dictionaries differ only in the keys about the cross-reference data, /W and
-    // /DecodeParms among them: the first-page stream's offsets fit in fewer bytes.
+    // stream (14) at the end. The main stream's dictionary says nothing about the document, and the keys about the
+    // cross-reference data differ: /W and /DecodeParms too, as in pdfjs/empty.pdf of the corpus.
     let mut p = Pdf::new();
     p.obj(10, b"<< /Linearized 1 /L 0 /O 3 /E 0 /N 1 /T 0 /H [0 0] >>");
     let first = p.d.len();
