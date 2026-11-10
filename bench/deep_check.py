@@ -35,13 +35,15 @@ Outputs that merely differ from base's are counted and listed, not findings. CPU
 printed as `benchmark.py compare` gives them; on a shared machine they are an indication, not a verdict.
 
 A reader counts for a file only when it drew at least one page of the original. When a reader disagrees, the
-original is compared with itself once: a reader that disagrees with itself there is "unstable" on that file
-and says nothing. A reader that timed out or could not open the original leaves the file "unverified by" it.
+original is compared with itself once: what a reader says of the original against itself too is not about the
+output and is dropped, and the file is "unverified by" that reader; anything else it says stands. A reader that
+timed out or could not open the original leaves the file "unverified by" it as well.
 
 Needs what the benchmark needs (docs/tasks/README.md, step 2): the corpus ($CORPUS, bench/fetch_corpus.sh),
 qpdf, xz, brotli, zstd, a C compiler, jpegtran, Poppler, pikepdf, pypdfium2, Pillow, and pdf.js with
-@napi-rs/canvas ($PDFJS_MODULES); bench/checkers/ pins the versions the workflow installs. Run with python3 -I:
-the corpus is untrusted.
+@napi-rs/canvas ($PDFJS_MODULES); bench/checkers/ pins the versions the workflow installs. And jbig2dec: without
+it verify_pdf.py finds a JBIG2 image's pixels different in a file compared with itself. Run with python3 -I: the
+corpus is untrusted.
 """
 import argparse, collections, concurrent.futures, json, os, resource, shutil, subprocess, sys, tempfile, time
 
@@ -176,10 +178,10 @@ def readers(orig, out):
 
 def settle(first, again):
     """`first` is the readers on (original, output), `again` on (original, original), asked for only when
-    `first` has problems: a reader that disagrees with itself on the original is unstable there and its
-    problems are dropped; the others' stand."""
-    unstable = sorted({k for k, _ in again['problems']})
-    return dict(first, problems=[p for p in first['problems'] if p[0] not in unstable], unstable=unstable,
+    `first` has problems: what a reader says of the original against itself too is dropped, and that reader is
+    unstable on the file; every other problem stands (a real difference must not hide behind an unstable one)."""
+    unstable = {k: s for k, s in reversed(again['problems'])}  # each such reader, with the first thing it said
+    return dict(first, problems=[p for p in first['problems'] if p not in again['problems']], unstable=unstable,
                 unverified=sorted(set(first['unverified']) | set(unstable)))
 
 
@@ -279,7 +281,7 @@ def machine(runs):
     """What the report says about the two measurements, from their meta.json; missing tools are a finding."""
     metas = [json.load(open(p)) if os.path.exists(p) else {} for p in (os.path.join(run, 'meta.json') for run in runs)]
     missing = sorted(set().union(*(m['missing_tools'] if 'missing_tools' in m else ['meta.json (a measurement did not start)'] for m in metas)))
-    missing += [t for t in ('pdftoppm', 'pdftotext', 'node') if not shutil.which(t)]
+    missing += [t for t in ('pdftoppm', 'pdftotext', 'node', 'jbig2dec') if not shutil.which(t)]
     m = metas[1]
     return {'missing_tools': missing, 'cpus': m.get('cpus'), 'cpu_model': m.get('cpu_model'), 'tools': m.get('tools'),
             'binaries': [x.get('engine_sha256') for x in metas], 'builds': [x.get('build') for x in metas],
@@ -468,7 +470,7 @@ def render_pdf(res):
         partly = [x for x in r if x['unverified'] and not x['problems']]
         if partly:
             L += ['', f"Not verified by every reader: {len(partly)} outputs. " + '; '.join(
-                f"`{x['file']}` (effort {x['effort']}): {', '.join(x['unverified'])}" + (' (unstable: ' + ', '.join(x['unstable']) + ')' if x.get('unstable') else '') for x in partly[:LIST_CAP])]
+                f"`{x['file']}` (effort {x['effort']}): {', '.join(x['unverified'])}" + ''.join(f' ({k} says of the original against itself: {cell(s)[:120]})' for k, s in (x.get('unstable') or {}).items()) for x in partly[:LIST_CAP])]
     return '\n'.join(L + [''] + tail(res) + [NOT_CHECKED, ''])
 
 
@@ -531,10 +533,12 @@ def selftest():
     assert not any(findings({'x': judge(base, base)}).values()), 'a build against itself has a finding'
     assert not any(findings({'x': judge(base[:2], head[:2])}).values()), 'a smaller output is a finding'
     assert threads_differ([row('a'), row('b')], [row('a'), row('b', sha='x')]) == ['b']
-    # The readers: an unstable reader's problems are dropped, the others' stand.
+    # The readers: what one says of the original against itself too is dropped, everything else stands.
     first = {'problems': [['Poppler', 'poppler pages differ'], ['PDFium', 'page 1 renders differently']], 'unverified': [], 'pages': {}}
-    assert settle(first, {'problems': [['Poppler', 'poppler pages differ']]})['problems'] == [['PDFium', 'page 1 renders differently']]
+    settled = settle(first, {'problems': [['Poppler', 'poppler pages differ']]})
+    assert settled['problems'] == [['PDFium', 'page 1 renders differently']] and settled['unstable'] == {'Poppler': 'poppler pages differ'}, settled
     assert settle(first, {'problems': []})['problems'] == first['problems']
+    assert settle(first, {'problems': [['Poppler', 'poppler text differs']]})['problems'] == first['problems'], 'another problem of the same reader stands'
     # Which outputs are read: one per distinct output, outcome changes and growths first, at most the cap.
     targets, n = reader_targets({'a': dict(s, effort=0), 'b': dict(s, effort=50)}, 3)
     assert n == 5 and [t['file'] for t in targets[:2]] == ['larger', 'accepted'] and len(targets) == 3, (targets, n)

@@ -99,13 +99,14 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
-      # The tools of docs/tasks/README.md, step 2. The scripts run as `python -I`, which does not see packages
-      # installed for the user, so the Python ones go into an environment of their own.
+      # The tools of docs/tasks/README.md, step 2, and jbig2dec, which pikepdf needs to decode JBIG2 images. The
+      # scripts run as `python -I`, which does not see packages installed for the user, so the Python ones go into
+      # an environment of their own.
       - name: The checking tools
         run: |
           set -eu
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qpdf xz-utils brotli zstd build-essential libjpeg-turbo-progs poppler-utils python3-venv
+          sudo apt-get install -y -qq qpdf xz-utils brotli zstd build-essential libjpeg-turbo-progs poppler-utils jbig2dec python3-venv
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install --quiet -r bench/checkers/requirements.txt
           npm ci --prefix bench/checkers
