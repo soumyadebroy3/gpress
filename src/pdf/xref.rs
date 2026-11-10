@@ -156,9 +156,9 @@ pub struct Doc<'a> {
     pub sections: usize,
     /// The file keeps earlier saves: more sections than one save writes, a `startxref` before the first section or
     /// more of them than sections (a save no /Prev links), or an object two sections, or one section twice, define
-    /// differently. One save writes one section, or two: a linearised file's (/Linearized in the first 1024 bytes,
-    /// the newer section first, the older trailer adding nothing to the newer), or a hybrid file's whose /XRefStm
-    /// sits in an empty newest table (its stream before the older section, the two trailers alike).
+    /// differently. One save writes one section, or two: those of a linearised file (/Linearized in the first 1024
+    /// bytes, the newer section first, the older trailer adding nothing to the newer), or of a hybrid file whose
+    /// newest table is empty and names an /XRefStm (its stream before the older section, the two trailers alike).
     pub has_revisions: bool,
     /// Bytes after the last %%EOF.
     pub trailing: usize,

@@ -180,10 +180,11 @@ fn one_startxref_more_than_sections_is_a_revision() {
     untouched(&p.d);
 }
 
-/// One save, linearised as qpdf writes it, after what `p` holds: the linearisation dictionary (10); the first-page
+/// One save, linearised in qpdf's layout, after what `p` holds: the linearisation dictionary (10); the first-page
 /// section, with its row, the /Size of the whole file and a /Prev naming the main section at the end; and the main
-/// section, with the page's rows and a /Size of its own. Without `first_startxref` no `startxref` follows the
-/// first-page section, as qpdf writes it. Returns where the first-page section is.
+/// section, with the page's rows and a /Size of its own. With `first_startxref` a `startxref` follows the
+/// first-page section, as qpdf writes one after a table; without it none does, as qpdf writes none after a
+/// cross-reference stream. Returns where the first-page section is.
 fn linearised_save(mut p: Pdf, first_startxref: bool) -> (Pdf, usize) {
     p.obj(10, b"<< /Linearized 1 /L 0 /O 3 /E 0 /N 1 /T 0 /H [0 0] >>");
     // Room for the first-page section, written once the offsets are known.
@@ -242,6 +243,30 @@ fn one_linearised_save_of_cross_reference_streams_is_rewritten_with_every_object
 }
 
 #[test]
+fn a_main_stream_after_a_first_page_table_is_rewritten_with_every_object() {
+    // The first-page trailer has none of the keys that describe the main section's stream (/Type, /W, /Filter,
+    // /DecodeParms and the rest), so none of them may count as the older trailer saying more. A linearised file of
+    // two streams depends on the same where their /W or /DecodeParms differ.
+    let mut p = Pdf::new();
+    p.obj(10, b"<< /Linearized 1 /L 0 /O 3 /E 0 /N 1 /T 0 /H [0 0] >>");
+    let first = p.d.len();
+    p.d.extend_from_slice(&[b' '; 200]);
+    p.d.push(b'\n');
+    page(&mut p, "ONE SAVE");
+    // Each row after a 0, the tag of PNG's filter "none", as /Predictor 12 reads rows.
+    let rows: Vec<u8> = stream_rows(&p, 0..6).chunks(5).flat_map(|r| [&[0], r].concat()).collect();
+    let main = p.d.len();
+    let dict =
+        "/Type /XRef /Size 6 /Index [0 6] /W [1 3 1] /Filter /FlateDecode /DecodeParms << /Columns 5 /Predictor 12 >>";
+    p.obj(14, &stream(dict, &gpress::flate::deflate_zlib(&rows, &gpress::flate::Options::quick())));
+    p.d.extend_from_slice(format!("startxref\n{first}\n%%EOF\n").as_bytes());
+    let head = format!("xref\n10 1\n{:010} 00000 n \ntrailer\n<< /Size 11 /Root 1 0 R /Prev {main} >>\n", p.at[&10]);
+    assert!(head.len() <= 200, "{}", head.len());
+    p.d[first..first + head.len()].copy_from_slice(head.as_bytes());
+    rewritten(&p.d);
+}
+
+#[test]
 fn an_update_to_a_linearised_file_is_a_revision() {
     let (mut p, first) = linearised_save(Pdf::new(), true);
     p.obj(20, b"<< /Title (Second save) >>");
@@ -251,7 +276,7 @@ fn an_update_to_a_linearised_file_is_a_revision() {
 
 #[test]
 fn a_linearised_save_appended_without_prev_is_a_revision() {
-    // Two qpdf-style linearised saves, the second appended whole with no /Prev: as many `startxref` as the newest
+    // Two linearised saves, the second appended whole with no /Prev: as many `startxref` as the newest
     // save has sections, but the first one comes before them.
     let (mut p, _) = linearised_save(Pdf::new(), false);
     p.d.extend_from_slice(b"%PDF-1.5\n");
