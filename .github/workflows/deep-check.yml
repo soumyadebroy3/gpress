@@ -1,0 +1,210 @@
+name: Deep check
+# What a change does to the engine's outputs on real files: the build of the base commit and the build of the
+# change, side by side over the corpus. bench/deep_check.py does the work and says what is measured and what
+# counts as a finding; this file builds the two tools, runs its three parts and posts their reports as one
+# comment on the pull request.
+#
+# It reports and does not gate: "All checks passed" (ci.yml) and CodeQL stay the only checks a merge needs. A
+# red part means a reviewer has to look, and a finding can be the point of a change (a new refusal leaves a file
+# untouched that base rewrote). On a branch without a pull request: `gh workflow run deep-check.yml --ref BRANCH`,
+# and the reports are on the run's page.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels that pull request's run still in progress, as in ci.yml.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Head is the commit checked out: for a pull request its merge into main, so main's later changes are on both
+  # sides. Base is where head left main: main's tip for a pull request, the fork point for a branch, the commit
+  # before for main itself. Both are built in the same directory with the same toolchain, so the same source
+  # gives the same file, and then there is nothing to measure.
+  build:
+    name: Build base and head
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      same: ${{ steps.build.outputs.same }}
+      base: ${{ steps.build.outputs.base }}
+      head: ${{ steps.build.outputs.head }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - name: The rules catch each planted finding
+        run: python3 -I bench/deep_check.py selftest
+      - name: Build both
+        id: build
+        run: |
+          set -eu
+          head=$(git rev-parse HEAD)
+          base=$(git merge-base HEAD origin/main)
+          [ "$base" != "$head" ] || base=$(git rev-parse HEAD^)
+          mkdir -p "$RUNNER_TEMP/bin/base" "$RUNNER_TEMP/bin/head"
+          cargo build --release --locked --features existing
+          cp target/release/gpress "$RUNNER_TEMP/bin/head/"
+          git checkout --quiet --detach "$base"
+          cargo build --release --locked --features existing
+          cp target/release/gpress "$RUNNER_TEMP/bin/base/"
+          sha256sum "$RUNNER_TEMP"/bin/*/gpress
+          if cmp -s "$RUNNER_TEMP/bin/base/gpress" "$RUNNER_TEMP/bin/head/gpress"; then same=true; else same=false; fi
+          {
+            echo "same=$same"
+            echo "base=$(git rev-parse --short=10 "$base")"
+            echo "head=$(git rev-parse --short=10 "$head")"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$same" = true ]; then
+            echo "The tool built from head (\`$head\`) is byte for byte the tool built from base (\`$base\`), so nothing was measured. The C library and the WebAssembly module are not compared." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: deep-check-binaries
+          path: ${{ runner.temp }}/bin/
+          if-no-files-found: error
+          retention-days: 7
+
+  # The three parts of bench/deep_check.py, each on a runner of its own. They run this pull request's code (the
+  # two tools, the scripts in bench/) on untrusted files, so they hold a token that can only read.
+  check:
+    name: ${{ matrix.name }}
+    needs: build
+    if: needs.build.outputs.same != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read # `gh run download` of the two tools the build job stored
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: pdf
+            name: Normal PDF, the whole corpus
+          - part: archive
+            name: Archives, the 120-file sample
+          - part: hostile
+            name: Hostile input
+    env:
+      PART: ${{ matrix.part }}
+      PDFJS_MODULES: ${{ github.workspace }}/bench/checkers/node_modules
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      # The tools of docs/tasks/README.md, step 2. The scripts run as `python -I`, which does not see packages
+      # installed for the user, so the Python ones go into an environment of their own.
+      - name: The checking tools
+        run: |
+          set -eu
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qpdf xz-utils brotli zstd build-essential libjpeg-turbo-progs poppler-utils python3-venv
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet -r bench/checkers/requirements.txt
+          npm ci --prefix bench/checkers
+      - name: The corpus
+        run: bench/fetch_corpus.sh
+      - name: The two tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name deep-check-binaries --dir "$RUNNER_TEMP/bin"
+          chmod +x "$RUNNER_TEMP"/bin/*/gpress
+      - name: Deep check
+        env:
+          BASE: ${{ needs.build.outputs.base }}
+          HEAD: ${{ needs.build.outputs.head }}
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" -I bench/deep_check.py "$PART" --out "$RUNNER_TEMP/deep-check" \
+            --base "$RUNNER_TEMP/bin/base/gpress" --base-label "$BASE" --head "$RUNNER_TEMP/bin/head/gpress" --head-label "$HEAD"
+      - name: The report, on the run's page
+        if: ${{ !cancelled() }}
+        run: cat "$RUNNER_TEMP/deep-check/$PART.md" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: deep-check-report-${{ matrix.part }}
+          path: |
+            ${{ runner.temp }}/deep-check/*.md
+            ${{ runner.temp }}/deep-check/*.json
+            ${{ runner.temp }}/deep-check/*.log
+          retention-days: 30
+
+  # The one job that may write to the pull request. It checks nothing out and runs nothing of the pull request:
+  # it puts the parts' reports, as text, under a heading of its own in one comment, which it finds again by its
+  # first line and its author. A pull request from a fork gets no comment (its token cannot write): its reports
+  # are on the run's page.
+  comment:
+    name: Report on the pull request
+    needs: [build, check]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read # the parts' reports
+      pull-requests: write # the comment
+    steps:
+      - name: One comment, made or updated
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BUILD: ${{ needs.build.result }}
+          SAME: ${{ needs.build.outputs.same }}
+          BASE: ${{ needs.build.outputs.base }}
+        run: |
+          set -eu
+          mark='<!-- gpress-deep-check -->'
+          dir="$RUNNER_TEMP/reports" body="$RUNNER_TEMP/body.md" parts="$RUNNER_TEMP/parts.md"
+          mkdir -p "$dir"
+          gh run download "$GITHUB_RUN_ID" --pattern 'deep-check-report-*' --dir "$dir" || true
+          {
+            echo "$mark"
+            echo "## Deep check of \`$PR_HEAD\`"
+            echo
+            echo "[Run $GITHUB_RUN_ID]($RUN_URL), attempt $GITHUB_RUN_ATTEMPT: this pull request merged into main, against main at \`${BASE:-?}\`. It reports and does not gate. Everything under this paragraph was written by the pull request's own code (its build of the tool and its \`bench/\` scripts)."
+            echo
+          } > "$body"
+          if [ "$SAME" = true ]; then
+            echo "**Nothing to measure:** the tool built from this pull request is byte for byte the tool built from main. The C library and the WebAssembly module are not compared." > "$parts"
+          else
+            for part in pdf archive hostile; do
+              if [ -s "$dir/deep-check-report-$part/$part.md" ]; then
+                cat "$dir/deep-check-report-$part/$part.md"
+              else
+                printf '### %s: no report\n\nThis part did not finish (the build job: %s). The run has its log.\n' "$part" "$BUILD"
+              fi
+              echo
+            done > "$parts"
+          fi
+          # A name after an @ would notify its owner, and a report can hold any text.
+          sed 's/@/@<!-- -->/g' "$parts" >> "$body"
+          if [ "$(wc -c < "$body")" -gt 60000 ]; then
+            head -n 5 "$body" > "$body.short"
+            echo "The reports are too long for a comment: they are on the run's page." >> "$body.short"
+            mv "$body.short" "$body"
+          fi
+          # A run for an older commit that ends late must not replace the newer report.
+          [ "$(gh api "repos/$GH_REPO/pulls/$PR" --jq .head.sha)" = "$PR_HEAD" ] || exit 0
+          id=$(gh api --paginate "repos/$GH_REPO/issues/$PR/comments" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- gpress-deep-check -->"))) | .id' | head -n 1)
+          if [ -n "$id" ]; then
+            gh api --method PATCH "repos/$GH_REPO/issues/comments/$id" -F body=@"$body" --silent
+          else
+            gh api --method POST "repos/$GH_REPO/issues/$PR/comments" -F body=@"$body" --silent
+          fi
