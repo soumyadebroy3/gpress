@@ -437,7 +437,7 @@ fn count_match(h: &mut Hist, len: usize, dist: usize) {
 /// Observations every block-end check compares.
 const BATCH: u32 = 512;
 /// Blocks are at least this long (bytes), unless the segment is shorter...
-const MIN_BLOCK: usize = 2000;
+const MIN_BLOCK: usize = 2500;
 /// ...and at most about this long.
 const MAX_BLOCK: usize = 300_000;
 /// Kinds of observation: eight for literals, two for matches.
