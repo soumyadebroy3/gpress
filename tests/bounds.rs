@@ -301,6 +301,47 @@ fn a_dangling_reference_to_an_object_in_the_file_leaves_it_untouched() {
     }
 }
 
+#[test]
+fn a_trailer_reference_to_an_object_in_the_file_leaves_it_untouched() {
+    let reason = "an object in the file is missing from its cross-reference data";
+    // The catalog is in the file, but the table has no row for it. PDFium and pdf.js find it and show the page;
+    // nothing is reachable from the trailer, so a rewrite would be an empty file.
+    let mut pdf = classic(&page_objects(), "5");
+    let row = pdf.windows(5).position(|w| w == b"\n1 1\n").unwrap() + 1;
+    pdf.drain(row..row + 24);
+    assert!(xref::open(&pdf).unwrap().load(1).is_err(), "object 1 must be missing");
+    assert_eq!(untouched(&optimize(&pdf, &Options::effort(0)), &pdf), reason);
+    // The same for the trailer's other references: /Info names object 9, which only the page's text holds.
+    for (text, found) in [("9 0 obj", true), ("9 1 obj", false)] {
+        let mut objs = page_objects();
+        let content = format!("BT /F1 12 Tf 10 10 Td ({text}) Tj ET\n").repeat(50);
+        objs[3].1 = stream("", content.as_bytes());
+        let pdf = classic(&objs, "10 /Info 9 0 R");
+        let r = optimize(&pdf, &Options::effort(0));
+        if found {
+            assert_eq!(untouched(&r, &pdf), reason);
+        } else {
+            smaller(&r, &pdf);
+        }
+    }
+}
+
+#[test]
+fn a_file_without_its_catalog_is_left_untouched() {
+    // /Root names an object that is nowhere, or one that is no dictionary. What the trailer reaches is then not
+    // the document (in the first file it is nothing), and a rewrite keeps nothing else.
+    let mut objs = page_objects();
+    let mut pdf = classic(&objs[1..], "5");
+    assert_eq!(untouched(&optimize(&pdf, &Options::effort(0)), &pdf), "no document catalog");
+    // A catalog written in the trailer itself counts (pdf.js and qpdf read it): the file is rewritten as before.
+    let at = pdf.windows(11).rposition(|w| w == b"/Root 1 0 R").unwrap();
+    pdf.splice(at..at + 11, *b"/Root << /Type /Catalog /Pages 2 0 R >>");
+    smaller(&optimize(&pdf, &Options::effort(0)), &pdf);
+    objs[0].1 = b"[2 0 R]".to_vec();
+    let pdf = classic(&objs, "5");
+    assert_eq!(untouched(&optimize(&pdf, &Options::effort(0)), &pdf), "no document catalog");
+}
+
 /// The page with its content stream numbered `n` and the trailer /Size just above it.
 fn page_with_content_at(n: u64) -> Vec<u8> {
     let mut objs = page_objects();

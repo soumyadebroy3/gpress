@@ -151,17 +151,21 @@ pub fn optimize(input: &[u8], opt: &Options) -> Optimized {
     }
 }
 
+/// The references the trailer makes into the document.
+fn trailer_refs(doc: &Doc) -> Vec<(u32, u16)> {
+    let mut refs = Vec::new();
+    for (k, v) in &doc.trailer.0 {
+        if !matches!(k.as_slice(), b"Prev" | b"XRefStm" | b"Size" | b"Encrypt") {
+            v.refs(&mut refs);
+        }
+    }
+    refs
+}
+
 /// Everything reachable from the trailer, in a stable order, with its generation and value.
 fn load_reachable(doc: &Doc) -> Result<BTreeMap<u32, (u16, Obj)>, String> {
     let mut all = BTreeMap::new();
-    let mut todo: Vec<u32> = Vec::new();
-    let mut seed = Vec::new();
-    for (k, v) in &doc.trailer.0 {
-        if !matches!(k.as_slice(), b"Prev" | b"XRefStm" | b"Size" | b"Encrypt") {
-            v.refs(&mut seed);
-        }
-    }
-    todo.extend(seed.iter().map(|r| r.0));
+    let mut todo: Vec<u32> = trailer_refs(doc).iter().map(|r| r.0).collect();
     while let Some(n) = todo.pop() {
         if all.contains_key(&n) {
             continue;
@@ -232,7 +236,7 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, conformance: bool) -> Resul
     }
     // A reference to an object missing from the cross-reference data is null — unless the object is
     // physically in the file, where some readers find it anyway.
-    let mut dangling = HashSet::new();
+    let mut dangling: HashSet<_> = trailer_refs(doc).into_iter().filter(|(n, _)| !objs.contains_key(n)).collect();
     for (_, o) in objs.values() {
         let mut r = Vec::new();
         match o {
@@ -244,6 +248,14 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, conformance: bool) -> Resul
     }
     if holds_header(doc.data, &dangling) {
         return Err("an object in the file is missing from its cross-reference data".into());
+    }
+    // A rewrite keeps only what the trailer reaches, and without a catalog that is not the document.
+    let catalog = match doc.trailer.get(b"Root") {
+        Some(Obj::Ref(n, _)) => objs.get(n).map(|(_, o)| o),
+        direct => direct,
+    };
+    if !matches!(catalog, Some(Obj::Dict(_))) {
+        return Err("no document catalog".into());
     }
     if !conformance {
         return Ok(());
