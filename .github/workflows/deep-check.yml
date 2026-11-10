@@ -73,10 +73,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # The three parts of bench/deep_check.py, each on a runner of its own. They run this pull request's code (the
-  # two tools, the scripts in bench/) on untrusted files, so they hold a token that can only read.
+  # The three parts of bench/deep_check.py, each on a runner of its own: "check (pdf)", "check (archive)" and
+  # "check (hostile)" in the list of checks. They run this pull request's code (the two tools, the scripts in
+  # bench/) on untrusted files, so they hold a token that can only read.
   check:
-    name: ${{ matrix.name }}
     needs: build
     if: needs.build.outputs.same != 'true'
     runs-on: ubuntu-latest
@@ -87,13 +87,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - part: pdf
-            name: Normal PDF, the whole corpus
-          - part: archive
-            name: Archives, the 120-file sample
-          - part: hostile
-            name: Hostile input
+        part: [pdf, archive, hostile]
     env:
       PART: ${{ matrix.part }}
       PDFJS_MODULES: ${{ github.workspace }}/bench/checkers/node_modules
