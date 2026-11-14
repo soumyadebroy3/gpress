@@ -55,7 +55,10 @@ pub fn plain_image(d: &Dict) -> Option<(usize, usize, usize)> {
         _ => return None,
     };
     let size = |k: &[u8]| d.get(k)?.as_int().and_then(|v| usize::try_from(v).ok()).filter(|&v| v > 0);
-    Some((m, size(b"Width")?, size(b"Height")?))
+    let (w, h) = (size(b"Width")?, size(b"Height")?);
+    // A row is counted in bits, of samples and of indexes: neither count may overflow.
+    w.checked_mul(8)?;
+    Some((m, w, h))
 }
 
 /// What the object table says that an image's own dictionary can't.
@@ -270,6 +273,11 @@ mod tests {
         assert!(convert(&sixteen, &px).is_none());
         let form = dict("<< /Subtype /Form /Width 10 /Height 10 /BitsPerComponent 8 /ColorSpace /DeviceRGB >>");
         assert!(convert(&form, &px).is_none());
+        // A size that is none, and a width whose row can't be counted in bits.
+        for (w, h, ok) in [(10, 10, true), (0, 10, false), (10, -1, false), (i64::MAX / 2, 1, false)] {
+            let d = format!("<< /Subtype /Image /Width {w} /Height {h} /BitsPerComponent 8 /ColorSpace /DeviceGray >>");
+            assert_eq!(plain_image(&dict(&d)).is_some(), ok, "{w} x {h}");
+        }
     }
 
     #[test]
