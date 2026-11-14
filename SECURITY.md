@@ -43,7 +43,8 @@ With T threads (at most 64), the normal-PDF writer needs about this for one file
   on the pool; for an image whose predictor is chosen again (one that decodes to at most 48 MiB), its samples
   and one candidate's input as well, and while the winner is encoded its filtered input, its plain encode,
   and that encode's output and zlib copy. A 1-bit image tried as JBIG2 adds the changing elements of its rows
-  (at most 2^24, as for a fax image), once for the image and once for what the new stream decodes to; an image
+  (4 bytes each; at most 2^24, and at most 65,536 and 8 for each stored byte, so that the list follows the data
+  as a fax image's does), once for the image and once for what the new stream decodes to; an image
   tried as an Indexed one adds its indexes (at most a byte for each pixel) and their own predictor search.
 - E: one encoder's working set at the effort, about 42 MB at effort 100 (measured). The output an encode is
   making for the store, at most one per thread, is part of it.

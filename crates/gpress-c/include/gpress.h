@@ -81,12 +81,12 @@ typedef struct gpress_options {
   uint8_t jpeg_tables;            /* 1: give JPEG images optimal Huffman tables (same coefficients) */
   uint8_t jbig2;                  /* 1: write CCITT fax images, and 1-bit images stored without an image
                                      codec, as JBIG2 when clearly smaller (same pixels) */
-  uint8_t palette;                /* 1: write an 8-bit image of few colours as an Indexed image when smaller
-                                     (same colours) */
   uint8_t rewrite_encrypted;      /* 1: rewrite files the empty password opens, keeping their encryption */
   uint8_t decrypt;                /* 1: archive: store such files' streams decrypted (encrypted again on
                                      expand) */
   uint8_t use_existing_libraries; /* 1: use the optional existing library (Lepton) when built in */
+  uint8_t palette;                /* 1: write an 8-bit image of few colours as an Indexed image when smaller
+                                     (same colours). The last byte, which was padding: no other field moved */
 } gpress_options;
 
 typedef struct gpress_buffer {

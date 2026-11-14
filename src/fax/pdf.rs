@@ -262,7 +262,8 @@ pub fn same_image(a: &Stream, b: &Stream, resolve: Resolve) -> bool {
 /// The pixels of a 1-bit image (`one_bit`) whose filters are general ones only: `bits` is what those filters
 /// give, a predictor undone, and must be exactly the rows its direct /Width and /Height describe, each padded
 /// to a byte. A pixel is its bit as it is (the padding bits are left out). The size and work bounds are the fax
-/// path's, the work counted against the stored bytes. None: not such an image, or out of bounds.
+/// path's, the work and the number of changing elements counted against the stored bytes. None: not such an
+/// image, or out of bounds.
 fn bilevel(s: &Stream, bits: &[u8]) -> Option<Image> {
     let d = &s.dict;
     one_bit(d).ok()?;
@@ -274,6 +275,10 @@ fn bilevel(s: &Stream, bits: &[u8]) -> Option<Image> {
     if bits.len() as u64 != row as u64 * h as u64 {
         return None;
     }
+    // General filters can store millions of changing elements in a few bytes, so their list is held to the
+    // stored bytes as a fax image's holds itself (its data spends a bit or more on each): 8 for a byte, over
+    // the allowance a small stream has.
+    let most = MAX_CHANGES.min((WORK_BASE as usize).saturating_add(s.data.len().saturating_mul(8)));
     let mut img = Image::new(w);
     let (mut px, mut ch) = (vec![0u8; w], Vec::new());
     let mut above: &[u8] = &[];
@@ -286,7 +291,7 @@ fn bilevel(s: &Stream, bits: &[u8]) -> Option<Image> {
             ccitt::row_changes(&px, &mut ch);
             above = r;
         }
-        if img.changes.len() + ch.len() > MAX_CHANGES {
+        if img.changes.len() + ch.len() > most {
             return None;
         }
         img.push_row(&ch);
