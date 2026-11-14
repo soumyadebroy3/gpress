@@ -219,10 +219,12 @@ may not be seen, and such a picture can be taken for a photo: written as a JPEG 
 and 100 resampled to 150 pixels per inch, its labels blurred. Nor are a word or two, or print that is soft
 itself (a photographed note).
 
-Two limits the photo set shows. An image in doubt counts as line art, and the step took none of the three
-scikit-image photographs for a photo: none became a JPEG, and only the copies stored as samples and shown at
-600 pixels per inch were resampled (to 300, as line art). And a progressive JPEG is left alone at every level;
-so is the set's camera photograph, a JPEG whose scan header is not as the standard writes it.
+What the photo set shows. An image in doubt counts as line art. Of the three scikit-image photographs, the
+astronaut and the coffee cup are sharp photos (edges as hard as text's, see `lossy_flat_run` and the rules
+after it), which become JPEGs at the line-art floor of 300 pixels per inch, and the Hubble deep field, mostly
+black sky, stays line art: only its copy stored as samples and shown at 600 pixels per inch is resampled (to
+300). A progressive JPEG is left alone at every level; so is the set's camera photograph, a JPEG whose scan
+header is not as the standard writes it.
 
 ## Engine levels
 
