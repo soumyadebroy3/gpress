@@ -249,9 +249,16 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, conformance: bool) -> Resul
     if highest_number(doc, objs, crypt) as u64 + 1 > xref::row_limit(doc.data.len()) as u64 {
         return Err("object numbers far apart".into());
     }
+    // PDFium opens a file whose trailer holds a value nested 64 dictionaries deep, and not what would be
+    // written from it, where the cross-reference stream's dictionary carries the trailer's keys. The gate
+    // stops far below that, and counts arrays like dictionaries.
+    if doc.trailer.0.iter().any(|(_, v)| nested(v, 16)) {
+        return Err("a trailer value nested too deeply".into());
+    }
     // A reference to an object missing from the cross-reference data is null — unless the object is
     // physically in the file, where some readers find it anyway.
-    let mut dangling: HashSet<_> = trailer_refs(doc).into_iter().filter(|(n, _)| !objs.contains_key(n)).collect();
+    let mut dangling: HashSet<u32> =
+        trailer_refs(doc).into_iter().map(|r| r.0).filter(|n| !objs.contains_key(n)).collect();
     for (_, o) in objs.values() {
         let mut r = Vec::new();
         match o {
@@ -259,7 +266,7 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, conformance: bool) -> Resul
             Obj::Stream(st) => st.dict.0.iter().filter(|(k, _)| k != b"Length").for_each(|(_, v)| v.refs(&mut r)),
             _ => o.refs(&mut r),
         }
-        dangling.extend(r.into_iter().filter(|(n, _)| !objs.contains_key(n)));
+        dangling.extend(r.into_iter().map(|r| r.0).filter(|n| !objs.contains_key(n)));
     }
     if holds_header(doc.data, &dangling) {
         return Err("an object in the file is missing from its cross-reference data".into());
@@ -366,42 +373,81 @@ fn contains(h: &[u8], n: &[u8]) -> bool {
     h.windows(n.len()).any(|w| w == n)
 }
 
-/// Whether `data` holds "n g obj" for some (n, g) of `refs`, anywhere, as `format!("{n} {g} obj")` writes
-/// it: the same answer as a search for each, in one pass. Before each " obj" must come g's digits (all of
-/// them, as g is written after a space), a space, and n's digits; n is every number the digits before that
-/// space end with ("112 0 obj" holds "12 0 obj"). A number is written without leading zeros.
-fn holds_header(data: &[u8], refs: &HashSet<(u32, u16)>) -> bool {
-    if refs.is_empty() {
+/// Whether `o` is an array or a dictionary with others nested in it `levels` deep, `o` counted.
+fn nested(o: &Obj, levels: usize) -> bool {
+    match o {
+        Obj::Array(_) | Obj::Dict(_) if levels <= 1 => true,
+        Obj::Array(a) => a.iter().any(|x| nested(x, levels - 1)),
+        Obj::Dict(d) => d.0.iter().any(|(_, v)| nested(v, levels - 1)),
+        _ => false,
+    }
+}
+
+/// Whether `data` holds the header of an object numbered as one of `nums`, anywhere: the number, a gap, the
+/// digits of a generation, a gap or none, `obj`, where a gap is white space and comments (a comment runs from a
+/// `%` to the line end). Poppler rebuilds a damaged file's cross-reference data from headers. It takes, among
+/// others, one with two spaces, a tab or a line feed between its parts, with its generation spelt "00", or with
+/// a NUL right after the number's digits and a comment before the line end. The search asks less of a header
+/// than Poppler does, to stay simple. Among others: the generation's value is not compared, no NUL is needed
+/// before a comment, a NUL alone counts as white space, any `%` of a line may start its comment, a gap may hold
+/// any number of lines, and no white space needs to stand before `obj`. The number is every number of up to ten
+/// digits that the digits before the gap end with ("112 0 obj" holds 12, and "012 0 obj" too).
+fn holds_header(data: &[u8], nums: &HashSet<u32>) -> bool {
+    if nums.is_empty() {
         return false;
     }
-    // The digits that end at `end`, at most `most` of them.
-    let digits = |end: usize, most: usize| {
-        data[end.saturating_sub(most)..end].iter().rev().take_while(|c| c.is_ascii_digit()).count()
-    };
-    let number = |t: &[u8]| -> Option<u64> {
-        if t.len() > 1 && t[0] == b'0' {
-            return None;
-        }
-        t.iter().try_fold(0u64, |v, &c| v.checked_mul(10)?.checked_add((c - b'0') as u64))
-    };
-    for at in 0..data.len().saturating_sub(3) {
-        if &data[at..at + 4] != b" obj" {
-            continue;
-        }
-        // g: every digit before " obj" (more than five can't be a u16), after a space.
-        let k = digits(at, 6);
-        if k == 0 || k > 5 || at < k + 1 || data[at - k - 1] != b' ' {
-            continue;
-        }
-        let Some(g) = number(&data[at - k..at]).and_then(|g| u16::try_from(g).ok()) else { continue };
-        let end = at - k - 1;
-        // n: each number of up to ten digits (a u32) that ends at that space.
-        for j in 1..=digits(end, 10) {
-            let n = number(&data[end - j..end]).and_then(|n| u32::try_from(n).ok());
-            if n.is_some_and(|n| refs.contains(&(n, g))) {
+    let digit = |c: u8| c.is_ascii_digit();
+    (0..data.len().saturating_sub(2)).any(|at| {
+        // Backwards from "obj": a gap or none, the generation's digits, a gap, the number's.
+        &data[at..at + 3] == b"obj"
+            && gap_starts(data, at, true, &mut |g_end| {
+                let g = run_start(data, g_end, digit);
+                g < g_end
+                    && gap_starts(data, g, false, &mut |end| {
+                        let (mut n, mut place) = (0u64, 1u64);
+                        data[end.saturating_sub(10)..end].iter().rev().take_while(|&&c| digit(c)).any(|&c| {
+                            n += (c - b'0') as u64 * place;
+                            place *= 10;
+                            u32::try_from(n).is_ok_and(|n| nums.contains(&n))
+                        })
+                    })
+            })
+    })
+}
+
+/// Where the run of bytes that `is` holds for, ending at `end`, starts.
+fn run_start(data: &[u8], mut end: usize, is: impl Fn(u8) -> bool) -> usize {
+    while end > 0 && is(data[end - 1]) {
+        end -= 1;
+    }
+    end
+}
+
+/// Calls `f` with each place where digits may end before a gap that ends at `end` (`empty`: a gap may also be
+/// no bytes at all), and says whether `f` said yes to one. Where the gap's white space holds a line end, each
+/// `%` of the line that it ends may start a comment; when only white space comes before that `%`, the gap goes
+/// on before it. A line is looked at only for the one gap that holds its line end, so a search stays one pass.
+fn gap_starts(data: &[u8], mut end: usize, empty: bool, f: &mut dyn FnMut(usize) -> bool) -> bool {
+    let white = |c: u8| matches!(c, 0 | b'\t' | b'\n' | 0x0c | b'\r' | b' ');
+    let eol = |c: u8| c == b'\n' || c == b'\r';
+    let mut s = run_start(data, end, white);
+    if (empty || s < end) && f(s) {
+        return true;
+    }
+    while data[s..end].iter().any(|&c| eol(c)) {
+        let line = data[..s].iter().rposition(|&c| eol(c)).map_or(0, |i| i + 1);
+        let mut first = None;
+        for q in (line..s).filter(|&q| data[q] == b'%') {
+            let w = run_start(data, q, white);
+            if f(w) {
                 return true;
             }
+            if w <= line {
+                first = Some((w, q));
+            }
         }
+        let Some(gap) = first else { return false };
+        (s, end) = gap;
     }
     false
 }
@@ -2778,8 +2824,42 @@ mod effort_tests {
     }
 
     #[test]
-    fn headers_are_found_as_a_search_for_each_finds_them() {
-        let planted: [&[u8]; 14] = [
+    fn headers_are_found_however_they_are_spelt() {
+        // A header read forwards from `a`: the number's digits (ten at most), a gap, the generation's digits, a
+        // gap or none, "obj". A gap is white space and comments, each from a `%` to the line end. The search
+        // under test reads backwards from "obj".
+        let white = |c: u8| matches!(c, 0 | b'\t' | b'\n' | 0x0c | b'\r' | b' ');
+        let header_at = |soup: &[u8], a: usize| -> Option<u32> {
+            let run = |from: usize, is: &dyn Fn(u8) -> bool| from + soup[from..].iter().take_while(|&&c| is(c)).count();
+            let digit = |c: u8| c.is_ascii_digit();
+            // Where the part after a gap from `from` starts.
+            let gap = |mut from: usize| loop {
+                from = run(from, &white);
+                match soup[from..].iter().position(|&c| c == b'\n' || c == b'\r') {
+                    Some(e) if soup[from] == b'%' => from += e,
+                    _ => return from,
+                }
+            };
+            let n_end = run(a, &digit);
+            let g = gap(n_end);
+            let g_end = run(g, &digit);
+            if n_end == a || n_end - a > 10 || g == n_end || g_end == g || !soup[gap(g_end)..].starts_with(b"obj") {
+                return None;
+            }
+            std::str::from_utf8(&soup[a..n_end]).ok()?.parse::<u64>().ok().and_then(|n| u32::try_from(n).ok())
+        };
+        let planted: [&[u8]; 25] = [
+            b"6\x00%c\n0 obj",
+            b"6\x00%a\n %b\r\n\t%c\n\n0 obj",
+            b"6 0\x00%a\n%b%c\nobj",
+            b"6 0\x00%c\r\nobj",
+            b"6\x00%a\r0\x00 %b\n \tobj",
+            b"9\x00%x%y 3\n0 obj",
+            b"4 %c\n\n%d\n1 obj",
+            b"2\x00%",
+            b"5\r\n0\tobj",
+            b"3 \x00\x0c 4obj",
+            b"0000000000012 1 obj",
             b"112 0 obj",
             b"5 010 obj",
             b"x 0 obj",
@@ -2796,7 +2876,10 @@ mod effort_tests {
             b"1 0 obj",
         ];
         // Soups of these, so that near-headers of every kind come up.
-        let tokens: [&[u8]; 12] = [b"0", b"1", b"2", b"5", b"7", b"9", b"0", b" ", b" ", b" obj", b"x", b"\n"];
+        let tokens: [&[u8]; 17] = [
+            b"0", b"1", b"2", b"5", b"7", b"9", b"0", b" ", b" ", b" obj", b"obj", b"x", b"\n", b"%", b"\r", b"\x00",
+            b"\n",
+        ];
         let mut r = 0x9E37_79B9_7F4A_7C15u64;
         let mut next = move |k: usize| {
             r ^= r << 13;
@@ -2818,40 +2901,22 @@ mod effort_tests {
             if round % 3 == 1 {
                 soup.extend_from_slice(planted[next(planted.len())]);
             }
-            // Every (n, g) the soup could hold: numbers read from every "digits space digits" in it, leading
-            // zeros and all, plus small ones.
-            let mut cands: BTreeSet<(u32, u16)> = (0..=12).flat_map(|n| (0..=12).map(move |g| (n, g))).collect();
-            for a in 0..soup.len() {
-                for b in a + 1..=soup.len().min(a + 18) {
-                    let Some(sp) = soup[a..b].iter().position(|&c| c == b' ') else { continue };
-                    let (x, y) = (&soup[a..a + sp], &soup[a + sp + 1..b]);
-                    let read = |t: &[u8]| -> Option<u64> {
-                        if t.is_empty() || !t.iter().all(u8::is_ascii_digit) {
-                            return None;
-                        }
-                        std::str::from_utf8(t).ok()?.parse().ok()
-                    };
-                    if let (Some(n), Some(g)) = (read(x), read(y)) {
-                        if let (Ok(n), Ok(g)) = (u32::try_from(n), u16::try_from(g)) {
-                            cands.insert((n, g));
-                        }
-                    }
-                }
-            }
-            let mut any = false;
-            for &(n, g) in &cands {
-                let want = contains(&soup, format!("{n} {g} obj").as_bytes());
+            // Every number the soup's headers hold, and small ones besides.
+            let held: BTreeSet<u32> = (0..soup.len()).filter_map(|a| header_at(&soup, a)).collect();
+            let cands: BTreeSet<u32> = held.iter().copied().chain(0..=130).collect();
+            for &n in &cands {
+                let want = held.contains(&n);
                 assert_eq!(
-                    holds_header(&soup, &HashSet::from([(n, g)])),
+                    holds_header(&soup, &HashSet::from([n])),
                     want,
-                    "{n} {g} in {:?}",
+                    "{n} in {:?}",
                     String::from_utf8_lossy(&soup)
                 );
-                any |= want;
                 found += want as usize;
                 asked += 1;
             }
-            assert_eq!(holds_header(&soup, &cands.iter().copied().collect()), any);
+            assert_eq!(holds_header(&soup, &cands.iter().copied().collect()), !held.is_empty());
+            assert!(!holds_header(&soup, &HashSet::new()));
         }
         assert!(found > 1000 && asked > found * 3, "{found} found of {asked}");
     }
