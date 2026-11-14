@@ -71,9 +71,10 @@ fn mib(v: u32, default: usize) -> usize {
 }
 
 fn options(effort: u32, max_input_mb: u32, max_stream_mb: u32, objects_per_stream: u32, flags: u32) -> gpress::Options {
-    let mut o = gpress::Options::default().effort(effort.min(100) as u8).threads(1);
+    let level = effort.min(100) as u8;
+    let mut o = gpress::Options::default().effort(level).threads(1);
     if flags & FLAG_ENGINE_EFFORT != 0 {
-        o.engine_effort = Some(o.effort.level());
+        o.engine_effort = Some(level);
     }
     o.max_input = mib(max_input_mb, o.max_input);
     o.max_stream = mib(max_stream_mb, o.max_stream);
@@ -399,8 +400,13 @@ mod tests {
         assert_eq!(o.objects_per_stream, 9);
         assert!(!o.jpeg_tables && !o.rewrite_encrypted && !o.decrypt);
         assert!(o.jbig2 && o.respect_conformance && o.flate_over_jpeg && o.use_existing_libraries);
-        let d = options(40, 0, 0, 0, 0);
+        let default = gpress::Effort::default().level();
+        let d = options(default as u32, 0, 0, 0, 0);
         assert_eq!(d, gpress::Options::default().threads(1));
+        // The wrapper's copies of the default effort and of the flag are the module's.
+        let ts = include_str!("../js/gpress.ts");
+        assert!(ts.contains(&format!("options.effort ?? {default},")));
+        assert!(ts.contains(&format!("const FLAG_ENGINE_EFFORT = {FLAG_ENGINE_EFFORT};")));
         // A size past the module's address space is clamped, never wrapped; a budget is a u64 everywhere.
         assert_eq!(mib(u32::MAX, 0), usize::try_from((u32::MAX as u64) << 20).unwrap_or(usize::MAX));
         assert_eq!(budget(u32::MAX, 0), (u32::MAX as u64) << 20);

@@ -284,7 +284,8 @@ impl Options {
     }
     /// One lossy setting changed at a time, for the bindings and the command line: each value that is not 0
     /// takes its place in the lossy settings these options mean (`lossy`, or else the effort's), and 0 leaves
-    /// its setting as it is. All 0 changes nothing.
+    /// its setting as it is. All 0 changes nothing. Call it after `effort`, `engine_effort` and `lossy`: it
+    /// starts from what they mean at that moment.
     pub fn lossy_overrides(mut self, photo_ppi: u16, art_ppi: u16, jpeg_quality: u8) -> Options {
         if (photo_ppi, art_ppi, jpeg_quality) != (0, 0, 0) {
             let mut lossy = self.lossy_settings();
@@ -362,7 +363,7 @@ impl Options {
     /// The lossy settings these options mean: `lossy` when set, else the effort's (steps 60, 80 and 100 are
     /// `Lossy::level` 1, 2 and 3), and off with `engine_effort`.
     fn lossy_settings(&self) -> Lossy {
-        let level = if self.engine_effort.is_some() { 0 } else { (self.effort.step() / 20).saturating_sub(2) };
+        let level = if self.engine_effort.is_some() { 0 } else { (self.effort.level() / 20).saturating_sub(2) };
         self.lossy.unwrap_or(Lossy::level(level))
     }
 
@@ -602,8 +603,13 @@ fn check(input: &[u8], opt: &Options) -> Result<(), Error> {
 /// The output is read back and compared before it is returned; when in doubt the input comes back untouched.
 pub fn optimize(input: &[u8], opt: &Options) -> Result<Optimized, Error> {
     check(input, opt)?;
+    optimize_until(input, opt, opt.deadline())
+}
+
+/// `optimize` after its checks, with the deadline given (`optimize_to_size` has one for all its runs).
+fn optimize_until(input: &[u8], opt: &Options, deadline: Deadline) -> Result<Optimized, Error> {
     guard("optimize", || {
-        let r = rewrite::optimize(input, &opt.rewrite());
+        let r = rewrite::optimize(input, &rewrite::Options { deadline, ..opt.rewrite() });
         let outcome = match r.outcome {
             rewrite::Outcome::Smaller(s) => Outcome::Smaller(Report {
                 objects: s.objects,
@@ -636,22 +642,12 @@ pub fn optimize_to_size(input: &[u8], target: u64, opt: &Options) -> Result<Pick
         ));
     }
     check(input, opt)?;
-    let start = crate::clock::now();
+    // One deadline for every run: the time budget covers the whole call.
+    let deadline = opt.deadline();
     let mut best: Option<Picked> = None;
     for level in (0..=100u8).step_by(20) {
-        let mut at = opt.clone().effort(level);
-        // Each run gets what is left of the one budget.
-        if let Some(budget) = opt.time_budget {
-            let left = budget.saturating_sub(crate::clock::since(start));
-            if left.is_zero() {
-                return Err(Error::TimeBudget(budget));
-            }
-            at.time_budget = Some(left);
-        }
-        let result = optimize(input, &at).map_err(|e| match (e, opt.time_budget) {
-            (Error::TimeBudget(_), Some(budget)) => Error::TimeBudget(budget),
-            (e, _) => e,
-        })?;
+        let at = opt.clone().effort(level);
+        let result = optimize_until(input, &at, deadline)?;
         let reached = result.data.len() as u64 <= target;
         // On a tie the lower effort stays: it changed less.
         if reached || best.as_ref().is_none_or(|b| result.data.len() < b.result.data.len()) {

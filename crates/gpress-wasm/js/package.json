@@ -2,7 +2,7 @@
   "name": "gpress",
   "version": "0.1.0",
   "private": true,
-  "description": "Lossless PDF compression in the browser and Node: smaller PDFs that any reader opens, and the gpress archive that restores byte for byte.",
+  "description": "PDF compression in the browser and Node, lossless by default: smaller PDFs that any reader opens, and the gpress archive that restores byte for byte.",
   "license": "(MIT OR Apache-2.0)",
   "type": "module",
   "main": "./dist/gpress.js",
@@ -12,13 +12,15 @@
     "./gpress.wasm": "./dist/gpress.wasm",
     "./gpress-web.wasm": "./dist/gpress-web.wasm"
   },
-  "files": ["dist/"],
+  "files": ["dist/", "LICENSE-APACHE", "LICENSE-MIT"],
   "scripts": {
     "build:wasm": "node build-wasm.mjs && node build-wasm.mjs --no-default-features --features web --out dist/gpress-web.wasm",
     "build:js": "tsc -p tsconfig.json",
     "build": "npm run build:wasm && npm run build:js",
     "test": "node --test --test-concurrency=1 test/*.test.mjs",
-    "test:web": "GPRESS_WASM=dist/gpress-web.wasm node --test --test-concurrency=1 test/*.test.mjs"
+    "test:web": "GPRESS_WASM=dist/gpress-web.wasm node --test --test-concurrency=1 test/*.test.mjs",
+    "prepack": "node -e \"for (const f of ['LICENSE-APACHE', 'LICENSE-MIT']) fs.copyFileSync('../../../' + f, f)\"",
+    "postpack": "node -e \"for (const f of ['LICENSE-APACHE', 'LICENSE-MIT']) fs.rmSync(f)\""
   },
   "devDependencies": {
     "typescript": "^7.0.2"

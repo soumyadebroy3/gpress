@@ -367,7 +367,7 @@ function pack(options: GpressOptions): Packed {
       (options.jbig2 === false ? FLAG_NO_JBIG2 : 0) |
       (options.rewriteEncrypted === false ? FLAG_KEEP_ENCRYPTED : 0) |
       (options.decrypt === false ? FLAG_NO_DECRYPT : 0) |
-      (options.engineEffort === undefined ? 0 : FLAG_ENGINE_EFFORT),
+      (options.engineEffort == null ? 0 : FLAG_ENGINE_EFFORT),
     photoPpi: clamp(options.photoPpi ?? 0, 0, 0xffff),
     artPpi: clamp(options.artPpi ?? 0, 0, 0xffff),
     jpegQuality: clamp(options.jpegQuality ?? 0, 0, 0xff),

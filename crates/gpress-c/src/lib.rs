@@ -164,6 +164,10 @@ fn failure(code: c_int, msg: &str) -> GpressResult {
     GpressResult { code, outcome: 0, output: empty_buffer(), message: message(msg), effort: 0, reached: 0 }
 }
 
+fn success(outcome: c_int, data: Vec<u8>, message: *mut c_char) -> GpressResult {
+    GpressResult { code: 0, outcome, output: buffer_from(data), message, effort: 0, reached: 0 }
+}
+
 /// A null input with a length: nothing to read, so refused (GPRESS_ERR_BAD_ARGUMENT).
 const BAD_ARGUMENT: c_int = 5;
 
@@ -234,7 +238,7 @@ fn optimized(r: gpress::Optimized) -> GpressResult {
         gpress::Outcome::Smaller(_) => (GPRESS_OUTCOME_SMALLER, ptr::null_mut()),
         gpress::Outcome::Untouched(why) => (GPRESS_OUTCOME_UNTOUCHED, message(why)),
     };
-    GpressResult { code: 0, outcome, output: buffer_from(r.data), message: msg, effort: 0, reached: 0 }
+    success(outcome, r.data, msg)
 }
 
 /// A PDF of at most `target` bytes at the lowest effort that reaches it, or the smallest of the six efforts
@@ -267,14 +271,9 @@ pub unsafe extern "C" fn gpress_compress(input: *const u8, len: usize, options: 
     let Some(data) = input_slice(input, len) else { return failure(BAD_ARGUMENT, "null input with a non-zero length") };
     let opt = options_from(options.as_ref());
     match gpress::compress(data, &opt) {
-        Ok(c) => GpressResult {
-            code: 0,
-            outcome: if c.stored { GPRESS_OUTCOME_UNTOUCHED } else { GPRESS_OUTCOME_SMALLER },
-            output: buffer_from(c.data),
-            message: ptr::null_mut(),
-            effort: 0,
-            reached: 0,
-        },
+        Ok(c) => {
+            success(if c.stored { GPRESS_OUTCOME_UNTOUCHED } else { GPRESS_OUTCOME_SMALLER }, c.data, ptr::null_mut())
+        }
         Err(e) => from_error(e),
     }
 }
@@ -288,14 +287,7 @@ pub unsafe extern "C" fn gpress_expand(input: *const u8, len: usize, options: *c
     let Some(data) = input_slice(input, len) else { return failure(BAD_ARGUMENT, "null input with a non-zero length") };
     let opt = options_from(options.as_ref());
     match gpress::expand(data, &opt) {
-        Ok(v) => GpressResult {
-            code: 0,
-            outcome: 0,
-            output: buffer_from(v),
-            message: ptr::null_mut(),
-            effort: 0,
-            reached: 0,
-        },
+        Ok(v) => success(0, v, ptr::null_mut()),
         Err(e) => from_error(e),
     }
 }
