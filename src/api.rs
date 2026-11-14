@@ -140,8 +140,12 @@ pub struct Options {
     pub flate_over_jpeg: bool,
     /// Normal PDF: give JPEG images optimal Huffman tables (the same coefficients, read back and compared).
     pub jpeg_tables: bool,
-    /// Normal PDF: write CCITT fax images as JBIG2 when that is clearly smaller (the same pixels).
+    /// Normal PDF: write CCITT fax images, and 1-bit images stored without an image codec, as JBIG2 when that
+    /// is clearly smaller (the same pixels).
     pub jbig2: bool,
+    /// Normal PDF: write an 8-bit image of few colours as an Indexed image over its own colour space when
+    /// that is smaller (the same colour for every pixel).
+    pub palette: bool,
     /// Normal PDF: rewrite files the empty user password opens, keeping their encryption exactly. Off,
     /// every encrypted file is left untouched.
     pub rewrite_encrypted: bool,
@@ -181,6 +185,7 @@ impl Default for Options {
             flate_over_jpeg: true,
             jpeg_tables: true,
             jbig2: true,
+            palette: true,
             rewrite_encrypted: true,
             decrypt: true,
             use_existing_libraries: true,
@@ -244,6 +249,10 @@ impl Options {
     }
     pub fn jbig2(mut self, yes: bool) -> Options {
         self.jbig2 = yes;
+        self
+    }
+    pub fn palette(mut self, yes: bool) -> Options {
+        self.palette = yes;
         self
     }
     pub fn rewrite_encrypted(mut self, yes: bool) -> Options {
@@ -319,6 +328,7 @@ impl Options {
             respect_conformance: self.respect_conformance,
             flate_over_jpeg: self.flate_over_jpeg,
             jbig2: self.jbig2,
+            palette: self.palette,
             jpeg_tables: self.jpeg_tables,
             rewrite_encrypted: self.rewrite_encrypted,
             deadline: self.deadline(),
@@ -447,6 +457,10 @@ pub struct Report {
     pub jpegs_retabled: usize,
     /// CCITT fax images written as JBIG2 (the same pixels).
     pub fax_to_jbig2: usize,
+    /// 1-bit images stored without an image codec written as JBIG2 (the same pixels).
+    pub bilevel_to_jbig2: usize,
+    /// Images of few colours written as Indexed images (the same colours).
+    pub images_indexed: usize,
     /// How the file is encrypted, kept exactly as it was (e.g. "R4/AESV2"); empty when it isn't.
     pub encryption: String,
 }
@@ -528,6 +542,8 @@ pub fn optimize(input: &[u8], opt: &Options) -> Result<Optimized, Error> {
                 unreachable_objects_dropped: s.dropped_unreachable,
                 jpegs_retabled: s.jpegs_retabled,
                 fax_to_jbig2: s.fax_to_jbig2,
+                bilevel_to_jbig2: s.bilevel_to_jbig2,
+                images_indexed: s.images_indexed,
                 encryption: s.encryption,
             }),
             rewrite::Outcome::Untouched(why) => Outcome::Untouched(why),
@@ -714,6 +730,7 @@ mod tests {
             .flate_over_jpeg(false)
             .jpeg_tables(false)
             .jbig2(false)
+            .palette(false)
             .rewrite_encrypted(false)
             .decrypt(false)
             .use_existing_libraries(false)
@@ -721,6 +738,7 @@ mod tests {
         let r = opt.rewrite();
         assert_eq!((r.effort, r.threads, r.store_budget, r.max_stream, r.objstm_size), (40, 3, 4096, 1000, 7));
         assert!(!r.respect_conformance && !r.flate_over_jpeg && !r.jpeg_tables && !r.jbig2 && !r.rewrite_encrypted);
+        assert!(!r.palette && Options::default().rewrite().palette);
         assert!(r.deadline.is_set() && r.flate.deadline == Deadline::NONE, "the pool sets the Flate deadline");
         assert!(!Options::default().rewrite().deadline.is_set());
         #[cfg(feature = "archive")]
