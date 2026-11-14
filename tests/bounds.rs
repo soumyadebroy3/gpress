@@ -374,14 +374,21 @@ fn numbering_far_apart_is_left_untouched() {
         assert_eq!(untouched(&quick(&pdf, &Options::effort(100)), &pdf), "object numbers far apart", "{n}");
         packs_and_restores(&pdf);
     }
-    // Numbers thousands apart are what some writers leave behind (pdf.js's reduced test files keep a few
-    // objects with their original numbers): still made smaller, with the rows that takes (60,000 rows cost
-    // about a second of Flate at effort 100).
-    for n in [4000u64, 60_000] {
+    // Numbers apart are what some writers leave behind (pdf.js's reduced test files keep a few objects with
+    // their original numbers): still made smaller, with the rows that takes, while the highest number written
+    // (the cross-reference stream's, n + 2) is at most a third of the output's length. qpdf 12 reads no object
+    // numbered above that, so beyond it the file is left as it is.
+    for n in [40u64, 100] {
         let pdf = page_with_content_at(n);
         let r = optimize(&pdf, &Options::effort(100));
         smaller(&r, &pdf);
         assert_eq!(xref::open(&r.data).unwrap().trailer.get(b"Size"), Some(&Obj::Int(n as i64 + 3)), "{n}");
+        assert!(n as usize + 2 <= r.data.len() / 3, "{n}: {} bytes", r.data.len());
+    }
+    for n in [4000u64, 60_000] {
+        let pdf = page_with_content_at(n);
+        assert_eq!(untouched(&optimize(&pdf, &Options::effort(100)), &pdf), "object numbers far apart", "{n}");
+        packs_and_restores(&pdf);
     }
 }
 

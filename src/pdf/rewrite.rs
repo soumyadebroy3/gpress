@@ -1572,6 +1572,12 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     out.extend_from_slice(b"\nendstream\nendobj\n");
     out.extend_from_slice(format!("startxref\n{xref_off}\n%%EOF\n").as_bytes());
 
+    // qpdf 12 reads no object numbered above a third of the file's length, this cross-reference stream
+    // included, and objects keep their numbers: a file whose numbers are too high for its new length stays
+    // as it is.
+    if xn as usize > out.len() / 3 {
+        return Err("object numbers far apart".into());
+    }
     // Read our own output back and compare everything reachable.
     let taken = self_check(&objs, &out, &doc.trailer, crypt, &proven, pool)?;
     if dbg {
