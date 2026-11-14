@@ -987,6 +987,26 @@ fn header_search(ll: &[u8], d: &[u8], flag_sets: &[u8], rounds: usize, unused: u
     Header { hlit, hdist, hclen: m.hclen, cl: m.cl, tokens: lists.tokens(b).to_vec(), bits: m.bits }
 }
 
+/// The three types of block.
+pub enum BlockType {
+    Stored,
+    Fixed,
+    Dynamic,
+}
+
+/// The smallest type of block, from the bits of each. Of equal sizes: fixed, then dynamic, then stored, unless
+/// `tie` (the rule `block_tie`) puts dynamic (1) or stored (2) first.
+pub fn smallest(stored: u64, fixed: u64, dynamic: u64, tie: usize) -> BlockType {
+    let coded = fixed.min(dynamic);
+    if stored < coded || (tie == 2 && stored == coded) {
+        BlockType::Stored
+    } else if fixed < dynamic || (tie != 1 && fixed == dynamic) {
+        BlockType::Fixed
+    } else {
+        BlockType::Dynamic
+    }
+}
+
 /// Exact bits of a stored block sequence for `len` bytes, starting at bit offset `bitpos` (mod 8 matters).
 pub fn stored_bits(len: usize, bitpos: u64) -> u64 {
     let mut pos = bitpos;

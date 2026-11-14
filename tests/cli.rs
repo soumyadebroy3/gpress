@@ -63,9 +63,9 @@ fn the_flate_flags_mean_what_the_library_means() {
             == lib(Options { fast: 5, ..tuned })
     );
     assert!(deflate_cli(&dir, &data, &["--effort", "0", "--fast", "0", "--threads", "1"]) == lib(Options::quick()));
-    // The thread count never changes the output: an input of more than two of the fast encoder's 1 MiB
-    // segments, so that threads take part (the deflate tools use a pool from --threads 1 on).
-    let big = input((1 << 20) * 5 / 2);
+    // The thread count never changes the output: an input of more than two of the fast encoder's segments
+    // (the rule `fast_segment`), so that threads take part (the deflate tools use a pool from --threads 1 on).
+    let big = input(gpress::FlateRules::default().get("fast_segment").unwrap() as usize * 5 / 2);
     let one = deflate_cli(&dir, &big, &["--effort", "0", "--threads", "1"]);
     assert!(one == flate::deflate_zlib(&big, &Options::effort(0)));
     for t in ["2", "3", "4"] {

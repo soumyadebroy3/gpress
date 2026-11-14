@@ -35,7 +35,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
 
 use crate::clock::Deadline;
-pub use crate::flate::FlateRules;
+use crate::flate::FlateRules;
 #[cfg(feature = "archive")]
 use crate::pack;
 // Without the archive: its format's constants, which the options and `is_archive` use in every build.

@@ -1,23 +1,26 @@
 #![no_main]
 // Our Flate decoder against arbitrary bytes: an error or a result, never a panic. When it decodes, the
 // result must round-trip through our encoder and back, at the quick settings and under rules and an effort
-// taken from the start of the input.
+// taken from the bytes after the stream.
 use gpress::flate::{deflate_zlib, zlib, Options};
 use gpress::FlateRules;
 use libfuzzer_sys::fuzz_target;
 
+// One byte picks a rule.
+const _: () = assert!(FlateRules::RULES.len() <= 256);
+
 fuzz_target!(|data: &[u8]| {
-    let (opt, data) = settings(data);
     if let Ok(u) = zlib::unwrap(data, 1 << 24) {
         round_trip(&u.data, &Options::quick());
         // At most 64 KiB: the slowest values in range do many times the default work.
+        let opt = settings(&data[data.len() - u.trailing..]);
         round_trip(&u.data[..u.data.len().min(1 << 16)], &opt);
     }
 });
 
-/// The start of the input: a count of rules (up to 7), then for each a byte that picks the rule and four
-/// for its value (anywhere in its range), then a byte for the effort (above 100: the quick settings).
-fn settings(data: &[u8]) -> (Options, &[u8]) {
+/// A count of rules (up to 7), then for each a byte that picks the rule and four for its value (anywhere in
+/// its range), then a byte for the effort (above 100: the quick settings).
+fn settings(data: &[u8]) -> Options {
     let (&count, mut rest) = data.split_first().unwrap_or((&0, &[]));
     let mut rules = FlateRules::default();
     for _ in 0..count % 8 {
@@ -27,9 +30,10 @@ fn settings(data: &[u8]) -> (Options, &[u8]) {
         assert!(rules.set(name, lowest + value % (highest - lowest + 1)));
         rest = after;
     }
-    let (&effort, rest) = rest.split_first().unwrap_or((&0, &[]));
-    let opt = if effort > 100 { Options::quick_with(&rules) } else { Options::effort_with(effort, &rules) };
-    (opt, rest)
+    match rest.first() {
+        Some(&effort) if effort > 100 => Options::quick_with(&rules),
+        effort => Options::effort_with(effort.copied().unwrap_or(0), &rules),
+    }
 }
 
 fn round_trip(data: &[u8], opt: &Options) {

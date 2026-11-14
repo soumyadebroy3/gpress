@@ -93,7 +93,8 @@ impl Options {
     /// Row `k` of the rules' table of settings: the quick settings, then the bands from 20 to 100.
     fn row(k: usize, rules: &FlateRules) -> Options {
         const AT: usize = FlateRules::at("quick_rounds");
-        let v = |column: usize| rules.v(AT + 9 * k + column);
+        const WIDTH: usize = FlateRules::at("e20_rounds") - AT;
+        let v = |column: usize| rules.v(AT + WIDTH * k + column);
         Options {
             iterations: v(0),
             exact_rounds: v(1),
@@ -413,16 +414,10 @@ fn write_best(w: &mut BitWriter, data: &[u8], p: &Plan, last: bool, r: &FlateRul
     let dyn_bits = 3 + dyncode.bits;
     let fix_bits = 3 + fixed_bits(&h);
     let st_bits = stored_bits(p.b - p.a, w.bit_len());
-    // Of equal sizes: fixed, then dynamic, then stored, unless the rule `block_tie` puts dynamic (1) or stored
-    // (2) first.
-    let tie = rule!(r, "block_tie");
-    let coded = dyn_bits.min(fix_bits);
-    if st_bits < coded || (tie == 2 && st_bits == coded) {
-        write_stored(w, &data[p.a..p.b], last);
-    } else if fix_bits < dyn_bits || (tie != 1 && fix_bits == dyn_bits) {
-        write_fixed(w, &p.syms, last);
-    } else {
-        write_dynamic(w, &p.syms, &dyncode, last);
+    match smallest(st_bits, fix_bits, dyn_bits, rule!(r, "block_tie")) {
+        BlockType::Stored => write_stored(w, &data[p.a..p.b], last),
+        BlockType::Fixed => write_fixed(w, &p.syms, last),
+        BlockType::Dynamic => write_dynamic(w, &p.syms, &dyncode, last),
     }
 }
 
@@ -651,7 +646,7 @@ fn exact(
     let over = over.map(|bits| bits as f32);
     // The prices (and `alt`) of this round's parses and the last round's, by round parity and variant. The
     // same again give the same parse, which was priced then and so cannot beat `best_bits` now: it is not
-    // made again. Without alternatives the third variant is the first, and a round whose code is the last
+    // made again. Without alternatives the third variant is the first (by default), and a round whose code is the last
     // round's repeats it whole. Kept on the stack.
     let mut tried: [Option<(bool, Costs)>; 6] = Default::default();
     for round in 0..opt.exact_rounds {
@@ -694,12 +689,12 @@ fn same_costs(x: &Costs, y: &Costs) -> bool {
 }
 
 /// Chooses block boundaries by dynamic programming over candidate split points.
-fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>, r: &FlateRules) -> Vec<Plan> {
+fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>, rules: &FlateRules) -> Vec<Plan> {
     let n = syms.len();
-    if n < rule!(r, "split_min_symbols") {
+    if n < rule!(rules, "split_min_symbols") {
         return vec![Plan { a, b, syms }];
     }
-    let g = (n / rule!(r, "split_step_div")).max(rule!(r, "split_step_min"));
+    let g = (n / rule!(rules, "split_step_div")).max(rule!(rules, "split_step_min"));
     let mut cand: Vec<usize> = (0..n).step_by(g).collect();
     if *cand.last().unwrap() != n {
         cand.push(n);
@@ -720,8 +715,8 @@ fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>, r: &FlateRules) -> Vec
         pos.push(bytes);
         pref.push(h.clone());
     }
-    let span_limit = rule!(r, "split_span");
-    let stored_extra = rule!(r, "split_stored_extra_bits") as u64;
+    let span_limit = rule!(rules, "split_span");
+    let stored_extra = rule!(rules, "split_stored_extra_bits") as u64;
     // One estimator for all pairs: for a given j, the histograms of i and i + 1 differ by one block. The fixed
     // code's size is a sum over the counts, so that of a pair is the difference of the prefixes' (which have no
     // end-of-block) plus the end-of-block's.
@@ -760,8 +755,8 @@ fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>, r: &FlateRules) -> Vec
     let mut idx: Vec<usize> = cuts.iter().map(|&c| cand[c]).collect();
     // The search's estimator serves the left side (it gives the same estimates whatever it priced before).
     let (mut el, mut er) = (es, Estimator::new());
-    let reach = g * rule!(r, "split_tune_reach");
-    let step = (g / rule!(r, "split_tune_div")).max(1);
+    let reach = g * rule!(rules, "split_tune_reach");
+    let step = (g / rule!(rules, "split_tune_div")).max(1);
     for t in 1..idx.len() - 1 {
         let (l, r) = (idx[t - 1], idx[t + 1]);
         let total = Hist::of(&syms[l..r]);

@@ -102,7 +102,7 @@ mod threads {
     use std::time::Duration;
 
     /// The default of the rule `remember_up_to`.
-    const REMEMBER_UP_TO: usize = 256 << 10;
+    const REMEMBER_UP_TO: usize = FlateRules::RULES[FlateRules::at("remember_up_to")].1 as usize;
 
     #[test]
     fn segments_in_parallel_give_the_same_bytes() {

@@ -13,41 +13,30 @@ use std::sync::Arc;
 /// How many rules there are.
 const N: usize = FlateRules::RULES.len();
 
-/// The values of the Flate encoders' rules, by name (without the group's prefix, `flate_`). Cheap to clone.
+/// The values of the Flate encoders' rules, one per row of `RULES` (named there without the group's prefix,
+/// `flate_`). Cheap to clone.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FlateRules(Arc<Kept>);
+pub struct FlateRules(Arc<[u32; N]>);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Kept {
-    /// One value per row of `RULES`.
-    v: [u32; N],
-    /// A hash of the values, for `deflate::Options::fingerprint`.
-    hash: u64,
-}
-
-impl Default for FlateRules {
-    fn default() -> Self {
-        let mut v = [0; N];
-        for (x, r) in v.iter_mut().zip(Self::RULES) {
-            *x = r.1 as u32;
-        }
-        FlateRules(Arc::new(Kept { v, hash: hash(&v) }))
-    }
-}
-
-fn hash(v: &[u32; N]) -> u64 {
-    v.iter().fold(0x2545_F491_4F6C_DD1D, |h, &x| (h ^ x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29))
-}
-
-// Every default is in its range, and every value fits the 32 bits it is kept in.
-const _: () = {
+/// Every rule at its default. Building it checks that every default is in its range and that every value fits
+/// the 32 bits it is kept in.
+const DEFAULTS: [u32; N] = {
+    let mut v = [0; N];
     let mut i = 0;
     while i < N {
         let (_, default, lowest, highest) = FlateRules::RULES[i];
         assert!(lowest <= default && default <= highest && highest <= u32::MAX as u64);
+        v[i] = default as u32;
         i += 1;
     }
+    v
 };
+
+impl Default for FlateRules {
+    fn default() -> Self {
+        FlateRules(Arc::new(DEFAULTS))
+    }
+}
 
 impl FlateRules {
     /// (name without the prefix, default, lowest, highest), in a fixed order.
@@ -348,12 +337,12 @@ impl FlateRules {
     /// The value in row `i`.
     #[inline(always)]
     pub(crate) fn v(&self, i: usize) -> usize {
-        self.0.v[i] as usize
+        self.0[i] as usize
     }
 
     /// A hash of all the values (for the key of remembered outputs).
     pub(crate) fn hash(&self) -> u64 {
-        self.0.hash
+        crate::par::hash64(self.0.map(u32::to_le_bytes).as_flattened())
     }
 
     /// Sets a rule. false: no such rule, or a value outside lowest..=highest; nothing is changed then, and
@@ -364,15 +353,13 @@ impl FlateRules {
         if value < lowest || value > highest {
             return false;
         }
-        let kept = Arc::make_mut(&mut self.0);
-        kept.v[i] = value as u32;
-        kept.hash = hash(&kept.v);
+        Arc::make_mut(&mut self.0)[i] = value as u32;
         true
     }
 
     /// The value of a rule, or None when there is no such rule.
     pub fn get(&self, name: &str) -> Option<u64> {
-        Self::find(name).map(|i| self.0.v[i] as u64)
+        Self::find(name).map(|i| self.0[i] as u64)
     }
 }
 
@@ -473,13 +460,6 @@ mod tests {
             // 30 literals of 9 bits: as large stored as under the fixed codes.
             "block_tie" => ((0..30).map(|k| 144 + 3 * k).collect(), vec![]),
             "first_long_length_bits" => (overlap(), vec![]),
-            // Runs long enough for the shortcut.
-            "run_shortcut" => (sample(48_000), vec![]),
-            // Polishing at the quick settings, the second start at effort 100 and the first exact try each win
-            // on some inputs only: these are such inputs.
-            "quick_polish" => (sample(48_000), vec![]),
-            "e100_second_start" => (sample(12_000), vec![]),
-            "exact_try1_missing" => (sample(96_000), vec![]),
             _ if of_fast(name) => (sample(150_000), vec![]),
             _ => (sample(24_000), vec![]),
         }
@@ -525,13 +505,13 @@ mod tests {
         let bands = FlateRules::at("quick_rounds");
         for (k, band) in BANDS.iter().enumerate() {
             for (c, column) in BAND_COLUMNS.iter().enumerate() {
-                assert_eq!(names[bands + 9 * k + c], format!("{band}_{column}"));
+                assert_eq!(names[bands + BAND_COLUMNS.len() * k + c], format!("{band}_{column}"));
             }
         }
         let levels = FlateRules::at("level1_mode");
         for level in 1..=crate::flate::fast::LEVELS as usize {
             for (c, column) in LEVEL_COLUMNS.iter().enumerate() {
-                assert_eq!(names[levels + 5 * (level - 1) + c], format!("level{level}_{column}"));
+                assert_eq!(names[levels + LEVEL_COLUMNS.len() * (level - 1) + c], format!("level{level}_{column}"));
             }
         }
     }
@@ -601,19 +581,23 @@ mod tests {
             if FOR_SPEED.contains(&name) {
                 continue;
             }
-            let (data, mut around) = scene(name);
-            let plain: Vec<Vec<u8>> =
-                settings(name, &with(&around)).iter().map(|opt| deflate_zlib(&data, opt)).collect();
-            around.push((name, default));
-            let changes = [lowest, highest, default / 2, default * 2, default + 1, default.saturating_sub(1)]
-                .into_iter()
-                .filter(|&v| v != default && (lowest..=highest).contains(&v))
-                .any(|v| {
-                    *around.last_mut().unwrap() = (name, v);
-                    let other = settings(name, &with(&around));
-                    other.iter().zip(&plain).any(|(opt, plain)| deflate_zlib(&data, opt) != *plain)
-                });
-            if !changes {
+            let (data, around) = scene(name);
+            let plain = settings(name, &with(&around));
+            let others: Vec<Vec<Options>> =
+                [lowest, highest, default / 2, default * 2, default + 1, default.saturating_sub(1)]
+                    .into_iter()
+                    .filter(|&v| v != default && (lowest..=highest).contains(&v))
+                    .map(|v| settings(name, &with(&[&around[..], &[(name, v)]].concat())))
+                    .collect();
+            let shows = |data: &[u8]| {
+                let plain: Vec<Vec<u8>> = plain.iter().map(|opt| deflate_zlib(data, opt)).collect();
+                others
+                    .iter()
+                    .any(|other| other.iter().zip(&plain).any(|(opt, plain)| deflate_zlib(data, opt) != *plain))
+            };
+            // Some rules win on some inputs only (polishing at the quick settings, the second start at effort 100):
+            // more inputs for those.
+            if ![data, sample(12_000), sample(48_000), sample(96_000)].iter().any(|data| shows(data)) {
                 silent.push(name);
             }
         }
@@ -627,27 +611,24 @@ mod tests {
         let data = sample(150_000);
         let efforts = [0, 40];
         let want = efforts.map(|e| deflate_zlib(&data, &Options::effort_with(e, &with(&many))));
-        for (name, value) in [
-            ("remember_up_to", 0),
-            ("remember_up_to", 1 << 20),
-            ("segments_at_once", 1),
-            ("segments_at_once", 3),
-            ("fast_group", 1),
-            ("fast_group", 64),
-        ] {
-            assert!(FOR_SPEED.contains(&name));
-            let r = with(&[many[0], many[1], (name, value)]);
-            for threads in [1, 2, 3] {
-                for (e, want) in efforts.iter().zip(&want) {
-                    let opt = Options { shared: Some(Shared::new(threads)), ..Options::effort_with(*e, &r) };
-                    assert!(deflate_zlib(&data, &opt) == *want, "{name} = {value}, {threads} threads, effort {e}");
+        for name in FOR_SPEED {
+            let (_, _, lowest, highest) = FlateRules::RULES[FlateRules::at(name)];
+            for value in [lowest, highest, (lowest + highest) / 2] {
+                let r = with(&[many[0], many[1], (name, value)]);
+                for threads in [1, 2, 3] {
+                    for (e, want) in efforts.iter().zip(&want) {
+                        let opt = Options { shared: Some(Shared::new(threads)), ..Options::effort_with(*e, &r) };
+                        assert!(deflate_zlib(&data, &opt) == *want, "{name} = {value}, {threads} threads, effort {e}");
+                    }
                 }
             }
         }
         // An input is remembered up to `remember_up_to` bytes: beyond it the same input is encoded again, to the
         // same bytes.
         let small = sample(24_000);
-        for (remember, hits) in [(256 << 10, 1), (24_000, 1), (23_999, 0), (0, 0)] {
+        for (remember, hits) in
+            [(DEFAULTS[FlateRules::at("remember_up_to")] as u64, 1), (24_000, 1), (23_999, 0), (0, 0)]
+        {
             let shared = Shared::new(1);
             let r = with(&[("remember_up_to", remember)]);
             let opt = Options { shared: Some(shared.clone()), ..Options::effort_with(40, &r) };

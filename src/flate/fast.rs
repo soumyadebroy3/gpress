@@ -55,7 +55,8 @@
 
 use super::bits::BitWriter;
 use super::block::{
-    data_bits, fixed_bits, patch_distances, stored_bits, write_dynamic, write_fixed, write_stored, DynCode, Header,
+    data_bits, fixed_bits, patch_distances, smallest, stored_bits, write_dynamic, write_fixed, write_stored, BlockType,
+    DynCode, Header,
 };
 use super::huffman::lengths_into;
 use super::lz::{Hist, Sym};
@@ -157,7 +158,8 @@ impl Level {
     /// those chosen on 3373 Flate streams of PDF files (152.5 MB) for the smallest output at each speed.
     fn of(level: u8, r: &FlateRules) -> Level {
         const AT: usize = FlateRules::at("level1_mode");
-        let v = |column: usize| r.v(AT + 5 * (level.clamp(1, LEVELS) as usize - 1) + column);
+        const WIDTH: usize = FlateRules::at("level2_mode") - AT;
+        let v = |column: usize| r.v(AT + WIDTH * (level.clamp(1, LEVELS) as usize - 1) + column);
         Level {
             mode: match v(0) {
                 0 => Mode::Greedy,
@@ -272,24 +274,22 @@ impl Out {
     }
 
     /// Writes the block of `syms` (counted in `h`, end-of-block included) for input `a..b` as the smallest
-    /// of dynamic, fixed and stored. Of equal sizes: fixed, then dynamic, then stored, unless the rule
-    /// `block_tie` puts dynamic (1) or stored (2) first.
+    /// of dynamic, fixed and stored (see `block::smallest`).
     fn block(&mut self, syms: &[Sym], h: &Hist, a: usize, b: usize, last: bool) {
         let code = dynamic_code(h);
         let dyn_bits = 3 + code.bits;
         let fix_bits = 3 + fixed_bits(h);
         let here = self.before + self.w.bit_len();
         let st_bits = stored_bits(b - a, here);
-        let coded = dyn_bits.min(fix_bits);
-        if st_bits < coded || (self.tie == 2 && st_bits == coded) {
-            // The final pass writes it, as the last block of the stream when nothing follows.
-            self.close();
-            self.before = here + st_bits;
-            self.pieces.push(Piece::Stored(a, b));
-        } else if fix_bits < dyn_bits || (self.tie != 1 && fix_bits == dyn_bits) {
-            write_fixed(&mut self.w, syms, last);
-        } else {
-            write_dynamic(&mut self.w, syms, &code, last);
+        match smallest(st_bits, fix_bits, dyn_bits, self.tie) {
+            BlockType::Stored => {
+                // The final pass writes it, as the last block of the stream when nothing follows.
+                self.close();
+                self.before = here + st_bits;
+                self.pieces.push(Piece::Stored(a, b));
+            }
+            BlockType::Fixed => write_fixed(&mut self.w, syms, last),
+            BlockType::Dynamic => write_dynamic(&mut self.w, syms, &code, last),
         }
     }
 
@@ -1263,15 +1263,15 @@ fn optimal(seg: &mut Seg, lv: &Level) {
     let end = buf.len();
     let stop = end.saturating_sub(3);
     let nice = lv.nice;
-    let (far3, max_cands, max_block) = (lv.far3, lv.max_cands, lv.max_opt_block);
+    let (far3, max_cands, max_opt_block) = (lv.far3, lv.max_cands, lv.max_opt_block);
     // Candidate matches of one block at most (a block ends early when they would not fit).
-    let cand_cap = 3 * max_block;
+    let cand_cap = 3 * max_opt_block;
     let mut mf = Tree::new(end, lv);
     let mut cands: Vec<(u16, u16)> = Vec::with_capacity(cand_cap.min(4 * (end - seg.start)) + max_cands);
     for q in 0..seg.start.min(stop) {
         mf.walk::<false>(buf, q, (end - q).min(MAX_MATCH), nice, lv.depth, &mut cands);
     }
-    let mut counts: Vec<u8> = Vec::with_capacity((end - seg.start).min(max_block) + MAX_MATCH);
+    let mut counts: Vec<u8> = Vec::with_capacity((end - seg.start).min(max_opt_block) + MAX_MATCH);
     let mut o = Parse::default();
     let mut split = Split::new();
     // Counts of a greedy parse (before the mark, end-of-block included, and since): the first costs.
@@ -1338,7 +1338,7 @@ fn optimal(seg: &mut Seg, lv: &Level) {
             }
         }
         p += step;
-        let full = (p - start >= max_block || cands.len() + max_cands > cand_cap) && p < end;
+        let full = (p - start >= max_opt_block || cands.len() + max_cands > cand_cap) && p < end;
         if split.n_now >= lv.batch || full {
             if full {
                 take_into(&mut seen, &mut now);
@@ -1377,7 +1377,7 @@ mod tests {
     use std::time::Duration;
 
     /// Where segments start by default (the rule `fast_segment`).
-    const SEGMENT: usize = 1 << 20;
+    const SEGMENT: usize = FlateRules::RULES[FlateRules::at("fast_segment")].1 as usize;
 
     /// `super::deflate` under the default rules.
     fn deflate(data: &[u8], level: u8, pool: Option<&Pool>, deadline: Deadline) -> Vec<u8> {
