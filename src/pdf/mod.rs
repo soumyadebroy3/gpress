@@ -7,6 +7,7 @@ pub mod crypt;
 pub(crate) use crate::off::crypt;
 pub mod filters;
 pub mod images;
+pub mod lossy;
 pub mod object;
 pub mod parse;
 pub mod rewrite;

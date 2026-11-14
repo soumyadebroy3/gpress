@@ -1,7 +1,9 @@
-//! gpress: lossless PDF compression as a library.
+//! gpress: PDF compression as a library, lossless unless a lossy effort is asked for.
 //!
 //! Two outputs, both verified before they are returned:
-//! - [`optimize`]: a smaller PDF that any reader opens, every object's value preserved.
+//! - [`optimize`]: a smaller PDF that any reader opens, every object's value preserved at efforts 0 to 40 (the
+//!   default is 40; from 60 its images may change, within floors: see [`Effort`]). [`optimize_to_size`] picks
+//!   the lowest effort that reaches a size.
 //! - [`compress`] / [`expand`]: the gpress archive, restored byte for byte.
 //!
 //! The engine is part of this crate: Flate encoder and decoder, zlib re-creation, PDF reader and writer, JPEG
@@ -43,6 +45,7 @@ use off::jpeg;
 use off::pack;
 
 pub use api::{
-    compress, expand, is_archive, optimize, Compressed, Effort, Error, Optimized, Options, Outcome, Report, VERSION,
+    compress, expand, is_archive, optimize, optimize_to_size, Compressed, Effort, Error, Lossy, Optimized, Options,
+    Outcome, Picked, Report, VERSION,
 };
 pub use feature::Feature;

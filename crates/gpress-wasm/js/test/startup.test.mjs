@@ -7,7 +7,7 @@
 // two-core runner meets it (bench/RESULTS.md, Start-up), but most of the first call runs while V8's
 // optimizing compiler works in the background, so a machine with fewer cores, or a busy one, can take two or
 // three times as long. So the test fails only above 150 ms, which still catches a large step back;
-// GPRESS_STARTUP_LIMIT_MS raises that limit (a smaller number is ignored). The default effort (100) does
+// GPRESS_STARTUP_LIMIT_MS raises that limit (a smaller number is ignored). The default effort (40) does
 // far more work on this PDF than effort 0 (once compiled, its call takes 5 to 15 times as long) and is held
 // to twice the limit. Run the test files one at a time (`npm test` does), or the samples measure the other
 // tests too.

@@ -1,5 +1,6 @@
-//! The command-line tool's Flate flags: `--fast N`, the effort, the strong encoder's tuning flags and the
-//! thread count, each checked against the library's own output for the same settings; and `--store-budget`.
+//! The command-line tool's Flate flags: `--fast N`, the engine's level and the effort, the strong encoder's
+//! tuning flags and the thread count, each checked against the library's own output for the same settings;
+//! `--store-budget`; and `--target-size`.
 
 use gpress::flate::{self, zlib, Options};
 use std::path::{Path, PathBuf};
@@ -49,12 +50,20 @@ fn the_flate_flags_mean_what_the_library_means() {
         assert!(got == lib(Options { fast: level, ..Options::effort(100) }), "--fast {level}");
         assert_eq!(zlib::unwrap(&got, data.len() + 1).unwrap().data, data);
     }
-    // The effort alone: below 20 the fast encoder, from 20 the strong one.
-    for effort in [0u8, 19, 20] {
-        let got = deflate_cli(&dir, &data, &["--effort", &effort.to_string(), "--threads", "1"]);
-        assert!(got == lib(Options::effort(effort)), "--effort {effort}");
+    // The engine's level alone: below 20 the fast encoder, from 20 the strong one.
+    for level in [0u8, 19, 20] {
+        let got = deflate_cli(&dir, &data, &["--engine-effort", &level.to_string(), "--threads", "1"]);
+        assert!(got == lib(Options::effort(level)), "--engine-effort {level}");
     }
     assert!(Options::effort(0).fast > 0 && Options::effort(20).fast == 0);
+    // The effort goes through its steps: 0 and 20 are the engine's 0 and 20, 40 and above its 100, and the
+    // engine's level wins when both are given.
+    for (effort, level) in [("19", 0u8), ("39", 20), ("59", 100)] {
+        let got = deflate_cli(&dir, &data, &["--effort", effort, "--threads", "1"]);
+        assert!(got == lib(Options::effort(level)), "--effort {effort}");
+    }
+    let both = deflate_cli(&dir, &data, &["--effort", "100", "--engine-effort", "19", "--threads", "1"]);
+    assert!(both == lib(Options::effort(19)));
     // A tuning flag below 20 selects the strong encoder with that tuning; --fast still wins.
     let tuned = Options { max_chain: 16, fast: 0, ..Options::effort(0) };
     assert!(deflate_cli(&dir, &data, &["--effort", "0", "--chain", "16", "--threads", "1"]) == lib(tuned.clone()));
@@ -158,5 +167,62 @@ fn the_store_budget_flag_is_the_library_option() {
     let refused = gpress::Options::default().store_budget(gpress::api::MAX_STORE_BUDGET + 1).check().unwrap_err();
     assert_eq!(code, Some(refused.code()), "{log}");
     assert!(log.contains(&refused.to_string()) && out.is_none(), "{log}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `--target-size V` on `optimize` is the library's `optimize_to_size`: V in each of its forms, the end of the
+/// output line (there only in this mode), the file written, and exit 2 for a value that is no size.
+#[test]
+fn the_target_size_flag_picks_the_effort() {
+    let dir = std::env::temp_dir().join(format!("gpress-cli-target-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (i, o) = (dir.join("in.pdf"), dir.join("out.pdf"));
+    let pdf = small_pdf();
+    std::fs::write(&i, &pdf).unwrap();
+    let run = |args: &[&str]| {
+        let _ = std::fs::remove_file(&o);
+        let r = Command::new(env!("CARGO_BIN_EXE_gpress"))
+            .arg("optimize")
+            .arg(&i)
+            .arg(&o)
+            .args(["--threads", "1"])
+            .args(args)
+            .output()
+            .unwrap();
+        (r.status.code(), String::from_utf8_lossy(&r.stdout).trim_end().to_string(), std::fs::read(&o).ok())
+    };
+    let opt = gpress::Options::default().threads(1);
+    // Without the flag the line ends as it always did.
+    let (code, line, fast) = run(&["--effort", "0"]);
+    assert_eq!(code, Some(0));
+    assert!(line.contains("\tSMALLER\t") && !line.contains("target=") && !line.contains(" effort="), "{line}");
+    // A size the input itself meets, in each form: the first effort tried, and its file.
+    for v in [&pdf.len().to_string()[..], "1024k", "1M", "100%", "250%"] {
+        let (code, line, out) = run(&["--target-size", v]);
+        assert_eq!(code, Some(0), "{v}");
+        assert!(line.ends_with(" effort=0 target=reached"), "{v}: {line}");
+        assert!(out == fast, "{v}");
+    }
+    // A size no effort reaches, in each form: the smallest of the six, as the library picks it.
+    let missed = gpress::optimize_to_size(&pdf, 0, &opt).unwrap();
+    assert!(!missed.reached);
+    for v in ["0", "0k", "0m", "0%"] {
+        let (code, line, out) = run(&["--target-size", v, "--effort", "0"]);
+        assert_eq!(code, Some(0), "{v}");
+        assert!(line.ends_with(&format!(" effort={} target=missed", missed.effort.level())), "{v}: {line}");
+        assert!(out.as_deref() == Some(&missed.result.data[..]), "{v}");
+    }
+    // A share of the input is counted in whole bytes, rounded down: 1% of this file is under any output.
+    let (_, line, _) = run(&["--target-size", "1%"]);
+    assert!(line.ends_with("target=missed"), "{line}");
+    // No size: a usage error, exit 2, and no file. The same without a value.
+    for bad in ["", "abc", "-1", "1.5k", "12g", "%", "k", "5 %"] {
+        let (code, line, out) = run(&["--target-size", bad]);
+        assert_eq!((code, line.as_str(), out), (Some(2), "", None), "{bad:?}");
+    }
+    assert_eq!(run(&["--target-size"]).0, Some(2));
+    // The picker sets the effort itself, so the engine's level is refused as the library refuses it.
+    let refused = gpress::optimize_to_size(&pdf, 0, &opt.clone().engine_effort(Some(0))).unwrap_err();
+    assert_eq!(run(&["--target-size", "0", "--engine-effort", "0"]).0, Some(refused.code()));
     let _ = std::fs::remove_dir_all(&dir);
 }

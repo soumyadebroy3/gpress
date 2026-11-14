@@ -6,8 +6,9 @@
 //! an operation, reads the output through `gpress_out_ptr()` / `gpress_out_len()` (the module keeps one
 //! result at a time), then frees both with `gpress_free_input` / `gpress_clear_out`. Operations return
 //! 0 on success or a gpress error code; `gpress_message_*` give the text (also the "untouched because"
-//! reason). The engine reads no clock here (so there is no time budget: the host bounds the work by
-//! running it in a worker).
+//! reason). After `gpress_optimize_to_size`, `gpress_outcome()` also carries the effort that made the output
+//! (bits 8 to 15) and whether it reached the target (bit 16). The engine reads no clock here (so there is no
+//! time budget: the host bounds the work by running it in a worker).
 //!
 //! Features: the module may be built without parts of the engine (the crate's Cargo features; the npm
 //! package ships the whole module and the web one, without the archive). `gpress_features` gives the parts it
@@ -57,6 +58,8 @@ pub const FLAG_NO_JPEG_TABLES: u32 = 8;
 pub const FLAG_NO_JBIG2: u32 = 16;
 pub const FLAG_KEEP_ENCRYPTED: u32 = 32;
 pub const FLAG_NO_DECRYPT: u32 = 64;
+/// For measuring: the `effort` argument is the engine's own lossless level, and nothing is lossy.
+pub const FLAG_ENGINE_EFFORT: u32 = 128;
 
 /// A size given in MiB, or the default for 0, clamped to what this module can address.
 fn mib(v: u32, default: usize) -> usize {
@@ -69,6 +72,9 @@ fn mib(v: u32, default: usize) -> usize {
 
 fn options(effort: u32, max_input_mb: u32, max_stream_mb: u32, objects_per_stream: u32, flags: u32) -> gpress::Options {
     let mut o = gpress::Options::default().effort(effort.min(100) as u8).threads(1);
+    if flags & FLAG_ENGINE_EFFORT != 0 {
+        o.engine_effort = Some(o.effort.level());
+    }
     o.max_input = mib(max_input_mb, o.max_input);
     o.max_stream = mib(max_stream_mb, o.max_stream);
     o.max_stream_archive = mib(max_stream_mb, o.max_stream_archive);
@@ -145,10 +151,22 @@ pub unsafe extern "C" fn gpress_free_input(ptr: *mut u8, len: usize) {
     }
 }
 
-/// A smaller PDF (outcome 1) or the input untouched (outcome 2, message says why).
+/// An optimize result as `run` takes it: outcome 1 for a smaller PDF, 2 for the input untouched (the message
+/// says why).
+fn optimized(r: gpress::Optimized) -> (Vec<u8>, i32, String) {
+    match r.outcome {
+        gpress::Outcome::Smaller(_) => (r.data, 1, String::new()),
+        gpress::Outcome::Untouched(why) => (r.data, 2, why),
+    }
+}
+
+/// A smaller PDF (outcome 1) or the input untouched (outcome 2, message says why). `photo_ppi`, `art_ppi`
+/// and `jpeg_quality` are the lossy overrides: 0 (or left out by a JavaScript caller) is what the effort says.
 ///
 /// # Safety
 /// See `input`.
+// The flat argument list is the module's calling convention: a JavaScript caller leaves the last ones out.
+#[allow(clippy::too_many_arguments)]
 #[no_mangle]
 pub unsafe extern "C" fn gpress_optimize(
     ptr: *const u8,
@@ -158,15 +176,41 @@ pub unsafe extern "C" fn gpress_optimize(
     max_stream_mb: u32,
     objects_per_stream: u32,
     flags: u32,
+    photo_ppi: u32,
+    art_ppi: u32,
+    jpeg_quality: u32,
 ) -> i32 {
     let data = input(ptr, len);
-    let opt = options(effort, max_input_mb, max_stream_mb, objects_per_stream, flags);
+    let opt = options(effort, max_input_mb, max_stream_mb, objects_per_stream, flags).lossy_overrides(
+        photo_ppi.min(u16::MAX as u32) as u16,
+        art_ppi.min(u16::MAX as u32) as u16,
+        jpeg_quality.min(u8::MAX as u32) as u8,
+    );
+    run(|| Ok(optimized(gpress::optimize(data, &opt)?)))
+}
+
+/// A PDF of at most `target` bytes at the lowest effort that reaches it, or the smallest of the six efforts
+/// (`gpress::optimize_to_size`). The outcome is `gpress_optimize`'s (1 or 2) with the effort that made the
+/// output in bits 8 to 15 and bit 16 set when it reached the target. `FLAG_ENGINE_EFFORT` is refused (code 5).
+///
+/// # Safety
+/// See `input`.
+#[no_mangle]
+pub unsafe extern "C" fn gpress_optimize_to_size(
+    ptr: *const u8,
+    len: usize,
+    target: u32,
+    max_input_mb: u32,
+    max_stream_mb: u32,
+    objects_per_stream: u32,
+    flags: u32,
+) -> i32 {
+    let data = input(ptr, len);
+    let opt = options(0, max_input_mb, max_stream_mb, objects_per_stream, flags);
     run(|| {
-        let r = gpress::optimize(data, &opt)?;
-        Ok(match r.outcome {
-            gpress::Outcome::Smaller(_) => (r.data, 1, String::new()),
-            gpress::Outcome::Untouched(why) => (r.data, 2, why),
-        })
+        let p = gpress::optimize_to_size(data, target as u64, &opt)?;
+        let (data, outcome, msg) = optimized(p.result);
+        Ok((data, outcome | (p.effort.level() as i32) << 8 | (p.reached as i32) << 16, msg))
     })
 }
 
@@ -327,9 +371,16 @@ mod tests {
             // Not a PDF: untouched with a reason.
             let r = gpress_alloc(5);
             std::ptr::copy_nonoverlapping(b"hello".as_ptr(), r, 5);
-            assert_eq!(gpress_optimize(r, 5, 100, 0, 0, 0, FLAG_NO_JBIG2 | FLAG_IGNORE_CONFORMANCE), 0);
+            assert_eq!(gpress_optimize(r, 5, 100, 0, 0, 0, FLAG_NO_JBIG2 | FLAG_IGNORE_CONFORMANCE, 0, 0, 0), 0);
             assert_eq!(gpress_outcome(), 2);
             assert!(gpress_message_len() > 0);
+            // A target size: the outcome also carries the effort picked and whether the target was reached.
+            // Five bytes fit in five (effort 0, the first tried) and never in four (the smallest of the six).
+            assert_eq!(gpress_optimize_to_size(r, 5, 5, 0, 0, 0, 0), 0);
+            assert_eq!(gpress_outcome(), 2 | 1 << 16);
+            assert_eq!(gpress_optimize_to_size(r, 5, 4, 0, 0, 0, 0), 0);
+            assert_eq!((gpress_outcome() & 0xff, gpress_outcome() >> 16, gpress_out_len()), (2, 0, 5));
+            assert_eq!(gpress_optimize_to_size(r, 5, 5, 0, 0, 0, FLAG_ENGINE_EFFORT), 5);
             gpress_free_input(r, 5);
         }
         assert_eq!(gpress_archive_version(), 9);
@@ -341,13 +392,14 @@ mod tests {
     fn the_flags_and_sizes_reach_the_options() {
         let o = options(30, 3, 5, 9, FLAG_NO_JPEG_TABLES | FLAG_KEEP_ENCRYPTED | FLAG_NO_DECRYPT);
         assert_eq!(
-            (o.effort.level(), o.max_input, o.max_stream, o.max_stream_archive),
-            (30, 3 << 20, 5 << 20, 5 << 20)
+            (o.effort.level(), o.engine_effort, o.max_input, o.max_stream, o.max_stream_archive),
+            (30, None, 3 << 20, 5 << 20, 5 << 20)
         );
+        assert_eq!(options(30, 0, 0, 0, FLAG_ENGINE_EFFORT).engine_effort, Some(30));
         assert_eq!(o.objects_per_stream, 9);
         assert!(!o.jpeg_tables && !o.rewrite_encrypted && !o.decrypt);
         assert!(o.jbig2 && o.respect_conformance && o.flate_over_jpeg && o.use_existing_libraries);
-        let d = options(100, 0, 0, 0, 0);
+        let d = options(40, 0, 0, 0, 0);
         assert_eq!(d, gpress::Options::default().threads(1));
         // A size past the module's address space is clamped, never wrapped; a budget is a u64 everywhere.
         assert_eq!(mib(u32::MAX, 0), usize::try_from((u32::MAX as u64) << 20).unwrap_or(usize::MAX));

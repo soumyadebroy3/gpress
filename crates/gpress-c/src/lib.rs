@@ -15,7 +15,8 @@ use std::time::Duration;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct GpressOptions {
-    /// 0..=100
+    /// 0..=100 in steps of 20 (a value in between counts as the step below): 0, 20 and 40 are lossless, 60, 80
+    /// and 100 lossy.
     pub effort: u8,
     /// Worker threads (0 = every core the machine offers, at most 8; at most 64).
     pub threads: u32,
@@ -47,6 +48,15 @@ pub struct GpressOptions {
     pub decrypt: u8,
     /// 1 = use the optional existing library (Lepton) when the build has it.
     pub use_existing_libraries: u8,
+    /// 1 = for measuring: `effort` is the engine's own lossless level (0..=100) and nothing is lossy.
+    pub effort_is_engine_level: u8,
+    /// Lossy overrides, each 0 = what the effort says: photos shown at more than this many pixels per inch are
+    /// resampled down to it,
+    pub photo_ppi: u16,
+    /// line art and scans likewise,
+    pub art_ppi: u16,
+    /// and the JPEG quality for a photo that is resampled or stored without JPEG.
+    pub jpeg_quality: u8,
 }
 
 /// A buffer gpress allocated. Free it with `gpress_free`; never with `free()`.
@@ -57,7 +67,7 @@ pub struct GpressBuffer {
     cap: usize,
 }
 
-/// What `gpress_optimize` did (the `outcome` field of `GpressResult`).
+/// What `gpress_optimize` and `gpress_optimize_to_size` did (the `outcome` field of `GpressResult`).
 pub const GPRESS_OUTCOME_SMALLER: c_int = 1;
 pub const GPRESS_OUTCOME_UNTOUCHED: c_int = 2;
 
@@ -69,6 +79,10 @@ pub struct GpressResult {
     pub outcome: c_int,
     pub output: GpressBuffer,
     pub message: *mut c_char,
+    /// `gpress_optimize_to_size` only: the effort that made the output, and 1 when the output is at most the
+    /// target (0: no effort reaches it, and the output is the smallest of the six). 0 from every other call.
+    pub effort: u8,
+    pub reached: u8,
 }
 
 fn empty_buffer() -> GpressBuffer {
@@ -104,6 +118,9 @@ fn options_from(o: Option<&GpressOptions>) -> gpress::Options {
     let mut opt = gpress::Options::default();
     if let Some(o) = o {
         opt.effort = gpress::Effort::new(o.effort);
+        if o.effort_is_engine_level != 0 {
+            opt.engine_effort = Some(o.effort);
+        }
         opt.threads = o.threads as usize;
         opt.max_input = size(o.max_input, opt.max_input);
         opt.max_stream = size(o.max_stream, opt.max_stream);
@@ -125,6 +142,7 @@ fn options_from(o: Option<&GpressOptions>) -> gpress::Options {
         opt.rewrite_encrypted = o.rewrite_encrypted != 0;
         opt.decrypt = o.decrypt != 0;
         opt.use_existing_libraries = o.use_existing_libraries != 0;
+        opt = opt.lossy_overrides(o.photo_ppi, o.art_ppi, o.jpeg_quality);
     }
     opt
 }
@@ -143,7 +161,7 @@ unsafe fn input_slice<'a>(input: *const u8, len: usize) -> Option<&'a [u8]> {
 }
 
 fn failure(code: c_int, msg: &str) -> GpressResult {
-    GpressResult { code, outcome: 0, output: empty_buffer(), message: message(msg) }
+    GpressResult { code, outcome: 0, output: empty_buffer(), message: message(msg), effort: 0, reached: 0 }
 }
 
 /// A null input with a length: nothing to read, so refused (GPRESS_ERR_BAD_ARGUMENT).
@@ -187,6 +205,10 @@ pub unsafe extern "C" fn gpress_options_default(out: *mut GpressOptions) {
         rewrite_encrypted: d.rewrite_encrypted as u8,
         decrypt: d.decrypt as u8,
         use_existing_libraries: d.use_existing_libraries as u8,
+        effort_is_engine_level: 0,
+        photo_ppi: 0,
+        art_ppi: 0,
+        jpeg_quality: 0,
     };
     // SAFETY: `out` is non-null and the caller owns the struct it points to.
     unsafe { ptr::write(out, o) };
@@ -201,17 +223,37 @@ pub unsafe extern "C" fn gpress_optimize(input: *const u8, len: usize, options: 
     let Some(data) = input_slice(input, len) else { return failure(BAD_ARGUMENT, "null input with a non-zero length") };
     let opt = options_from(options.as_ref());
     match gpress::optimize(data, &opt) {
-        Ok(r) => {
-            let outcome = match r.outcome {
-                gpress::Outcome::Smaller(_) => GPRESS_OUTCOME_SMALLER,
-                gpress::Outcome::Untouched(_) => GPRESS_OUTCOME_UNTOUCHED,
-            };
-            let msg = match &r.outcome {
-                gpress::Outcome::Untouched(why) => message(why),
-                _ => ptr::null_mut(),
-            };
-            GpressResult { code: 0, outcome, output: buffer_from(r.data), message: msg }
-        }
+        Ok(r) => optimized(r),
+        Err(e) => from_error(e),
+    }
+}
+
+/// An optimize result for C: the output, the outcome and, for an untouched file, why.
+fn optimized(r: gpress::Optimized) -> GpressResult {
+    let (outcome, msg) = match &r.outcome {
+        gpress::Outcome::Smaller(_) => (GPRESS_OUTCOME_SMALLER, ptr::null_mut()),
+        gpress::Outcome::Untouched(why) => (GPRESS_OUTCOME_UNTOUCHED, message(why)),
+    };
+    GpressResult { code: 0, outcome, output: buffer_from(r.data), message: msg, effort: 0, reached: 0 }
+}
+
+/// A PDF of at most `target` bytes at the lowest effort that reaches it, or the smallest of the six efforts
+/// (`gpress::optimize_to_size`): the result's `effort` and `reached` say which. `options.effort` is not used;
+/// `effort_is_engine_level` or a lossy override set is refused (code 5).
+///
+/// # Safety
+/// `input` must point to `len` readable bytes; `options` may be null for defaults.
+#[no_mangle]
+pub unsafe extern "C" fn gpress_optimize_to_size(
+    input: *const u8,
+    len: usize,
+    target: u64,
+    options: *const GpressOptions,
+) -> GpressResult {
+    let Some(data) = input_slice(input, len) else { return failure(BAD_ARGUMENT, "null input with a non-zero length") };
+    let opt = options_from(options.as_ref());
+    match gpress::optimize_to_size(data, target, &opt) {
+        Ok(p) => GpressResult { effort: p.effort.level(), reached: p.reached as u8, ..optimized(p.result) },
         Err(e) => from_error(e),
     }
 }
@@ -230,6 +272,8 @@ pub unsafe extern "C" fn gpress_compress(input: *const u8, len: usize, options: 
             outcome: if c.stored { GPRESS_OUTCOME_UNTOUCHED } else { GPRESS_OUTCOME_SMALLER },
             output: buffer_from(c.data),
             message: ptr::null_mut(),
+            effort: 0,
+            reached: 0,
         },
         Err(e) => from_error(e),
     }
@@ -244,7 +288,14 @@ pub unsafe extern "C" fn gpress_expand(input: *const u8, len: usize, options: *c
     let Some(data) = input_slice(input, len) else { return failure(BAD_ARGUMENT, "null input with a non-zero length") };
     let opt = options_from(options.as_ref());
     match gpress::expand(data, &opt) {
-        Ok(v) => GpressResult { code: 0, outcome: 0, output: buffer_from(v), message: ptr::null_mut() },
+        Ok(v) => GpressResult {
+            code: 0,
+            outcome: 0,
+            output: buffer_from(v),
+            message: ptr::null_mut(),
+            effort: 0,
+            reached: 0,
+        },
         Err(e) => from_error(e),
     }
 }
@@ -299,6 +350,8 @@ pub unsafe extern "C" fn gpress_result_free(res: *mut GpressResult) {
     gpress_free_message(&mut r.message);
     r.code = 0;
     r.outcome = 0;
+    r.effort = 0;
+    r.reached = 0;
 }
 
 #[cfg(test)]
@@ -324,6 +377,52 @@ mod tests {
         unreachable!("used only with the archive")
     }
 
+    /// The effort fields reach the library: the defaults are its defaults, a zeroed struct is valid (effort 0,
+    /// nothing lossy), the engine's level and each lossy override arrive, and a target size picks an effort.
+    #[test]
+    fn the_effort_fields_and_the_target_size() {
+        use gpress::Lossy;
+        // SAFETY: zeroed options are plain data, and gpress_options_default fills the struct it is given.
+        let (zero, mut o): (GpressOptions, GpressOptions) = unsafe { (std::mem::zeroed(), std::mem::zeroed()) };
+        unsafe { gpress_options_default(&mut o) };
+        assert_eq!(options_from(Some(&o)), gpress::Options::default());
+        assert_eq!(options_from(None), gpress::Options::default());
+        let z = options_from(Some(&zero));
+        assert_eq!((z.effort.level(), z.engine_effort, z.lossy, z.check()), (0, None, None, Ok(())));
+        let engine = options_from(Some(&GpressOptions { effort: 50, effort_is_engine_level: 1, ..o }));
+        assert_eq!((engine.engine_effort, engine.rewrite().effort, engine.rewrite().lossy), (Some(50), 50, Lossy::OFF));
+        let photos = options_from(Some(&GpressOptions { effort: 80, photo_ppi: 200, ..o }));
+        assert_eq!(photos.lossy, Some(Lossy { photo_ppi: 200, ..Lossy::level(2) }));
+        let quality = options_from(Some(&GpressOptions { art_ppi: 400, jpeg_quality: 60, ..o }));
+        assert_eq!(quality.lossy, Some(Lossy { art_ppi: 400, jpeg_quality: 60, ..Lossy::OFF }));
+
+        let input = b"%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n";
+        unsafe {
+            // Any output fits the largest target, so the first effort tried is the one picked.
+            let mut fits = gpress_optimize_to_size(input.as_ptr(), input.len(), u64::MAX, &o);
+            assert_eq!((fits.code, fits.effort, fits.reached), (0, 0, 1));
+            assert!(fits.output.len <= input.len());
+            gpress_result_free(&mut fits);
+            assert_eq!((fits.effort, fits.reached), (0, 0));
+            // Nothing fits in no bytes: the smallest of the six, marked as missed.
+            let mut missed = gpress_optimize_to_size(input.as_ptr(), input.len(), 0, ptr::null());
+            assert_eq!((missed.code, missed.reached), (0, 0));
+            assert!(missed.output.len > 0 && missed.output.len <= input.len());
+            gpress_result_free(&mut missed);
+            // The picker sets the effort itself: the engine's level or a lossy override is refused.
+            for bad in [GpressOptions { effort_is_engine_level: 1, ..o }, GpressOptions { jpeg_quality: 80, ..o }] {
+                let mut r = gpress_optimize_to_size(input.as_ptr(), input.len(), 0, &bad);
+                assert_eq!(r.code, 5);
+                assert!(r.output.data.is_null() && !r.message.is_null());
+                gpress_result_free(&mut r);
+            }
+            // Every other call leaves the two fields at 0.
+            let mut plain = gpress_optimize(input.as_ptr(), input.len(), &o);
+            assert_eq!((plain.code, plain.effort, plain.reached), (0, 0, 0));
+            gpress_result_free(&mut plain);
+        }
+    }
+
     #[test]
     fn round_trip_through_the_c_surface() {
         let input = b"%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n".to_vec();
@@ -331,7 +430,7 @@ mod tests {
         let mut o: GpressOptions = unsafe { std::mem::zeroed() };
         unsafe {
             gpress_options_default(&mut o);
-            assert_eq!((o.effort, o.jbig2, o.decrypt, o.max_len, o.max_decoded), (100, 1, 1, 1 << 30, 256 << 20));
+            assert_eq!((o.effort, o.jbig2, o.decrypt, o.max_len, o.max_decoded), (40, 1, 1, 1 << 30, 256 << 20));
             // Without the archive: compress and expand give GPRESS_ERR_NEEDS_FEATURE, a message that names the
             // feature and no output; optimize works.
             if !cfg!(feature = "archive") {

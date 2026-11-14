@@ -20,11 +20,12 @@ test("the web module optimizes to the same bytes as the whole module", { skip: !
   const tail = enc.encode("\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
   const page = new Uint8Array([...head, ...content, ...tail]);
   for (const pdf of [onePagePdf(), page, enc.encode("not a PDF")]) {
-    for (const effort of [0, 50, 100]) {
-      const a = whole.optimize(pdf, { effort });
-      const b = web.optimize(pdf, { effort });
+    // Three of the engine's lossless levels, and the strongest lossy effort.
+    for (const options of [{ engineEffort: 0 }, { engineEffort: 50 }, { engineEffort: 100 }, { effort: 100 }]) {
+      const a = whole.optimize(pdf, options);
+      const b = web.optimize(pdf, options);
       assert.equal(b.outcome, a.outcome);
-      assert.deepEqual(b.data, a.data, `effort ${effort}`);
+      assert.deepEqual(b.data, a.data, JSON.stringify(options));
     }
   }
   const archive = whole.compress(page).data;

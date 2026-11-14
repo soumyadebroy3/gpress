@@ -5,7 +5,8 @@
 //! set, and measured thresholds; `docs/reference.md` lists them.
 //!
 //! The three operations:
-//! - [`optimize`]: a smaller PDF that any PDF reader opens, with every object's value preserved.
+//! - [`optimize`]: a smaller PDF that any PDF reader opens, with every object's value preserved at efforts 0
+//!   to 40 (from 60 its images may change, within floors: see [`Effort`]).
 //! - [`compress`]: the gpress archive (`.gpz`), restored byte for byte by [`expand`].
 //! - [`expand`]: the original bytes back from an archive, or an error; never a wrong file.
 //!
@@ -40,6 +41,7 @@ use crate::pack;
 // Without the archive: its format's constants, which the options and `is_archive` use in every build.
 #[cfg(not(feature = "archive"))]
 use crate::off::pack;
+pub use crate::pdf::lossy::Lossy;
 use crate::pdf::rewrite;
 use crate::Feature;
 
@@ -55,13 +57,27 @@ pub const MAX_THREADS: usize = crate::par::MAX_THREADS;
 /// The largest `store_budget` a caller may ask for (a store never keeps more).
 pub const MAX_STORE_BUDGET: usize = crate::flate::deflate::MAX_STORE_BUDGET;
 
-/// How hard to try, 0 to 100. 0 is the fast path: our fast Flate encoder (a near-optimal parse for page
-/// content and fonts, one pass of it for a stream over 4 MiB, a lazy one for images), image predictors
-/// chosen from an estimate, and only the cheap steps (object streams, the cross-reference stream, JPEG
-/// Huffman tables, JBIG2 for fax images). 1 to 19 bridge to the strong encoder, so that time and size move
-/// smoothly; 20 to 100 are the strong encoder's steps, and 100 is everything the engine knows how to do. A
-/// percentage control maps straight onto this.
-/// See `pdf::rewrite::Options::effort`; the archive's use of effort is `pack::PackOptions::effort`.
+/// How much to do, 0 to 100 in steps of 20. A value in between counts as the step below it (59 is 40).
+///
+/// 0, 20 and 40 are lossless: every object's value is kept. 0 is the fast path, 20 the strong encoder's first
+/// step, and 40 (the default) the smallest lossless output: everything the engine knows how to do.
+///
+/// 60, 80 and 100 are lossy: the work of 40, after a step that changes images only. At 60 an image shown at
+/// more than 300 pixels per inch is resampled down to 300, and a photo that is resampled, or stored without
+/// JPEG, becomes a JPEG at quality 85 (line art stays lossless Flate). 80 is the same with photos down to 150
+/// pixels per inch. 100 is as 80 at JPEG quality 75, and an existing JPEG photo is written again at that
+/// quality when that is at least a tenth smaller. Floors that hold at every lossy level: a photo is never
+/// taken below 150 pixels per inch at its displayed size, and line art (screenshots, charts, diagrams) and
+/// scans never below 300; 1-bit images and small images (at most 65,536 pixels) are never touched; a lossy
+/// result is kept only when it is clearly smaller than what the lossless path makes of the image and a
+/// per-image quality check passes; a file the safety gate leaves untouched (signed, PDF/A, PDF/X, needing a
+/// password) stays untouched, and an encrypted file keeps its encryption.
+///
+/// The archive ([`compress`]) is always lossless: there 40 and above all mean its strongest setting.
+///
+/// The engine has a finer lossless scale of its own, 0 to 100 (`pdf::rewrite::Options::effort`,
+/// `pack::PackOptions::effort`): steps 0 and 20 are its 0 and 20, and 40 and above are its 100.
+/// [`Options::engine_effort`] sets it directly, for measuring.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Effort(u8);
 
@@ -75,21 +91,30 @@ impl Effort {
     pub fn level(self) -> u8 {
         self.0
     }
-}
-
-impl Default for Effort {
-    fn default() -> Self {
-        Effort::MAX
+    /// The step this effort counts as: the multiple of 20 at or below it.
+    pub fn step(self) -> u8 {
+        self.0 / 20 * 20
     }
 }
 
-/// Everything a caller can tune. `Options::default()` is maximum effort with the limits the engine was
-/// measured with; the builder methods adjust one thing each, and `check` says whether a set of options is
-/// one the engine accepts (every operation runs it first).
+impl Default for Effort {
+    /// 40: the smallest lossless output.
+    fn default() -> Self {
+        Effort(40)
+    }
+}
+
+/// Everything a caller can tune. `Options::default()` is the smallest lossless output (effort 40) with the
+/// limits the engine was measured with; the builder methods adjust one thing each, and `check` says whether a
+/// set of options is one the engine accepts (every operation runs it first).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
     /// Effort for both outputs, 0 to 100 (see [`Effort`]).
     pub effort: Effort,
+    /// For the measuring tools, the benchmarks and the engine's tests: the engine's own lossless level, 0 to
+    /// 100 (more counts as 100), in place of the one the effort means. Set, the effort decides nothing: the
+    /// lossy step is off unless `lossy` is `Some`. `None`: the effort decides.
+    pub engine_effort: Option<u8>,
     /// Worker threads for independent work: 0 = every core the machine offers, at most 8 for now (each thread
     /// holds a stream of its own, so memory grows with them); else at most [`MAX_THREADS`]. Output is identical
     /// whatever the count; this only changes speed. A thread the system refuses is no loss: the calling thread
@@ -144,6 +169,10 @@ pub struct Options {
     /// Normal PDF: rewrite files the empty user password opens, keeping their encryption exactly. Off,
     /// every encrypted file is left untouched.
     pub rewrite_encrypted: bool,
+    /// Normal PDF: the lossy image step. `None`: what the effort means (efforts 60, 80 and 100 turn it on, see
+    /// [`Effort`]); `Some`: exactly these settings whatever the effort (`Some(Lossy::OFF)` keeps any effort
+    /// lossless).
+    pub lossy: Option<Lossy>,
     /// Archive: store the streams of a file the empty user password opens decrypted (so they can be rebuilt
     /// and modelled) and encrypt them again on expand. Off, encrypted streams are stored as they are.
     pub decrypt: bool,
@@ -162,7 +191,8 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
-            effort: Effort::MAX,
+            effort: Effort::default(),
+            engine_effort: None,
             threads: 0,
             store_budget: 2 << 20,
             max_input: 1 << 30,
@@ -176,6 +206,7 @@ impl Default for Options {
             jpeg_tables: true,
             jbig2: true,
             rewrite_encrypted: true,
+            lossy: None,
             decrypt: true,
             use_existing_libraries: true,
             time_budget: None,
@@ -189,6 +220,10 @@ impl Options {
     }
     pub fn effort(mut self, level: u8) -> Options {
         self.effort = Effort::new(level);
+        self
+    }
+    pub fn engine_effort(mut self, level: Option<u8>) -> Options {
+        self.engine_effort = level;
         self
     }
     pub fn threads(mut self, n: usize) -> Options {
@@ -243,6 +278,29 @@ impl Options {
         self.rewrite_encrypted = yes;
         self
     }
+    pub fn lossy(mut self, lossy: Option<Lossy>) -> Options {
+        self.lossy = lossy;
+        self
+    }
+    /// One lossy setting changed at a time, for the bindings and the command line: each value that is not 0
+    /// takes its place in the lossy settings these options mean (`lossy`, or else the effort's), and 0 leaves
+    /// its setting as it is. All 0 changes nothing.
+    pub fn lossy_overrides(mut self, photo_ppi: u16, art_ppi: u16, jpeg_quality: u8) -> Options {
+        if (photo_ppi, art_ppi, jpeg_quality) != (0, 0, 0) {
+            let mut lossy = self.lossy_settings();
+            if photo_ppi != 0 {
+                lossy.photo_ppi = photo_ppi;
+            }
+            if art_ppi != 0 {
+                lossy.art_ppi = art_ppi;
+            }
+            if jpeg_quality != 0 {
+                lossy.jpeg_quality = jpeg_quality;
+            }
+            self.lossy = Some(lossy);
+        }
+        self
+    }
     pub fn decrypt(mut self, yes: bool) -> Options {
         self.decrypt = yes;
         self
@@ -288,13 +346,33 @@ impl Options {
         self.time_budget.map_or(Deadline::NONE, Deadline::after)
     }
 
-    /// The Flate encoder settings this effort level means: the fast encoder below 20, the strong encoder's
-    /// steps of 20 from there (see `flate::Options::effort`).
-    pub(crate) fn flate(&self) -> crate::flate::Options {
-        crate::flate::Options::effort(self.effort.level())
+    /// The engine's lossless level these options mean: `engine_effort` when set, else the effort's step as the
+    /// engine counts it (0 is 0, 20 is 20, 40 and above are 100).
+    fn engine_level(&self) -> u8 {
+        match self.engine_effort {
+            Some(level) => level.min(100),
+            None => match self.effort.step() {
+                0 => 0,
+                20 => 20,
+                _ => 100,
+            },
+        }
     }
 
-    /// The Flate settings for this effort, for the command-line tool's fine-tuning flags.
+    /// The lossy settings these options mean: `lossy` when set, else the effort's (steps 60, 80 and 100 are
+    /// `Lossy::level` 1, 2 and 3), and off with `engine_effort`.
+    fn lossy_settings(&self) -> Lossy {
+        let level = if self.engine_effort.is_some() { 0 } else { (self.effort.step() / 20).saturating_sub(2) };
+        self.lossy.unwrap_or(Lossy::level(level))
+    }
+
+    /// The Flate encoder settings of the engine's level: the fast encoder below 20, the strong encoder's
+    /// steps of 20 from there (see `flate::Options::effort`).
+    pub(crate) fn flate(&self) -> crate::flate::Options {
+        crate::flate::Options::effort(self.engine_level())
+    }
+
+    /// The Flate settings of the engine's level, for the command-line tool's fine-tuning flags.
     #[doc(hidden)]
     pub fn flate_for_cli(&self) -> crate::flate::Options {
         self.flate()
@@ -306,7 +384,7 @@ impl Options {
             flate: self.flate(),
             objstm_size: self.objects_per_stream.max(1),
             max_stream: self.max_stream,
-            effort: self.effort.level(),
+            effort: self.engine_level(),
             threads: self.threads,
             store_budget: self.store_budget,
             respect_conformance: self.respect_conformance,
@@ -314,15 +392,17 @@ impl Options {
             jbig2: self.jbig2,
             jpeg_tables: self.jpeg_tables,
             rewrite_encrypted: self.rewrite_encrypted,
+            lossy: self.lossy_settings(),
             deadline: self.deadline(),
         }
     }
 
-    /// The archive settings these options mean.
+    /// The archive settings these options mean. The archive is always lossless: it takes the engine's level
+    /// and nothing else from the effort.
     #[cfg(feature = "archive")]
     pub fn pack(&self) -> pack::PackOptions {
         pack::PackOptions {
-            effort: self.effort.level(),
+            effort: self.engine_level(),
             threads: self.threads,
             decrypt: self.decrypt,
             max_stream: self.max_stream_archive,
@@ -420,7 +500,8 @@ impl Error {
 /// What `optimize` did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// A smaller PDF with every object's value preserved. The statistics say what changed.
+    /// A smaller PDF with every object's value preserved, but for the images a lossy effort changed. The
+    /// statistics say what changed.
     Smaller(Report),
     /// The input is returned exactly as it was, with the reason (encrypted with a password, signed,
     /// PDF/A, damaged, or nothing to gain).
@@ -449,6 +530,17 @@ pub struct Report {
 pub struct Optimized {
     pub data: Vec<u8>,
     pub outcome: Outcome,
+}
+
+/// What [`optimize_to_size`] picked for a target size.
+#[derive(Clone, Debug)]
+pub struct Picked {
+    pub result: Optimized,
+    /// The effort that made `result`: 0, 20, 40, 60, 80 or 100.
+    pub effort: Effort,
+    /// Whether `result.data` is at most the target. `false`: no effort reaches it, and `result` is the
+    /// smallest of the six.
+    pub reached: bool,
 }
 
 /// A gpress archive and what went into it.
@@ -505,8 +597,9 @@ fn check(input: &[u8], opt: &Options) -> Result<(), Error> {
     Ok(())
 }
 
-/// A smaller PDF that any reader opens. Every object's value is preserved and the output is read back
-/// and compared before it is returned; when in doubt the input comes back untouched.
+/// A smaller PDF that any reader opens. At efforts 0 to 40 every object's value is preserved; from 60 the
+/// lossy image step may change images, within the floors [`Effort`] gives, and every other value is preserved.
+/// The output is read back and compared before it is returned; when in doubt the input comes back untouched.
 pub fn optimize(input: &[u8], opt: &Options) -> Result<Optimized, Error> {
     check(input, opt)?;
     guard("optimize", || {
@@ -528,6 +621,47 @@ pub fn optimize(input: &[u8], opt: &Options) -> Result<Optimized, Error> {
         };
         Ok(Optimized { data: r.data, outcome })
     })
+}
+
+/// A normal PDF of at most `target` bytes, at the lowest effort that reaches it: [`optimize`] at efforts 0, 20,
+/// 40, 60, 80 and 100 in turn (so up to six runs of the engine, the other options as given), and the first
+/// result that is small enough. When none is, the smallest of the six, with `reached` false. Efforts 60 and
+/// above are lossy, within the floors [`Effort`] gives, so a target no effort reaches within them is missed
+/// rather than forced. `opt.effort` is not used; `engine_effort` and `lossy` must be `None`
+/// ([`Error::InvalidOptions`] otherwise). One time budget covers the whole call.
+pub fn optimize_to_size(input: &[u8], target: u64, opt: &Options) -> Result<Picked, Error> {
+    if opt.engine_effort.is_some() || opt.lossy.is_some() {
+        return Err(Error::InvalidOptions(
+            "a target size picks the effort itself: engine_effort and lossy must not be set".into(),
+        ));
+    }
+    check(input, opt)?;
+    let start = crate::clock::now();
+    let mut best: Option<Picked> = None;
+    for level in (0..=100u8).step_by(20) {
+        let mut at = opt.clone().effort(level);
+        // Each run gets what is left of the one budget.
+        if let Some(budget) = opt.time_budget {
+            let left = budget.saturating_sub(crate::clock::since(start));
+            if left.is_zero() {
+                return Err(Error::TimeBudget(budget));
+            }
+            at.time_budget = Some(left);
+        }
+        let result = optimize(input, &at).map_err(|e| match (e, opt.time_budget) {
+            (Error::TimeBudget(_), Some(budget)) => Error::TimeBudget(budget),
+            (e, _) => e,
+        })?;
+        let reached = result.data.len() as u64 <= target;
+        // On a tie the lower effort stays: it changed less.
+        if reached || best.as_ref().is_none_or(|b| result.data.len() < b.result.data.len()) {
+            best = Some(Picked { result, effort: at.effort, reached });
+        }
+        if reached {
+            break;
+        }
+    }
+    best.ok_or_else(|| Error::Internal("optimize_to_size: no effort was tried".into()))
 }
 
 /// The gpress archive: any file (a PDF gains the most), restored byte for byte by [`expand`]. Every
@@ -671,15 +805,17 @@ mod tests {
 
     #[test]
     fn effort_levels_move_every_knob_monotonically() {
-        // Below 20 the fast encoder (its level for streams other than images; images get theirs in the plan).
+        // The engine's levels. Below 20 the fast encoder (its level for streams other than images; images get
+        // theirs in the plan).
+        let at = |e: u8| Options::new().engine_effort(Some(e)).flate();
         for e in 0..crate::pdf::rewrite::FAST_BELOW {
-            assert_eq!(Options::new().effort(e).flate().fast, crate::flate::fast::LEVELS, "effort {e}");
+            assert_eq!(at(e).fast, crate::flate::fast::LEVELS, "effort {e}");
         }
         // From 20 the strong encoder, every knob moving one way.
-        let mut last = Options::new().effort(20).flate();
+        let mut last = at(20);
         assert_eq!(last.fast, 0);
         for e in 21..=100u8 {
-            let f = Options::new().effort(e).flate();
+            let f = at(e);
             assert!(
                 f.fast == 0
                     && f.iterations >= last.iterations
@@ -689,13 +825,67 @@ mod tests {
             );
             last = f;
         }
-        assert_eq!(Options::new().effort(100).flate().max_chain, crate::flate::Options::max().max_chain);
+        assert_eq!(at(100).max_chain, crate::flate::Options::max().max_chain);
+    }
+
+    #[test]
+    fn an_effort_means_its_step_and_the_engine_level_is_a_knob_of_its_own() {
+        assert_eq!((Effort::default(), Options::default().effort), (Effort::new(40), Effort::new(40)));
+        assert_eq!((Options::default().engine_effort, Options::default().lossy), (None, None));
+        for e in 0..=100u8 {
+            let step = e / 20 * 20;
+            assert_eq!(Effort::new(e).step(), step);
+            let (engine, lossy) = match step {
+                0 => (0, 0),
+                20 => (20, 0),
+                40 => (100, 0),
+                60 => (100, 1),
+                80 => (100, 2),
+                _ => (100, 3),
+            };
+            let opt = Options::new().effort(e);
+            let r = opt.rewrite();
+            assert_eq!((r.effort, r.lossy), (engine, Lossy::level(lossy)), "effort {e}");
+            assert_eq!(r.flate.max_chain, crate::flate::Options::effort(engine).max_chain, "effort {e}");
+            // The archive takes the lossless level and nothing else: it has no lossy setting to take.
+            #[cfg(feature = "archive")]
+            assert_eq!(opt.pack().effort, engine, "effort {e}");
+            // The engine's own level: the effort then decides nothing, and nothing is lossy.
+            let own = opt.clone().engine_effort(Some(e));
+            assert_eq!((own.rewrite().effort, own.rewrite().lossy), (e, Lossy::OFF), "engine level {e}");
+            #[cfg(feature = "archive")]
+            assert_eq!(own.pack().effort, e, "engine level {e}");
+            // `lossy` set wins both ways, over the effort and over the engine's level.
+            for l in [Lossy::OFF, Lossy::level(2)] {
+                assert_eq!(opt.clone().lossy(Some(l)).rewrite().lossy, l, "effort {e}");
+                assert_eq!(own.clone().lossy(Some(l)).rewrite().lossy, l, "engine level {e}");
+            }
+            assert_eq!(opt.clone().lossy(Some(Lossy::level(2))).rewrite().effort, engine, "effort {e}");
+        }
+        assert_eq!(Options::new().engine_effort(Some(255)).rewrite().effort, 100);
+        assert!(Lossy::level(0).is_off() && !Lossy::level(1).is_off());
+    }
+
+    #[test]
+    fn a_lossy_override_replaces_one_setting_of_what_the_options_mean() {
+        // All 0: nothing changes, and `lossy` stays unset.
+        assert_eq!(Options::new().effort(80).lossy_overrides(0, 0, 0), Options::new().effort(80));
+        // One value: that setting, the rest as the effort has them (off below 60, and with the engine's level).
+        let at80 = Options::new().effort(80).lossy_overrides(200, 0, 0);
+        assert_eq!(at80.lossy, Some(Lossy { photo_ppi: 200, ..Lossy::level(2) }));
+        let at40 = Options::new().lossy_overrides(0, 400, 60);
+        assert_eq!(at40.lossy, Some(Lossy { art_ppi: 400, jpeg_quality: 60, ..Lossy::OFF }));
+        let own = Options::new().effort(100).engine_effort(Some(50)).lossy_overrides(0, 0, 90);
+        assert_eq!(own.rewrite().lossy, Lossy { jpeg_quality: 90, ..Lossy::OFF });
+        // On top of `lossy` when that is set.
+        let set = Options::new().lossy(Some(Lossy::level(3))).lossy_overrides(0, 600, 0);
+        assert_eq!(set.rewrite().lossy, Lossy { art_ppi: 600, ..Lossy::level(3) });
     }
 
     #[test]
     fn the_options_reach_the_engine() {
         let opt = Options::new()
-            .effort(40)
+            .engine_effort(Some(40))
             .threads(3)
             .store_budget(4096)
             .max_stream(1000)

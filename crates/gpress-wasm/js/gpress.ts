@@ -1,9 +1,11 @@
 /**
- * gpress for JavaScript and TypeScript: lossless PDF compression in the browser and Node.
+ * gpress for JavaScript and TypeScript: PDF compression in the browser and Node, lossless unless a lossy
+ * effort is asked for.
  *
  *   import { Gpress } from "gpress";
  *   const g = await Gpress.load(fetch("gpress.wasm"));          // or a Uint8Array / ArrayBuffer / path in Node
- *   const smaller = g.optimize(pdfBytes, { effort: 70 });       // { data, outcome: "smaller" | "untouched", reason? }
+ *   const smaller = g.optimize(pdfBytes, { effort: 20 });       // { data, outcome: "smaller" | "untouched", reason? }
+ *   const fits = g.optimizeToSize(pdfBytes, 500_000);           // the same, with the effort picked and `reached`
  *   const archive = g.compress(anyBytes);                       // the gpress archive (.gpz)
  *   const original = g.expand(archive.data);                    // Uint8Array, or throws GpressError
  *
@@ -27,8 +29,29 @@
 export type Outcome = "smaller" | "untouched";
 
 export interface GpressOptions {
-  /** 0..100: 0 fastest, 100 everything the engine knows (default 100). */
+  /**
+   * 0..100 in steps of 20; a value in between counts as the step below (default 40). 0, 20 and 40 are
+   * lossless: 0 fastest, 40 the smallest lossless output. 60, 80 and 100 are lossy: the work of 40 after a
+   * step that changes images only, stronger each step, within floors (photos never below 150 pixels per inch
+   * at their displayed size, line art and scans never below 300, 1-bit and small images never touched). The
+   * archive is lossless at every effort: 40 and above all mean its strongest setting.
+   */
   effort?: number;
+  /**
+   * For measuring: the engine's own lossless level, 0..100, in place of what `effort` means; nothing is
+   * lossy then, unless a lossy override below is set.
+   */
+  engineEffort?: number;
+  /**
+   * Lossy overrides for optimize(), each 0 or absent = what the effort says; any of them set makes the output
+   * lossy at any effort. Photos shown at more than this many pixels per inch are resampled down to it (never
+   * below 150, whatever is asked).
+   */
+  photoPpi?: number;
+  /** Line art and scans shown at more than this many pixels per inch are resampled down to it (never below 300). */
+  artPpi?: number;
+  /** JPEG quality, kept within 50 to 95, for a photo that is resampled or stored without JPEG. */
+  jpegQuality?: number;
   /** Largest accepted input in MiB (default 1024). */
   maxInputMiB?: number;
   /** Largest decoded stream re-encoded (normal PDF) or stored decoded (archive), MiB (default 64 / 256). */
@@ -78,6 +101,14 @@ export interface GpressResult {
   reason?: string;
 }
 
+/** What optimizeToSize() picked. */
+export interface SizedResult extends GpressResult {
+  /** The effort that made `data`: 0, 20, 40, 60, 80 or 100. */
+  effort: number;
+  /** Whether `data` is at most the target. False: no effort reaches it, and `data` is the smallest of the six. */
+  reached: boolean;
+}
+
 export class GpressError extends Error {
   constructor(public readonly code: number, message: string) {
     super(message);
@@ -120,12 +151,15 @@ const FLAG_NO_JPEG_TABLES = 8;
 const FLAG_NO_JBIG2 = 16;
 const FLAG_KEEP_ENCRYPTED = 32;
 const FLAG_NO_DECRYPT = 64;
+/** The effort argument is the engine's own level. */
+const FLAG_ENGINE_EFFORT = 128;
 
 interface Exports {
   memory: WebAssembly.Memory;
   gpress_alloc(len: number): number;
   gpress_free_input(ptr: number, len: number): void;
-  gpress_optimize(ptr: number, len: number, effort: number, maxIn: number, maxStream: number, objectsPerStream: number, flags: number): number;
+  gpress_optimize(ptr: number, len: number, effort: number, maxIn: number, maxStream: number, objectsPerStream: number, flags: number, photoPpi: number, artPpi: number, jpegQuality: number): number;
+  gpress_optimize_to_size(ptr: number, len: number, target: number, maxIn: number, maxStream: number, objectsPerStream: number, flags: number): number;
   gpress_compress(ptr: number, len: number, effort: number, maxIn: number, maxStream: number, maxDecoded: number, flags: number): number;
   gpress_expand(ptr: number, len: number, maxIn: number, maxLen: number, maxDecoded: number): number;
   gpress_out_ptr(): number;
@@ -150,6 +184,9 @@ interface Packed {
   maxDecoded: number;
   objectsPerStream: number;
   flags: number;
+  photoPpi: number;
+  artPpi: number;
+  jpegQuality: number;
 }
 
 export class Gpress {
@@ -213,10 +250,38 @@ export class Gpress {
     return FEATURES.filter((_, i) => (bits >>> i) & 1);
   }
 
-  /** A smaller PDF that any reader opens, every object's value preserved; or the input untouched. */
+  /**
+   * A smaller PDF that any reader opens, or the input untouched. Every object's value is preserved at efforts
+   * 0 to 40; from 60 images may be changed, within the floors of the effort levels.
+   */
   optimize(input: Uint8Array, options: GpressOptions = {}): GpressResult {
     const o = pack(options);
-    return this.run(input, (ptr, len) => this.ex.gpress_optimize(ptr, len, o.effort, o.maxIn, o.maxStream, o.objectsPerStream, o.flags));
+    return this.run(input, (ptr, len) =>
+      this.ex.gpress_optimize(ptr, len, o.effort, o.maxIn, o.maxStream, o.objectsPerStream, o.flags, o.photoPpi, o.artPpi, o.jpegQuality),
+    );
+  }
+
+  /**
+   * A PDF of at most `targetBytes`: optimize() at efforts 0, 20, 40, 60, 80 and 100 in turn (so up to six runs
+   * of the engine), returning the first result that is small enough, or else the smallest of the six with
+   * `reached` false. Efforts 60 and above are lossy. `options.effort` is not used; `engineEffort` or a lossy
+   * override set throws GpressError with code INVALID_OPTIONS.
+   */
+  optimizeToSize(input: Uint8Array, targetBytes: number, options: GpressOptions = {}): SizedResult {
+    const o = pack(options);
+    if (o.photoPpi || o.artPpi || o.jpegQuality) {
+      throw new GpressError(GpressError.INVALID_OPTIONS, "invalid options: a target size picks the effort itself: lossy overrides must not be set");
+    }
+    // Every output is under 4 GiB here, so a larger target is as good as that.
+    const target = clamp(targetBytes, 0, 0xffffffff);
+    let picked = 0;
+    const r = this.run(input, (ptr, len) => {
+      const code = this.ex.gpress_optimize_to_size(ptr, len, target, o.maxIn, o.maxStream, o.objectsPerStream, o.flags);
+      // The outcome also carries the effort (bits 8 to 15) and whether the target was reached (bit 16).
+      picked = this.ex.gpress_outcome();
+      return code;
+    });
+    return { ...r, effort: (picked >> 8) & 0xff, reached: (picked >> 16) === 1 };
   }
 
   /** The gpress archive of any input; expand() restores it byte for byte. */
@@ -267,7 +332,7 @@ export class Gpress {
       if (code !== 0) throw new GpressError(code, message || `gpress error ${code}`);
       // Copy out: the module reuses its result buffer on the next call.
       const data = new Uint8Array(this.ex.memory.buffer, this.ex.gpress_out_ptr(), this.ex.gpress_out_len()).slice();
-      const outcome: Outcome = this.ex.gpress_outcome() === 2 ? "untouched" : "smaller";
+      const outcome: Outcome = (this.ex.gpress_outcome() & 0xff) === 2 ? "untouched" : "smaller";
       return message ? { data, outcome, reason: message } : { data, outcome };
     } finally {
       // After a trap the module is not called again (its state may be inconsistent); the input buffer is
@@ -289,7 +354,7 @@ export class Gpress {
 /** The options as the module takes them: numbers in MiB (0 = default) and a flags word. */
 function pack(options: GpressOptions): Packed {
   return {
-    effort: clamp(options.effort ?? 100, 0, 100),
+    effort: clamp(options.engineEffort ?? options.effort ?? 40, 0, 100),
     maxIn: clamp(options.maxInputMiB ?? 0, 0, 1 << 20),
     maxStream: clamp(options.maxStreamMiB ?? 0, 0, 1 << 20),
     maxDecoded: clamp(options.maxDecodedMiB ?? 0, 0, 1 << 24),
@@ -301,7 +366,11 @@ function pack(options: GpressOptions): Packed {
       (options.jpegTables === false ? FLAG_NO_JPEG_TABLES : 0) |
       (options.jbig2 === false ? FLAG_NO_JBIG2 : 0) |
       (options.rewriteEncrypted === false ? FLAG_KEEP_ENCRYPTED : 0) |
-      (options.decrypt === false ? FLAG_NO_DECRYPT : 0),
+      (options.decrypt === false ? FLAG_NO_DECRYPT : 0) |
+      (options.engineEffort === undefined ? 0 : FLAG_ENGINE_EFFORT),
+    photoPpi: clamp(options.photoPpi ?? 0, 0, 0xffff),
+    artPpi: clamp(options.artPpi ?? 0, 0, 0xffff),
+    jpegQuality: clamp(options.jpegQuality ?? 0, 0, 0xff),
   };
 }
 

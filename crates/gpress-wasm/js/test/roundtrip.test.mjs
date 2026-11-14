@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { deflateSync as zlibSync } from "node:zlib";
 import { Gpress, GpressError, GpressFeatureError } from "../dist/gpress.js";
 import { modulePath } from "./module.mjs";
+import { onePagePdf } from "./onepage.mjs";
 
 const g = await Gpress.load(modulePath);
 // The web module has no archive: there every archive test checks that compress and expand say so instead.
@@ -132,8 +133,8 @@ archiveTest("an image row past 2^32 bits packs as on 64 bits", () => {
   assert.deepEqual(g.expand(native), pdf);
 });
 
-test("optimize makes a page smaller at every effort, the fast path too", () => {
-  // The fast encoder (efforts below 20) once trapped in this 32-bit module: an empty hash table entry passed
+test("optimize makes a page smaller at every engine level, the fast path too", () => {
+  // The fast encoder (engine levels below 20) once trapped in this 32-bit module: an empty hash table entry passed
   // for a match. A page with a content stream stored by zlib's fastest level leaves room to gain.
   const enc = new TextEncoder();
   let text = "";
@@ -159,10 +160,50 @@ test("optimize makes a page smaller at every effort, the fast path too", () => {
   const pdf = new Uint8Array(at);
   let k = 0;
   for (const p of parts) { pdf.set(p, k); k += p.length; }
-  for (const effort of [0, 10, 100]) {
-    const r = g.optimize(pdf, { effort });
-    assert.equal(r.outcome, "smaller", `effort ${effort}: ${r.reason}`);
+  for (const engineEffort of [0, 10, 100]) {
+    const r = g.optimize(pdf, { engineEffort });
+    assert.equal(r.outcome, "smaller", `engine level ${engineEffort}: ${r.reason}`);
     assert.ok(r.data.length < pdf.length);
+  }
+});
+
+test("the effort counts in steps of 20, the default is 40, and the engine's level is a knob of its own", () => {
+  const pdf = onePagePdf();
+  const at = (options) => g.optimize(pdf, options).data;
+  // The default is effort 40, the smallest lossless output: the engine's level 100.
+  assert.deepEqual(at({}), at({ effort: 40 }));
+  assert.deepEqual(at({ effort: 40 }), at({ engineEffort: 100 }));
+  // A value in between counts as the step below it, and steps 20 and 0 are the engine's 20 and 0.
+  assert.deepEqual(at({ effort: 59 }), at({ effort: 40 }));
+  assert.deepEqual(at({ effort: 39 }), at({ engineEffort: 20 }));
+  assert.deepEqual(at({ effort: 19 }), at({ engineEffort: 0 }));
+  assert.notDeepEqual(at({ engineEffort: 0 }), at({ engineEffort: 100 }));
+  // With the engine's level set the effort decides nothing, and a lossy effort lossless again is the same file.
+  assert.deepEqual(at({ effort: 100, engineEffort: 0 }), at({ effort: 0 }));
+});
+
+test("optimizeToSize picks the lowest effort that reaches the target, or else the smallest result", () => {
+  const pdf = onePagePdf();
+  const efforts = [0, 20, 40, 60, 80, 100];
+  const sizes = efforts.map((effort) => g.optimize(pdf, { effort }).data.length);
+  // The fast level's own size: reached by the first level tried.
+  const fast = g.optimize(pdf, { effort: 0 });
+  const first = g.optimizeToSize(pdf, fast.data.length);
+  assert.deepEqual([first.effort, first.reached, first.outcome], [0, true, fast.outcome]);
+  assert.deepEqual(first.data, fast.data);
+  // The smallest size any level gives: reached by the lowest level that gives it.
+  const least = Math.min(...sizes);
+  const best = g.optimizeToSize(pdf, least, { effort: 0 });
+  assert.deepEqual([best.effort, best.reached, best.data.length], [efforts[sizes.indexOf(least)], true, least]);
+  // One byte less: no level reaches it, and the same result comes back marked as missed.
+  const missed = g.optimizeToSize(pdf, least - 1);
+  assert.deepEqual([missed.effort, missed.reached], [best.effort, false]);
+  assert.deepEqual(missed.data, best.data);
+  // A target past 4 GiB is as good as any: reached at once.
+  assert.equal(g.optimizeToSize(pdf, Number.MAX_SAFE_INTEGER).effort, 0);
+  // The picker sets the effort itself: the engine's level or a lossy override is refused.
+  for (const bad of [{ engineEffort: 0 }, { photoPpi: 200 }, { artPpi: 400 }, { jpegQuality: 80 }]) {
+    assert.throws(() => g.optimizeToSize(pdf, 1, bad), (e) => e instanceof GpressError && e.code === GpressError.INVALID_OPTIONS, JSON.stringify(bad));
   }
 });
 
