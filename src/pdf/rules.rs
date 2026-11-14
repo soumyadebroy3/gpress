@@ -61,8 +61,9 @@ rules! {
     jbig2_min_saving = 5, 0, 100;
 
     // Image predictors. An image that decodes to more than this gets no predictor search (a value over the
-    // default counts only as far as `max_stream`: the search holds copies of the image).
-    max_predictor_image = 48 << 20, 0, ANY;
+    // default counts only as far as `max_stream`: the search holds copies of the image; at most 1 GiB: the
+    // fast path's estimate counts an image's bytes in 32 bits).
+    max_predictor_image = 48 << 20, 0, 1 << 30;
     // An image with fewer bytes of samples gets none either.
     min_predictor_image = 1024, 0, ANY;
     // The candidates ranked by encoding them (bits: 1 no predictor, 2 Sub, 4 Up, 8 Average, 16 Paeth, 32 a

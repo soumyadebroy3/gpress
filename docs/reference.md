@@ -87,7 +87,7 @@ the input, returned only when smaller, and the same for any thread count. The ru
 | `rewrite_jpeg_second_pass_flate_gain` | 10 | 0 | 100 | From `rewrite_full_from`, a JPEG's original bytes get a Flate pass of their own only when Flate took this percent off the JPEG with its new tables, |
 | `rewrite_jpeg_second_pass_table_gain` | 10 | 0 | 100 | and the new tables took this percent off the original. |
 | `rewrite_jbig2_min_saving` | 5 | 0 | 100 | A fax (CCITT) image becomes JBIG2 only when that is at least this percent smaller, and at least a byte. |
-| `rewrite_max_predictor_image` | 50,331,648 | 0 | 1,099,511,627,776 | An image that decodes to more gets no predictor search. A value over the default counts only as far as `max_stream` (the search holds copies of the image). |
+| `rewrite_max_predictor_image` | 50,331,648 | 0 | 1,073,741,824 | An image that decodes to more gets no predictor search. A value over the default counts only as far as `max_stream` (the search holds copies of the image). |
 | `rewrite_min_predictor_image` | 1,024 | 0 | 1,099,511,627,776 | An image with fewer bytes of samples gets no predictor search. |
 | `rewrite_predictor_candidates` | 55 | 0 | 63 | The predictors ranked by encoding them (bits: 1 none, 2 Sub, 4 Up, 8 Average, 16 Paeth, 32 a type for each row), ranked in the order none, each row, Up, Sub, Paeth, Average; the first of equals wins. 55 is all but Average. |
 | `rewrite_fast_predictor_candidates` | 63 | 0 | 63 | The predictors the fast path's estimate compares (the same bits, in the order of the bits). |
@@ -172,7 +172,8 @@ Why the ranges end where they do:
   are at least 1, so an output is never as large as what it replaces.
 - A highest value of 1,099,511,627,776 (1 TiB) is more than any input at the default `max_input` (1 GiB):
   it means "never" or "always". `rewrite_max_predictor_image` above its default still counts only as
-  far as `max_stream`, since the search holds copies of the image.
+  far as `max_stream`, since the search holds copies of the image, and it goes to 1 GiB at most: the fast
+  path's estimate counts an image's bytes in 32 bits.
 - `rewrite_jpeg_code_orders` keeps at least one order, and `rewrite_predictor_sample_bands` at least one band.
   `rewrite_quick_budget_doubling`, `rewrite_work_budget_doubling` and `rewrite_job_check_ratio` divide, so they
   are at least 1.
