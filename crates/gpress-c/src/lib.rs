@@ -329,6 +329,21 @@ mod tests {
         unreachable!("used only with the archive")
     }
 
+    /// Only exactly 1 drops the earlier saves: a byte the caller never set drops nothing.
+    #[test]
+    fn drop_history_is_off_unless_it_is_exactly_1() {
+        // SAFETY: a zeroed options struct is plain data; gpress_options_default then fills it.
+        let mut o: GpressOptions = unsafe { std::mem::zeroed() };
+        // SAFETY: `o` is a valid struct to fill.
+        unsafe { gpress_options_default(&mut o) };
+        assert_eq!(o.drop_history, 0);
+        for (byte, drops) in [(0, false), (1, true), (2, false), (255, false)] {
+            o.drop_history = byte;
+            assert_eq!(options_from(Some(&o)).drop_history, drops, "{byte}");
+        }
+        assert!(!options_from(None).drop_history);
+    }
+
     #[test]
     fn round_trip_through_the_c_surface() {
         let input = b"%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n".to_vec();

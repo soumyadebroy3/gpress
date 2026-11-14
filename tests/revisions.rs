@@ -786,7 +786,7 @@ fn a_prev_of_zero_leaves_the_file_untouched() {
 }
 
 #[test]
-fn a_reference_to_an_object_a_later_save_frees_leaves_the_file_untouched() {
+fn a_reference_to_an_object_that_is_not_there_leaves_the_file_untouched() {
     // Here and for qpdf the reference is null; readers that keep the earlier save's row still show the object.
     // The update frees the document information (6), which its trailer still names.
     let mut p = Pdf::new();
@@ -800,11 +800,255 @@ fn a_reference_to_an_object_a_later_save_frees_leaves_the_file_untouched() {
     q.obj(3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << /Font << /F1 5 1 R >> >> >>");
     q.at.remove(&5);
     q.table_of(&[(3, 1), (5, 1)], &format!("/Size 6 /Root 1 0 R /Prev {x}"), None);
-    let why = "keeps earlier revisions: a reference to an object a later save frees";
-    for pdf in [&p.d, &q.d] {
+    // No save lists the annotations (9) the page names, or the document information (9) the update's trailer
+    // names: Poppler then looks through the bytes and takes the last object of every number, whatever the rows say.
+    let (mut r, x) = first_save();
+    r.obj(3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Annots 9 0 R >>");
+    r.table(3, 1, &format!("/Size 6 /Root 1 0 R /Prev {x}"), None);
+    let (mut t, x) = first_save();
+    t.table(0, 0, &format!("/Size 6 /Root 1 0 R /Info 9 0 R /Prev {x}"), None);
+    let why = "keeps earlier revisions: a reference to an object that isn't there";
+    for pdf in [&p.d, &q.d, &r.d, &t.d] {
         for drop_history in [false, true] {
             untouched_for(pdf, why, &Options { drop_history, ..Options::effort(0) });
         }
+    }
+}
+
+/// An update's table and trailer written by hand: `rows` after `xref`, the trailer's entries, the table's place.
+fn table_by_hand(p: &mut Pdf, rows: &str, trailer: &str) {
+    let x = p.d.len();
+    p.d.extend_from_slice(format!("xref\n{rows}trailer\n<< {trailer} >>\nstartxref\n{x}\n%%EOF\n").as_bytes());
+}
+
+#[test]
+fn a_length_or_an_object_stream_at_another_generation_leaves_the_file_untouched() {
+    let both = |d: &[u8]| {
+        for drop_history in [false, true] {
+            let why = "keeps earlier revisions: a reference to another generation";
+            untouched_for(d, why, &Options { drop_history, ..Options::effort(0) });
+        }
+    };
+    // The content (4) takes its length from object 6, which the update writes again at generation 1: the length is
+    // read by number here, and at the generation the stream names by qpdf, Poppler and pypdf.
+    let mut p = Pdf::new();
+    page(&mut p, "ORIGINAL SECRET TEXT");
+    // (The stream ends at either length: the bytes between the two ends are more text.)
+    let short = b"BT /F1 12 Tf 10 10 Td (SHORT) Tj ET\n".repeat(50);
+    let long = [&short[..], b"\nendstream\nendobj\n", &b"BT 10 30 Td (LONG TAIL) Tj ET\n".repeat(50)[..]].concat();
+    p.obj(4, &[b"<< /Length 6 0 R >>\nstream\n", &long[..], b"\nendstream"].concat());
+    p.obj(6, short.len().to_string().as_bytes());
+    let x = p.table(0, 7, "/Size 7 /Root 1 0 R", None);
+    let at = p.d.len();
+    p.d.extend_from_slice(format!("6 1 obj\n{}\nendobj\n", long.len()).as_bytes());
+    table_by_hand(&mut p, &format!("6 1\n{at:010} 00001 n \n"), &format!("/Size 7 /Root 1 0 R /Prev {x}"));
+    both(&p.d);
+
+    // The update of `an_update_written_as_streams_is_kept_with_the_first`, then a save that writes its object
+    // stream (7) again at generation 1: the rows name the stream by number alone.
+    let (mut p, x) = first_save();
+    p.obj(7, &stream("/Type /ObjStm /N 1 /First 4", b"6 0 << /Title (Second save) >>"));
+    let (at7, at8) = (p.at[&7], p.d.len());
+    let rows = [[2, 0, 7, 0], [1, (at7 >> 8) as u8, at7 as u8, 0], [1, (at8 >> 8) as u8, at8 as u8, 0]].concat();
+    let dict = format!("/Type /XRef /Size 9 /Index [6 3] /W [1 2 1] /Root 1 0 R /Info 6 0 R /Prev {x}");
+    p.obj(8, &stream(&dict, &rows));
+    p.d.extend_from_slice(format!("startxref\n{at8}\n%%EOF\n").as_bytes());
+    let at = p.d.len();
+    p.d.extend_from_slice(b"7 1 obj\n");
+    p.d.extend_from_slice(&stream("/Type /ObjStm /N 1 /First 4", b"6 0 << /Title (Third save) >>"));
+    p.d.extend_from_slice(b"\nendobj\n");
+    let trailer = format!("/Size 9 /Root 1 0 R /Info 6 0 R /Prev {at8}");
+    table_by_hand(&mut p, &format!("7 1\n{at:010} 00001 n \n"), &trailer);
+    both(&p.d);
+}
+
+#[test]
+fn a_row_that_does_not_point_at_its_object_leaves_the_file_untouched() {
+    // The update lists a number nothing names (8) at the place of the first save's content (4): pypdf moves such a
+    // row to the number that stands there, over the update's own row for it.
+    let (mut p, x) = first_save();
+    let old = p.at[&4];
+    p.obj(4, &text("NEW VERSION"));
+    let rows = format!("4 1\n{:010} 00000 n \n8 1\n{old:010} 00000 n \n", p.at[&4]);
+    table_by_hand(&mut p, &rows, &format!("/Size 9 /Root 1 0 R /Prev {x}"));
+    for drop_history in [false, true] {
+        let why = "keeps earlier revisions: a row that doesn't point at its object";
+        untouched_for(&p.d, why, &Options { drop_history, ..Options::effort(0) });
+    }
+}
+
+#[test]
+fn a_row_in_use_for_object_0_or_a_free_row_of_generation_65535_for_object_1_leaves_the_file_untouched() {
+    let both = |d: &[u8]| {
+        untouched(d);
+        untouched_for(d, KEEPS, &Options { drop_history: true, ..Options::effort(0) });
+    };
+    // The update writes the content (4) again and lists it under object 0: qpdf 11 reads it as object 4.
+    let (mut p, x) = first_save();
+    p.obj(4, &text("NEW VERSION"));
+    let (at, trailer) = (p.at[&4], format!("/Size 6 /Root 1 0 R /Prev {x}"));
+    table_by_hand(&mut p, &format!("0 1\n{at:010} 00000 n \n"), &trailer);
+    both(&p.d);
+
+    // A file without an object 1, and an update whose table starts at 1 with the row that object 0 has: Poppler
+    // takes such a table to start at 0, so the content (4) it lists is object 3 there.
+    let with = |free: &str| {
+        let mut p = Pdf::new();
+        p.obj(6, b"<< /Type /Catalog /Pages 2 0 R >>");
+        p.obj(2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+        p.obj(3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R >>");
+        p.obj(4, &text("ORIGINAL SECRET TEXT"));
+        p.obj(5, b"<< /Title (First save) >>");
+        let x = p.table(0, 7, "/Size 7 /Root 6 0 R /Info 5 0 R", None);
+        p.obj(4, &text("NEW VERSION"));
+        let rows = format!("1 1\n0000000000 {free} f \n4 1\n{:010} 00000 n \n", p.at[&4]);
+        table_by_hand(&mut p, &rows, &format!("/Size 7 /Root 6 0 R /Info 5 0 R /Prev {x}"));
+        p.d
+    };
+    both(&with("65535"));
+    kept(&with("00000"), 2);
+}
+
+#[test]
+fn a_prev_that_names_white_space_before_its_section_leaves_the_file_untouched() {
+    // The first save's cross-reference stream (7) comes after a line end, and the update's /Prev names that line
+    // end: pypdf may give the chain up there and look through the bytes.
+    let with = |own: usize, back: usize| {
+        let mut p = Pdf::new();
+        page(&mut p, "ORIGINAL SECRET TEXT");
+        let at7 = p.d.len();
+        let mut rows: Vec<u8> = (1..6).flat_map(|n| [1, (p.at[&n] >> 8) as u8, p.at[&n] as u8, 0]).collect();
+        rows.extend([0, 0, 0, 0, 1, (at7 >> 8) as u8, at7 as u8, 0]);
+        p.obj(7, &stream("/Type /XRef /Size 8 /W [1 2 1] /Index [1 7] /Root 1 0 R", &rows));
+        p.d.extend_from_slice(format!("startxref\n{}\n%%EOF\n", at7 - own).as_bytes());
+        p.obj(6, b"<< /Title (Second save) >>");
+        p.table(6, 1, &format!("/Size 8 /Root 1 0 R /Info 6 0 R /Prev {}", at7 - back), None);
+        p.d
+    };
+    // (The same when the first save's own `startxref` names the line end too.)
+    for own in [0, 1] {
+        untouched(&with(own, 1));
+        untouched_for(&with(own, 1), KEEPS, &Options { drop_history: true, ..Options::effort(0) });
+    }
+    kept(&with(0, 0), 2);
+}
+
+/// An update that adds document information (6) after the section at `x`. Returns where its table is.
+fn info_save(p: &mut Pdf, x: usize) -> usize {
+    p.obj(6, b"<< /Title (Second save) >>");
+    p.table(6, 1, &format!("/Size 7 /Root 1 0 R /Info 6 0 R /Prev {x}"), None)
+}
+
+#[test]
+fn ends_that_cannot_be_told_apart_leave_the_file_untouched() {
+    // A `startxref` without a number between the two saves.
+    let (mut p, x) = first_save();
+    p.d.extend_from_slice(b"startxref\nnone\n%%EOF\n");
+    info_save(&mut p, x);
+    untouched(&p.d);
+
+    // A `startxref` with no `%%EOF` before the next one.
+    let (mut p, x) = first_save();
+    p.obj(6, b"<< /Title (Second save) >>");
+    let (at6, t) = (p.at[&6], p.d.len());
+    let trailer = format!("trailer\n<< /Size 7 /Root 1 0 R /Info 6 0 R /Prev {x} >>");
+    let table = format!("xref\n6 1\n{at6:010} 00000 n \n{trailer}\nstartxref\n{t}\nstartxref\n{t}\n%%EOF\n");
+    p.d.extend_from_slice(table.as_bytes());
+    untouched(&p.d);
+
+    // More than 2048 bytes from a `startxref` to the end of its save: a reader of the file cut there looks for
+    // the word in the last bytes only.
+    let (mut p, x) = first_save();
+    p.d.truncate(p.d.len() - b"%%EOF\n".len());
+    p.d.extend_from_slice(format!("%{}\n%%EOF\n", "a".repeat(3000)).as_bytes());
+    info_save(&mut p, x);
+    untouched(&p.d);
+
+    // The second of three saves ends with a `startxref` that names the third save's table, which lies after it.
+    let (mut p, x) = first_save();
+    let second = info_save(&mut p, x);
+    p.obj(7, b"<< /Title (Third save) >>");
+    let third = p.table(7, 1, &format!("/Size 8 /Root 1 0 R /Info 7 0 R /Prev {second}"), None);
+    let (old, new) = (format!("startxref\n{second}\n"), format!("startxref\n{third}\n"));
+    assert_eq!(old.len(), new.len());
+    let at = p.d.windows(old.len()).position(|w| w == old.as_bytes()).unwrap();
+    p.d[at..at + old.len()].copy_from_slice(new.as_bytes());
+    untouched(&p.d);
+
+    // The word more often than saves are taken apart, here in a string.
+    let (mut p, x) = first_save();
+    p.obj(6, format!("<< /Title ({}) >>", "startxref ".repeat(70)).as_bytes());
+    p.table(6, 1, &format!("/Size 7 /Root 1 0 R /Info 6 0 R /Prev {x}"), None);
+    untouched_for(&p.d, xref::TOO_MANY, &Options::effort(0));
+
+    // An update to a file whose first object doesn't read: another reader may still find a linearisation
+    // dictionary there.
+    let mut p = Pdf::new();
+    p.d.extend_from_slice(b"9 0 obj\n<< /A (\nendobj\n");
+    page(&mut p, "ORIGINAL SECRET TEXT");
+    let x = p.table(0, 6, "/Size 6 /Root 1 0 R", None);
+    info_save(&mut p, x);
+    untouched(&p.d);
+}
+
+#[test]
+fn a_number_with_two_rows_or_a_row_of_an_unknown_type_leaves_the_file_untouched() {
+    // The update's table lists the document information (6) twice, at two places.
+    let (mut p, x) = first_save();
+    p.obj(6, b"<< /Title (Second save A) >>");
+    let a = p.at[&6];
+    p.obj(6, b"<< /Title (Second save B) >>");
+    let rows = format!("6 1\n{a:010} 00000 n \n6 1\n{:010} 00000 n \n", p.at[&6]);
+    table_by_hand(&mut p, &rows, &format!("/Size 7 /Root 1 0 R /Info 6 0 R /Prev {x}"));
+    untouched(&p.d);
+
+    // The update is a cross-reference stream (7) whose last row has the type 3.
+    let (mut p, x) = first_save();
+    p.obj(6, b"<< /Title (Second save) >>");
+    let (at6, at7) = (p.at[&6], p.d.len());
+    let rows = [[1, (at6 >> 8) as u8, at6 as u8, 0], [1, (at7 >> 8) as u8, at7 as u8, 0], [3, 0, 0, 0]].concat();
+    let dict = format!("/Type /XRef /Size 9 /Index [6 3] /W [1 2 1] /Root 1 0 R /Info 6 0 R /Prev {x}");
+    p.obj(7, &stream(&dict, &rows));
+    p.d.extend_from_slice(format!("startxref\n{at7}\n%%EOF\n").as_bytes());
+    untouched(&p.d);
+}
+
+#[test]
+fn saves_that_are_too_long_together_or_do_not_read_leave_the_file_untouched() {
+    // Each save is read as a file of its own: 40 saves of this size are more than 16 times the file together,
+    // 17 are not.
+    let many = |updates: usize| {
+        let (mut p, mut x) = first_save();
+        for _ in 0..updates {
+            x = info_save(&mut p, x);
+        }
+        p.d
+    };
+    untouched_for(&many(39), xref::TOO_MANY, &Options::effort(0));
+    kept(&many(16), 17);
+
+    // A first whole file without a /Root, then a second whole file after it: the first doesn't open on its own.
+    let mut p = Pdf::new();
+    page(&mut p, "ORIGINAL SECRET TEXT");
+    p.table(0, 6, "/Size 6", None);
+    p.d.extend_from_slice(b"%PDF-1.5\n");
+    page(&mut p, "NEW VERSION");
+    p.table(0, 6, "/Size 6 /Root 1 0 R", None);
+    let why = "keeps earlier revisions: a save that doesn't open on its own";
+    untouched_for(&p.d, why, &Options { drop_history: true, ..Options::effort(0) });
+
+    // The first save's content (4) has no `endstream` where its /Length says; the update writes it again.
+    let mut p = Pdf::new();
+    page(&mut p, "ORIGINAL SECRET TEXT");
+    p.obj(4, b"<< /Length 5000 >>\nstream\nBT ET\nendstream");
+    let x = p.table(0, 6, "/Size 6 /Root 1 0 R", None);
+    p.obj(4, &text("NEW VERSION"));
+    p.table(4, 1, &format!("/Size 6 /Root 1 0 R /Prev {x}"), None);
+    for drop_history in [false, true] {
+        let r = optimize(&p.d, &Options { drop_history, ..Options::effort(0) });
+        let why = "keeps earlier revisions: revision 0 of 2: unreadable object 4";
+        assert!(matches!(&r.outcome, Outcome::Untouched(w) if w.starts_with(why)), "{:?}", r.outcome);
+        assert_eq!(r.data, p.d);
     }
 }
 
@@ -839,7 +1083,8 @@ fn a_trailer_without_a_key_the_save_before_it_has_leaves_the_file_untouched() {
     p.obj(6, b"<< /Title (Second save) >>");
     p.table(6, 1, &format!("/Size 7 /Root 1 0 R /Info 6 0 R /Prev {x}"), None);
     kept(&p.d, 2);
-    untouched_for(&p.d, KEEPS, &Options { drop_history: true, ..Options::effort(0) });
+    let why = "keeps earlier revisions: a trailer key that only an earlier save has";
+    untouched_for(&p.d, why, &Options { drop_history: true, ..Options::effort(0) });
 }
 
 #[test]
@@ -897,8 +1142,11 @@ fn a_linearisation_dictionary_that_gives_the_whole_length_leaves_the_file_untouc
     p.table(20, 1, &format!("/Size 21 /Root 1 0 R /Info 20 0 R /Prev {first}"), None);
     let old = b"/L 0 /O 3 /E 0 /N 1 /T 0 /H [0 0]";
     let at = p.d.windows(old.len()).position(|w| w == old).unwrap();
-    let new = format!("{:<1$}", format!("/L {}", p.d.len()), old.len());
-    p.d[at..at + old.len()].copy_from_slice(new.as_bytes());
-    untouched(&p.d);
-    untouched_for(&p.d, KEEPS, &Options { drop_history: true, ..Options::effort(0) });
+    // A real number isn't read here, so the file stays as it is whatever it says.
+    for l in [p.d.len().to_string(), "1.5".to_string()] {
+        let new = format!("{:<1$}", format!("/L {l}"), old.len());
+        p.d[at..at + old.len()].copy_from_slice(new.as_bytes());
+        untouched(&p.d);
+        untouched_for(&p.d, KEEPS, &Options { drop_history: true, ..Options::effort(0) });
+    }
 }

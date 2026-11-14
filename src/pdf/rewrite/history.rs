@@ -21,7 +21,9 @@ use std::sync::Arc;
 const UNLINKED: &str = "keeps earlier revisions: a save the newest doesn't link";
 const OPENS: &str = "keeps earlier revisions: a save that doesn't open on its own";
 const GENERATION: &str = "keeps earlier revisions: a reference to another generation";
-const FREED: &str = "keeps earlier revisions: a reference to an object a later save frees";
+const ABSENT: &str = "keeps earlier revisions: a reference to an object that isn't there";
+const ELSEWHERE: &str = "keeps earlier revisions: a row that doesn't point at its object";
+const LACKS: &str = "keeps earlier revisions: a trailer key that only an earlier save has";
 const TOO_HIGH: &str = "keeps earlier revisions: numbers too high for a revision's length";
 const ENCRYPTION: &str = "encrypted: revisions differ in their encryption";
 
@@ -78,7 +80,7 @@ fn find(input: &[u8], drop: bool) -> Result<Vec<Save>, String> {
     }
     // (Written alone, the newest save would lose a key that such readers take from an earlier trailer.)
     if drop && saves.iter().any(|s| s.lacks_key) {
-        return Err(xref::KEEPS.into());
+        return Err(LACKS.into());
     }
     // Each save is read as a file of its own: together they are at most 16 times the input.
     if saves.iter().map(|s| s.end as u64).sum::<u64>() > (input.len() as u64).saturating_mul(16) {
@@ -121,28 +123,24 @@ fn in_use(doc: &Doc, n: u32) -> bool {
     matches!(doc.entries.get(&n), Some(Entry::Offset(..) | Entry::InStream(..)))
 }
 
-/// Every reference the objects make (a stream's /Length aside: it is written as a number).
-fn references(objs: &Reached) -> Vec<(u32, u16)> {
-    let mut refs = Vec::new();
-    for (_, o) in objs.values() {
-        match o {
-            Obj::Stream(s) => s.dict.0.iter().filter(|(k, _)| k != b"Length").for_each(|(_, v)| v.refs(&mut refs)),
-            _ => o.refs(&mut refs),
-        }
-    }
-    refs
+/// Whether the header of object `n` at generation `g` stands at `off`, as `parse_indirect` reads one.
+fn headed(d: &[u8], off: usize, n: u32, g: u16) -> bool {
+    let mut lx = crate::pdf::parse::Lexer::new(d, off.min(d.len()));
+    let mut number = || {
+        lx.skip_ws();
+        std::str::from_utf8(lx.regular_token()).ok().and_then(|t| t.parse::<u32>().ok())
+    };
+    number() == Some(n) && number() == Some(g as u32) && lx.expect_keyword(b"obj")
 }
 
 /// Save `k` of `of`, read on its own: the file cut at `end`, opened the way a reader opens it, with everything its
-/// trailer reaches. It passes the gate as a file of one save, whatever the options say about conformance. `earlier`
-/// holds the numbers the saves before it had in use (the saves are read oldest first), and gets this one's.
+/// trailer reaches. It passes the gate as a file of one save, whatever the options say about conformance.
 fn read<'a>(
     input: &'a [u8],
     end: usize,
     (k, of): (usize, usize),
     opt: &Options,
     budget: &mut Budget,
-    earlier: &mut HashSet<u32>,
 ) -> Result<(Doc<'a>, Reached), String> {
     if opt.deadline.passed() {
         return Err(TIMED_OUT.into());
@@ -157,28 +155,41 @@ fn read<'a>(
     // The saves are told apart already: this one is checked as a file of one save.
     doc.has_revisions = false;
     gate(&doc, &objs, true)?;
-    // A reference whose generation is not its object's: one reader gives null, another the object, a third looks
-    // through the file's bytes, where an earlier save's object may still be.
-    let mut refs = references(&objs);
+    // Every reference this save makes, a stream's /Length and the trailer's /Encrypt too.
+    let mut refs = Vec::new();
+    objs.values().for_each(|(_, o)| o.refs(&mut refs));
     for (key, v) in &doc.trailer.0 {
-        if !matches!(key.as_slice(), b"Prev" | b"XRefStm" | b"Size" | b"Encrypt") {
+        if !matches!(key.as_slice(), b"Prev" | b"XRefStm" | b"Size") {
             v.refs(&mut refs);
         }
     }
-    if refs.iter().any(|(n, g)| objs.get(n).is_some_and(|o| o.0 != *g)) {
-        return Err(GENERATION.into());
-    }
-    // A reference to a number an earlier save had in use and this one has not: null here and for qpdf, the earlier
-    // save's object for readers that keep its row. (A stream's /Length and the trailer's /Encrypt count here too.)
-    let lengths = objs.values().filter_map(|(_, o)| match o {
-        Obj::Stream(s) => s.dict.get(b"Length"),
+    // The generation a number has in the rows (0 in an object stream), when it is in use.
+    let generation = |n: u32| match doc.entries.get(&n) {
+        Some(Entry::Offset(_, g)) => Some(*g),
+        Some(Entry::InStream(..)) => Some(0),
+        _ => None,
+    };
+    // A reference whose generation is not its object's: one reader gives null, another the object, a third looks
+    // through the file's bytes, where an earlier save's object may still be. A row names its object stream by
+    // number alone: readers that hold it to generation 0 keep an earlier save's stream of that number.
+    let homes = doc.entries.values().filter_map(|e| match e {
+        Entry::InStream(sn, _) => Some((*sn, 0)),
         _ => None,
     });
-    lengths.chain(doc.trailer.get(b"Encrypt")).for_each(|o| o.refs(&mut refs));
-    if refs.iter().any(|(n, _)| earlier.contains(n) && !in_use(&doc, *n)) {
-        return Err(FREED.into());
+    if refs.iter().copied().chain(homes).any(|(n, g)| generation(n).is_some_and(|h| h != g)) {
+        return Err(GENERATION.into());
     }
-    earlier.extend(doc.entries.iter().filter(|(_, e)| !matches!(e, Entry::Free)).map(|(n, _)| *n));
+    // A reference to a number that is not in use: null here and for qpdf, an earlier save's object for readers
+    // that keep its row, and Poppler looks through the bytes for it and then takes the last object of every
+    // number, whatever the rows say.
+    if refs.iter().any(|&(n, _)| generation(n).is_none()) {
+        return Err(ABSENT.into());
+    }
+    // pypdf moves a table's rows to other numbers when one points at another number's object, and looks through
+    // the bytes when one points at none.
+    if doc.entries.iter().any(|(&n, e)| matches!(e, Entry::Offset(off, g) if !headed(&input[..end], *off, n, *g))) {
+        return Err(ELSEWHERE.into());
+    }
     Ok((doc, objs))
 }
 
@@ -186,11 +197,11 @@ fn read<'a>(
 /// what the whole file's trailer reaches.
 pub(super) fn dropped(input: &[u8], opt: &Options, newest: &Reached) -> Result<Vec<Dropped>, String> {
     let saves = find(input, true)?;
-    let (mut budget, mut earlier) = (Budget::new(input, opt), HashSet::new());
+    let mut budget = Budget::new(input, opt);
     let mut out = Vec::new();
     let mut start = 0;
     for (k, save) in saves.iter().enumerate() {
-        let (_, objs) = read(input, save.end, (k, saves.len()), opt, &mut budget, &mut earlier)?;
+        let (_, objs) = read(input, save.end, (k, saves.len()), opt, &mut budget)?;
         if k + 1 < saves.len() {
             let versions = objs.iter().filter(|(n, v)| newest.get(n) != Some(v)).count();
             out.push(Dropped { start, end: save.end, versions });
@@ -284,7 +295,7 @@ fn planted(_: Fault) -> bool {
 pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     let saves = find(input, false)?;
     let of = saves.len();
-    let (mut budget, mut earlier) = (Budget::new(input, opt), HashSet::new());
+    let mut budget = Budget::new(input, opt);
 
     // Every revision is read, one at a time: only the distinct values and each revision's table of them stay.
     let mut values = Values::default();
@@ -296,7 +307,7 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
     let mut crypt: Option<Crypt> = None;
     let (mut top, mut version) = (0u32, (1, 5));
     for (k, save) in saves.iter().enumerate() {
-        let (doc, objs) = read(input, save.end, (k, of), opt, &mut budget, &mut earlier)?;
+        let (doc, objs) = read(input, save.end, (k, of), opt, &mut budget)?;
         // Every revision opens with the same encryption, or none is encrypted.
         let c = doc.crypt.as_ref().and_then(|c| c.as_ref().ok());
         if k == 0 {
@@ -338,7 +349,7 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
         version = doc.version;
         revs.push(Rev { end: save.end, trailer: doc.trailer.clone(), objs: table, frees });
     }
-    drop((jobs_by_key, earlier));
+    drop(jobs_by_key);
     let crypt = crypt.as_ref();
 
     // One pool of threads, one plan and one store of encoded outputs for the streams of every revision, as for a
@@ -658,11 +669,6 @@ fn check(
             return Err(fail("an object the input doesn't have"));
         }
         drop(doc2);
-        let missing: HashSet<(u32, u16)> =
-            references(&objs).into_iter().filter(|(n, _)| !objs.contains_key(n)).collect();
-        if holds_header(cut, &missing) {
-            return Err(fail("an object in the file is missing from its cross-reference data"));
-        }
 
         let proven: Vec<(u32, Proof)> = objs
             .iter()

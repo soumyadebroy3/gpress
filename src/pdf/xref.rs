@@ -555,7 +555,9 @@ type Section = (Vec<(u32, Entry)>, Dict, usize);
 struct Rare {
     /// The free rows with a generation above 0, object 0's aside: number and generation.
     freed: Vec<(u32, u16)>,
-    /// A row has a generation beyond 16 bits, or a type that is not 0, 1 or 2.
+    /// A row has a generation beyond 16 bits, or a type that is not 0, 1 or 2; object 0 has a row in use (qpdf 11
+    /// reads the object it points at under that object's own number); or object 1 has a free row of generation
+    /// 65535 (Poppler takes a table that starts with such a row to start at object 0, one number down).
     odd: bool,
 }
 
@@ -563,6 +565,7 @@ impl Rare {
     /// Takes note of a row of type `t` (0 free, 1 in use, 2 in an object stream) with the generation `gen`.
     fn note(&mut self, num: u32, t: u64, gen: u64) {
         self.odd |= t > 2 || (t < 2 && gen > u16::MAX as u64);
+        self.odd |= (num == 0 && t != 0) || (num == 1 && t == 0 && gen == u16::MAX as u64);
         if t == 0 && num != 0 && gen > 0 {
             self.freed.push((num, gen.min(u16::MAX as u64) as u16));
         }
@@ -785,17 +788,6 @@ fn places(d: &[u8], pat: &[u8], most: usize) -> Vec<usize> {
     out
 }
 
-/// Where the section that a `startxref` or a /Prev of `off` names starts: `off` itself for a table, else the object
-/// after any white space and comments, as `read_section` reads it.
-fn section_start(d: &[u8], off: usize) -> usize {
-    if d.get(off..).is_some_and(|t| t.starts_with(b"xref")) {
-        return off;
-    }
-    let mut lx = Lexer::new(d, off.min(d.len()));
-    lx.skip_ws();
-    lx.pos
-}
-
 /// Whether no number has two different rows in `rows` (object 0 aside, as `open_with` reads it): readers differ on
 /// which of two rows of one save they keep.
 fn rows_agree<'r>(rows: impl Iterator<Item = &'r (u32, Entry)>) -> bool {
@@ -810,10 +802,11 @@ fn rows_agree<'r>(rows: impl Iterator<Item = &'r (u32, Entry)>) -> bool {
 /// file as it is: a `startxref` without a number or without a `%%EOF` before the next one, an end the file cut
 /// there doesn't open from, two ends naming one section, a section without an end of its own, a hybrid section
 /// (/XRefStm), one number given two different rows by one save, a chain that doesn't read or that a /Prev of 0 goes
-/// on, a trailer without a key that the save before it has and that names an object there, a trailer nested 16
-/// levels deep, a
-/// row with a lower generation than an older row of its number, a row with a generation beyond 16 bits or of an
-/// unknown type, a linearisation dictionary whose /L is the length of the whole file or a real number.
+/// on, a `startxref` or a /Prev that names white space or a comment, a trailer without a key that the save before
+/// it has and that names an object there, a trailer nested 16 levels deep, a row with a lower generation than an
+/// older row of its number, a row with a generation beyond 16 bits or of an unknown type, a row in use for object
+/// 0, a free row of generation 65535 for object 1, a linearisation dictionary whose /L is the length of the whole
+/// file or a real number.
 ///
 /// No object is loaded. Each section is read once, all of them within the rows a file of this size may have.
 pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
@@ -851,9 +844,10 @@ pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
     let mut chain = |off: usize, sections: &mut HashMap<usize, Section>| -> Result<Vec<usize>, &'static str> {
         let mut out: Vec<usize> = Vec::new();
         let mut next = Some(off);
-        while let Some(off) = next {
-            let at = section_start(data, off);
-            if out.contains(&at) || out.len() > 1000 {
+        while let Some(at) = next {
+            // A `startxref` or a /Prev names its section's first byte: `read_section` would skip white space and
+            // comments before a cross-reference stream, where pypdf gives the chain up and looks through the bytes.
+            if out.contains(&at) || out.len() > 1000 || data.get(at).is_none_or(|&b| is_white(b) || b == b'%') {
                 return Err(KEEPS);
             }
             if !sections.contains_key(&at) {
@@ -861,7 +855,7 @@ pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
                     return Err(TOO_MANY);
                 }
                 let mut rare = Rare::default();
-                let read = read_rows(data, off, &mut rows_left, Some(&mut rare)).map_err(|_| KEEPS)?;
+                let read = read_rows(data, at, &mut rows_left, Some(&mut rare)).map_err(|_| KEEPS)?;
                 // (A reader that gives up inside a deep trailer loses the keys after that place: PDFium reads 63
                 // levels.)
                 let deep = read.1 .0.iter().any(|(_, v)| nesting(v) >= MOST_NESTED);
@@ -897,8 +891,7 @@ pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
         if end - s > 2048 {
             return Err(KEEPS);
         }
-        let at = section_start(data, n);
-        let place = newest.iter().position(|&c| c == at);
+        let place = newest.iter().position(|&c| c == n);
         let own = match place {
             Some(j) => {
                 if revisions.last().is_some_and(|&older| j >= older) {
@@ -913,7 +906,7 @@ pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
         if own.iter().any(|c| sections[c].2 > eof) {
             return Err(KEEPS);
         }
-        out.push(Save { end, section: at, linked: place.is_some(), lacks_key: false });
+        out.push(Save { end, section: n, linked: place.is_some(), lacks_key: false });
     }
     // PDFium keeps the row with the higher generation where the others keep the newer row: no row in use has a
     // lower generation than an older section's row of its number, free rows counted.

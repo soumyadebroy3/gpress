@@ -307,24 +307,29 @@ fn unencrypted_files_with_a_raw_carriage_return_in_a_string_are_left_untouched()
     }
 }
 
+/// The fixture `name` with an update that writes object `n` again as `body`. Returns the first save's length too.
+fn updated(name: &str, n: u32, body: &[u8]) -> (Vec<u8>, usize) {
+    let mut input = file(name);
+    let first = input.len();
+    let t = find(&input, b"trailer << ").unwrap() + 11;
+    let trailer = String::from_utf8(input[t..t + find(&input[t..], b" >>\nstartxref\n").unwrap()].to_vec()).unwrap();
+    let p = find(&input, b"startxref\n").unwrap() + 10;
+    let prev = String::from_utf8(input[p..p + find(&input[p..], b"\n").unwrap()].to_vec()).unwrap();
+    let at = input.len();
+    input.extend_from_slice(&[format!("{n} 0 obj\n").as_bytes(), body, b"\nendobj\n"].concat());
+    let x = input.len();
+    let table =
+        format!("xref\n{n} 1\n{at:010} 00000 n \ntrailer << {trailer} /Prev {prev} >>\nstartxref\n{x}\n%%EOF\n");
+    input.extend_from_slice(table.as_bytes());
+    (input, first)
+}
+
 #[test]
 fn an_update_to_an_encrypted_file_keeps_both_saves_with_the_same_encryption() {
     // The update writes the pages object (4) again with one more entry: no string or stream, so nothing of it
     // is encrypted.
     for name in ["r3_rc4_128", "r4_aes_128"] {
-        let mut input = file(name);
-        let first = input.len();
-        let t = find(&input, b"trailer << ").unwrap() + 11;
-        let trailer =
-            String::from_utf8(input[t..t + find(&input[t..], b" >>\nstartxref\n").unwrap()].to_vec()).unwrap();
-        let p = find(&input, b"startxref\n").unwrap() + 10;
-        let prev = String::from_utf8(input[p..p + find(&input[p..], b"\n").unwrap()].to_vec()).unwrap();
-        let at = input.len();
-        input.extend_from_slice(b"4 0 obj\n<< /Count 1 /Kids [ 5 0 R ] /Type /Pages /Rotate 0 >>\nendobj\n");
-        let x = input.len();
-        let table =
-            format!("xref\n4 1\n{at:010} 00000 n \ntrailer << {trailer} /Prev {prev} >>\nstartxref\n{x}\n%%EOF\n");
-        input.extend_from_slice(table.as_bytes());
+        let (input, first) = updated(name, 4, b"<< /Count 1 /Kids [ 5 0 R ] /Type /Pages /Rotate 0 >>");
         let r = optimize(&input, &opts());
         let Outcome::Smaller(s) = &r.outcome else { panic!("{name}: {:?}", r.outcome) };
         assert_eq!(s.history_kept, 1, "{name}");
@@ -338,4 +343,40 @@ fn an_update_to_an_encrypted_file_keeps_both_saves_with_the_same_encryption() {
         }
         assert_eq!(optimize(&input, &opts()).data, r.data, "{name}");
     }
+}
+
+#[test]
+fn a_stream_an_update_writes_again_is_encrypted_with_a_vector_of_its_own() {
+    // The update writes the page's content (7) again with one more entry in its dictionary: the same data under the
+    // same key in both revisions, which one vector would turn into the same bytes twice.
+    let input = file("r4_aes_128");
+    let (at, len) = stream_data(&input, 7);
+    let head = format!("<< /Filter /FlateDecode /Length {len} /Again true >>\nstream\n");
+    let (input, _) = updated("r4_aes_128", 7, &[head.as_bytes(), &input[at..at + len], b"\nendstream"].concat());
+    let r = optimize(&input, &opts());
+    let Outcome::Smaller(s) = &r.outcome else { panic!("{:?}", r.outcome) };
+    assert_eq!(s.history_kept, 1);
+    let first = &r.data[..xref::saves(&r.data).unwrap()[0].end];
+    let vector = |cut: &[u8]| {
+        let (at, _) = stream_data(cut, 7);
+        cut[at..at + 16].to_vec()
+    };
+    assert_ne!(vector(first), vector(&r.data));
+}
+
+#[test]
+fn saves_that_differ_in_their_encryption_are_not_kept() {
+    // The update writes the encryption dictionary (10) again as object 11, and its trailer names that one.
+    let input = file("r4_aes_128");
+    let at = find(&input, b"\n10 0 obj\n").unwrap() + 10;
+    let dict = input[at..at + find(&input[at..], b"\nendobj").unwrap()].to_vec();
+    let (mut input, first) = updated("r4_aes_128", 11, &dict);
+    for (old, new) in [(&b"/Encrypt 10 0 R"[..], &b"/Encrypt 11 0 R"[..]), (b"/Size 11", b"/Size 12")] {
+        let at = first + find(&input[first..], old).unwrap();
+        input[at..at + old.len()].copy_from_slice(new);
+    }
+    let r = optimize(&input, &opts());
+    let why = "encrypted: revisions differ in their encryption";
+    assert!(matches!(&r.outcome, Outcome::Untouched(w) if w == why), "{:?}", r.outcome);
+    assert_eq!(r.data, input);
 }
