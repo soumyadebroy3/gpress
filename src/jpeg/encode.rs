@@ -185,7 +185,7 @@ pub fn ycc_planes(rgb: &[u8], w: usize, h: usize) -> Option<Vec<Plane>> {
         return None;
     }
     // The weights of Y add up to 65536 and those of Cb and of Cr to 0, so every result is within 0..=255.
-    let luma = |p: &[u8]| ((19595 * p[0] as u32 + 38470 * p[1] as u32 + 7471 * p[2] as u32 + 32768) >> 16) as u8;
+    let luma = |p: &[u8; 3]| ((19595 * p[0] as u32 + 38470 * p[1] as u32 + 7471 * p[2] as u32 + 32768) >> 16) as u8;
     let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
     let (mut cb, mut cr) = (Vec::with_capacity(cw * ch), Vec::with_capacity(cw * ch));
     for cy in 0..ch {
@@ -204,7 +204,7 @@ pub fn ycc_planes(rgb: &[u8], w: usize, h: usize) -> Option<Vec<Plane>> {
             cr.push(((r + count / 2) / count) as u8);
         }
     }
-    let px = rgb.chunks_exact(3).map(luma).collect();
+    let px = rgb.as_chunks::<3>().0.iter().map(luma).collect();
     Some(vec![Plane { w, h, px }, Plane { w: cw, h: ch, px: cb }, Plane { w: cw, h: ch, px: cr }])
 }
 

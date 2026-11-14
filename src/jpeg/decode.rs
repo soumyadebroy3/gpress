@@ -150,7 +150,7 @@ fn put_block(p: &mut Plane, x: u64, y: u64, coef: &[i32; 64], q: &[u16; 64]) -> 
     }
     idct(&mut b);
     let at = y as usize * 8 * p.w + x as usize * 8;
-    for (r, row) in b.chunks_exact(8).enumerate() {
+    for (r, row) in b.as_chunks::<8>().0.iter().enumerate() {
         for (o, &v) in p.px.get_mut(at + r * p.w..)?.iter_mut().zip(row) {
             *o = (v + 128).clamp(0, 255) as u8;
         }

@@ -346,8 +346,8 @@ fn luma(px: &[u8], channels: usize) -> Cow<'_, [u8]> {
     if channels != 3 {
         return Cow::Borrowed(px);
     }
-    let y = |p: &[u8]| ((19595 * p[0] as u32 + 38470 * p[1] as u32 + 7471 * p[2] as u32 + 32768) >> 16) as u8;
-    Cow::Owned(px.chunks_exact(3).map(y).collect())
+    let y = |p: &[u8; 3]| ((19595 * p[0] as u32 + 38470 * p[1] as u32 + 7471 * p[2] as u32 + 32768) >> 16) as u8;
+    Cow::Owned(px.as_chunks::<3>().0.iter().map(y).collect())
 }
 
 /// A run of equal samples this long, along a row or down a column, is flat (see `is_photo`).
