@@ -2,8 +2,6 @@
 __pycache__/
 /crates/gpress-wasm/js/node_modules/
 /crates/gpress-wasm/js/dist/
-# The package's wrapper and web module, copied beside the demo page by web/build.mjs.
-/web/dist/
 /fuzz/target
 /fuzz/corpus
 /fuzz/artifacts
