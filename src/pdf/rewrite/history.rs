@@ -583,7 +583,7 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
         // can't open a file whose cross-reference stream has a higher one. The new numbers lie above every
         // revision's, so a short early revision under a long later one could have one: the output cut at each
         // revision's end stays below.
-        if (xn as u64 + 1) * 3 > out.len() as u64 {
+        if xn as usize >= out.len() / 3 {
             return Err(TOO_HIGH.into());
         }
         ends.push(out.len());
