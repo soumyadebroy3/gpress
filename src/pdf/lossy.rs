@@ -52,7 +52,8 @@ impl Lossy {
 //
 // What is kept: a candidate of at most nine tenths of the image's lossless size (the smaller of its stored
 // bytes and a quick lossless encode of it), whose JPEG, decoded again, stays close to the samples it was made
-// from (`WHOLE_MSE`, `BLOCK_MSE`). Any other candidate is dropped.
+// from (`WHOLE_MSE`, `BLOCK_MSE`); a JPEG that does not is first coded again at a higher quality
+// (`photo_jpeg`). Any other candidate is dropped.
 
 use super::filters::{self, chain, decode_stage, is_general, Stage};
 use super::images;
@@ -450,8 +451,9 @@ use crate::jpeg::{self, Plane};
 
 /// The most luma error a JPEG candidate may have against the samples it was made from, as mean squared error
 /// in hundredths: 20.56 over the whole image (a PSNR of 35 dB) and 163.34 in its worst block of 16 by 16
-/// (26 dB). The brief's starting values: at quality 75 and up a photo stays well inside both, while a
-/// candidate with ringing around hard edges (line art taken for a photo) falls out on the block floor.
+/// (26 dB). A smooth photo is well inside both at quality 75; one with much fine detail needs 85 or more for
+/// the first (two landscapes of the test corpus: 32.8 and 35.9 dB at 75, 35.7 and 38.4 dB at 85). A JPEG with
+/// ringing around hard edges (line art taken for a photo) falls out on the block floor.
 #[cfg(feature = "jpeg")]
 const WHOLE_MSE: u64 = 2056;
 #[cfg(feature = "jpeg")]
@@ -483,17 +485,22 @@ fn errors(a: &[u8], b: &[u8], w: usize, h: usize) -> (u64, u64) {
     (whole * 100 / (w as u64 * h as u64).max(1), worst)
 }
 
-/// A photo's planes (grey, or Y with Cb and Cr at any size) as a JPEG at `quality`: brought to `size` when
-/// there is one (the chroma planes to half of it each way, which the encoder asks for; a chroma plane that is
-/// smaller than that is not enlarged: None), coded, and given optimal Huffman tables. With the luma plane the
-/// JPEG was made from, for the check.
+/// A photo's planes (grey, or Y with Cb and Cr at any size) as a JPEG, with its size: the planes brought to
+/// `size` when there is one (the chroma planes to half of it each way, which the encoder asks for; a chroma
+/// plane smaller than that is not enlarged, the photo is left alone), coded at `quality`, and given optimal
+/// Huffman tables. The JPEG must be worth it against `stored` and `lossless()` (the image's stored bytes and
+/// its quick lossless size), and decode close to the planes it was made from: when it does not, it is coded
+/// again 10 and then 20 higher (at most 95), so that a photo with much fine detail is still written, with
+/// more bits, instead of staying as large as it was.
 #[cfg(feature = "jpeg")]
 fn photo_jpeg(
     mut planes: Vec<Plane>,
     size: Option<(usize, usize)>,
     quality: u8,
-    deadline: Deadline,
-) -> Result<(Vec<u8>, Plane), &'static str> {
+    stored: usize,
+    lossless: impl FnOnce() -> usize,
+    opt: &Options,
+) -> Result<(Vec<u8>, (usize, usize)), &'static str> {
     let (w, h) = size.unwrap_or((planes[0].w, planes[0].h));
     for (i, p) in planes.iter_mut().enumerate() {
         let (pw, ph) = if i == 0 { (w, h) } else { (w.div_ceil(2), h.div_ceil(2)) };
@@ -501,13 +508,34 @@ fn photo_jpeg(
             return Err("chroma too coarse to code again");
         }
         if (p.w, p.h) != (pw, ph) {
-            let px = resample(&p.px, p.w, p.h, 1, pw, ph, deadline).ok_or("out of time")?;
+            let px = resample(&p.px, p.w, p.h, 1, pw, ph, opt.deadline).ok_or("out of time")?;
             *p = Plane { w: pw, h: ph, px };
         }
     }
-    let coded = jpeg::encode(&planes, quality, deadline).ok_or("the JPEG encoder refused it")?;
-    let coded = jpeg::optimize(&coded).unwrap_or(coded);
-    Ok((coded, planes.swap_remove(0)))
+    let (mut lossless, mut limit) = (Some(lossless), stored);
+    let mut why = "";
+    for step in [0, 10, 20] {
+        let q = quality.saturating_add(step).min(95);
+        if step > 0 && q == quality.saturating_add(step - 10).min(95) {
+            break;
+        }
+        let coded = jpeg::encode(&planes, q, opt.deadline).ok_or("the JPEG encoder refused it")?;
+        let coded = jpeg::optimize(&coded).unwrap_or(coded);
+        // The quick lossless size is worked out once, and only for a JPEG that beats the stored bytes.
+        if worth(coded.len(), limit) {
+            if let Some(f) = lossless.take() {
+                limit = limit.min(f());
+            }
+        }
+        if !worth(coded.len(), limit) {
+            return Err("not a tenth smaller as a JPEG");
+        }
+        match close(&coded, &planes[0], opt) {
+            Ok(()) => return Ok((coded, (w, h))),
+            Err(e) => why = e,
+        }
+    }
+    Err(why)
 }
 
 /// Whether the JPEG `coded` decodes to luma close enough to `y`, the plane it was made from.
@@ -549,13 +577,9 @@ fn from_jpeg(
     if size.is_none() && !opt.lossy.rejpeg {
         return Err("a JPEG photo at or near its floor");
     }
-    let (coded, y) = photo_jpeg(pic.planes, size, quality, opt.deadline)?;
-    let lossless = jpeg::optimize(data).map_or(data.len(), |j| j.len());
-    if !worth(coded.len(), img.s.data.len()) || !worth(coded.len(), lossless) {
-        return Err("JPEG: not a tenth smaller");
-    }
-    close(&coded, &y, opt)?;
-    let dict = new_dict(&img.s.dict, y.w, y.h, b"DCTDecode", None, coded.len());
+    let lossless = || jpeg::optimize(data).map_or(data.len(), |j| j.len());
+    let (coded, (w, h)) = photo_jpeg(pic.planes, size, quality, img.s.data.len(), lossless, opt)?;
+    let dict = new_dict(&img.s.dict, w, h, b"DCTDecode", None, coded.len());
     let what = if size.is_some() { "JPEG resampled" } else { REJPEG };
     Ok(Candidate { dict, data: coded, resampled: size.is_some(), to_jpeg: false, what })
 }
@@ -575,12 +599,9 @@ fn from_photo(
     } else {
         vec![Plane { w, h, px: px.to_vec() }]
     };
-    let (coded, y) = photo_jpeg(planes, size, quality, opt.deadline)?;
-    if !worth(coded.len(), img.s.data.len()) || !worth(coded.len(), quick_flate(px, w, img.channels, opt).1.len()) {
-        return Err("photo: not a tenth smaller as a JPEG");
-    }
-    close(&coded, &y, opt)?;
-    let dict = new_dict(&img.s.dict, y.w, y.h, b"DCTDecode", None, coded.len());
+    let lossless = || quick_flate(px, w, img.channels, opt).1.len();
+    let (coded, (w, h)) = photo_jpeg(planes, size, quality, img.s.data.len(), lossless, opt)?;
+    let dict = new_dict(&img.s.dict, w, h, b"DCTDecode", None, coded.len());
     let what = if size.is_some() { "photo resampled, to JPEG" } else { "photo to JPEG" };
     Ok(Candidate { dict, data: coded, resampled: size.is_some(), to_jpeg: true, what })
 }
@@ -711,6 +732,27 @@ mod tests {
         // Every sample off by 5: 25 everywhere.
         let c = vec![105u8; w * h];
         assert_eq!(errors(&a, &c, w, h), (2500, 2500));
+    }
+
+    #[cfg(feature = "jpeg")]
+    #[test]
+    fn a_busy_photo_is_coded_at_a_higher_quality() {
+        // A ramp under noise of 41 levels: far from its samples at a low quality, close at a high one.
+        let (w, h) = (160, 120);
+        let mut s = 0x2545_f491_4f6c_dd1du64;
+        let px = (0..w * h).map(|i| (60 + (i % w) / 2 + (rng(&mut s) % 41) as usize) as u8).collect();
+        let y = Plane { w, h, px };
+        let opt = Options::default();
+        let at = |q: u8| jpeg::encode(std::slice::from_ref(&y), q, Deadline::NONE).unwrap();
+        assert!(close(&at(75), &y, &opt).is_err() && close(&at(95), &y, &opt).is_ok());
+        let (coded, size) = photo_jpeg(vec![y.clone()], None, 75, usize::MAX, || usize::MAX, &opt).unwrap();
+        assert_eq!(size, (w, h));
+        assert_eq!(close(&coded, &y, &opt), Ok(()));
+        // Two steps up from 50 are not enough: the photo is left alone. So is one that is not worth it.
+        let low = photo_jpeg(vec![y.clone()], None, 50, usize::MAX, || usize::MAX, &opt);
+        assert!(low.unwrap_err().starts_with("quality"));
+        let big = photo_jpeg(vec![y.clone()], None, 75, usize::MAX, || 10, &opt);
+        assert_eq!(big.unwrap_err(), "not a tenth smaller as a JPEG");
     }
 
     #[test]
