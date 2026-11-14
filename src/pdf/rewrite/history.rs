@@ -237,13 +237,18 @@ type JobKey = (usize, Vec<(u32, usize)>);
 /// An object of a revision: its generation, its value, and its job when it is a stream.
 type Def = (u16, usize, Option<usize>);
 
+/// Where object `n` is in a revision's objects, which are in ascending order of number.
+fn at(objs: &[(u32, Def)], n: u32) -> Option<usize> {
+    objs.binary_search_by_key(&n, |o| o.0).ok()
+}
+
 /// One revision, as read.
 struct Rev {
     /// Where the input cut at this revision ends.
     end: usize,
     trailer: Dict,
-    /// What its trailer reaches.
-    objs: BTreeMap<u32, Def>,
+    /// What its trailer reaches, in ascending order of number.
+    objs: Vec<(u32, Def)>,
     /// Numbers the revisions before it reach that it no longer has in use.
     frees: Vec<u32>,
 }
@@ -301,11 +306,8 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
         }
         let listed = doc.entries.keys().next_back().copied().unwrap_or(0);
         top = top.max(listed).max(highest_number(&doc, &objs, c));
-        let frees: Vec<u32> = known.iter().copied().filter(|&n| !in_use(&doc, n)).collect();
-        for n in &frees {
-            known.remove(n);
-        }
-        known.extend(objs.keys());
+        let (kept, frees): (Vec<u32>, Vec<u32>) = known.iter().partition(|&&n| in_use(&doc, n));
+        known = kept.into_iter().chain(objs.keys().copied()).collect();
         // What each stream's job is given, by number, before the values move into the table.
         let looked: Vec<(u32, Vec<u32>)> = objs
             .iter()
@@ -315,22 +317,22 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
             })
             .collect();
         // Most objects are the ones the revision before has under their number.
-        let before = |n: &u32| revs.last().and_then(|r| r.objs.get(n)).map(|d| d.1);
-        let mut table: BTreeMap<u32, Def> =
-            objs.into_iter().map(|(n, (g, o))| (n, (g, values.intern(o, before(&n)), None))).collect();
+        let before = |n: u32| revs.last().and_then(|r| Some(r.objs[at(&r.objs, n)?].1 .1));
+        let mut table: Vec<(u32, Def)> =
+            objs.into_iter().map(|(n, (g, o))| (n, (g, values.intern(o, before(n)), None))).collect();
         if values.stored > input.len() {
             return Err(xref::TOO_MANY.into());
         }
         for (n, refs) in looked {
-            let value = |n: &u32| table.get(n).map(|d| d.1);
-            let Some(v) = value(&n) else { continue };
-            let key: JobKey = (v, refs.iter().filter_map(|m| Some((*m, value(m)?))).collect());
+            let value = |n: u32| at(&table, n).map(|i| table[i].1 .1);
+            let Some(v) = value(n) else { continue };
+            let key: JobKey = (v, refs.iter().filter_map(|&m| Some((m, value(m)?))).collect());
             let job = *jobs_by_key.entry(key.clone()).or_insert_with(|| {
                 keys.push((n, key));
                 keys.len() - 1
             });
-            if let Some(d) = table.get_mut(&n) {
-                d.2 = Some(job);
+            if let Some(i) = at(&table, n) {
+                table[i].1 .2 = Some(job);
             }
         }
         version = doc.version;
@@ -380,8 +382,7 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
                 .collect(),
         })
         .collect();
-    let mut order: Vec<usize> = (0..jobs.len()).collect();
-    order.sort_by_key(|&u| (std::cmp::Reverse(jobs[u].s.data.len()), u));
+    let order = largest_first(&jobs);
     let dbg = std::env::var_os("PDFE_DEBUG").is_some();
     let store = flate::deflate::Shared::with_store(workers.clone(), opt.store_budget);
     let done = par::map(pool, jobs.len(), Some(&order), |u| run_job(&jobs[u], &store, opt, dbg));
@@ -407,8 +408,8 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
         next += 1;
         n.ok_or_else(|| "object numbers far apart".to_string())
     };
-    // What the output defines so far, by the input value each number was written from.
-    let mut defined: BTreeMap<u32, Def> = BTreeMap::new();
+    // What the output defines so far, by the input value each number was written from. Only looked up.
+    let mut defined: HashMap<u32, Def> = HashMap::new();
     let mut ends = Vec::with_capacity(of);
     let mut prev = None;
     let mut objstm_bytes = 0usize;
@@ -422,7 +423,7 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
         // Every object this revision reaches that the output doesn't define yet, or defines from another value.
         let mut direct: BTreeMap<u32, (u16, Vec<u8>)> = BTreeMap::new();
         let mut packable: Vec<(u32, &Obj)> = Vec::new();
-        for (&n, &def) in &rev.objs {
+        for &(n, def) in &rev.objs {
             if defined.get(&n) == Some(&def) || k > 0 && defined.contains_key(&n) && planted(Fault::Unwritten) {
                 continue;
             }
@@ -480,47 +481,21 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
         }
 
         // Its own object streams, grouped by kind.
-        packable.sort_by_cached_key(|&(n, o)| (kind_key(o), n));
+        by_kind(&mut packable);
         // The rows of this revision's section: one for each object written, each object taken away, and itself.
         let mut rows: Vec<(u32, u8, u64, u64)> = Vec::new();
         let mut raws = Vec::new();
         for chunk in packable.chunks(opt.objstm_size.max(1)) {
             let sn = number()?;
-            let mut head = Vec::new();
-            let mut body = Vec::new();
-            for (i, (n, o)) in chunk.iter().enumerate() {
-                if i > 0 {
-                    body.push(b'\n');
-                }
-                head.extend_from_slice(format!("{} {} ", n, body.len()).as_bytes());
-                body.extend_from_slice(&to_bytes(o));
-                rows.push((*n, 2, sn as u64, i as u64));
-            }
-            let first = head.len();
-            head.extend_from_slice(&body);
-            raws.push((sn, chunk.len(), first, head));
+            rows.extend(chunk.iter().enumerate().map(|(i, (n, _))| (*n, 2, sn as u64, i as u64)));
+            let (raw, first) = objstm_raw(chunk);
+            raws.push((sn, chunk.len(), first, raw));
         }
         objstm_bytes += raws.iter().map(|r| r.3.len()).sum::<usize>();
         let structure = structure_flate(opt, objstm_bytes, input.len());
-        let zs = par::map(pool, raws.len(), None, |i| flate::deflate_zlib(&raws[i].3, &structure));
+        let zs = deflate_each(pool, &raws.iter().map(|r| r.3.as_slice()).collect::<Vec<_>>(), &structure);
         for (&(sn, count, first, _), z) in raws.iter().zip(zs) {
-            let mut d = Dict::default();
-            d.set(b"Type", Obj::Name(b"ObjStm".to_vec()));
-            d.set(b"N", Obj::Int(count as i64));
-            d.set(b"First", Obj::Int(first as i64));
-            d.set(b"Filter", Obj::Name(b"FlateDecode".to_vec()));
-            // Encrypted as a stream, under its own number; the objects inside are not encrypted on their own.
-            let (mut d, z) = match crypt {
-                Some(c) => c.seal_stream_at(k as u32, sn, 0, &d, &z).map_err(|e| format!("object stream: {e}"))?,
-                None => (d, z),
-            };
-            d.set(b"Length", Obj::Int(z.len() as i64));
-            let mut body = Vec::new();
-            Writer { out: &mut body }.dict(&d);
-            body.extend_from_slice(b"stream\n");
-            body.extend_from_slice(&z);
-            body.extend_from_slice(b"\nendstream");
-            direct.insert(sn, (0, body));
+            direct.insert(sn, (0, objstm_body(crypt, k as u32, sn, (count, first), z)?));
             stats.objstms += 1;
         }
         drop(raws);
@@ -550,7 +525,7 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
         let xn = number()?;
         let xref_off = out.len();
         rows.push((xn, 1, xref_off as u64, 0));
-        rows.sort_unstable();
+        rows.sort_unstable_by_key(|r| r.0);
         let w1 = bytes_for(rows.iter().map(|r| r.2).max().unwrap_or(0));
         let w2 = bytes_for(rows.iter().map(|r| r.3).max().unwrap_or(0));
         let cols = 1 + w1 + w2;
@@ -566,13 +541,6 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
                 _ => runs.push((n, 1)),
             }
         }
-        // With PNG "Up" prediction when that is smaller, its parameters counted (as in `rewrite`).
-        let up = images::png_filter(&plain, cols, 1, images::Choice::Fixed(2));
-        let structure = structure_flate(opt, objstm_bytes + plain.len() + up.len(), input.len());
-        let mut both = par::map(pool, 2, None, |i| flate::deflate_zlib(if i == 0 { &plain } else { &up }, &structure));
-        let (Some(z_up), Some(z_plain)) = (both.pop(), both.pop()) else {
-            return Err("cross-reference stream not encoded".into());
-        };
         let mut xd = Dict::default();
         xd.set(b"Type", Obj::Name(b"XRef".to_vec()));
         xd.set(b"Size", Obj::Int(xn as i64 + 1));
@@ -595,24 +563,8 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
         if k > 0 && planted(Fault::AddedKey) {
             xd.set(b"Added", Obj::Null);
         }
-        xd.set(b"Filter", Obj::Name(b"FlateDecode".to_vec()));
-        let mut p = Dict::default();
-        p.set(b"Predictor", Obj::Int(12));
-        p.set(b"Columns", Obj::Int(cols as i64));
-        let parms = to_bytes(&Obj::Dict(p.clone())).len() + b"/DecodeParms".len();
-        let zx = if z_up.len() + parms < z_plain.len() {
-            xd.set(b"DecodeParms", Obj::Dict(p));
-            z_up
-        } else {
-            z_plain
-        };
-        xd.set(b"Length", Obj::Int(zx.len() as i64));
-        out.extend_from_slice(format!("{xn} 0 obj\n").as_bytes());
-        Writer { out: &mut out }.dict(&xd);
-        out.extend_from_slice(b"stream\n");
-        out.extend_from_slice(&zx);
-        out.extend_from_slice(b"\nendstream\nendobj\n");
-        out.extend_from_slice(format!("startxref\n{xref_off}\n%%EOF\n").as_bytes());
+        let structure = |more| structure_flate(opt, objstm_bytes + more, input.len());
+        write_xref(&mut out, xn, xd, (&plain, cols), &structure, pool)?;
         if out.len() >= input.len() {
             return Err("no saving possible".into());
         }
@@ -714,7 +666,7 @@ fn check(
         let proven: Vec<(u32, Proof)> = objs
             .iter()
             .filter_map(|(&n, (_, o))| {
-                let (encoded, p) = proved.get(rev.objs.get(&n)?.2?)?.as_ref()?;
+                let (encoded, p) = proved.get(rev.objs[at(&rev.objs, n)?].1 .2?)?.as_ref()?;
                 (**encoded == *o)
                     .then(|| (n, Proof { of: n, sha: p.sha, filter: p.filter.clone(), parms: p.parms.clone() }))
             })

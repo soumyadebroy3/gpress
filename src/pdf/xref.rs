@@ -813,7 +813,7 @@ fn rows_agree<'r>(rows: impl Iterator<Item = &'r (u32, Entry)>) -> bool {
 /// on, a trailer without a key that the save before it has and that names an object there, a trailer nested 16
 /// levels deep, a
 /// row with a lower generation than an older row of its number, a row with a generation beyond 16 bits or of an
-/// unknown type, a linearisation dictionary whose /L is the length of the whole file.
+/// unknown type, a linearisation dictionary whose /L is the length of the whole file or a real number.
 ///
 /// No object is loaded. Each section is read once, all of them within the rows a file of this size may have.
 pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
@@ -977,8 +977,9 @@ pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
     // Poppler, and PDFium when it loads a file the way Chrome does, take a linearised file from its first-page
     // section when the first object's /L is the file's length: they then never see a later save.
     let whole = |l: &Obj| match l {
-        Obj::Int(l) => *l as f64 == data.len() as f64,
-        Obj::Real(l) => std::str::from_utf8(l).ok().and_then(|l| l.parse().ok()) == Some(data.len() as f64),
+        Obj::Int(l) => usize::try_from(*l) == Ok(data.len()),
+        // A real number isn't read here: a file with one stays as it is.
+        Obj::Real(_) => true,
         _ => false,
     };
     let mut lx = Lexer::new(data, 0);
