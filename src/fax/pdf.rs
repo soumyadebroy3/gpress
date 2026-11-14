@@ -6,9 +6,9 @@
 //! every JBIG2 decoder can hold, no byte alignment (readers disagree on it), EOL codes where every reader
 //! expects them, every row decoded and written back bit for bit, the data ending with end codes or only 0
 //! bits, coding work in proportion to the data, and the JBIG2 stream at least 5% smaller (the rewrite's rule
-//! `jbig2_min_saving`) and decoding (with our decoder) to the same pixels. JBIG2Decode gives 1 for white, CCITTFaxDecode gives 0 for black unless
-//! BlackIs1: the JBIG2 bitmap is chosen so the filter's output is the same bits, and every other entry of the
-//! image dictionary (Decode, ImageMask, masks) keeps its meaning.
+//! `jbig2_min_saving`) and decoding (with our decoder) to the same pixels. JBIG2Decode gives 1 for white,
+//! CCITTFaxDecode gives 0 for black unless BlackIs1: the JBIG2 bitmap is chosen so the filter's output is the
+//! same bits, and every other entry of the image dictionary (Decode, ImageMask, masks) keeps its meaning.
 
 use super::ccitt::{self, Image, Limits, Parsed, Scheme, Stop, MAX_COLUMNS};
 

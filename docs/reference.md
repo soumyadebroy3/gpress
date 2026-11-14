@@ -6,9 +6,9 @@ the benchmark and check scripts.
 
 ## Options
 
-Everything a caller can tune is a field of `Options` (the C struct has every field but `store_budget`, and
-the TypeScript options most of them; `store_budget` stays at its default in both), with `Options::check`
-saying whether the engine accepts a set; nothing is read from the environment except
+Everything a caller can tune is a field of `Options` (the C struct has every field but `store_budget` and
+`rewrite_rules`, and the TypeScript options most of them; those two stay at their defaults in both), with
+`Options::check` saying whether the engine accepts a set; nothing is read from the environment except
 `PDFE_DEBUG`, which only prints timings and figures to standard error. For a normal PDF that includes one
 summary line per file, which `bench/p5.py` reads:
 
@@ -32,11 +32,12 @@ the encoding time its answers saved, roughly), and the segments written from an 
 | `respect_conformance` | on | Normal PDF: leave PDF/A, PDF/X, signed, certified and usage-rights files untouched. Off, every object's value is still kept, but those guarantees are given up. |
 | `flate_over_jpeg` | on | Normal PDF: also try our Flate in front of a JPEG (never in front of JPEG 2000 or JBIG2, whose filter chain keeps its shape for readers such as pdf.js). |
 | `jpeg_tables` | on | Normal PDF: JPEGs get optimal Huffman tables (the same coefficients). |
-| `jbig2` | on | Normal PDF: CCITT fax images become JBIG2 when that is at least 5% smaller (the same pixels). |
+| `jbig2` | on | Normal PDF: CCITT fax images become JBIG2 when that is at least 5% smaller (the same pixels; the rule `rewrite_jbig2_min_saving`). |
 | `rewrite_encrypted` | on | Normal PDF: files the empty user password opens are rewritten with their encryption kept exactly. Off, every encrypted file is left untouched. |
 | `decrypt` | on | Archive: the streams of such files are stored decrypted (so they get the zlib rebuild, Lepton and the model) and encrypted again on expand. |
 | `use_existing_libraries` | on | Use Lepton for JPEG streams in the archive when the build has it (`--features existing`). An archive with parts Lepton made expands only with such a build (the error says so). |
 | `time_budget` | none | Give up after this much wall time: `Error::TimeBudget` and no output, the input unchanged. Checked between streams, Flate segments and archive parts (every 64 KiB of model work) in all three operations, so it can be overshot by a little (on expand by one part's zlib re-creation). A call that finishes in time gives the same bytes as one without a budget. |
+| `rewrite_rules` | each rule's default | Normal PDF: the values the rewrite decides by, each a rule with a name, a default and a range ([Rules of the rewrite](#rules-of-the-rewrite)). |
 
 Memory while expanding follows these three: at most about `max_len` for the output, `max_len + max_decoded`
 for the model's history (one byte per byte it codes, and while an image part is coded a ring of its residuals:
@@ -54,15 +55,136 @@ holds them to 512 MiB.
 
 Three kinds of constants stay in the code: the ones that define the file formats (a decoder must agree with
 its encoder on those: the model's settings, the part tags, the fax work budget); the ones readers set (JBIG2
-images of at most 2^30 pixels, the EOL rules readers disagree on); and measured thresholds (JBIG2 only when
-5% smaller, at most 2048 pixels of fax work per byte, at most 4096 JPEG segments, plain coding below effort
-50, fax streams of at least 64 bytes, Flate in front of a JPEG only when it saves 1%, the second Flate pass
-only for JPEGs with poor tables, Lepton only when 10% smaller than the Flate bytes, the quick budget's 16
-bytes per byte and 4 MiB, 16 cross-reference rows per byte of the file plus 65536). The engine's own types
-(`pdf::rewrite::Options`, `pack::PackOptions`, `pack::UnpackOptions`, `flate::Options` with its iterations,
-exact rounds, chain length, segment size, splitting, alternatives, multi-start limit, nice length and
-polishing) are public too, for measuring and for callers that want a knob the library's `Options` doesn't
+images of at most 2^30 pixels, the EOL rules readers disagree on); and measured thresholds (at most 2048
+pixels of fax work per byte, at most 4096 JPEG segments, plain coding below effort 50, fax streams of at least
+64 bytes, Lepton only when 10% smaller than the Flate bytes, 16 cross-reference rows per byte of the file plus
+65536). The values the rewrite decides by (JBIG2 only when 5% smaller, Flate in front of a JPEG only when it
+saves 1%, the second Flate pass only for JPEGs with poor tables, the quick budget's 16 bytes per byte and 4 MiB,
+and more) are rules with those as their defaults: [Rules of the rewrite](#rules-of-the-rewrite). The engine's
+own types (`pdf::rewrite::Options`, `pack::PackOptions`, `pack::UnpackOptions`, `flate::Options` with its
+iterations, exact rounds, chain length, segment size, splitting, alternatives, multi-start limit, nice length
+and polishing) are public too, for measuring and for callers that want a knob the library's `Options` doesn't
 carry.
+
+## Rules of the rewrite
+
+The values the lossless rewrite decides by, each a rule: a whole number with a name, a default (the value that
+was fixed in the code before), a lowest and a highest value. A rule that is not set has its default, and with
+no rule set every output is byte for byte what it was before. In Rust they are the field `rewrite_rules` of
+`Options`: `options.rewrite_rules.set("jbig2_min_saving", 10)` (the name without `rewrite_`) returns false, and
+changes nothing, for a name that is no rule or a value outside the rule's range; nothing is moved to the
+nearest allowed value. Any value in a rule's range is safe: the output is still read back and compared with
+the input, returned only when smaller, and the same for any thread count. The rules of a table (`image_level_`,
+`big_level_`, `predictor_sample_`, `work_cost_`) are one rule per effort or band of 20.
+
+| Rule | Default | Lowest | Highest | What it decides |
+| --- | ---: | ---: | ---: | --- |
+| `rewrite_min_file_saving` | 1 | 1 | 1,099,511,627,776 | The rewritten file is returned only when it is at least this many bytes smaller than the input; else the input comes back untouched. |
+| `rewrite_min_stream_saving` | 1 | 1 | 1,099,511,627,776 | A stream gets a new encoding only when its new data is at least this many bytes smaller than its stored data. |
+| `rewrite_flate_over_image_min_saving` | 1 | 0 | 100 | Our Flate goes in front of an image codec that had no general filter (a JPEG, say) only when it saves more than this percent (over the JPEG with its new tables, when there is one). |
+| `rewrite_jpeg_min_saving` | 1 | 1 | 1,099,511,627,776 | A JPEG with new Huffman tables is taken only when it is at least this many bytes smaller. |
+| `rewrite_jpeg_code_orders` | 7 | 1 | 7 | Which assignments of code words are tried for each JPEG scan (bits: 1 by symbol value, 2 most frequent first, 4 fewest one bits); the one with the fewest 0xFF bytes is written, the first of equals. |
+| `rewrite_jpeg_second_pass_flate_gain` | 10 | 0 | 100 | From `rewrite_full_from`, a JPEG's original bytes get a Flate pass of their own only when Flate took this percent off the JPEG with its new tables, |
+| `rewrite_jpeg_second_pass_table_gain` | 10 | 0 | 100 | and the new tables took this percent off the original. |
+| `rewrite_jbig2_min_saving` | 5 | 0 | 100 | A fax (CCITT) image becomes JBIG2 only when that is at least this percent smaller, and at least a byte. |
+| `rewrite_max_predictor_image` | 50,331,648 | 0 | 1,099,511,627,776 | An image that decodes to more gets no predictor search. A value over the default counts only as far as `max_stream` (the search holds copies of the image). |
+| `rewrite_min_predictor_image` | 1,024 | 0 | 1,099,511,627,776 | An image with fewer bytes of samples gets no predictor search. |
+| `rewrite_predictor_candidates` | 55 | 0 | 63 | The predictors ranked by encoding them (bits: 1 none, 2 Sub, 4 Up, 8 Average, 16 Paeth, 32 a type for each row), ranked in the order none, each row, Up, Sub, Paeth, Average; the first of equals wins. 55 is all but Average. |
+| `rewrite_fast_predictor_candidates` | 63 | 0 | 63 | The predictors the fast path's estimate compares (the same bits, in the order of the bits). |
+| `rewrite_fast_predictor_min_bits` | 8 | 1 | 16 | On the fast path an image with fewer bits per component gets no predictor. |
+| `rewrite_row_predictor_rule` | 0 | 0 | 1 | How the type of each row is chosen: 0 the smallest sum of absolute residuals (libpng's way), 1 the fewest bits by an order-0 estimate of the row's residuals. |
+| `rewrite_predictor_sample_bands` | 8 | 1 | 1,024 | The rows the predictors are ranked on are taken as this many bands spread over the image. |
+| `rewrite_fast_predictor_sample` | 65,536 | 0 | 1,099,511,627,776 | Bytes of an image the fast path's estimate looks at. |
+| `rewrite_predictor_sample_0` | 65,536 | 0 | 1,099,511,627,776 | Bytes of an image the predictors are ranked on, when they are ranked by encoding them, at efforts 0 to 19. The whole image when it is smaller, and from `rewrite_full_from` on. |
+| `rewrite_predictor_sample_20` | 131,072 | 0 | 1,099,511,627,776 | The same at efforts 20 to 39. |
+| `rewrite_predictor_sample_40` | 262,144 | 0 | 1,099,511,627,776 | The same at efforts 40 to 59. |
+| `rewrite_predictor_sample_60` | 524,288 | 0 | 1,099,511,627,776 | The same at efforts 60 to 79. |
+| `rewrite_predictor_sample_80` | 1,048,576 | 0 | 1,099,511,627,776 | The same at efforts 80 to 99. |
+| `rewrite_predictor_rank_level` | 7 | 0 | 12 | The fast encoder's level the predictors are ranked with on the fast path (0: the strong encoder's quick settings, as from effort 20). |
+| `rewrite_rank_together` | 8,388,608 | 0 | 1,099,511,627,776 | Predictor candidates whose input is up to this size are ranked side by side, bigger ones one after another. Speed and memory only. |
+| `rewrite_object_streams` | 1 | 0 | 1 | Small objects are packed into object streams (1) or written one by one (0). |
+| `rewrite_object_stream_order` | 0 | 0 | 1 | The order of the objects in the object streams: 0 by kind (dictionaries by type and subtype, then arrays, then the rest), 1 by object number. |
+| `rewrite_xref_predictor` | 0 | 0 | 2 | The cross-reference stream: 0 the smaller of plain and Up-predicted, 1 always plain, 2 always Up. |
+| `rewrite_string_form` | 0 | 0 | 1 | A string is written in the shorter of its two forms (0; a literal on a tie) or in hexadecimal (1). |
+| `rewrite_full_from` | 100 | 0 | 101 | From this effort on there are no budgets: every stream gets the effort's full settings and predictors are ranked on the whole image (101: never). |
+| `rewrite_trial_predictors_from` | 10 | 0 | 20 | On the fast path, from this effort on predictors are chosen by encoding the candidates, below it from an estimate. |
+| `rewrite_bridge_from` | 10 | 0 | 20 | From this effort on, below 20, the streams that take the most room get the strong encoder's quick settings within a budget (20: never). |
+| `rewrite_bridge_start` | 16 | 0 | 1,048,576 | That budget at `rewrite_bridge_from`, in 256ths of the file's size, |
+| `rewrite_bridge_growth` | 200 | 100 | 1,000 | and what it is multiplied by for each point of effort above, in percent. |
+| `rewrite_bridge_test` | 1 | 0 | 1 | On that bridge, a Flate stream (not an image) that effort 0's settings cannot shrink is kept as it is (1), or gets the strong encoder all the same (0). |
+| `rewrite_big_stream` | 4,194,304 | 0 | 1,099,511,627,776 | Below effort 20, a stream other than an image that decodes to more than this gets the level of `rewrite_big_level_` at most. |
+| `rewrite_image_level_0` | 7 | 1 | 12 | The fast encoder's level for images at effort 0. |
+| `rewrite_image_level_1` | 7 | 1 | 12 | The fast encoder's level for images at effort 1. |
+| `rewrite_image_level_2` | 7 | 1 | 12 | The fast encoder's level for images at effort 2. |
+| `rewrite_image_level_3` | 9 | 1 | 12 | The fast encoder's level for images at effort 3. |
+| `rewrite_image_level_4` | 9 | 1 | 12 | The fast encoder's level for images at effort 4. |
+| `rewrite_image_level_5` | 9 | 1 | 12 | The fast encoder's level for images at effort 5. |
+| `rewrite_image_level_6` | 10 | 1 | 12 | The fast encoder's level for images at effort 6. |
+| `rewrite_image_level_7` | 10 | 1 | 12 | The fast encoder's level for images at effort 7. |
+| `rewrite_image_level_8` | 11 | 1 | 12 | The fast encoder's level for images at effort 8. |
+| `rewrite_image_level_9` | 11 | 1 | 12 | The fast encoder's level for images at effort 9. |
+| `rewrite_image_level_10` | 12 | 1 | 12 | The fast encoder's level for images at effort 10. |
+| `rewrite_image_level_11` | 12 | 1 | 12 | The fast encoder's level for images at effort 11. |
+| `rewrite_image_level_12` | 12 | 1 | 12 | The fast encoder's level for images at effort 12. |
+| `rewrite_image_level_13` | 12 | 1 | 12 | The fast encoder's level for images at effort 13. |
+| `rewrite_image_level_14` | 12 | 1 | 12 | The fast encoder's level for images at effort 14. |
+| `rewrite_image_level_15` | 12 | 1 | 12 | The fast encoder's level for images at effort 15. |
+| `rewrite_image_level_16` | 12 | 1 | 12 | The fast encoder's level for images at effort 16. |
+| `rewrite_image_level_17` | 12 | 1 | 12 | The fast encoder's level for images at effort 17. |
+| `rewrite_image_level_18` | 12 | 1 | 12 | The fast encoder's level for images at effort 18. |
+| `rewrite_image_level_19` | 12 | 1 | 12 | The fast encoder's level for images at effort 19. |
+| `rewrite_big_level_0` | 9 | 1 | 12 | The fast encoder's highest level for a stream over `rewrite_big_stream` at effort 0. |
+| `rewrite_big_level_1` | 9 | 1 | 12 | The fast encoder's highest level for a stream over `rewrite_big_stream` at effort 1. |
+| `rewrite_big_level_2` | 9 | 1 | 12 | The fast encoder's highest level for a stream over `rewrite_big_stream` at effort 2. |
+| `rewrite_big_level_3` | 9 | 1 | 12 | The fast encoder's highest level for a stream over `rewrite_big_stream` at effort 3. |
+| `rewrite_big_level_4` | 9 | 1 | 12 | The fast encoder's highest level for a stream over `rewrite_big_stream` at effort 4. |
+| `rewrite_big_level_5` | 9 | 1 | 12 | The fast encoder's highest level for a stream over `rewrite_big_stream` at effort 5. |
+| `rewrite_big_level_6` | 10 | 1 | 12 | The fast encoder's highest level for a stream over `rewrite_big_stream` at effort 6. |
+| `rewrite_big_level_7` | 10 | 1 | 12 | The fast encoder's highest level for a stream over `rewrite_big_stream` at effort 7. |
+| `rewrite_big_level_8` | 10 | 1 | 12 | The fast encoder's highest level for a stream over `rewrite_big_stream` at effort 8. |
+| `rewrite_big_level_9` | 10 | 1 | 12 | The fast encoder's highest level for a stream over `rewrite_big_stream` at effort 9. |
+| `rewrite_big_level_10` | 12 | 1 | 12 | The fast encoder's highest level for a stream over `rewrite_big_stream` at effort 10. |
+| `rewrite_big_level_11` | 12 | 1 | 12 | The fast encoder's highest level for a stream over `rewrite_big_stream` at effort 11. |
+| `rewrite_big_level_12` | 12 | 1 | 12 | The fast encoder's highest level for a stream over `rewrite_big_stream` at effort 12. |
+| `rewrite_big_level_13` | 12 | 1 | 12 | The fast encoder's highest level for a stream over `rewrite_big_stream` at effort 13. |
+| `rewrite_big_level_14` | 12 | 1 | 12 | The fast encoder's highest level for a stream over `rewrite_big_stream` at effort 14. |
+| `rewrite_big_level_15` | 12 | 1 | 12 | The fast encoder's highest level for a stream over `rewrite_big_stream` at effort 15. |
+| `rewrite_big_level_16` | 12 | 1 | 12 | The fast encoder's highest level for a stream over `rewrite_big_stream` at effort 16. |
+| `rewrite_big_level_17` | 12 | 1 | 12 | The fast encoder's highest level for a stream over `rewrite_big_stream` at effort 17. |
+| `rewrite_big_level_18` | 12 | 1 | 12 | The fast encoder's highest level for a stream over `rewrite_big_stream` at effort 18. |
+| `rewrite_big_level_19` | 12 | 1 | 12 | The fast encoder's highest level for a stream over `rewrite_big_stream` at effort 19. |
+| `rewrite_quick_budget_factor` | 16 | 0 | 1,048,576 | Below `rewrite_full_from`, decoded bytes that may be re-encoded in all: this many per byte of the file at effort 0, |
+| `rewrite_quick_budget_doubling` | 10 | 1 | 100 | twice as many every so many points of effort, |
+| `rewrite_quick_budget_floor` | 4,194,304 | 0 | 1,099,511,627,776 | and never fewer than this. A stream that does not fit in what is left is kept as it is. |
+| `rewrite_work_budget_start` | 100 | 0 | 1,048,576 | Extra encoder work per byte of the file from effort 20, in hundredths of quick-encoding one decoded byte: this much at effort 1, |
+| `rewrite_work_budget_doubling` | 10 | 1 | 100 | twice as much every so many points of effort. |
+| `rewrite_work_cost_20` | 170 | 100 | 100,000 | The cost of a decoded byte at the Flate settings of efforts 20 to 39, in percent of its cost at the quick settings. |
+| `rewrite_work_cost_40` | 200 | 100 | 100,000 | The same for efforts 40 to 59. |
+| `rewrite_work_cost_60` | 310 | 100 | 100,000 | The same for efforts 60 to 79. |
+| `rewrite_work_cost_80` | 390 | 100 | 100,000 | The same for efforts 80 to 99. |
+| `rewrite_step_down` | 1 | 0 | 1 | A stream too big for the effort's settings is offered the lower steps of 20 before the quick settings (1), or the quick settings at once (0). |
+| `rewrite_budget_order` | 0 | 0 | 1 | The budgets go to the streams that take the most room first (0), or in the order of their object numbers (1). |
+| `rewrite_job_check_ratio` | 2 | 1 | 1,099,511,627,776 | A stream job checks its own new data only when the stream decodes to at least this many times its stored size (the self-check then finds it by its hash). Speed only. |
+
+Why the ranges end where they do:
+
+- The least savings in bytes (`rewrite_min_file_saving`, `rewrite_min_stream_saving`, `rewrite_jpeg_min_saving`)
+  are at least 1, so an output is never as large as what it replaces.
+- A highest value of 1,099,511,627,776 (1 TiB) is more than any input at the default `max_input` (1 GiB):
+  it means "never" or "always". `rewrite_max_predictor_image` above its default still counts only as
+  far as `max_stream`, since the search holds copies of the image.
+- `rewrite_jpeg_code_orders` keeps at least one order, and `rewrite_predictor_sample_bands` at least one band.
+  `rewrite_quick_budget_doubling`, `rewrite_work_budget_doubling` and `rewrite_job_check_ratio` divide, so they
+  are at least 1.
+- `rewrite_fast_predictor_min_bits` runs over the bit depths an image can have (1 to 16), and the levels over
+  the fast encoder's (1 to 12; `rewrite_predictor_rank_level` 0 is the strong encoder's quick settings).
+- `rewrite_bridge_growth` is at least 100%, so the bridge's budget does not shrink as the effort grows, and
+  `rewrite_work_cost_` at least 100%, so no step of 20 costs less than the quick settings. Larger budgets cost
+  time, not safety: every stream is still held to `max_stream`, and `time_budget` ends a run that takes too
+  long.
+- `rewrite_full_from`, `rewrite_trial_predictors_from` and `rewrite_bridge_from` are efforts; 101 and 20 mean
+  "never". Effort 20 itself (the fast encoder below it) and the bands of 20 stay fixed: the tables here and the
+  Flate encoder's are laid out on them.
 
 ## Building only what a product needs
 

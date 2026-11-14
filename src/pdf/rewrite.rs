@@ -983,7 +983,10 @@ fn big_level(effort: u8, rules: &RewriteRules) -> u8 {
 /// when those bytes fit in `bridge_budget` (a budget of their own, as large as the streams' one), so that
 /// effort 19 ends where 20 begins.
 fn structure_flate(opt: &Options, raw: usize, input_len: usize) -> flate::Options {
-    if opt.flate.fast > 0 && raw as f64 <= bridge_budget(opt.effort, input_len, &opt.rules) {
+    if opt.flate.fast > 0
+        && on_bridge(&opt.rules, opt.effort)
+        && raw as f64 <= bridge_budget(opt.effort, input_len, &opt.rules)
+    {
         flate::Options { shared: opt.flate.shared.clone(), deadline: opt.flate.deadline, ..flate::Options::quick() }
     } else {
         opt.flate.clone()
