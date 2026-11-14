@@ -98,6 +98,11 @@ Floors that hold at every lossy level:
 - a file the safety gate leaves untouched (signed, PDF/A, PDF/X, needing a password...) stays untouched, and an
   encrypted file keeps its encryption.
 
+What the six efforts make of the 907 test files and of a set of photographs is in the README's table
+("Effort levels") and, with a row per file of the photo set, in bench/RESULTS.md ("Sizes at the six efforts").
+What decides that an image is a photo is cautious: an image in doubt counts as line art, and on that set none
+of the three scikit-image photographs was taken for a photo. A progressive JPEG is left alone at every level.
+
 ## Building only what a product needs
 
 The parts of the engine are Cargo features, all on by default. A product that needs fewer builds with
@@ -125,8 +130,8 @@ with 10 (`pack` and `unpack` without `archive`, or a measuring command of a part
 only a build with the part can tell the two apart, as with Lepton's parts and `NeedsExistingLibrary`. Neither
 ever gives a wrong file.
 
-The npm package has two modules: `dist/gpress.wasm` with every part (383,303 bytes of gzip), and
-`dist/gpress-web.wasm`, the `web` set (267,937 bytes of gzip, 30% less). Both have the same wrapper; in the web
+The npm package has two modules: `dist/gpress.wasm` with every part (432,454 bytes of gzip), and
+`dist/gpress-web.wasm`, the `web` set (315,675 bytes of gzip, 27% less). Both have the same wrapper; in the web
 module `compress` and `expand` throw a `GpressFeatureError` whose `feature` is `"archive"`, and `g.features`
 lists the parts a module has.
 

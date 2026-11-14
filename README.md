@@ -21,14 +21,14 @@
 </p>
 
 <p align="center">
-  <a href="#benchmarks"><img src="docs/assets/hero.svg" width="880" alt="gpress archive: 60.9% of the original size on 907 public test PDFs, against 76.3% for the best of xz, Brotli and Zstandard. Normal PDF: 85.0% of the input on the 90 files gpress rewrites from a hard 120-file sample, against 87.2% for qpdf 11.9.0 at its strongest lossless setting. Web module: 268 KB of gzipped WebAssembly for normal PDFs, 383 KB with the archive, the same output as the native library."></a>
+  <a href="#benchmarks"><img src="docs/assets/hero.svg" width="880" alt="gpress archive: 60.9% of the original size on 907 public test PDFs, against 76.3% for the best of xz, Brotli and Zstandard. Normal PDF: 85.0% of the input on the 90 files gpress rewrites from a hard 120-file sample, against 87.2% for qpdf 11.9.0 at its strongest lossless setting. Web module: 316 KB of gzipped WebAssembly for normal PDFs, 432 KB with the archive, the same output as the native library."></a>
 </p>
 
 <p align="center">
   <strong>Archives about 20% smaller than the best of xz, Brotli and Zstandard</strong><br>
   <strong>Normal PDFs 2.5% smaller in total than qpdf 11.9.0's strongest lossless output, on the files gpress rewrites</strong><br>
-  <strong>Efforts 0 to 40 lossless &middot; 268 KB gzipped in the browser for normal PDFs, 383 KB with the archive</strong><br>
-  <sub>Archive: 907 public test PDFs, format 9, effort 100, built with Lepton. Normal PDF: totals on the 90 files gpress rewrites from a hard 120-file sample, default effort. One thread. Browser: the gzip sizes of the two WebAssembly modules, as recorded in bench/sizes.json on 2026-10-22, before archive format 9. <a href="#benchmarks">Details</a>.</sub>
+  <strong>Efforts 0 to 40 lossless &middot; 316 KB gzipped in the browser for normal PDFs, 432 KB with the archive</strong><br>
+  <sub>Archive: 907 public test PDFs, format 9, effort 100, built with Lepton. Normal PDF: totals on the 90 files gpress rewrites from a hard 120-file sample, default effort. One thread. Browser: the gzip sizes of the two WebAssembly modules, as recorded in bench/sizes.json on 2026-11-14. <a href="#benchmarks">Details</a>.</sub>
 </p>
 
 <p align="center">
@@ -170,14 +170,24 @@ engine searches, and their outputs are checked the same way. Efforts 60, 80 and 
 after a step that changes images only. The archive is lossless at every effort: there 40 and above all mean its
 strongest setting. The output is the same for any thread count.
 
-| Effort | | What it does to a normal PDF |
-| ---: | --- | --- |
-| 0 (`--quick`) | lossless | The fast path: our fast Flate encoder and the cheap steps. |
-| 20 | lossless | The strong encoder's first step. |
-| 40 (default) | lossless | The smallest lossless output: everything the engine knows how to do. |
-| 60 | lossy | The work of 40, after the lossy image step: an image shown at 375 pixels per inch or more is resampled down to 300, and a photo that was resampled, or is not a JPEG, is written as a JPEG at quality 85 (line art stays samples behind Flate). |
-| 80 | lossy | As 60, with photos down to 150 pixels per inch (those shown at 187.5 or more). |
-| 100 | lossy | As 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
+| Effort | | 907 test files | Photo set | What it does to a normal PDF |
+| ---: | --- | ---: | ---: | --- |
+| the input | | 130,469,001 | 22,715,581 | |
+| 0 (`--quick`) | lossless | 117,623,756 (90.2%) | 20,900,345 (92.0%) | The fast path: our fast Flate encoder and the cheap steps. |
+| 20 | lossless | 116,462,384 (89.3%) | 20,585,352 (90.6%) | The strong encoder's first step. |
+| 40 (default) | lossless | 116,169,014 (89.0%) | 20,510,831 (90.3%) | The smallest lossless output: everything the engine knows how to do. |
+| 60 | lossy | 114,597,320 (87.8%) | 18,255,199 (80.4%) | The work of 40, after the lossy image step: an image shown at 375 pixels per inch or more is resampled down to 300, and a photo that was resampled, or is not a JPEG, is written as a JPEG at quality 85 (line art stays samples behind Flate). |
+| 80 | lossy | 114,079,379 (87.4%) | 17,737,258 (78.1%) | As 60, with photos down to 150 pixels per inch (those shown at 187.5 or more). |
+| 100 | lossy | 114,046,104 (87.4%) | 17,703,983 (77.9%) | As 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
+
+The two size columns are the bytes of all the outputs together and their share of the input, one thread
+(`bench/effort_table.py`; bench/RESULTS.md, "Sizes at the six efforts", has a row per file of the photo set and
+how close its pages stay to the input's). A file gpress leaves untouched counts with its own size: 206 of the
+907 public test files. The lossy efforts change 4 of the 907. The photo
+set is 23 files that `bench/photo_set.py` puts together to show the lossy step: two of the test files, three
+photographs from scikit-image's sample data (two by NASA in the public domain, one under CC0), each on a page
+at 150, 300 and 600 pixels per inch as samples and as a JPEG, a camera photograph at 754 pixels per inch and a
+scanned page at 300.
 
 Floors that hold at every lossy level:
 
@@ -193,6 +203,11 @@ Floors that hold at every lossy level:
   quality); otherwise the image goes through the lossless path as before;
 - a file the safety gate leaves untouched (signed, PDF/A, PDF/X, needing a password...) stays untouched, and an
   encrypted file keeps its encryption.
+
+Two limits the photo set shows. An image in doubt counts as line art, and the step took none of the three
+scikit-image photographs for a photo: none became a JPEG, and only the copies stored as samples and shown at
+600 pixels per inch were resampled (to 300, as line art). And a progressive JPEG is left alone at every level;
+so is the set's camera photograph, a JPEG whose scan header is not as the standard writes it.
 
 ## Engine levels
 
