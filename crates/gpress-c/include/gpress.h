@@ -87,6 +87,9 @@ typedef struct gpress_options {
   uint8_t use_existing_libraries; /* 1: use the optional existing library (Lepton) when built in */
   uint8_t palette;                /* 1: write an 8-bit image of few colours as an Indexed image when smaller
                                      (same colours). The last byte, which was padding: no other field moved */
+  uint8_t drop_history;           /* exactly 1: write only the newest save of a file that keeps earlier ones
+                                     (the earlier saves are gone for good); any other value keeps every save,
+                                     and the default is 0 */
 } gpress_options;
 
 typedef struct gpress_buffer {
@@ -105,7 +108,7 @@ typedef struct gpress_result {
 /* Version string, e.g. "0.1.0". Static; do not free. */
 const char *gpress_version(void);
 
-/* Fills *out with the defaults (effort 100, every step on). */
+/* Fills *out with the defaults (effort 100, every step on, drop_history 0). */
 void gpress_options_default(gpress_options *out);
 
 /* A smaller PDF that any reader opens, every object's value preserved; or the input untouched. */

@@ -49,7 +49,8 @@ fn set_needed(bit: u32) {
     NEEDED.with(|n| *n.borrow_mut() = bit);
 }
 
-/// Switches in the `flags` argument: a set bit turns the step off (the defaults are all on).
+/// Switches in the `flags` argument: a set bit turns the step off (the defaults are all on), except
+/// `FLAG_DROP_HISTORY`, which turns dropping on. Bit 256 is kept free for another switch.
 pub const FLAG_IGNORE_CONFORMANCE: u32 = 1;
 pub const FLAG_NO_FLATE_OVER_JPEG: u32 = 2;
 pub const FLAG_NO_EXISTING_LIBRARIES: u32 = 4;
@@ -58,6 +59,8 @@ pub const FLAG_NO_JBIG2: u32 = 16;
 pub const FLAG_KEEP_ENCRYPTED: u32 = 32;
 pub const FLAG_NO_DECRYPT: u32 = 64;
 pub const FLAG_NO_PALETTE: u32 = 128;
+/// Set: write only the newest save of a file that keeps earlier ones (see `gpress::Options::drop_history`).
+pub const FLAG_DROP_HISTORY: u32 = 512;
 
 /// A size given in MiB, or the default for 0, clamped to what this module can address.
 fn mib(v: u32, default: usize) -> usize {
@@ -84,6 +87,7 @@ fn options(effort: u32, max_input_mb: u32, max_stream_mb: u32, objects_per_strea
     o.palette = flags & FLAG_NO_PALETTE == 0;
     o.rewrite_encrypted = flags & FLAG_KEEP_ENCRYPTED == 0;
     o.decrypt = flags & FLAG_NO_DECRYPT == 0;
+    o.drop_history = flags & FLAG_DROP_HISTORY != 0;
     o
 }
 
@@ -349,6 +353,7 @@ mod tests {
         assert_eq!(o.objects_per_stream, 9);
         assert!(!o.jpeg_tables && !o.rewrite_encrypted && !o.decrypt && !o.palette);
         assert!(o.jbig2 && o.respect_conformance && o.flate_over_jpeg && o.use_existing_libraries);
+        assert!(!o.drop_history && options(100, 0, 0, 0, FLAG_DROP_HISTORY).drop_history);
         let d = options(100, 0, 0, 0, 0);
         assert_eq!(d, gpress::Options::default().threads(1));
         // A size past the module's address space is clamped, never wrapped; a budget is a u64 everywhere.

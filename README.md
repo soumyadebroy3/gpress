@@ -74,9 +74,10 @@ in.pdf	SMALLER	8791	4955	0.15	objects=6 streams=2 reencoded=2 kept=0 objstms=1 d
 in.pdf	8791	6963	0.10	PACKED streams=3 rebuilt=3 rebuilt_bytes=7909 lepton=0 type1=0 fax=0 decrypted=0 decoded_bytes=54664
 ```
 
-A file `optimize` can't make smaller or can't safely touch (a signed file, PDF/A, a file with earlier revisions,
-an encrypted file that needs a password, a damaged one) is written to `out.pdf` unchanged, with `UNTOUCHED` and
-the reason.
+A file `optimize` can't make smaller or can't safely touch (a signed file, PDF/A, an encrypted file that needs a
+password, a damaged one) is written to `out.pdf` unchanged, with `UNTOUCHED` and the reason. A file that keeps
+earlier saves (incremental updates) keeps every one of them, each read back and compared with the input's;
+`--drop-history` writes only the newest.
 
 <details>
 <summary><b>Every command, and the exit status</b></summary>
@@ -330,6 +331,7 @@ ones most callers need:
 | `max_len` | `--max-len BYTES` | 1 GiB | Expand: an archive declaring a larger original is refused before anything is decoded. |
 | `max_decoded` | `--max-decoded BYTES` | 256 MiB | Archive: the most decoded bytes the parts of one archive may claim, both ways. |
 | `respect_conformance` | `--ignore-conformance` | on | Normal PDF: leave PDF/A, PDF/X, signed, certified and usage-rights files untouched. |
+| `drop_history` | `--drop-history` | off | Normal PDF: write only the newest save of a file that keeps earlier ones (incremental updates). Off, every save is kept. |
 | `jpeg_tables`, `jbig2`, `palette`, `flate_over_jpeg` | `--no-jpeg-tables`, `--no-jbig2`, `--no-palette`, `--no-flate-over-jpeg` | on | Normal PDF: turn single steps off. |
 
 Every other option, the memory each limit bounds, the parts of the engine a build can leave out
