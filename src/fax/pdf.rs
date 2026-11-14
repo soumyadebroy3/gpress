@@ -9,6 +9,12 @@
 //! our decoder) to the same pixels. JBIG2Decode gives 1 for white, CCITTFaxDecode gives 0 for black unless
 //! BlackIs1: the JBIG2 bitmap is chosen so the filter's output is the same bits, and every other entry of the
 //! image dictionary (Decode, ImageMask, masks) keeps its meaning.
+//!
+//! A 1-bit image stored without an image codec (general filters only, or none) is held to the same rules where
+//! they apply: a DeviceGray image or a stencil mask, direct width and height that the data fills exactly (whole
+//! rows, each padded to a byte), the same size and work bounds, and the JBIG2 stream at least 5% smaller than
+//! the best other encoding of the stream and decoding to the same pixels. The padding bits of a row are not
+//! pixels and are not compared.
 
 use super::ccitt::{self, Image, Limits, Parsed, Scheme, Stop, MAX_COLUMNS};
 
@@ -81,14 +87,8 @@ impl FaxParams {
 /// Follows a reference with the document's objects.
 pub type Resolve<'a> = &'a dyn Fn(&Obj) -> Option<Obj>;
 
-/// The parameters of a stream whose only filter is CCITTFaxDecode, and its /Height (Width and Height may be
-/// references to numbers).
-fn lone_fax(s: &Stream, resolve: Resolve) -> Result<(FaxParams, usize), &'static str> {
-    let stages = chain(&s.dict).ok_or("filter chain unreadable")?;
-    if stages.len() != 1 || stages[0].name != b"CCITTFaxDecode" {
-        return Err("not a lone CCITTFaxDecode filter");
-    }
-    let d = &s.dict;
+/// An image dictionary of the two kinds written as JBIG2: a 1-bit DeviceGray image or a stencil mask.
+pub fn one_bit(d: &Dict) -> Result<(), &'static str> {
     if d.name(b"Subtype") != Some(b"Image") {
         return Err("not an image");
     }
@@ -101,6 +101,18 @@ fn lone_fax(s: &Stream, resolve: Resolve) -> Result<(FaxParams, usize), &'static
     } else if !(one_bit && d.name(b"ColorSpace") == Some(b"DeviceGray")) {
         return Err("not a 1-bit DeviceGray image or a mask");
     }
+    Ok(())
+}
+
+/// The parameters of a stream whose only filter is CCITTFaxDecode, and its /Height (Width and Height may be
+/// references to numbers).
+fn lone_fax(s: &Stream, resolve: Resolve) -> Result<(FaxParams, usize), &'static str> {
+    let stages = chain(&s.dict).ok_or("filter chain unreadable")?;
+    if stages.len() != 1 || stages[0].name != b"CCITTFaxDecode" {
+        return Err("not a lone CCITTFaxDecode filter");
+    }
+    let d = &s.dict;
+    one_bit(d)?;
     let p = FaxParams::from(stages[0].parms.as_ref()).ok_or("parameters not direct values")?;
     let int = |k: &[u8]| d.get(k).and_then(resolve).and_then(|x| x.as_int());
     let w = int(b"Width").ok_or("no Width")?;
@@ -229,4 +241,81 @@ pub fn same_image(a: &Stream, b: &Stream, resolve: Resolve) -> bool {
     };
     affordable(&parsed.image, a.data.len())
         && jbig2::read_pdf_stream(&b.data, p.black_is_1, parsed.image.changes.len()).as_ref() == Some(&parsed.image)
+}
+
+/// The pixels of a 1-bit image (`one_bit`) whose filters are general ones only: `bits` is what those filters
+/// give, a predictor undone, and must be exactly the rows its direct /Width and /Height describe, each padded
+/// to a byte. A pixel is its bit as it is (the padding bits are left out). The size and work bounds are the fax
+/// path's, the work counted against the stored bytes.
+fn bilevel(s: &Stream, bits: &[u8]) -> Result<Image, &'static str> {
+    let d = &s.dict;
+    one_bit(d)?;
+    let int = |k: &[u8]| d.get(k).and_then(|x| x.as_int());
+    let w = int(b"Width").ok_or("no direct Width")?;
+    let h = int(b"Height").ok_or("no direct Height")?;
+    if !(1..=MAX_COLUMNS as i64).contains(&w) || !(1..=1 << 20).contains(&h) {
+        return Err("Width or Height out of range");
+    }
+    if (w as u64).next_multiple_of(32) * h as u64 > MAX_JBIG2_PIXELS {
+        return Err("too large for some JBIG2 decoders");
+    }
+    let (w, row) = (w as usize, (w as usize).div_ceil(8));
+    if bits.len() as u64 != row as u64 * h as u64 {
+        return Err("the data is not the rows of the image");
+    }
+    let mut img = Image::new(w);
+    let (mut px, mut ch) = (vec![0u8; w], Vec::new());
+    for r in bits.chunks_exact(row) {
+        for (x, p) in px.iter_mut().enumerate() {
+            *p = r[x / 8] >> (7 - x % 8) & 1;
+        }
+        ccitt::row_changes(&px, &mut ch);
+        if img.changes.len() + ch.len() > MAX_CHANGES {
+            return Err("too many changing elements");
+        }
+        img.push_row(&ch);
+    }
+    if !affordable(&img, s.data.len()) {
+        return Err("too much work for the size of the data");
+    }
+    Ok(img)
+}
+
+fn decide_bits(s: &Stream, bits: &[u8], best: usize) -> Result<(Dict, Vec<u8>), &'static str> {
+    let img = bilevel(s, bits)?;
+    // JBIG2Decode gives 1 for a 0 of the bitmap: the bitmap is the inverse of the bits, so the filter gives the
+    // same bits back.
+    let out = jbig2::pdf_stream(&img, true);
+    if out.len() as u64 * 100 > best as u64 * 95 {
+        return Err("JBIG2 not at least 5% smaller");
+    }
+    // Our JBIG2 decoder must give the very same pixels back.
+    if jbig2::read_pdf_stream(&out, true, img.changes.len()).as_ref() != Some(&img) {
+        return Err("JBIG2 does not decode to the same pixels");
+    }
+    let mut d = s.dict.clone();
+    d.set(b"Filter", Obj::Name(b"JBIG2Decode".to_vec()));
+    d.remove(b"DecodeParms");
+    Ok((d, out))
+}
+
+/// A 1-bit image whose filters are general ones only, as JBIG2, when that is at least 5% smaller than `best`
+/// (the bytes of the best other encoding of the stream) and every check passes: (the new dictionary, the new
+/// data). `bits`: what the filters give, a predictor undone. None leaves the stream to the other candidates.
+pub fn bilevel_candidate(s: &Stream, bits: &[u8], best: usize) -> Option<(Dict, Vec<u8>)> {
+    decide_bits(s, bits, best).ok()
+}
+
+/// For the self-check: `a` is a 1-bit image whose filters, general ones only, give `bits` (a predictor undone),
+/// `b` is the JBIG2 stream `bilevel_candidate` makes of it, and JBIG2Decode gives the same pixels (decoded with
+/// our decoder).
+pub fn same_bits(a: &Stream, bits: &[u8], b: &Stream) -> bool {
+    match chain(&b.dict) {
+        Some(st) if st.len() == 1 && st[0].name == b"JBIG2Decode" && st[0].parms.is_none() => {}
+        _ => return false,
+    }
+    match bilevel(a, bits) {
+        Ok(img) => jbig2::read_pdf_stream(&b.data, true, img.changes.len()).as_ref() == Some(&img),
+        Err(_) => false,
+    }
 }

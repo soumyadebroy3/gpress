@@ -39,8 +39,11 @@ pub struct GpressOptions {
     pub flate_over_jpeg: u8,
     /// 1 = give JPEG images optimal Huffman tables.
     pub jpeg_tables: u8,
-    /// 1 = write CCITT fax images as JBIG2 when that is clearly smaller.
+    /// 1 = write CCITT fax images, and 1-bit images stored without an image codec, as JBIG2 when that is
+    /// clearly smaller.
     pub jbig2: u8,
+    /// 1 = write an 8-bit image of few colours as an Indexed image when that is smaller.
+    pub palette: u8,
     /// 1 = rewrite files the empty password opens, keeping their encryption.
     pub rewrite_encrypted: u8,
     /// 1 = archive: store the streams of such files decrypted (encrypted again on expand).
@@ -122,6 +125,7 @@ fn options_from(o: Option<&GpressOptions>) -> gpress::Options {
         opt.flate_over_jpeg = o.flate_over_jpeg != 0;
         opt.jpeg_tables = o.jpeg_tables != 0;
         opt.jbig2 = o.jbig2 != 0;
+        opt.palette = o.palette != 0;
         opt.rewrite_encrypted = o.rewrite_encrypted != 0;
         opt.decrypt = o.decrypt != 0;
         opt.use_existing_libraries = o.use_existing_libraries != 0;
@@ -184,6 +188,7 @@ pub unsafe extern "C" fn gpress_options_default(out: *mut GpressOptions) {
         flate_over_jpeg: d.flate_over_jpeg as u8,
         jpeg_tables: d.jpeg_tables as u8,
         jbig2: d.jbig2 as u8,
+        palette: d.palette as u8,
         rewrite_encrypted: d.rewrite_encrypted as u8,
         decrypt: d.decrypt as u8,
         use_existing_libraries: d.use_existing_libraries as u8,
