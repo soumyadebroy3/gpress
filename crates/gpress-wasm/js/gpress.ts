@@ -47,10 +47,19 @@ export interface GpressOptions {
   flateOverJpeg?: boolean;
   /** Give JPEG images optimal Huffman tables, the same coefficients (default true). */
   jpegTables?: boolean;
-  /** Write CCITT fax images as JBIG2 when that is clearly smaller, the same pixels (default true). */
+  /** Write CCITT fax images, and 1-bit images stored without an image codec, as JBIG2 when that is clearly
+   * smaller, the same pixels (default true). */
   jbig2?: boolean;
+  /** Write an 8-bit image of few colours as an Indexed image when that is smaller, the same colours (default
+   * true). */
+  palette?: boolean;
   /** Rewrite files the empty password opens, keeping their encryption (default true). */
   rewriteEncrypted?: boolean;
+  /**
+   * Normal PDF: write only the newest save of a file that keeps earlier ones (incremental updates); the earlier
+   * saves are gone for good (default false: every save is kept).
+   */
+  dropHistory?: boolean;
   /** Archive: store the streams of such files decrypted, encrypted again on expand (default true). */
   decrypt?: boolean;
   /** Use the optional existing library (Lepton) when the build has it (default true). */
@@ -112,7 +121,7 @@ export class GpressFeatureError extends GpressError {
 /** Largest input the 32-bit module takes: under 2 GiB. */
 export const MAX_INPUT_BYTES = 0x7fffffff;
 
-/** The switches in the module's flags word: a set bit turns the step off. */
+/** The switches in the module's flags word: a set bit turns the step off, except the last, which turns dropping on. */
 const FLAG_IGNORE_CONFORMANCE = 1;
 const FLAG_NO_FLATE_OVER_JPEG = 2;
 const FLAG_NO_EXISTING_LIBRARIES = 4;
@@ -120,6 +129,8 @@ const FLAG_NO_JPEG_TABLES = 8;
 const FLAG_NO_JBIG2 = 16;
 const FLAG_KEEP_ENCRYPTED = 32;
 const FLAG_NO_DECRYPT = 64;
+const FLAG_NO_PALETTE = 128;
+const FLAG_DROP_HISTORY = 512;
 
 interface Exports {
   memory: WebAssembly.Memory;
@@ -301,7 +312,9 @@ function pack(options: GpressOptions): Packed {
       (options.jpegTables === false ? FLAG_NO_JPEG_TABLES : 0) |
       (options.jbig2 === false ? FLAG_NO_JBIG2 : 0) |
       (options.rewriteEncrypted === false ? FLAG_KEEP_ENCRYPTED : 0) |
-      (options.decrypt === false ? FLAG_NO_DECRYPT : 0),
+      (options.decrypt === false ? FLAG_NO_DECRYPT : 0) |
+      (options.palette === false ? FLAG_NO_PALETTE : 0) |
+      (options.dropHistory === true ? FLAG_DROP_HISTORY : 0),
   };
 }
 

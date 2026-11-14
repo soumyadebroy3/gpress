@@ -91,6 +91,23 @@ fn text_doc() -> Vec<u8> {
     ])
 }
 
+/// `text_doc` saved a second time (an incremental update) with object 8 changed: a file with an earlier save.
+fn two_saves_doc() -> Vec<u8> {
+    let mut d = text_doc();
+    let text = String::from_utf8_lossy(&d).into_owned();
+    let prev = text[text.rfind("startxref\n").unwrap() + 10..].lines().next().unwrap().to_string();
+    let off = d.len();
+    d.extend_from_slice(b"8 0 obj\n<< /Type /ExtGState /LW 3 >>\nendobj\n");
+    let x = d.len();
+    d.extend_from_slice(
+        format!(
+            "xref\n8 1\n{off:010} 00000 n \ntrailer\n<< /Size 9 /Root 1 0 R /Prev {prev} >>\nstartxref\n{x}\n%%EOF\n"
+        )
+        .as_bytes(),
+    );
+    d
+}
+
 /// One page whose content is objects 4 and 5.
 fn page_of(streams: [Vec<u8>; 2]) -> Vec<u8> {
     let [a, b] = streams;
@@ -382,6 +399,7 @@ fn the_lowest_and_the_highest_value_of_every_rule_run_clean() {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Doc {
     Text,
+    TwoSaves,
     TwoStreams,
     Settled,
     FourLetters,
@@ -397,6 +415,7 @@ enum Doc {
 fn build(doc: Doc) -> Option<Vec<u8>> {
     Some(match doc {
         Doc::Text => text_doc(),
+        Doc::TwoSaves => two_saves_doc(),
         Doc::TwoStreams => two_streams_doc(),
         Doc::Settled => settled_doc(),
         Doc::FourLetters => four_letters_doc(),
@@ -503,6 +522,9 @@ fn every_rule_a_caller_can_see_has_a_value_that_changes_the_output() {
         case("work_cost_60", 100_000, 60, FourLetters, &[]),
         case("work_cost_80", 100_000, 80, FourLetters, &[]),
         case("step_down", 0, 60, FourLetters, &[("work_cost_60", 100_000)]),
+        // A file with an earlier save: both saves are kept unless a rule leaves the file as it is.
+        case("most_saves", 1, 0, TwoSaves, &[]),
+        case("saves_length_factor", 1, 0, TwoSaves, &[]),
     ];
     for e in 0..20 {
         cases.push(case(&format!("image_level_{e}"), 1, e, MixedRows, NO_BRIDGE));

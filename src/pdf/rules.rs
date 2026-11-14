@@ -195,6 +195,12 @@ rules! {
     // A stream job checks its own new data only when the stream decodes to at least this many times its
     // stored size (the self-check then takes it by its hash). Speed only.
     job_check_ratio = 2, 1, ANY;
+
+    // A file that keeps earlier saves: with more saves than this it is left as it is. Each save is read as a file
+    // of its own, so the time grows with them.
+    most_saves = crate::pdf::xref::MOST_SAVES as u64, 1, 1000;
+    // The same when its saves' lengths add up to more than this many times the file's length.
+    saves_length_factor = 16, 1, 256;
 }
 
 const COUNT: usize = RewriteRules::RULES.len();
