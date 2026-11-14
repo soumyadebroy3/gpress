@@ -5,16 +5,17 @@
 //! space /DeviceGray or /DeviceRGB, named in the image itself; general filters only (the caller's business);
 //! direct /Width and /Height that the samples fill exactly; no /Decode, colour-key /Mask, /ImageMask,
 //! /Interpolate or /Alternates; not the mask of another image (a soft mask must stay DeviceGray) and no soft
-//! mask with a /Matte colour, which is given in the image's colour space; and few enough colours for an index to take fewer bits than the samples of a pixel: at most 256
-//! colours of DeviceRGB, 16 of DeviceGray. The indexes take 8, 4 or 2 bits for at most 256, 16 or 4 colours,
-//! rows padded to a byte (never 1 bit: PDFium 5.13 draws a 1-bit image that it scales another way than the
-//! 8-bit image it was made of). The table holds the colours in ascending order of their bytes, so it does not
-//! depend on where in the image a colour comes first.
+//! mask with a /Matte colour, which is given in the image's colour space; and few enough colours for an index
+//! to take fewer bits than the samples of a pixel: at most 256 colours of DeviceRGB, 16 of DeviceGray. The
+//! indexes take 8, 4 or 2 bits for at most 256, 16 or 4 colours, rows padded to a byte (never 1 bit: PDFium
+//! 7999 draws a 1-bit image that it scales another way than the 8-bit image it was made of). The table holds
+//! the colours in ascending order of their bytes, so it does not depend on where in the image a colour comes
+//! first.
 //!
 //! CalGray, CalRGB and ICCBased images are left alone: a reader may take an image's samples and a table's
 //! colours through such a colour space by different routes that round differently (Poppler 24.02 draws an
-//! Indexed image over an ICCBased space up to 9 levels of 255 away from the image it was made of, PDFium 5.13
-//! one over CalRGB). For the same reason no image of a file that names a default colour space (/DefaultGray,
+//! Indexed image over an ICCBased space in other colours than the image it was made of, PDFium 7999 one over
+//! CalRGB). For the same reason no image of a file that names a default colour space (/DefaultGray,
 //! /DefaultRGB), which gives DeviceGray and DeviceRGB the meaning of another colour space, is written this way.
 //! What only the object table can say (masks, default colour spaces) is `allowed`'s to answer, from a `Table`.
 
