@@ -141,7 +141,9 @@ rules! {
     /// as in the last group): 1 on, 0 off.
     expect_text = 1, 0, 1;
     /// A pixel whose whole neighbourhood is white is coded with one small counter instead of the full fax
-    /// model: 1 on, 0 off (smaller for noisy scans, much slower).
+    /// model: 1 on, 0 off (off, on five fax files of the test set: from 0.4% smaller to 6.3% larger, and up to
+    /// 3.8 times slower; the most time a file can take stays what it was, as a page of noise goes through the
+    /// full model at every pixel either way).
     fax_white_shortcut = 1, 0, 1;
 
     // ---- Choices of the packing side only (never in a profile).
@@ -210,7 +212,6 @@ rules! {
 }
 
 /// The number of shared rules: rows `0..SHARED` (see the module's text).
-#[cfg_attr(not(feature = "archive"), allow(dead_code))]
 const SHARED: usize = Row::plain_below as usize;
 const _: () = assert!(SHARED < 256, "a profile names a rule in one byte");
 
@@ -229,6 +230,9 @@ impl Default for ArchiveRules {
 impl ArchiveRules {
     /// (name without the `archive_` prefix, default, lowest, highest), in a fixed order.
     pub const RULES: &'static [(&'static str, u64, u64, u64)] = RULES;
+    /// The first this many rules of `RULES` are shared with expand: with one of them changed an archive is
+    /// version 10.
+    pub const SHARED: usize = SHARED;
 
     /// Sets a rule. false: no such rule, or a value outside its range (nothing changes then).
     pub fn set(&mut self, name: &str, value: u64) -> bool {
@@ -306,5 +310,32 @@ impl ArchiveRules {
             i = after;
         }
         (n > 0).then_some((r, i))
+    }
+}
+
+#[cfg(all(test, feature = "archive"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_profile_reads_back_as_the_shared_rules() {
+        // None changed: no profile (version 9).
+        assert!(ArchiveRules::default().profile().is_empty());
+        // Every shared rule at its lowest, then at its highest, then every other one changed; with the rules of
+        // the packing side changed too, which a profile leaves out.
+        for k in 0..3 {
+            let mut r = ArchiveRules::default();
+            for (i, &(name, def, lo, hi)) in RULES.iter().enumerate() {
+                let v = [lo, hi, if i % 2 == 0 { lo } else { hi }][k];
+                assert!(r.set(name, if v == def && k == 2 { hi } else { v }));
+            }
+            let mut a = vec![7u8; 3];
+            a.extend(r.profile());
+            a.push(9);
+            let (back, end) = ArchiveRules::read_profile(&a, 3, r.local()).unwrap();
+            assert_eq!(back, r);
+            assert_eq!(a[end], 9);
+            assert_eq!(ArchiveRules::read_profile(&a, 3, ArchiveRules::default()).unwrap().0, r.shared());
+        }
     }
 }

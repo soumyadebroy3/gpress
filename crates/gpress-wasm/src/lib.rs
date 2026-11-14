@@ -257,7 +257,8 @@ pub extern "C" fn gpress_version_number() -> u32 {
     let (a, b, c) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0));
     a * 1_000_000 + b * 1000 + c
 }
-/// The archive format version this module writes and reads, 0 for a module without the archive.
+/// The archive format version this module writes and reads (it reads the next one too, which carries changed
+/// archive rules), 0 for a module without the archive.
 #[no_mangle]
 pub extern "C" fn gpress_archive_version() -> u32 {
     if gpress::Feature::Archive.enabled() {

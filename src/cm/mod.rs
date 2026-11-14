@@ -416,17 +416,18 @@ const APM_KNOTS: usize = 33;
 /// probability of the inputs within one spacing of it.
 pub struct Apm<const N: usize> {
     t: Box<[[u16; APM_KNOTS]; N]>,
-    /// Two knots are 2^span apart (7 by default); `mask` is 2^span - 1.
-    span: u32,
-    mask: i32,
+    /// The input is shifted right by this before the knots are looked up: 0 by default, 5 - bits with 2^bits + 1
+    /// knots in use (rule `apm_bits`), so that they cover the whole scale. One shift, so the default path is
+    /// what it always was.
+    down: u32,
     /// A step moves a knot by (end - knot) >> shift: 1/2^shift of the way to the bit's end of the scale (16 or
     /// 65520: 1/4096 or 4095/4096), rounded up from a quarter by default (`ends` are offset to do it, mirroring
     /// each other), so a knot gets to within a quarter step of the end (rounding from a half stops it up to half
     /// a step short: measured, slightly larger archives).
     shift: u32,
     ends: [i32; 2],
-    /// Where the last `p` looked: the context, and the knot below its input.
-    at: (usize, usize),
+    /// Where the last `p` looked: the knot below its input, counted over all the contexts' knots.
+    at: usize,
 }
 
 impl<const N: usize> Apm<N> {
@@ -436,41 +437,32 @@ impl<const N: usize> Apm<N> {
     /// `bits`: each map has 2^bits + 1 knots (3 to 5; rule `apm_bits`). `round`: a knot moves from this many
     /// quarters of a step, 1 to 4 (rule `apm_round`; within them a step never passes the bit's end).
     pub fn new(rate: i32, bits: u32, round: i32) -> Apm<N> {
-        const { assert!(N.is_power_of_two() && (APM_KNOTS - 1).is_power_of_two()) };
-        let span = 12 - bits.clamp(3, 5);
-        let knots = std::array::from_fn(|j| (squash(((j as i32) << span).min(4096) - 2048) * 16) as u16);
+        const { assert!(N.is_power_of_two()) };
+        let down = 5 - bits.clamp(3, 5);
+        // Knot j at stretched value (j << (7 + down)) - 2048; the ones past 2048 are never read.
+        let knots = std::array::from_fn(|j| (squash(((j as i32) << (7 + down)).min(4096) - 2048) * 16) as u16);
         let shift = (rate - 1).clamp(2, 15) as u32;
         let quarter = 1 << (shift - 2);
         let round = round.clamp(1, 4);
-        Apm {
-            t: boxed(knots),
-            span,
-            mask: (1 << span) - 1,
-            shift,
-            ends: [16 + round * quarter - 1, 65520 + (4 - round) * quarter],
-            at: (0, 0),
-        }
+        Apm { t: boxed(knots), down, shift, ends: [16 + round * quarter - 1, 65520 + (4 - round) * quarter], at: 0 }
     }
     /// The knots stay within 16..=65520, so the result is within 1..=4095.
     #[inline]
     pub fn p(&mut self, st: i32, cx: usize) -> i32 {
-        let x = st.clamp(-2047, 2047) + 2048;
-        // The knot below the input: at most the last but one (x is below 4096 and a span at least 2^7).
-        let (row, j, w) = (cx & (N - 1), (x >> self.span) as usize & (APM_KNOTS - 2), x & self.mask);
-        self.at = (row, j);
-        let (k0, k1) = (self.t[row][j] as i32, self.t[row][j + 1] as i32);
-        // The two knots weighed by 2^span - w and w: the lower one, plus w parts of the way to the upper.
-        let p16 = k0 + (((k1 - k0) * w) >> self.span);
+        let x = (st.clamp(-2047, 2047) + 2048) >> self.down;
+        let (at, w) = ((cx & (N - 1)) * APM_KNOTS + (x >> 7) as usize, x & 127);
+        self.at = at;
+        let k = self.t.as_flattened();
+        let p16 = (k[at] as i32 * (128 - w) + k[at + 1] as i32 * w) >> 7;
         (p16 + 8) >> 4
     }
     /// A step never passes the bit's end, so the knots stay within 16..=65520.
     #[inline]
     pub fn update(&mut self, bit: u32) {
         let end = self.ends[bit as usize & 1];
-        // The same two knots as `p` (the masks only tell the compiler what `p` made sure of).
-        let (k, j) = (&mut self.t[self.at.0 & (N - 1)], self.at.1 & (APM_KNOTS - 2));
-        k[j] = (k[j] as i32 + ((end - k[j] as i32) >> self.shift)) as u16;
-        k[j + 1] = (k[j + 1] as i32 + ((end - k[j + 1] as i32) >> self.shift)) as u16;
+        let k = &mut self.t.as_flattened_mut()[self.at..self.at + 2];
+        k[0] = (k[0] as i32 + ((end - k[0] as i32) >> self.shift)) as u16;
+        k[1] = (k[1] as i32 + ((end - k[1] as i32) >> self.shift)) as u16;
     }
 }
 

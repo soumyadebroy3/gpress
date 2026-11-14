@@ -713,9 +713,13 @@ impl Model {
         let st = stretch(pm);
         let p1 = self.a1.p(st, bc.a1 + self.c0 as usize);
         let p2 = self.a2.p(st, bc.a2 | self.c0 as usize);
-        // By default a quarter each of the mixer's result and the first APM's, and half of the second's.
-        let [bm, b1, b2] = self.blend;
-        (((bm * pm + b1 * p1 + b2 * p2 + 8) >> 4).clamp(1, 4095), states)
+        // By default a quarter each of the mixer's result and the first APM's, and half of the second's: the
+        // same sum without the multiplications, which would lengthen the path to every coded bit.
+        let p = match self.blend {
+            [4, 4, 8] => (pm + p1 + 2 * p2 + 2) >> 2,
+            [bm, b1, b2] => (bm * pm + b1 * p1 + b2 * p2 + 8) >> 4,
+        };
+        (p.clamp(1, 4095), states)
     }
 
     /// Learns the coded bit `k` in the match and expected-text models; at the first nibble's last bit, works out
