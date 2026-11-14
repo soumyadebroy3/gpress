@@ -10,6 +10,7 @@
 //   node bench/wasm_startup.mjs --sample module.wasm EFFORT [file.pdf]     -> one JSON line
 //
 // The module is called through its plain exports (no wrapper), so any build of gpress-wasm can be measured.
+// The efforts are the engine's own levels, 0 to 100.
 // Node flags given with --flags go to every sample process (for example --cpu-prof to see where the time goes).
 // --quiet (Linux) keeps a round only when the listed cores were idle, other work under --max-busy percent
 // of them, for a second before the round and a second after it; a dropped round is measured again. Use it
@@ -21,10 +22,14 @@ import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { onePagePdf } from "../crates/gpress-wasm/js/test/onepage.mjs";
 
+// The module's flags bit: the effort argument is the engine's own level. A module from before the effort
+// levels ignores the bit, and its effort is that level already.
+const FLAG_ENGINE_EFFORT = 256;
+
 function optimize(ex, input, effort) {
   const ptr = ex.gpress_alloc(input.length);
   new Uint8Array(ex.memory.buffer, ptr, input.length).set(input);
-  const code = ex.gpress_optimize(ptr, input.length, effort, 0, 0, 0, 0);
+  const code = ex.gpress_optimize(ptr, input.length, effort, 0, 0, 0, FLAG_ENGINE_EFFORT);
   if (code !== 0) throw new Error(`gpress_optimize returned ${code}`);
   const out = new Uint8Array(ex.memory.buffer, ex.gpress_out_ptr(), ex.gpress_out_len()).slice();
   ex.gpress_free_input(ptr, input.length);

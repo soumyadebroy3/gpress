@@ -9,7 +9,8 @@
  *   gpress_harness expand    IN OUT [options]   the bytes an archive restores -> OUT
  *   gpress_harness roundtrip IN OUT [options]   compress, expand, compare; archive -> OUT
  *
- * Options: --effort N, --threads N, --max-decoded BYTES (the archive's decoded-bytes budget, both ways).
+ * Options: --engine-effort N (the engine's own lossless level, 0 to 100; nothing is lossy), --threads N,
+ * --max-decoded BYTES (the archive's decoded-bytes budget, both ways).
  *
  * Exit codes: 0 success (OUT written), 1 a clean error from the library (message on stderr, no OUT),
  * 2 usage or file error, 4 GPRESS_ERR_INTERNAL (the library's guard caught a panic: a bug, but no crash),
@@ -58,14 +59,14 @@ static int exit_code_for(const gpress_result *r, const char *what) {
 
 int main(int argc, char **argv) {
     if (argc < 4) {
-        fprintf(stderr, "usage: gpress_harness optimize|compress|expand|roundtrip IN OUT [--effort N] [--threads N] [--max-decoded BYTES]\n");
+        fprintf(stderr, "usage: gpress_harness optimize|compress|expand|roundtrip IN OUT [--engine-effort N] [--threads N] [--max-decoded BYTES]\n");
         return 2;
     }
     gpress_options opt;
     gpress_options_default(&opt);
     opt.threads = 1;
     for (int i = 4; i + 1 < argc; i += 2) {
-        if (strcmp(argv[i], "--effort") == 0) opt.effort = (uint8_t)strtoul(argv[i + 1], NULL, 10);
+        if (strcmp(argv[i], "--engine-effort") == 0) { opt.effort = (uint8_t)strtoul(argv[i + 1], NULL, 10); opt.effort_is_engine_level = 1; }
         else if (strcmp(argv[i], "--threads") == 0) opt.threads = (uint32_t)strtoul(argv[i + 1], NULL, 10);
         else if (strcmp(argv[i], "--max-decoded") == 0) opt.max_decoded = (uint64_t)strtoull(argv[i + 1], NULL, 10);
         else { fprintf(stderr, "unknown option %s\n", argv[i]); return 2; }

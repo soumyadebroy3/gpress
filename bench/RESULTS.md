@@ -4,6 +4,9 @@ Test set: 907 public test PDFs, 130.47 MB (the pdf.js test suite, pypdf's sample
 pikepdf test resources). Many of them are deliberately broken or unusual. Measured on a 2-core cloud machine
 in October 2026. Every number below comes from the scripts in this folder.
 
+Every "effort" in this file is the engine's own level, 0 to 100 (`--engine-effort` today), measured before
+the public effort got its six steps: the public effort 40, the default, is the engine's 100.
+
 Which build: sections 1 to 5 are the phase-1 engine (commit d85cd7a) at maximum effort. Sections 6 and 7
 (time and space) and the Security section are the `speed` build (branch `speed`, commit ca8fa92:
 `--effort 0..100`, `--threads N`, the work budget), measured with `bench/benchmark.py` (parts 1 and 2) and
@@ -364,7 +367,7 @@ NEW has not measured every file of BASE (an unfinished run compares only the fil
 
 ## Effort levels
 
-The README's effort table: two runs of `bench/benchmark.py time` on the 120-file sample, normal PDF, one
+The README's engine-level table: two runs of `bench/benchmark.py time` on the 120-file sample, normal PDF, one
 thread. CPU time is summed over the files; output is the total size as a share of the input on the 90 files
 the engine rewrites.
 

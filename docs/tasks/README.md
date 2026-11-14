@@ -7,6 +7,10 @@ change, what must hold before the work is done, and how to report. Everything a 
 repository; the raw profile data behind the plan is not (it stays on the machine it was made on) and no
 brief needs it.
 
+The efforts these briefs speak of are the engine's own levels, 0 to 100 (`--engine-effort`, which
+`bench/benchmark.py --efforts` passes): the public effort has six steps, and its 40, the default, is the
+engine's 100.
+
 The rules every branch is held to, from the owner:
 
 - Data loss is never allowed: every normal-PDF output still reads back with every object's value kept, and

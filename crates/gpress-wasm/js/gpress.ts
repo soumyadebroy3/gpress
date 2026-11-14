@@ -152,7 +152,7 @@ const FLAG_NO_JBIG2 = 16;
 const FLAG_KEEP_ENCRYPTED = 32;
 const FLAG_NO_DECRYPT = 64;
 /** The effort argument is the engine's own level. */
-const FLAG_ENGINE_EFFORT = 128;
+const FLAG_ENGINE_EFFORT = 256;
 
 interface Exports {
   memory: WebAssembly.Memory;

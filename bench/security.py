@@ -296,7 +296,7 @@ def hang_after(cfg, time_bound):
 # The engine under test: the command-line tool, or the C harness with the same three operations
 
 class Tool:
-    """argv for optimize / pack / unpack. `kind` is 'binary' (pdfe or gpress: `CMD IN OUT [--effort N
+    """argv for optimize / pack / unpack. `kind` is 'binary' (pdfe or gpress: `CMD IN OUT [--effort N --engine-effort N
     --threads N]`) or 'charness' (bench/gpress_harness.c: optimize / compress / expand)."""
 
     def __init__(self, path, cfg, kind='binary'):
@@ -309,10 +309,12 @@ class Tool:
         if self.kind == 'binary':
             args = [self.path, op, inp, out] + budget
             if op != 'unpack':
-                args += ['--effort', self.effort, '--threads', self.threads]
+                # Both flags: a build from before the effort levels knows only --effort (it skips the other),
+                # and in a later one --engine-effort decides.
+                args += ['--effort', self.effort, '--engine-effort', self.effort, '--threads', self.threads]
             return args
         name = {'optimize': 'optimize', 'pack': 'compress', 'unpack': 'expand'}[op]
-        return [self.path, name, inp, out, '--effort', self.effort, '--threads', self.threads] + budget
+        return [self.path, name, inp, out, '--engine-effort', self.effort, '--threads', self.threads] + budget
 
     def special(self, r):
         """A verdict the tool's own exit codes carry, or None. Both tools exit 4 for a panic the library's guard
@@ -1750,7 +1752,7 @@ def main():
     ap.add_argument('--engine', help='the engine binary (default: $GPRESS, $PDFE or target/release/gpress)')
     ap.add_argument('--corpus', help='root of the test files (default: $CORPUS)')
     ap.add_argument('--files', help='the corpus list, one path per line (default: bench/sets/all.txt)')
-    ap.add_argument('--effort', type=int, help='engine effort for every run (default 0)')
+    ap.add_argument('--effort', type=int, help='the engine\'s own level (--engine-effort) for every run (default 0)')
     ap.add_argument('--threads', type=int, help='engine threads (default 1)')
     ap.add_argument('--max-decoded', type=int, help='the engine\'s decoded-bytes budget in MiB for every pack and unpack (default 64)')
     ap.add_argument('--packs', type=int, help='archives: packs to damage (default 20)')
