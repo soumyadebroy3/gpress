@@ -2,7 +2,7 @@
 // browser: the level table, one file's run with the target-size loop, sizes as text, download names and the
 // zip behind "Download all". Nothing here touches the document or the network.
 
-/** The six effort levels. 0, 20 and 40 are lossless; 60, 80 and 100 change images, within fixed floors. */
+/** The six effort levels. */
 export const LEVELS = [
   { effort: 0, lossless: true, name: "Fastest", about: "The quickest pass. Good for many files or very large ones." },
   { effort: 20, lossless: true, name: "Balanced", about: "Searches harder for a smaller file." },
@@ -19,7 +19,7 @@ export const MAX_INPUT_MIB = 1024;
 
 /** The engine reads a file only when it starts with a PDF header, and so does the page. */
 export function isPdf(bytes) {
-  return bytes.length >= 5 && String.fromCharCode(...bytes.subarray(0, 5)) === "%PDF-";
+  return String.fromCharCode(...bytes.subarray(0, 5)) === "%PDF-";
 }
 
 /**
@@ -28,28 +28,25 @@ export function isPdf(bytes) {
  * the module's own optimizeToSize when it has one, this loop otherwise. `onLevel(effort)` is called before
  * each run of the loop. Returns { outcome, effort, reached?, data?, reason? }. The outcome is "smaller" (with
  * `data`, always smaller than the input, so nothing larger or equal is ever offered), "untouched" (with the
- * engine's reason) or "refused" (not a PDF: the engine is not run).
+ * engine's reason) or "failed" (not a PDF: the engine is not run).
  */
 export function compress(g, input, { effort = DEFAULT_EFFORT, target = null } = {}, onLevel = () => {}) {
-  if (!isPdf(input)) return { outcome: "refused", effort, reason: "This is not a PDF file." };
+  if (!isPdf(input)) return { outcome: "failed", effort, reason: "This is not a PDF file." };
   const options = { maxInputMiB: MAX_INPUT_MIB };
   let r;
-  if (target === null) {
-    onLevel(effort);
-    r = { ...g.optimize(input, { ...options, effort }), effort };
-  } else if (typeof g.optimizeToSize === "function") {
+  if (target !== null && typeof g.optimizeToSize === "function") {
     r = g.optimizeToSize(input, target, options);
   } else {
-    for (const level of LEVELS) {
-      onLevel(level.effort);
-      const tried = { ...g.optimize(input, { ...options, effort: level.effort }), effort: level.effort };
+    // One level, or with a target each level in turn until one fits.
+    for (const e of target === null ? [effort] : LEVELS.map((level) => level.effort)) {
+      onLevel(e);
+      const tried = { ...g.optimize(input, { ...options, effort: e }), effort: e };
       if (!r || tried.data.length < r.data.length) r = tried;
-      if (r.data.length <= target) break;
+      if (target !== null && r.data.length <= target) break;
     }
-    r.reached = r.data.length <= target;
   }
   const out = { outcome: "untouched", effort: r.effort };
-  if (target !== null) out.reached = r.reached;
+  if (target !== null) out.reached = r.data.length <= target;
   if (r.outcome === "smaller" && r.data.length < input.length) return { ...out, outcome: "smaller", data: r.data };
   return { ...out, reason: r.reason || "no saving possible" };
 }
@@ -84,11 +81,14 @@ export function outputName(name) {
   return `${stem}-compressed.pdf`;
 }
 
-/** What an error from the worker means to the person who chose the file. */
+/**
+ * What an error from the worker means to the person who chose the file. The codes are GpressError's (1: too
+ * large, 4: the module trapped) and the worker's own "read".
+ */
 export function explain(error) {
-  if (error.code === 1 || error.name === "RangeError") return "This file is too large for the browser's memory. Your file is unchanged.";
+  if (error.code === 1) return "This file is too large for the browser's memory. Your file is unchanged.";
   if (error.code === 4) return `The compressor ran out of memory or stopped on this file. Your file is unchanged. (${error.message})`;
-  if (error.name === "NotReadableError" || error.name === "NotFoundError") return "The browser could not read this file. It may have been moved or deleted.";
+  if (error.code === "read") return "The browser could not read this file: it is too large for its memory, or it was moved or deleted.";
   return `Could not compress this file: ${error.message}`;
 }
 
@@ -128,14 +128,13 @@ export function zip(files, date = new Date()) {
     [20, 0x0800, 0, time, day].forEach((v, i) => shared.setUint16(i * 2, v, true));
     [f.crc, f.size, f.size].forEach((v, i) => shared.setUint32(10 + i * 4, v, true));
     shared.setUint16(22, nameBytes.length, true);
-    const local = new DataView(new ArrayBuffer(4));
-    local.setUint32(0, 0x04034b50, true);
     const entry = new DataView(new ArrayBuffer(46));
     entry.setUint32(0, 0x02014b50, true);
     entry.setUint16(4, 20, true);
     new Uint8Array(entry.buffer).set(new Uint8Array(shared.buffer), 6);
     entry.setUint32(42, offset, true);
-    parts.push(local, shared, nameBytes, f.data);
+    // A local header: its four signature bytes, then the shared fields and the name.
+    parts.push("PK\x03\x04", shared, nameBytes, f.data);
     directory.push(entry, nameBytes);
     offset += 30 + nameBytes.length + f.size;
   }

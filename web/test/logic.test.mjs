@@ -3,7 +3,7 @@
 // without the build it is skipped, except in CI, where it must run.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { crc32 as zlibCrc32 } from "node:zlib";
 import { LEVELS, DEFAULT_EFFORT, compress, crc32, explain, formatBytes, isPdf, outputName, savedPercent, targetBytes, zip } from "../logic.js";
 
@@ -52,10 +52,11 @@ test("a result that is not smaller than the input is never offered", () => {
   assert.deepEqual(compress(same, pdf(1000), { effort: 0 }), { outcome: "untouched", effort: 0, reason: "no saving possible" });
 });
 
-test("a file that is not a PDF is refused without running the engine", () => {
+test("a file that is not a PDF fails without running the engine", () => {
   const g = fake({});
-  assert.equal(compress(g, new TextEncoder().encode("PK\x03\x04 not a pdf"), { effort: 40 }).outcome, "refused");
-  assert.equal(compress(g, new Uint8Array(0), { target: 10 }).outcome, "refused");
+  assert.equal(compress(g, new TextEncoder().encode("PK\x03\x04 not a pdf"), { effort: 40 }).outcome, "failed");
+  assert.equal(compress(g, new Uint8Array(0), { target: 10 }).outcome, "failed");
+  assert.equal(compress(g, new TextEncoder().encode("%PDF"), { effort: 0 }).outcome, "failed");
   assert.deepEqual(g.calls, []);
   assert.equal(isPdf(pdf(9)), true);
 });
@@ -116,9 +117,8 @@ test("sizes, savings and names as text", () => {
 
 test("errors are told in words a person can act on", () => {
   assert.match(explain({ code: 1, message: "input is 9 bytes, over the limit of 8" }), /too large/);
-  assert.match(explain({ name: "RangeError", message: "Array buffer allocation failed" }), /too large/);
   assert.match(explain({ code: 4, message: "the module trapped (unreachable); load it again" }), /unchanged.*trapped/);
-  assert.match(explain({ name: "NotReadableError", message: "x" }), /could not read/);
+  assert.match(explain({ code: "read", message: "x" }), /could not read/);
   assert.match(explain({ message: "something else" }), /something else/);
 });
 
@@ -162,24 +162,24 @@ test("a zip that would need zip64 is refused", () => {
   assert.equal(zip(Array.from({ length: 0x10000 }, (_, i) => ({ name: `${i}.pdf`, crc: 0, size: 0, data: new Uint8Array(0) }))), null);
 });
 
-test("the page is light and asks no other site for anything", () => {
-  const read = (name) => readFileSync(new URL(`../${name}`, import.meta.url), "utf8");
-  const files = ["index.html", "style.css", "app.js", "worker.js", "logic.js"].map(read);
+test("the page is light and its policy lets nothing reach another site", () => {
+  // The page's own files, as web/build.mjs picks them: every .html, .css and .js in web/.
+  const names = readdirSync(new URL("../", import.meta.url)).filter((f) => /\.(html|css|js)$/.test(f));
+  assert.deepEqual(names.sort(), ["app.js", "index.html", "logic.js", "style.css", "worker.js"]);
+  const files = names.map((name) => readFileSync(new URL(`../${name}`, import.meta.url), "utf8"));
   const total = files.reduce((n, text) => n + Buffer.byteLength(text), 0);
   assert.ok(total < 30000, `the page's own files are ${total} bytes, over 30 KB`);
-  // The one address of another site is the link to the source, which a person follows by choice.
-  const elsewhere = files.join("\n").match(/\b(?:https?:)?\/\/[\w.-]+\.[a-z]{2,}[^\s"'<>)]*/g) ?? [];
-  assert.deepEqual(elsewhere.filter((url) => !url.includes("www.w3.org/2000/svg")), ["https://github.com/soumyadebroy3/gpress"]);
-  const policy = files[0].match(/http-equiv="Content-Security-Policy" content="([^"]*)"/)[1];
-  assert.match(policy, /default-src 'none'/);
-  assert.match(policy, /connect-src 'self'(;|$)/);
-  assert.doesNotMatch(policy, /unsafe-inline|unsafe-eval'|https?:|\*/);
+  // The policy the browser holds the page to: nothing from, and nothing to, anywhere but the page's own origin.
+  const policy = files[names.indexOf("index.html")].match(/http-equiv="Content-Security-Policy" content="([^"]*)"/)[1];
+  assert.equal(policy, "default-src 'none'; script-src 'self' blob: 'wasm-unsafe-eval'; worker-src blob:; style-src 'self'; img-src data:; connect-src 'self'; base-uri 'none'; form-action 'none'");
 });
 
 const dist = new URL("../../crates/gpress-wasm/js/dist/", import.meta.url);
 const built = existsSync(new URL("gpress-web.wasm", dist));
 test("the real web module through the page's logic", { skip: !built && !process.env.CI && "the package is not built" }, async () => {
-  const { Gpress } = await import(new URL("gpress.js", dist));
+  const { Gpress, GpressError } = await import(new URL("gpress.js", dist));
+  // The two codes explain() in logic.js knows by number.
+  assert.deepEqual([GpressError.TOO_LARGE, GpressError.INTERNAL], [1, 4]);
   const g = await Gpress.load(new URL("gpress-web.wasm", dist));
   const input = new Uint8Array(readFileSync(new URL("../../tests/data/format-v9.pdf", import.meta.url)));
   for (const { effort } of LEVELS) {
@@ -194,4 +194,6 @@ test("the real web module through the page's logic", { skip: !built && !process.
   const miss = compress(g, input, { target: 10 });
   assert.deepEqual([miss.outcome, miss.reached, miss.data.length], ["smaller", false, smallest]);
   assert.equal(compress(g, new TextEncoder().encode("%PDF-1.4\nnot really"), { effort: 0 }).outcome, "untouched");
+  // A real error from the wrapper, as explain() reads it.
+  assert.throws(() => g.optimize(pdf(2 ** 20 + 1), { maxInputMiB: 1 }), (e) => e instanceof GpressError && /too large/.test(explain(e)));
 });

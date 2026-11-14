@@ -27,11 +27,12 @@ async function loadEngine() {
   const keep = async (path) => {
     const response = await fetch(path);
     if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
-    return URL.createObjectURL(new Blob([await response.text()], { type: "text/javascript" }));
+    return URL.createObjectURL(await response.blob());
   };
-  const [wrapper, logic, worker] = await Promise.all(["dist/gpress.js", "logic.js", "worker.js"].map(keep));
+  // The module, the largest download, starts with the scripts and compiles as it arrives.
+  const [module, wrapper, logic, worker] = await Promise.all([fetch("dist/gpress-web.wasm"), ...["dist/gpress.js", "logic.js", "worker.js"].map(keep)]);
   const { Gpress } = await import(wrapper);
-  return { wrapper, logic, worker, wasm: await Gpress.compile(fetch("dist/gpress-web.wasm")) };
+  return { wrapper, logic, worker, wasm: await Gpress.compile(module) };
 }
 
 loadEngine().then(
@@ -67,13 +68,18 @@ function add(files) {
 
 /** Starts the next waiting file, or sums up when none is left. */
 function next() {
-  if (current || !engine) return;
+  if (current) return;
   current = items.find((item) => item.state === "queued") ?? null;
   refresh();
-  if (!current) return;
+  if (!current) {
+    // With nothing left to do the worker goes, and with it the memory the last file took.
+    stopWorker();
+    if (items.length) say(`Done. ${summary()}`);
+    return;
+  }
   const item = current;
   started = performance.now();
-  if (item.file.size > MAX_INPUT_MIB * 2 ** 20) return finish(item, { state: "failed", note: explain({ code: 1 }) });
+  if (item.file.size > MAX_INPUT_MIB * 2 ** 20) return finish({ state: "failed", note: explain({ code: 1 }) });
   const target = $("use-target").checked ? targetBytes(item.file.size, $("amount").valueAsNumber, $("unit").value) : null;
   // With a target the level is not known before the worker reports the one it is trying.
   const effort = target === null ? Number(document.querySelector("[name=effort]:checked").value) : undefined;
@@ -81,11 +87,12 @@ function next() {
   render(item);
   say(`Compressing ${item.file.name} (${items.indexOf(item) + 1} of ${items.length})`);
   worker ??= startWorker();
-  worker.postMessage({ wasm: engine.wasm, wrapper: engine.wrapper, logic: engine.logic, file: item.file, effort, target });
+  worker.postMessage({ ...engine, file: item.file, effort, target });
 }
 
-function finish(item, changes) {
-  Object.assign(item, changes, { ms: performance.now() - started });
+/** The file being worked on has ended in the state `changes` names. */
+function finish(changes) {
+  const item = Object.assign(current, changes, { ms: performance.now() - started });
   current = null;
   render(item);
   next();
@@ -95,20 +102,20 @@ function startWorker() {
   const w = new Worker(engine.worker);
   w.onmessage = ({ data }) => {
     if (w !== worker || !current) return;
-    if (data.error) return finish(current, { state: "failed", note: explain(data.error) });
+    if (data.error) return finish({ state: "failed", note: explain(data.error) });
     if (!data.result) {
       current.effort = data.effort;
       return render(current);
     }
-    const { outcome, effort, reached, reason, data: bytes, crc } = data.result;
-    if (outcome !== "smaller") return finish(current, { state: outcome === "untouched" ? "untouched" : "failed", effort, reached, note: reason });
+    const { outcome: state, effort, reached, reason: note, data: bytes, crc } = data.result;
+    if (state !== "smaller") return finish({ state, effort, reached, note });
     const blob = new Blob([bytes], { type: "application/pdf" });
-    finish(current, { state: "smaller", effort, reached, crc, blob, after: blob.size, url: URL.createObjectURL(blob) });
+    finish({ state, effort, reached, crc, blob, after: blob.size, url: URL.createObjectURL(blob) });
   };
   w.onerror = (e) => {
     if (w !== worker) return;
     stopWorker();
-    if (current) finish(current, { state: "failed", note: explain({ code: 4, message: e.message || "the worker stopped" }) });
+    if (current) finish({ state: "failed", note: explain({ code: 4, message: e.message || "the worker stopped" }) });
   };
   return w;
 }
@@ -137,7 +144,9 @@ function forget(item) {
   Object.assign(item, { state: "queued", url: null, blob: null });
 }
 
-/** The controls and the totals as the list now stands. */
+const made = () => items.filter((item) => item.state === "smaller");
+
+/** The controls as the list now stands. */
 function refresh() {
   const busy = current !== null;
   clearInterval(ticker);
@@ -146,15 +155,15 @@ function refresh() {
   $("again").disabled = busy;
   $("target").disabled = busy;
   $("levels").disabled = busy || $("use-target").checked;
-  const made = items.filter((item) => item.state === "smaller");
-  $("all").hidden = made.length === 0;
-  const before = made.reduce((n, item) => n + item.file.size, 0);
-  const after = made.reduce((n, item) => n + item.after, 0);
-  const total = made.length
-    ? `${made.length} of ${items.length} made smaller: ${formatBytes(before)} to ${formatBytes(after)}, ${savedPercent(before, after)} saved.`
-    : items.length && !busy ? "No file was made smaller." : "";
-  $("total").textContent = total;
-  if (!busy && items.length && items.every((item) => item.state !== "cancelled")) say(`Done. ${total}`);
+  $("all").hidden = made().length === 0;
+}
+
+function summary() {
+  const before = made().reduce((n, item) => n + item.file.size, 0);
+  const after = made().reduce((n, item) => n + item.after, 0);
+  return made().length
+    ? `${made().length} of ${items.length} made smaller: ${formatBytes(before)} to ${formatBytes(after)}, ${savedPercent(before, after)} saved.`
+    : "No file was made smaller.";
 }
 
 function render(item) {
@@ -183,8 +192,7 @@ function render(item) {
 }
 
 function downloadAll() {
-  const made = items.filter((item) => item.state === "smaller");
-  const parts = zip(made.map((item) => ({ name: outputName(item.file.name), crc: item.crc, size: item.after, data: item.blob })));
+  const parts = zip(made().map((item) => ({ name: outputName(item.file.name), crc: item.crc, size: item.after, data: item.blob })));
   if (!parts) return say("These files are too many or too large for one zip: download them one by one.");
   const url = URL.createObjectURL(new Blob(parts, { type: "application/zip" }));
   el("a", { href: url, download: "gpress-pdfs.zip" }).click();

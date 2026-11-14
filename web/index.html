@@ -36,48 +36,43 @@
     <noscript><p class="error">This page needs JavaScript: the compressor runs in your browser.</p></noscript>
   </section>
 
-  <form id="settings">
-    <fieldset id="levels">
-      <legend>Level</legend>
-      <div class="groups">
-        <div role="group" aria-labelledby="lossless-title">
-          <h2 id="lossless-title"><span class="mark keep">Lossless</span></h2>
-          <p class="hint">Nothing in the document changes. gpress reads its result back and compares it with your file before you get it.</p>
-          <div class="choices" id="lossless"></div>
-        </div>
-        <div role="group" aria-labelledby="lossy-title">
-          <h2 id="lossy-title"><span class="mark lose">Reduces image quality</span></h2>
-          <p class="hint">Smaller files. Only images change: photos are never taken below 150 pixels per inch, line art and scans never below 300.</p>
-          <div class="choices" id="lossy"></div>
-        </div>
-      </div>
-    </fieldset>
-    <fieldset id="target">
-      <legend>Target size</legend>
-      <label class="check"><input id="use-target" type="checkbox"> Aim for a size instead of a level</label>
-      <span class="size">
-        <label class="hidden" for="amount">Target size</label>
-        <input id="amount" type="number" inputmode="decimal" min="1" step="any" value="50">
-        <label class="hidden" for="unit">Unit</label>
-        <select id="unit"><option value="%">% of the original</option><option>KB</option><option>MB</option></select>
-      </span>
-      <p class="hint">gpress tries the levels in order, 0 first, and keeps the first result that fits; if none fits, you get the smallest. Levels 60 and above reduce image quality.</p>
-    </fieldset>
-  </form>
-
   <section id="results" aria-labelledby="results-title" hidden>
     <div class="bar">
       <h2 id="results-title">Your files</h2>
       <button id="cancel" type="button" hidden>Cancel</button>
     </div>
     <ul id="list"></ul>
-    <p id="total"></p>
     <div class="actions">
       <button class="primary" id="all" type="button" hidden>Download all (.zip)</button>
       <button id="again" type="button">Compress again</button>
       <button id="clear" type="button">Clear</button>
     </div>
   </section>
+  <fieldset id="levels">
+    <legend>Level</legend>
+    <div class="groups">
+      <div role="group" aria-labelledby="lossless-title">
+        <h2 id="lossless-title"><span class="mark keep">Lossless</span></h2>
+        <p class="hint">Nothing in the document changes. gpress reads its result back and compares it with your file before you get it.</p>
+        <div class="choices" id="lossless"></div>
+      </div>
+      <div role="group" aria-labelledby="lossy-title">
+        <h2 id="lossy-title"><span class="mark lose">Reduces image quality</span></h2>
+        <p class="hint">Smaller files. Only images change: photos are never taken below 150 pixels per inch, line art and scans never below 300.</p>
+        <div class="choices" id="lossy"></div>
+      </div>
+    </div>
+  </fieldset>
+  <fieldset id="target">
+    <legend>Target size</legend>
+    <label class="check"><input id="use-target" type="checkbox"> Aim for a size instead of a level</label>
+    <span class="size">
+      <input id="amount" type="number" inputmode="decimal" min="1" step="any" value="50" aria-label="Target size">
+      <select id="unit" aria-label="Unit"><option value="%">% of the original</option><option>KB</option><option>MB</option></select>
+    </span>
+    <p class="hint">gpress tries the levels in order, 0 first, and keeps the first result that fits; if none fits, you get the smallest. Levels 60 and above reduce image quality.</p>
+  </fieldset>
+
 </main>
 
 <footer>

@@ -3,7 +3,7 @@
 //
 //   node web/build.mjs           web/dist/ only, to serve web/ as it is
 //   node web/build.mjs SITE      also the page's own files, so that SITE is all a web server needs
-import { copyFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -18,5 +18,6 @@ try {
   console.error(`build: ${e.message}\nbuild: build the package first: npm ci && npm run build in crates/gpress-wasm/js`);
   process.exit(1);
 }
-if (site !== web) for (const file of ["index.html", "style.css", "app.js", "worker.js", "logic.js"]) copyFileSync(join(web, file), join(site, file));
+// The page's own files: every .html, .css and .js beside this script.
+if (site !== web) for (const file of readdirSync(web).filter((f) => /\.(html|css|js)$/.test(f))) copyFileSync(join(web, file), join(site, file));
 console.error(`build: wrote ${site}`);
