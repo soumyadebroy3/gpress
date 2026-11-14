@@ -41,6 +41,7 @@ use crate::pack;
 #[cfg(not(feature = "archive"))]
 use crate::off::pack;
 use crate::pdf::rewrite;
+use crate::pdf::rules::RewriteRules;
 use crate::Feature;
 
 /// Library version, from Cargo.
@@ -157,6 +158,9 @@ pub struct Options {
     /// (on expand by one part's zlib re-creation). `None` = no limit. On a platform without a clock
     /// (WebAssembly without a host clock) there is no budget.
     pub time_budget: Option<Duration>,
+    /// Normal PDF: the values the rewrite decides by, each a rule with a name, a default and a range (see
+    /// `RewriteRules`; `docs/reference.md` lists them). Set one with `rewrite_rules.set(name, value)`.
+    pub rewrite_rules: RewriteRules,
 }
 
 impl Default for Options {
@@ -179,6 +183,7 @@ impl Default for Options {
             decrypt: true,
             use_existing_libraries: true,
             time_budget: None,
+            rewrite_rules: RewriteRules::default(),
         }
     }
 }
@@ -315,6 +320,7 @@ impl Options {
             jpeg_tables: self.jpeg_tables,
             rewrite_encrypted: self.rewrite_encrypted,
             deadline: self.deadline(),
+            rules: std::sync::Arc::new(self.rewrite_rules.clone()),
         }
     }
 

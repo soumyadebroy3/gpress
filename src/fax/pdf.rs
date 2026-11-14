@@ -5,8 +5,8 @@
 //! direct parameters, a DeviceGray image or a stencil mask, the width and height the data describes, a size
 //! every JBIG2 decoder can hold, no byte alignment (readers disagree on it), EOL codes where every reader
 //! expects them, every row decoded and written back bit for bit, the data ending with end codes or only 0
-//! bits, coding work in proportion to the data, and the JBIG2 stream at least 5% smaller and decoding (with
-//! our decoder) to the same pixels. JBIG2Decode gives 1 for white, CCITTFaxDecode gives 0 for black unless
+//! bits, coding work in proportion to the data, and the JBIG2 stream at least 5% smaller (the rewrite's rule
+//! `jbig2_min_saving`) and decoding (with our decoder) to the same pixels. JBIG2Decode gives 1 for white, CCITTFaxDecode gives 0 for black unless
 //! BlackIs1: the JBIG2 bitmap is chosen so the filter's output is the same bits, and every other entry of the
 //! image dictionary (Decode, ImageMask, masks) keeps its meaning.
 
@@ -178,15 +178,17 @@ fn clean_parse(data: &[u8], p: &FaxParams, h: usize) -> Result<Parsed, &'static 
     Ok(parsed)
 }
 
-fn decide(s: &Stream, resolve: Resolve) -> Result<(Dict, Vec<u8>), &'static str> {
+/// `min_saving`: the percentage the JBIG2 data must save on the fax data (and it must save a byte).
+fn decide(s: &Stream, resolve: Resolve, min_saving: u64) -> Result<(Dict, Vec<u8>), &'static str> {
     let (p, h) = lone_fax(s, resolve)?;
     let parsed = clean_parse(&s.data, &p, h)?;
     if !affordable(&parsed.image, s.data.len()) {
         return Err("too much work for the size of the data");
     }
     let out = jbig2::pdf_stream(&parsed.image, p.black_is_1);
-    if out.len() * 100 > s.data.len() * 95 {
-        return Err("JBIG2 not at least 5% smaller");
+    let most = s.data.len() as u64 * 100u64.saturating_sub(min_saving);
+    if out.len() as u64 * 100 > most || out.len() >= s.data.len() {
+        return Err("JBIG2 not smaller by the percentage asked");
     }
     // Our JBIG2 decoder must give the very same pixels back.
     if jbig2::read_pdf_stream(&out, p.black_is_1, parsed.image.changes.len()).as_ref() != Some(&parsed.image) {
@@ -198,15 +200,16 @@ fn decide(s: &Stream, resolve: Resolve) -> Result<(Dict, Vec<u8>), &'static str>
     Ok((d, out))
 }
 
-/// A lone CCITTFaxDecode image as JBIG2 when that is at least 5% smaller and every check passes: (the new
-/// dictionary, the new data). None leaves the stream to the other candidates.
-pub fn jbig2_candidate(s: &Stream, resolve: Resolve) -> Option<(Dict, Vec<u8>)> {
-    decide(s, resolve).ok()
+/// A lone CCITTFaxDecode image as JBIG2 when that is at least `min_saving` percent smaller (5 by default) and
+/// every check passes: (the new dictionary, the new data). None leaves the stream to the other candidates.
+pub fn jbig2_candidate(s: &Stream, resolve: Resolve, min_saving: u64) -> Option<(Dict, Vec<u8>)> {
+    decide(s, resolve, min_saving).ok()
 }
 
 /// What `jbig2_candidate` does with a stream, in words (for measuring).
 pub fn explain(s: &Stream, resolve: Resolve) -> String {
-    match decide(s, resolve) {
+    use crate::pdf::rules::{RewriteRules, Rule};
+    match decide(s, resolve, RewriteRules::default_of(Rule::jbig2_min_saving)) {
         Ok((_, out)) => format!("JBIG2 {} -> {} bytes", s.data.len(), out.len()),
         Err(why) => format!("kept: {why}"),
     }

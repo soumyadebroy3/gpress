@@ -2,6 +2,7 @@
 //! samples are stored; the decoded image is the same.
 
 use super::object::{Dict, Obj};
+use super::rules::{RewriteRules, Rule};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Geometry {
@@ -140,6 +141,19 @@ pub enum Choice {
     Fixed(u8),
     /// Per row, the type with the smallest sum of absolute (signed) residuals.
     MinSum,
+    /// Per row, the type whose residuals cost the fewest bits under an order-0 estimate of that row alone.
+    MinBits,
+}
+
+impl Choice {
+    /// The choice of a type for each row that the rule `row_predictor_rule` names (`MinSum` by default).
+    pub fn per_row(rules: &RewriteRules) -> Choice {
+        if rules.at(Rule::row_predictor_rule) == 0 {
+            Choice::MinSum
+        } else {
+            Choice::MinBits
+        }
+    }
 }
 
 /// Row `r` of `px` stored with PNG predictor type `t`, into `out` (one byte per sample byte).
@@ -154,13 +168,19 @@ fn residuals(px: &[u8], row: usize, bpp: usize, r: usize, t: u8, out: &mut [u8])
     }
 }
 
-/// The type `Choice::MinSum` picks for row `r` (the first of equal sums). `cand` is scratch: it is left with
-/// the last type's residuals, not the chosen one's.
-fn min_sum_type(px: &[u8], row: usize, bpp: usize, r: usize, cand: &mut [u8]) -> u8 {
+/// The type `how` (`Choice::MinSum` or `Choice::MinBits`) picks for row `r`, the first of equal scores. `cand`
+/// is scratch: it is left with the last type's residuals, not the chosen one's.
+fn row_type(px: &[u8], row: usize, bpp: usize, r: usize, how: Choice, cand: &mut [u8]) -> u8 {
     let mut best = (u64::MAX, 0u8);
     for t in 0..5u8 {
         residuals(px, row, bpp, r, t, cand);
-        let s: u64 = cand.iter().map(|&x| (x as i8).unsigned_abs() as u64).sum();
+        let s: u64 = if how == Choice::MinSum {
+            cand.iter().map(|&x| (x as i8).unsigned_abs() as u64).sum()
+        } else {
+            let mut counts = [0u32; 256];
+            cand.iter().for_each(|&x| counts[x as usize] += 1);
+            entropy_bits(&counts)
+        };
         if s < best.0 {
             best = (s, t);
         }
@@ -175,7 +195,7 @@ pub fn png_filter(px: &[u8], row: usize, bpp: usize, how: Choice) -> Vec<u8> {
     for r in 0..rows {
         let t = match how {
             Choice::Fixed(t) => t,
-            Choice::MinSum => min_sum_type(px, row, bpp, r, &mut cand),
+            per_row => row_type(px, row, bpp, r, per_row, &mut cand),
         };
         out.push(t);
         residuals(px, row, bpp, r, t, &mut cand);
@@ -186,7 +206,7 @@ pub fn png_filter(px: &[u8], row: usize, bpp: usize, how: Choice) -> Vec<u8> {
 
 /// What `png_filter` gives for the rows of `bands` only (ranges of whole rows, in order): row `a` of a band
 /// reads row `a - 1` as the row above, as it does in the whole image. Exact, since a filtered row depends on
-/// that row and the one above only (`MinSum` too chooses for each row alone).
+/// that row and the one above only (`MinSum` and `MinBits` too choose for each row alone).
 pub fn filter_rows(px: &[u8], row: usize, bpp: usize, how: Choice, bands: &[(usize, usize)]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bands.iter().map(|&(a, b)| (b - a) * (row + 1)).sum());
     for &(a, b) in bands {
@@ -199,36 +219,43 @@ pub fn filter_rows(px: &[u8], row: usize, bpp: usize, how: Choice, bands: &[(usi
 }
 
 /// The predictor to store the samples with on the fast path, chosen without encoding: None (as they are),
-/// one of the PNG types for every row, or the per-row minimum sum (libpng's heuristic), whichever costs the
-/// fewest bits under an order-0 entropy estimate of the rows in `bands` (`(first, end)` pairs; the first of
-/// equal costs wins). Below 8 bits per component always None: a predictor works on whole bytes, so it mixes
+/// one of the PNG types for every row, or a type for each row (the per-row minimum sum, libpng's heuristic,
+/// unless the rule `row_predictor_rule` says otherwise), whichever costs the fewest bits under an order-0
+/// entropy estimate of the rows in `bands` (`(first, end)` pairs; the first of equal costs wins). The rule
+/// `fast_predictor_candidates` can leave some of the six out. Below 8 bits per component (the rule
+/// `fast_predictor_min_bits`) always None: a predictor works on whole bytes, so it mixes
 /// neighbouring samples (on the sample's 44 such images it never paid). The caller keeps the samples as they
 /// are when the chosen predictor's encode is not smaller, so a wrong guess costs time, never size.
-pub fn estimate_choice(px: &[u8], row: usize, bpp: usize, bpc: usize, bands: &[(usize, usize)]) -> Option<Choice> {
-    if bpc < 8 || row == 0 {
+pub fn estimate_choice(
+    px: &[u8],
+    row: usize,
+    bpp: usize,
+    bpc: usize,
+    bands: &[(usize, usize)],
+    rules: &RewriteRules,
+) -> Option<Choice> {
+    if (bpc as u64) < rules.at(Rule::fast_predictor_min_bits) || row == 0 {
         return None;
     }
-    let bits = candidate_bits(px, row, bpp, bands);
-    let mut best = (bits[0], None);
-    for (k, how) in [
-        (1, Choice::Fixed(1)),
-        (2, Choice::Fixed(2)),
-        (3, Choice::Fixed(3)),
-        (4, Choice::Fixed(4)),
-        (5, Choice::MinSum),
-    ] {
-        if bits[k] < best.0 {
+    let per_row = Choice::per_row(rules);
+    let bits = candidate_bits(px, row, bpp, bands, per_row);
+    let asked = rules.at(Rule::fast_predictor_candidates);
+    let mut best = (if asked & 1 == 1 { bits[0] } else { u64::MAX }, None);
+    for (k, how) in
+        [(1, Choice::Fixed(1)), (2, Choice::Fixed(2)), (3, Choice::Fixed(3)), (4, Choice::Fixed(4)), (5, per_row)]
+    {
+        if asked >> k & 1 == 1 && bits[k] < best.0 {
             best = (bits[k], Some(how));
         }
     }
     best.1
 }
 
-/// The order-0 cost of the rows in `bands` stored as they are, with PNG types 1 to 4, and with the minimum sum
-/// (type bytes counted), in 1/65536 bits.
-fn candidate_bits(px: &[u8], row: usize, bpp: usize, bands: &[(usize, usize)]) -> [u64; 6] {
+/// The order-0 cost of the rows in `bands` stored as they are, with PNG types 1 to 4, and with a type for each
+/// row as `per_row` chooses it (type bytes counted), in 1/65536 bits.
+fn candidate_bits(px: &[u8], row: usize, bpp: usize, bands: &[(usize, usize)], per_row: Choice) -> [u64; 6] {
     let rows = px.len() / row;
-    // Counts for: as they are, PNG types 1 to 4, minimum sum.
+    // Counts for: as they are, PNG types 1 to 4, a type for each row.
     let mut counts = [[0u32; 256]; 6];
     let mut cand = vec![0u8; row];
     for &(a, b) in bands {
@@ -244,7 +271,7 @@ fn candidate_bits(px: &[u8], row: usize, bpp: usize, bands: &[(usize, usize)]) -
                     counts[t as usize][x as usize] += 1;
                 }
             }
-            let t = min_sum_type(px, row, bpp, r, &mut cand);
+            let t = row_type(px, row, bpp, r, per_row, &mut cand);
             residuals(px, row, bpp, r, t, &mut cand);
             counts[5][t as usize] += 1;
             for &x in &cand {
@@ -319,7 +346,7 @@ mod tests {
             }
             let nrows = px.len() / row;
             for bands in [vec![(0, nrows)], vec![(3, 11), (40, 52), (90, 96)]] {
-                let bits = candidate_bits(&px, row, bpp, &bands);
+                let bits = candidate_bits(&px, row, bpp, &bands, Choice::MinSum);
                 let written = |how: Option<Choice>| -> u64 {
                     let (data, stride) = match how {
                         None => (px.clone(), row),
@@ -367,16 +394,17 @@ mod tests {
 
     #[test]
     fn the_estimate_wants_a_predictor_only_where_it_helps() {
+        let rules = RewriteRules::default();
         let (row, rows) = (300usize, 200usize);
         let all = [(0usize, rows)];
         // A smooth gradient: a predictor leaves almost nothing.
         let smooth: Vec<u8> = (0..row * rows).map(|i| ((i % row) + (i / row) * 2) as u8).collect();
-        assert!(estimate_choice(&smooth, row, 3, 8, &all).is_some());
+        assert!(estimate_choice(&smooth, row, 3, 8, &all, &rules).is_some());
         // Identical rows: Up leaves only zeros below the first row, and so do Paeth (on identical rows it predicts
         // the row above) and the minimum sum; Paeth also takes the first row as Sub does, which suits this one.
         let stripes: Vec<u8> = (0..row * rows).map(|i| ((i % row) * 37 % 251) as u8).collect();
         assert!(matches!(
-            estimate_choice(&stripes, row, 3, 8, &all),
+            estimate_choice(&stripes, row, 3, 8, &all, &rules),
             Some(Choice::Fixed(2) | Choice::Fixed(4) | Choice::MinSum)
         ));
         // Noise: the residuals are noise as well, and the type bytes cost extra.
@@ -389,13 +417,13 @@ mod tests {
                 s as u8
             })
             .collect();
-        assert_eq!(estimate_choice(&noise, row, 3, 8, &all), None);
+        assert_eq!(estimate_choice(&noise, row, 3, 8, &all, &rules), None);
         // Below 8 bits per component never; nor for a blank image (nothing to gain).
-        assert_eq!(estimate_choice(&smooth, row, 1, 4, &all), None);
-        assert_eq!(estimate_choice(&vec![255u8; row * rows], row, 1, 8, &all), None);
+        assert_eq!(estimate_choice(&smooth, row, 1, 4, &all, &rules), None);
+        assert_eq!(estimate_choice(&vec![255u8; row * rows], row, 1, 8, &all, &rules), None);
         // Bands past the end are cut, and an empty band list wants nothing.
-        assert!(estimate_choice(&smooth, row, 3, 8, &[(0, 10), (150, 1000)]).is_some());
-        assert_eq!(estimate_choice(&smooth, row, 3, 8, &[]), None);
+        assert!(estimate_choice(&smooth, row, 3, 8, &[(0, 10), (150, 1000)], &rules).is_some());
+        assert_eq!(estimate_choice(&smooth, row, 3, 8, &[], &rules), None);
         // The integer entropy: two equally likely bytes cost one bit each.
         let mut c = [0u32; 256];
         c[1] = 1000;

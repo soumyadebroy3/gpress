@@ -118,6 +118,9 @@ pub fn is_regular(c: u8) -> bool {
 /// Appends tokens with the least whitespace that keeps them apart.
 pub struct Writer<'a> {
     pub out: &'a mut Vec<u8>,
+    /// How a string is written: 0 in the shorter of its two forms, 1 as a literal, 2 in hexadecimal (the
+    /// rewrite's rule `string_form`).
+    pub strings: u8,
 }
 
 impl<'a> Writer<'a> {
@@ -179,7 +182,8 @@ impl<'a> Writer<'a> {
         }
     }
 
-    /// A string as a literal or hexadecimal string, whichever is shorter. Both read back as the same bytes.
+    /// A string as a literal or hexadecimal string, whichever is shorter (a literal on a tie), or the one
+    /// `strings` asks for. Both read back as the same bytes.
     pub fn string(&mut self, s: &[u8]) {
         let mut lit = Vec::with_capacity(s.len() + 2);
         lit.push(b'(');
@@ -195,7 +199,7 @@ impl<'a> Writer<'a> {
             }
         }
         lit.push(b')');
-        if lit.len() <= 2 * s.len() + 2 {
+        if self.strings == 1 || (self.strings == 0 && lit.len() <= 2 * s.len() + 2) {
             self.out.extend_from_slice(&lit);
         } else {
             self.out.push(b'<');
@@ -209,7 +213,12 @@ impl<'a> Writer<'a> {
 
 /// Serialises a non-stream object compactly.
 pub fn to_bytes(o: &Obj) -> Vec<u8> {
+    to_bytes_as(o, 0)
+}
+
+/// Serialises a non-stream object compactly, its strings as `strings` says (see `Writer::strings`).
+pub fn to_bytes_as(o: &Obj, strings: u8) -> Vec<u8> {
     let mut v = Vec::new();
-    Writer { out: &mut v }.obj(o);
+    Writer { out: &mut v, strings }.obj(o);
     v
 }

@@ -10,4 +10,5 @@ pub mod images;
 pub mod object;
 pub mod parse;
 pub mod rewrite;
+pub mod rules;
 pub mod xref;
