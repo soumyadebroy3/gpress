@@ -47,8 +47,12 @@ export interface GpressOptions {
   flateOverJpeg?: boolean;
   /** Give JPEG images optimal Huffman tables, the same coefficients (default true). */
   jpegTables?: boolean;
-  /** Write CCITT fax images as JBIG2 when that is clearly smaller, the same pixels (default true). */
+  /** Write CCITT fax images, and 1-bit images stored without an image codec, as JBIG2 when that is clearly
+   * smaller, the same pixels (default true). */
   jbig2?: boolean;
+  /** Write an 8-bit image of few colours as an Indexed image when that is smaller, the same colours (default
+   * true). */
+  palette?: boolean;
   /** Rewrite files the empty password opens, keeping their encryption (default true). */
   rewriteEncrypted?: boolean;
   /** Archive: store the streams of such files decrypted, encrypted again on expand (default true). */
@@ -120,6 +124,7 @@ const FLAG_NO_JPEG_TABLES = 8;
 const FLAG_NO_JBIG2 = 16;
 const FLAG_KEEP_ENCRYPTED = 32;
 const FLAG_NO_DECRYPT = 64;
+const FLAG_NO_PALETTE = 128;
 
 interface Exports {
   memory: WebAssembly.Memory;
@@ -301,7 +306,8 @@ function pack(options: GpressOptions): Packed {
       (options.jpegTables === false ? FLAG_NO_JPEG_TABLES : 0) |
       (options.jbig2 === false ? FLAG_NO_JBIG2 : 0) |
       (options.rewriteEncrypted === false ? FLAG_KEEP_ENCRYPTED : 0) |
-      (options.decrypt === false ? FLAG_NO_DECRYPT : 0),
+      (options.decrypt === false ? FLAG_NO_DECRYPT : 0) |
+      (options.palette === false ? FLAG_NO_PALETTE : 0),
   };
 }
 

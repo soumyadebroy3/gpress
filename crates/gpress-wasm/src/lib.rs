@@ -57,6 +57,7 @@ pub const FLAG_NO_JPEG_TABLES: u32 = 8;
 pub const FLAG_NO_JBIG2: u32 = 16;
 pub const FLAG_KEEP_ENCRYPTED: u32 = 32;
 pub const FLAG_NO_DECRYPT: u32 = 64;
+pub const FLAG_NO_PALETTE: u32 = 128;
 
 /// A size given in MiB, or the default for 0, clamped to what this module can address.
 fn mib(v: u32, default: usize) -> usize {
@@ -80,6 +81,7 @@ fn options(effort: u32, max_input_mb: u32, max_stream_mb: u32, objects_per_strea
     o.use_existing_libraries = flags & FLAG_NO_EXISTING_LIBRARIES == 0;
     o.jpeg_tables = flags & FLAG_NO_JPEG_TABLES == 0;
     o.jbig2 = flags & FLAG_NO_JBIG2 == 0;
+    o.palette = flags & FLAG_NO_PALETTE == 0;
     o.rewrite_encrypted = flags & FLAG_KEEP_ENCRYPTED == 0;
     o.decrypt = flags & FLAG_NO_DECRYPT == 0;
     o
@@ -339,13 +341,13 @@ mod tests {
 
     #[test]
     fn the_flags_and_sizes_reach_the_options() {
-        let o = options(30, 3, 5, 9, FLAG_NO_JPEG_TABLES | FLAG_KEEP_ENCRYPTED | FLAG_NO_DECRYPT);
+        let o = options(30, 3, 5, 9, FLAG_NO_JPEG_TABLES | FLAG_KEEP_ENCRYPTED | FLAG_NO_DECRYPT | FLAG_NO_PALETTE);
         assert_eq!(
             (o.effort.level(), o.max_input, o.max_stream, o.max_stream_archive),
             (30, 3 << 20, 5 << 20, 5 << 20)
         );
         assert_eq!(o.objects_per_stream, 9);
-        assert!(!o.jpeg_tables && !o.rewrite_encrypted && !o.decrypt);
+        assert!(!o.jpeg_tables && !o.rewrite_encrypted && !o.decrypt && !o.palette);
         assert!(o.jbig2 && o.respect_conformance && o.flate_over_jpeg && o.use_existing_libraries);
         let d = options(100, 0, 0, 0, 0);
         assert_eq!(d, gpress::Options::default().threads(1));
