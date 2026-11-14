@@ -274,17 +274,23 @@ fn a_dangling_reference_keeps_its_number_free() {
 
 #[test]
 fn a_dangling_reference_to_an_object_in_the_file_leaves_it_untouched() {
-    // Object 9 is missing from the cross-reference data. When "9 0 obj" is in the file anyway (here in the
-    // page's text), some readers find it, so the file is left as it is. "19 0 obj" holds it too; "9 00 obj"
-    // and "9 1 obj" don't.
+    // Object 9 is missing from the cross-reference data. When a header of it is in the file anyway (here in
+    // the page's text), some readers find it, so the file is left as it is. The search takes a header at any
+    // generation and with any white space, and "19 0 obj" holds it too. Without two numbers before "obj"
+    // there is no header.
     let texts = [
         ("9 0 obj", true),
         ("19 0 obj", true),
         ("x9 0 obj", true),
-        ("9 00 obj", false),
-        ("9 1 obj", false),
-        ("9 0obj", false),
-        ("9  0 obj", false),
+        ("9 00 obj", true),
+        ("9 1 obj", true),
+        ("9 0obj", true),
+        ("9  0 obj", true),
+        ("9\n0\tobj", true),
+        ("9 obj", false),
+        ("90 obj", false),
+        ("9x0 obj", false),
+        ("9 0 ob", false),
     ];
     for (text, found) in texts {
         let mut objs = page_objects();
@@ -312,7 +318,7 @@ fn a_trailer_reference_to_an_object_in_the_file_leaves_it_untouched() {
     assert!(xref::open(&pdf).unwrap().load(1).is_err(), "object 1 must be missing");
     assert_eq!(untouched(&optimize(&pdf, &Options::effort(0)), &pdf), reason);
     // The same for the trailer's other references: /Info names object 9, which only the page's text holds.
-    for (text, found) in [("9 0 obj", true), ("9 1 obj", false)] {
+    for (text, found) in [("9 0 obj", true), ("9 1 obj", true), ("9 obj", false)] {
         let mut objs = page_objects();
         let content = format!("BT /F1 12 Tf 10 10 Td ({text}) Tj ET\n").repeat(50);
         objs[3].1 = stream("", content.as_bytes());
@@ -323,6 +329,51 @@ fn a_trailer_reference_to_an_object_in_the_file_leaves_it_untouched() {
         } else {
             smaller(&r, &pdf);
         }
+    }
+}
+
+#[test]
+fn a_freed_object_still_in_the_file_leaves_it_untouched() {
+    // The table frees the content stream and the page still names it. gpress reads a null there; Poppler
+    // rebuilds the table from the headers in the file and shows the page's text, also when the header has two
+    // spaces. The search does not compare generations, so the file stays as it is whichever the reference
+    // has. Without a header the file is rewritten.
+    let reason = "an object in the file is missing from its cross-reference data";
+    let freed = |header: &[u8; 8], contents: &[u8; 15]| {
+        let mut pdf = classic(&page_objects(), "5");
+        let row = pdf.windows(5).position(|w| w == b"\n4 1\n").unwrap() + 5;
+        pdf[row..row + 20].copy_from_slice(b"0000000000 00001 f \n");
+        let at = pdf.windows(8).position(|w| w == b"4 0 obj\n").unwrap();
+        pdf[at..at + 8].copy_from_slice(header);
+        let at = pdf.windows(15).position(|w| w == b"/Contents 4 0 R").unwrap();
+        pdf[at..at + 15].copy_from_slice(contents);
+        assert!(xref::open(&pdf).unwrap().load(4).is_err(), "object 4 must be free");
+        pdf
+    };
+    for (header, contents) in
+        [(b"4 0 obj\n", b"/Contents 4 0 R"), (b"4  0 obj", b"/Contents 4 0 R"), (b"4 0 obj\n", b"/Contents 4 1 R")]
+    {
+        let pdf = freed(header, contents);
+        assert_eq!(untouched(&optimize(&pdf, &Options::effort(0)), &pdf), reason);
+    }
+    let pdf = freed(b"4 0 xbj\n", b"/Contents 4 0 R");
+    smaller(&optimize(&pdf, &Options::effort(0)), &pdf);
+}
+
+#[test]
+fn a_trailer_nested_deeply_is_left_untouched() {
+    // PDFium opens a file whose trailer holds a value nested 64 dictionaries deep, and not what would be
+    // written from it. 16 levels of arrays or of dictionaries are refused, 15 are carried over.
+    for (open, close) in [("[", "]"), ("<< /A ", " >>")] {
+        let deep = |levels: usize| {
+            classic(&page_objects(), &format!("5 /Deep {}0{}", open.repeat(levels), close.repeat(levels)))
+        };
+        let pdf = deep(16);
+        assert_eq!(untouched(&optimize(&pdf, &Options::effort(0)), &pdf), "a trailer value nested too deeply");
+        let pdf = deep(15);
+        let r = optimize(&pdf, &Options::effort(0));
+        smaller(&r, &pdf);
+        assert!(xref::open(&r.data).unwrap().trailer.get(b"Deep").is_some(), "the key is carried over");
     }
 }
 
