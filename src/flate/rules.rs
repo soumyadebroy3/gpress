@@ -1,12 +1,13 @@
-//! The Flate encoders' rules: every tuning value of the two encoders (`deflate.rs` with `block.rs`, `matcher.rs`
-//! and `parse.rs`; `fast.rs`) as a named setting. A rule has a default, which is the value the code had before
+//! The Flate encoders' rules: the tuning values of the two encoders (`deflate.rs` with `block.rs`, `matcher.rs`
+//! and `parse.rs`; `fast.rs`) as named settings. A rule has a default, which is the value the code had before
 //! it was a rule, and a lowest and a highest value. With no rule set the encoders give the bytes they always
 //! gave; any value in a rule's range gives a valid stream.
 //!
 //! What stays fixed: the facts of the format, the seed of the strong encoder's blend (the output must be the
 //! same on every run), the effort bands' edges (20, 40, 60, 80, 100: `pdf::rewrite` has tables on the same
-//! edges), the number of fast levels, and the limits that keep memory bounded, which are the highest values
-//! of their rules here.
+//! edges), the number of fast levels, the limits that keep memory bounded, which are the highest values of
+//! their rules here, and what is code rather than a number: the run lengths the parse tells apart, the fast
+//! encoder's farthest distance (its tables' indexing) and the kinds of symbol it counts to see the data change.
 
 use std::sync::Arc;
 
@@ -554,8 +555,9 @@ mod tests {
             assert!(deflate_zlib(&data, &opt) == deflate_zlib(&data, &Options::effort(effort)), "effort {effort}");
         }
         assert!(deflate_zlib(&data, &Options::quick_with(&by_hand)) == deflate_zlib(&data, &Options::quick()));
-        // The settings are remembered by their rules too: another value, another output, also from one store.
-        let other = with(&[("e40_depth", 0)]);
+        // The settings are remembered by their rules too: another value of a rule that no field of `Options`
+        // carries, another output, also from one store.
+        let other = with(&[("header_starts", 1)]);
         assert!(!Options::effort_with(40, &other).same_output(&Options::effort(40)));
         let shared = Shared::new(1);
         let outputs = [FlateRules::default(), other].map(|r| {
