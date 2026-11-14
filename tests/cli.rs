@@ -1,6 +1,6 @@
 //! The command-line tool's Flate flags: `--fast N`, the engine's level and the effort, the strong encoder's
 //! tuning flags and the thread count, each checked against the library's own output for the same settings;
-//! `--store-budget`; and `--target-size`.
+//! `--store-budget`; `--target-size`; and `--drop-history`.
 
 use gpress::flate::{self, zlib, Options};
 use std::path::{Path, PathBuf};
@@ -71,9 +71,9 @@ fn the_flate_flags_mean_what_the_library_means() {
             == lib(Options { fast: 5, ..tuned })
     );
     assert!(deflate_cli(&dir, &data, &["--effort", "0", "--fast", "0", "--threads", "1"]) == lib(Options::quick()));
-    // The thread count never changes the output: an input of more than two of the fast encoder's 1 MiB
-    // segments, so that threads take part (the deflate tools use a pool from --threads 1 on).
-    let big = input(flate::fast::SEGMENT * 5 / 2);
+    // The thread count never changes the output: an input of more than two of the fast encoder's segments
+    // (the rule `fast_segment`), so that threads take part (the deflate tools use a pool from --threads 1 on).
+    let big = input(gpress::FlateRules::default().get("fast_segment").unwrap() as usize * 5 / 2);
     let one = deflate_cli(&dir, &big, &["--effort", "0", "--threads", "1"]);
     assert!(one == flate::deflate_zlib(&big, &Options::effort(0)));
     for t in ["2", "3", "4"] {
@@ -223,6 +223,53 @@ fn the_target_size_flag_picks_the_effort() {
     // The lossy flags too, each of which reaches the options.
     for flags in [["--photo-ppi", "200"], ["--art-ppi", "400"], ["--jpeg-quality", "80"]] {
         assert_eq!(run(&["--target-size", "0", flags[0], flags[1]]).0, Some(refused.code()), "{flags:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `--drop-history` is the library's `drop_history`: the same bytes, the summary's count of the saves kept or
+/// dropped, and one line on standard error for each dropped save, as the library's report lists it.
+#[test]
+fn the_drop_history_flag_is_the_library_option() {
+    // `small_pdf`, then an update that writes the second content stream (5) again, empty.
+    let mut pdf = small_pdf();
+    let first = pdf.len();
+    let prev = pdf.windows(5).position(|w| w == b"xref\n").unwrap();
+    pdf.extend_from_slice(b"5 0 obj\n<< /Length 0 >>\nstream\n\nendstream\nendobj\n");
+    let x = pdf.len();
+    let trailer = format!("trailer\n<< /Size 6 /Root 1 0 R /Prev {prev} >>");
+    pdf.extend_from_slice(format!("xref\n5 1\n{first:010} 00000 n \n{trailer}\nstartxref\n{x}\n%%EOF\n").as_bytes());
+    let dir = std::env::temp_dir().join(format!("gpress-cli-history-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (i, o) = (dir.join("in.pdf"), dir.join("out.pdf"));
+    std::fs::write(&i, &pdf).unwrap();
+    for drop_history in [false, true] {
+        let r = Command::new(env!("CARGO_BIN_EXE_gpress"))
+            .arg("optimize")
+            .arg(&i)
+            .arg(&o)
+            .args(["--effort", "0", "--threads", "1"])
+            .args(if drop_history { &["--drop-history"][..] } else { &[] })
+            .output()
+            .unwrap();
+        let (said, listed) = (String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+        assert_eq!(r.status.code(), Some(0), "{listed}");
+        let lib = gpress::optimize(&pdf, &gpress::Options::new().effort(0).threads(1).drop_history(drop_history));
+        let lib = lib.unwrap();
+        assert!(std::fs::read(&o).unwrap() == lib.data, "--drop-history {drop_history}");
+        let gpress::Outcome::Smaller(report) = &lib.outcome else { panic!("{:?}", lib.outcome) };
+        if drop_history {
+            assert_eq!((report.history_kept, report.history_dropped.len()), (0, 1));
+            let d = &report.history_dropped[0];
+            assert_eq!((d.start, d.end, d.versions), (0, first, 1));
+            assert!(said.contains(" revisions_dropped=1") && !said.contains("revisions_kept"), "{said}");
+            let line = format!("dropped revision 0 of 2: bytes 0-{first}, 1 object versions the output doesn't hold");
+            assert!(listed.contains(&line), "{listed}");
+        } else {
+            assert_eq!((report.history_kept, report.history_dropped.len()), (1, 0));
+            assert!(said.contains(" revisions_kept=1") && !said.contains("revisions_dropped"), "{said}");
+            assert!(!listed.contains("dropped revision"), "{listed}");
+        }
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

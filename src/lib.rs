@@ -45,7 +45,8 @@ use off::jpeg;
 use off::pack;
 
 pub use api::{
-    compress, expand, is_archive, optimize, optimize_to_size, Compressed, Effort, Error, Lossy, Optimized, Options,
-    Outcome, Picked, Report, VERSION,
+    compress, expand, is_archive, optimize, optimize_to_size, Compressed, Dropped, Effort, Error, Lossy, Optimized,
+    Options, Outcome, Picked, Report, VERSION,
 };
 pub use feature::Feature;
+pub use flate::FlateRules;

@@ -45,4 +45,19 @@ impl Crypt {
     pub fn seal_stream(&self, _num: u32, _gen: u16, _d: &Dict, _data: &[u8]) -> Result<(Dict, Vec<u8>), &'static str> {
         match self.never {}
     }
+
+    pub fn seal_object_at(&self, _rev: u32, _num: u32, _gen: u16, _o: &Obj) -> Result<Obj, &'static str> {
+        match self.never {}
+    }
+
+    pub fn seal_stream_at(
+        &self,
+        _rev: u32,
+        _num: u32,
+        _gen: u16,
+        _d: &Dict,
+        _data: &[u8],
+    ) -> Result<(Dict, Vec<u8>), &'static str> {
+        match self.never {}
+    }
 }

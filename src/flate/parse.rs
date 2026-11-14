@@ -3,6 +3,7 @@
 
 use super::lz::{d_extra, ll_extra, Hist, Sym};
 use super::matcher::{Matches, Step, CANDIDATES};
+use super::rules::{rule, FlateRules};
 use super::tables::*;
 
 /// Bits charged for each choice. `len[l]` includes the length symbol and its extra bits; `dist[c]` the
@@ -29,6 +30,7 @@ impl Costs {
     }
 
     /// Costs of the fixed Huffman codes: a neutral starting point.
+    #[cfg(test)]
     pub fn fixed() -> Costs {
         let ll = fixed_litlen_lengths();
         let llf: Vec<f32> = ll.iter().map(|&x| x as f32).collect();
@@ -36,10 +38,24 @@ impl Costs {
         Costs::from_symbol_costs(&llf, &d)
     }
 
-    /// Costs from symbol counts: -log2(p). Unused symbols cost as if seen once.
-    pub fn entropy(h: &Hist) -> Costs {
-        let ll = entropy_bits(&h.ll);
-        let d = entropy_bits(&h.d);
+    /// The costs the first pass over a segment starts from: by default those of the fixed Huffman codes
+    /// (`fixed`), a neutral starting point. From the rules `first_literal_bits` and the four after it: a literal
+    /// below 144 and from 144, a length symbol below 280 (lengths up to 114) and from 280, a distance.
+    pub fn first(r: &FlateRules) -> Costs {
+        let mut ll = [rule!(r, "first_literal_bits") as f32; LITLEN_SYMS];
+        ll[144..256].fill(rule!(r, "first_high_literal_bits") as f32);
+        ll[256..280].fill(rule!(r, "first_length_bits") as f32);
+        ll[280..].fill(rule!(r, "first_long_length_bits") as f32);
+        let d = [rule!(r, "first_distance_bits") as f32; DIST_SYMS];
+        Costs::from_symbol_costs(&ll, &d)
+    }
+
+    /// Costs from symbol counts: -log2(p). Unused symbols cost as if seen once, plus the rule
+    /// `unused_symbol_bits` (1 by default).
+    pub fn entropy(h: &Hist, r: &FlateRules) -> Costs {
+        let unused = rule!(r, "unused_symbol_bits") as f32;
+        let ll = entropy_bits(&h.ll, unused);
+        let d = entropy_bits(&h.d, unused);
         Costs::from_symbol_costs(&ll, &d)
     }
 
@@ -51,10 +67,10 @@ impl Costs {
     }
 }
 
-fn entropy_bits(counts: &[u32]) -> Vec<f32> {
+fn entropy_bits(counts: &[u32], unused: f32) -> Vec<f32> {
     let total: u64 = counts.iter().map(|&c| c as u64).sum::<u64>().max(1);
     let lt = (total as f64).log2();
-    counts.iter().map(|&c| if c == 0 { lt as f32 + 1.0 } else { (lt - (c as f64).log2()).max(0.0) as f32 }).collect()
+    counts.iter().map(|&c| if c == 0 { lt as f32 + unused } else { (lt - (c as f64).log2()).max(0.0) as f32 }).collect()
 }
 
 /// Scratch space reused between parses.
@@ -218,6 +234,8 @@ fn parse<const EACH: bool>(
     let shifts = shifts(c);
     // A match is at least 3 bytes, so a smaller `nice` acts as 3.
     let nice = nice.max(MIN_MATCH);
+    // How many steps of a walk are weighed with `alt` (the rule `alt_candidates`).
+    let cands = m.candidates.min(CANDIDATES);
     // The per-position lists, taken once for the whole range.
     let data = &data[a..b];
     let from = a - m.from;
@@ -324,7 +342,7 @@ fn parse<const EACH: bool>(
             k += 1;
             continue;
         }
-        // The first `CANDIDATES` (32) steps the walk found (nearly always all of them), sorted by length,
+        // The first `cands` (32 by default) steps the walk found (nearly always all of them), sorted by length,
         // shortest first (of equal lengths, the later one first), packed as length << 16 | distance. Sorted as
         // length << 16 | !distance, an order that does not depend on the order the steps come in.
         let key = |s: &Step| {
@@ -332,13 +350,13 @@ fn parse<const EACH: bool>(
             (ml as u32) << 16 | !d as u32
         };
         let mut cand = [0u32; CANDIDATES];
-        let cnt = steps.len().min(CANDIDATES);
+        let cnt = steps.len().min(cands);
         if far.is_empty() {
             // The chain alone, already in order.
             for (e, s) in cand.iter_mut().zip(chain) {
                 *e = key(s) ^ 0xffff;
             }
-        } else if steps.len() <= CANDIDATES {
+        } else if steps.len() <= cands {
             // The chain and the farther steps (which the matcher puts in this order too), merged.
             let (mut x, mut y) = (0, 0);
             for e in &mut cand[..cnt] {
@@ -356,7 +374,7 @@ fn parse<const EACH: bool>(
             // The walk found them in order of distance: the chain and the farther steps merged by distance,
             // each sorted in.
             let (mut x, mut y) = (0, 0);
-            for i in 0..CANDIDATES {
+            for i in 0..cands {
                 let s = if y == far.len() || (x < chain.len() && chain[x].get().1 < far[y].get().1) {
                     x += 1;
                     &chain[x - 1]
@@ -668,8 +686,19 @@ pub fn greedy(data: &[u8], a: usize, b: usize, m: &Matches, out: &mut Vec<Sym>) 
 
 #[cfg(test)]
 mod tests {
-    use super::super::matcher::{find_matches, find_matches_keeping_all};
+    use super::super::matcher::{self, find_matches_keeping_all};
     use super::*;
+
+    #[test]
+    fn the_first_costs_are_those_of_the_fixed_codes_by_default() {
+        let (first, fixed) = (Costs::first(&FlateRules::default()), Costs::fixed());
+        assert!(first.lit == fixed.lit && first.len == fixed.len && first.dist == fixed.dist);
+    }
+
+    /// `matcher::find_matches` under the default rules.
+    fn find_matches(data: &[u8], from: usize, to: usize, max_depth: usize, alternatives: bool) -> Matches {
+        matcher::find_matches(data, from, to, max_depth, alternatives, &FlateRules::default())
+    }
 
     /// The parse as it was before the windows: one range of lengths at a time, through the accessors.
     #[allow(clippy::too_many_arguments)]

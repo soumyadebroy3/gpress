@@ -19,6 +19,9 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
+mod history;
+pub use history::Dropped;
+
 #[derive(Clone, Debug)]
 pub struct Options {
     pub flate: flate::Options,
@@ -68,6 +71,10 @@ pub struct Options {
     pub rewrite_encrypted: bool,
     /// The lossy image step (see `crate::pdf::lossy`); `Lossy::OFF` leaves every image to the lossless path.
     pub lossy: super::lossy::Lossy,
+    /// A file that keeps earlier saves (incremental updates) is written with every one of them kept (see
+    /// `history`). With `true` only the newest is written, as a file of one save: what the earlier saves held
+    /// and the newest doesn't is gone (`Stats::history_dropped` lists them).
+    pub drop_history: bool,
     /// Stop when this passes (checked between streams and Flate segments): the outcome is then `TimedOut`
     /// and nothing is returned. A rewrite that finishes gives the same bytes with or without a deadline.
     pub deadline: Deadline,
@@ -89,6 +96,7 @@ impl Default for Options {
             jpeg_tables: true,
             rewrite_encrypted: true,
             lossy: super::lossy::Lossy::OFF,
+            drop_history: false,
             deadline: Deadline::NONE,
         }
     }
@@ -132,6 +140,12 @@ pub struct Stats {
     pub jpegs_rewritten: usize,
     /// How the file is encrypted (kept exactly as it was), e.g. "R4/AESV2"; empty when it isn't.
     pub encryption: String,
+    /// Earlier saves kept, each written again and checked (see `history`). The counts above are then of what
+    /// was written: an object or stream once for each revision that adds or changes it, and no count of
+    /// unreachable objects.
+    pub history_kept: usize,
+    /// Earlier saves dropped because `Options::drop_history` asked, oldest first.
+    pub history_dropped: Vec<Dropped>,
 }
 
 #[derive(Debug)]
@@ -243,7 +257,7 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, conformance: bool) -> Resul
         None => {}
     }
     if doc.has_revisions {
-        return Err("keeps earlier revisions (incremental updates)".into());
+        return Err(xref::KEEPS.into());
     }
     if doc.trailing > 1024 {
         return Err("data after the end of the file".into());
@@ -561,7 +575,7 @@ fn reencode(
         let fast = flate::Options {
             shared: opt.flate.shared.clone(),
             deadline: opt.flate.deadline,
-            ..flate::Options::effort(0)
+            ..flate::Options::effort_with(0, &opt.flate.rules)
         };
         if !opt.flate.same_output(&fast) && flate::deflate_zlib(&data, &fast).len() >= s.data.len() {
             return None;
@@ -894,7 +908,10 @@ fn repredict(
     // ranked side by side when threads are free.
     // On the fast path the candidates are ranked with the level effort 0 gives images, else with the quick
     // settings.
-    let rank = flate::Options { fast: if opt.flate.fast > 0 { image_level(0) } else { 0 }, ..flate::Options::quick() };
+    let rank = flate::Options {
+        fast: if opt.flate.fast > 0 { image_level(0) } else { 0 },
+        ..flate::Options::quick_with(&opt.flate.rules)
+    };
     let quick = flate::Options { shared: opt.flate.shared.as_ref().map(|sh| sh.without_store()), ..rank };
     let nrows = px.len() / row;
     let rows = predictor_sample(nrows, row, opt.effort);
@@ -1108,7 +1125,11 @@ fn structure_flate(opt: &Options, raw: usize, input_len: usize) -> flate::Option
         && (STRONG_FROM..FAST_BELOW).contains(&opt.effort)
         && raw as f64 <= bridge_budget(opt.effort, input_len)
     {
-        flate::Options { shared: opt.flate.shared.clone(), deadline: opt.flate.deadline, ..flate::Options::quick() }
+        flate::Options {
+            shared: opt.flate.shared.clone(),
+            deadline: opt.flate.deadline,
+            ..flate::Options::quick_with(&opt.flate.rules)
+        }
     } else {
         opt.flate.clone()
     }
@@ -1201,7 +1222,7 @@ fn effort_plan(
             flate: flate::Options {
                 shared: opt.flate.shared.clone(),
                 deadline: opt.flate.deadline,
-                ..flate::Options::quick()
+                ..flate::Options::quick_with(&opt.flate.rules)
             },
             ..opt.clone()
         };
@@ -1232,7 +1253,7 @@ fn effort_plan(
         flate: flate::Options {
             shared: opt.flate.shared.clone(),
             deadline: opt.flate.deadline,
-            ..flate::Options::effort(e)
+            ..flate::Options::effort_with(e, &opt.flate.rules)
         },
         effort: e,
         ..opt.clone()
@@ -1243,7 +1264,7 @@ fn effort_plan(
         flate: flate::Options {
             shared: opt.flate.shared.clone(),
             deadline: opt.flate.deadline,
-            ..flate::Options::quick()
+            ..flate::Options::quick_with(&opt.flate.rules)
         },
         effort: 0,
         ..opt.clone()
@@ -1277,6 +1298,18 @@ fn effort_plan(
         }
     }
     out
+}
+
+/// The objects of object streams, grouped by kind so similar objects sit together.
+fn by_kind(packable: &mut [(u32, &Obj)]) {
+    packable.sort_by(|a, b| kind_key(a.1).cmp(&kind_key(b.1)).then(a.0.cmp(&b.0)));
+}
+
+/// The order the jobs start in: the largest stream first.
+fn largest_first(jobs: &[Job]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..jobs.len()).collect();
+    order.sort_by_key(|&u| (std::cmp::Reverse(jobs[u].s.data.len()), u));
+    order
 }
 
 fn kind_key(o: &Obj) -> (u8, Vec<u8>, Vec<u8>) {
@@ -1481,8 +1514,20 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         );
     }
     let mut objs = objs?;
-    gate(&doc, &objs, opt.respect_conformance)?;
+    // A file that keeps earlier saves: every save is kept and written by `history`, or, when the caller asks,
+    // every save is checked there and the newest goes on alone.
+    let mut history_dropped = Vec::new();
+    match gate(&doc, &objs, opt.respect_conformance) {
+        Err(why) if why == xref::KEEPS && !opt.drop_history => {
+            drop((objs, doc));
+            return history::keep(input, opt);
+        }
+        // Every save passes the gate there, the newest among them.
+        Err(why) if why == xref::KEEPS => history_dropped = history::dropped(input, opt, &objs)?,
+        gated => gated?,
+    }
     let mut stats = Stats {
+        history_dropped,
         objects: objs.len(),
         dropped_unreachable: doc
             .entries
@@ -1542,8 +1587,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
             Job { n, s, settings, xmp, shares, palette, refs: job_refs(&s.dict, &objs) }
         })
         .collect();
-    let mut order: Vec<usize> = (0..jobs.len()).collect();
-    order.sort_by_key(|&u| (std::cmp::Reverse(jobs[u].s.data.len()), u));
+    let order = largest_first(&jobs);
     let dbg = std::env::var_os("PDFE_DEBUG").is_some();
     // One store of encoded outputs for the whole file: an input that two jobs encode with the same settings
     // (two streams with the same data under other dictionaries, say) is encoded once. It goes with the file.
@@ -1655,8 +1699,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         }
     }
 
-    // Object streams, grouped by kind so similar objects sit together.
-    packable.sort_by(|a, b| kind_key(a.1).cmp(&kind_key(b.1)).then(a.0.cmp(&b.0)));
+    by_kind(&mut packable);
     // New objects are numbered after the highest number the document uses (the encryption dictionary's
     // objects keep their numbers; a dangling reference keeps its number free), never after the old /Size:
     // that is a claim of the file, not something it holds, and the gate has already checked that no object
@@ -1667,45 +1710,18 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     let mut raws = Vec::with_capacity(chunks.len());
     for (k, chunk) in chunks.iter().enumerate() {
         let sn = next_num + k as u32;
-        let mut head = Vec::new();
-        let mut body = Vec::new();
-        for (i, (n, o)) in chunk.iter().enumerate() {
-            if i > 0 {
-                body.push(b'\n');
-            }
-            head.extend_from_slice(format!("{} {} ", n, body.len()).as_bytes());
-            body.extend_from_slice(&to_bytes(o));
+        for (i, (n, _)) in chunk.iter().enumerate() {
             in_stm.insert(*n, (sn, i as u32));
         }
-        let first = head.len();
-        let mut raw = head;
-        raw.extend_from_slice(&body);
-        raws.push((raw, first));
+        raws.push(objstm_raw(chunk));
     }
     let objstm_bytes: usize = raws.iter().map(|r| r.0.len()).sum();
     let structure = structure_flate(opt, objstm_bytes, input.len());
-    let zs = par::map(pool, raws.len(), None, |k| flate::deflate_zlib(&raws[k].0, &structure));
+    let zs = deflate_each(pool, &raws.iter().map(|r| r.0.as_slice()).collect::<Vec<_>>(), &structure);
     for (chunk, ((_, first), z)) in chunks.iter().zip(raws.iter().zip(zs)) {
         let sn = next_num;
         next_num += 1;
-        let first = *first;
-        let mut d = Dict::default();
-        d.set(b"Type", Obj::Name(b"ObjStm".to_vec()));
-        d.set(b"N", Obj::Int(chunk.len() as i64));
-        d.set(b"First", Obj::Int(first as i64));
-        d.set(b"Filter", Obj::Name(b"FlateDecode".to_vec()));
-        // Encrypted as a stream; the objects inside are not encrypted on their own.
-        let (mut d, z) = match crypt {
-            Some(c) => c.seal_stream(sn, 0, &d, &z).map_err(|e| format!("object stream: {e}"))?,
-            None => (d, z),
-        };
-        d.set(b"Length", Obj::Int(z.len() as i64));
-        let mut out = Vec::new();
-        Writer { out: &mut out }.dict(&d);
-        out.extend_from_slice(b"stream\n");
-        out.extend_from_slice(&z);
-        out.extend_from_slice(b"\nendstream");
-        direct.insert(sn, (0, out));
+        direct.insert(sn, (0, objstm_body(crypt, 0, sn, (chunk.len(), *first), z)?));
         stats.objstms += 1;
     }
     // The encryption dictionary and its objects as they were: never encrypted, never in an object stream.
@@ -1764,21 +1780,6 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         rows.extend_from_slice(&f2.to_be_bytes()[8 - w1..]);
         rows.extend_from_slice(&f3.to_be_bytes()[8 - w2..]);
     }
-    // PNG "Up" prediction usually helps the column-structured rows; keep whichever is smaller, counting the
-    // bytes its parameters take in the dictionary.
-    let cols = 1 + w1 + w2;
-    let mut up = Vec::with_capacity(rows.len() + rows.len() / cols + 1);
-    for (r, row) in rows.chunks(cols).enumerate() {
-        up.push(2u8);
-        for (i, &b) in row.iter().enumerate() {
-            let above = if r == 0 { 0 } else { rows[(r - 1) * cols + i] };
-            up.push(b.wrapping_sub(above));
-        }
-    }
-    // Its rows count too: a file can claim object numbers far beyond what it holds.
-    let structure = structure_flate(opt, objstm_bytes + rows.len() + up.len(), input.len());
-    let mut both = par::map(pool, 2, None, |k| flate::deflate_zlib(if k == 0 { &rows } else { &up }, &structure));
-    let (z_up, z_plain) = (both.pop().unwrap(), both.pop().unwrap());
     let mut xd = Dict::default();
     xd.set(b"Type", Obj::Name(b"XRef".to_vec()));
     xd.set(b"Size", Obj::Int(size as i64));
@@ -1789,24 +1790,8 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
             xd.set(k, v.clone());
         }
     }
-    xd.set(b"Filter", Obj::Name(b"FlateDecode".to_vec()));
-    let mut p = Dict::default();
-    p.set(b"Predictor", Obj::Int(12));
-    p.set(b"Columns", Obj::Int(cols as i64));
-    let parms = to_bytes(&Obj::Dict(p.clone())).len() + b"/DecodeParms".len();
-    let zx = if z_up.len() + parms < z_plain.len() {
-        xd.set(b"DecodeParms", Obj::Dict(p));
-        z_up
-    } else {
-        z_plain
-    };
-    xd.set(b"Length", Obj::Int(zx.len() as i64));
-    out.extend_from_slice(format!("{xn} 0 obj\n").as_bytes());
-    Writer { out: &mut out }.dict(&xd);
-    out.extend_from_slice(b"stream\n");
-    out.extend_from_slice(&zx);
-    out.extend_from_slice(b"\nendstream\nendobj\n");
-    out.extend_from_slice(format!("startxref\n{xref_off}\n%%EOF\n").as_bytes());
+    let structure = |more| structure_flate(opt, objstm_bytes + more, input.len());
+    write_xref(&mut out, xn, xd, (&rows, 1 + w1 + w2), &structure, pool)?;
 
     // qpdf 12 reads an object only when its number is below a third of the file's length, this cross-reference
     // stream included, and objects keep their numbers: a file whose numbers are too high for its new length
@@ -1828,6 +1813,96 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         return Err(TIMED_OUT.into());
     }
     Ok((out, stats))
+}
+
+/// Each of `raws` deflated on the pool, with the settings for the file's structure.
+fn deflate_each(pool: Option<&par::Pool>, raws: &[&[u8]], structure: &flate::Options) -> Vec<Vec<u8>> {
+    par::map(pool, raws.len(), None, |k| flate::deflate_zlib(raws[k], structure))
+}
+
+/// The data of an object stream of the objects of `chunk`, before it is deflated, and where its first object
+/// starts.
+fn objstm_raw(chunk: &[(u32, &Obj)]) -> (Vec<u8>, usize) {
+    let mut head = Vec::new();
+    let mut body = Vec::new();
+    for (i, (n, o)) in chunk.iter().enumerate() {
+        if i > 0 {
+            body.push(b'\n');
+        }
+        head.extend_from_slice(format!("{} {} ", n, body.len()).as_bytes());
+        body.extend_from_slice(&to_bytes(o));
+    }
+    let first = head.len();
+    head.extend_from_slice(&body);
+    (head, first)
+}
+
+/// Object stream `sn` as it goes into the file: `z` is its deflated data, of `count` objects, the first at
+/// `first`. Encrypted as a stream, for revision `rev` (see `Crypt::seal_stream_at`); the objects inside are not
+/// encrypted on their own.
+fn objstm_body(
+    crypt: Option<&Crypt>,
+    rev: u32,
+    sn: u32,
+    (count, first): (usize, usize),
+    z: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    let mut d = Dict::default();
+    d.set(b"Type", Obj::Name(b"ObjStm".to_vec()));
+    d.set(b"N", Obj::Int(count as i64));
+    d.set(b"First", Obj::Int(first as i64));
+    d.set(b"Filter", Obj::Name(b"FlateDecode".to_vec()));
+    let (mut d, z) = match crypt {
+        Some(c) => c.seal_stream_at(rev, sn, 0, &d, &z).map_err(|e| format!("object stream: {e}"))?,
+        None => (d, z),
+    };
+    d.set(b"Length", Obj::Int(z.len() as i64));
+    let mut out = Vec::new();
+    Writer { out: &mut out }.dict(&d);
+    out.extend_from_slice(b"stream\n");
+    out.extend_from_slice(&z);
+    out.extend_from_slice(b"\nendstream");
+    Ok(out)
+}
+
+/// Writes a cross-reference stream as object `xn` at the end of `out`, and `startxref` after it. `xd` is its
+/// dictionary but for how its rows are stored, `rows` its rows (of `cols` bytes each), and `structure` gives the
+/// settings for a file with that many more bytes of structure: the rows count too, as a file can claim object
+/// numbers far beyond what it holds. PNG "Up" prediction usually helps the column-structured rows: whichever is
+/// smaller is kept, counting the bytes its parameters take in the dictionary.
+fn write_xref(
+    out: &mut Vec<u8>,
+    xn: u32,
+    mut xd: Dict,
+    (rows, cols): (&[u8], usize),
+    structure: &dyn Fn(usize) -> flate::Options,
+    pool: Option<&par::Pool>,
+) -> Result<(), String> {
+    let up = images::png_filter(rows, cols, 1, images::Choice::Fixed(2));
+    let mut both = deflate_each(pool, &[rows, &up], &structure(rows.len() + up.len()));
+    let (Some(z_up), Some(z_plain)) = (both.pop(), both.pop()) else {
+        return Err("cross-reference stream not encoded".into());
+    };
+    xd.set(b"Filter", Obj::Name(b"FlateDecode".to_vec()));
+    let mut p = Dict::default();
+    p.set(b"Predictor", Obj::Int(12));
+    p.set(b"Columns", Obj::Int(cols as i64));
+    let parms = to_bytes(&Obj::Dict(p.clone())).len() + b"/DecodeParms".len();
+    let zx = if z_up.len() + parms < z_plain.len() {
+        xd.set(b"DecodeParms", Obj::Dict(p));
+        z_up
+    } else {
+        z_plain
+    };
+    xd.set(b"Length", Obj::Int(zx.len() as i64));
+    let xref_off = out.len();
+    out.extend_from_slice(format!("{xn} 0 obj\n").as_bytes());
+    Writer { out }.dict(&xd);
+    out.extend_from_slice(b"stream\n");
+    out.extend_from_slice(&zx);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(format!("startxref\n{xref_off}\n%%EOF\n").as_bytes());
+    Ok(())
 }
 
 fn bytes_for(v: u64) -> usize {

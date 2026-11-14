@@ -9,13 +9,13 @@
 //! then from the path found.
 //!
 //! Blocks end where the symbols change character. As symbols are made, a few coarse kinds of literal and
-//! match are counted; every `BATCH` of them the latest batch is compared with the block so far, and a large
+//! match are counted; every batch of them (512) the latest batch is compared with the block so far, and a large
 //! enough difference ends the block where the batch began (no search over split points). Each block gets
 //! its codes from the shared Huffman builder and goes out dynamic, fixed or stored, whichever is smallest,
 //! through the shared block writer.
 //!
-//! The input is cut into segments at multiples of `SEGMENT`. Each is encoded on its own, its match finder
-//! primed with up to `DICT` bytes of input before it, so threads can share the work, the size barely
+//! The input is cut into segments at multiples of 1 MiB. Each is encoded on its own, its match finder
+//! primed with up to 32 KiB of input before it, so threads can share the work, the size barely
 //! changes, and the output never depends on how many threads there are. A segment's coded blocks are
 //! written from bit 0 of its own buffer and spliced into the stream at the right bit; stored blocks depend
 //! on byte alignment, so they are written in that final pass.
@@ -23,6 +23,9 @@
 //! Memory per segment in flight: the match finder's tables (at most 640 KiB), the symbols of one block (at
 //! most 1.3 MB), for levels 8 to 12 the candidate matches and the parse arrays of one block (at most 8 MB),
 //! and the segment's output.
+//!
+//! The numbers above and the levels themselves are the defaults of rules (`FlateRules`: `fast_...`,
+//! `level1_...` to `level12_...`), which `Level::of` reads once for each input.
 //!
 //! Several parts are adapted from libdeflate's compressor (lib/deflate_compress.c, hc_matchfinder.h,
 //! bt_matchfinder.h and matchfinder_common.h), rewritten in Rust with their constants tuned again: the
@@ -52,26 +55,22 @@
 
 use super::bits::BitWriter;
 use super::block::{
-    data_bits, fixed_bits, patch_distances, stored_bits, write_dynamic, write_fixed, write_stored, DynCode, Header,
+    data_bits, fixed_bits, patch_distances, smallest, stored_bits, write_dynamic, write_fixed, write_stored, BlockType,
+    DynCode, Header,
 };
 use super::huffman::lengths_into;
 use super::lz::{Hist, Sym};
+use super::rules::{rule, FlateRules};
 use super::tables::*;
 use crate::clock::Deadline;
 use crate::par::{self, Pool};
 
-/// Segments start at multiples of this.
-pub const SEGMENT: usize = 1 << 20;
-/// Each segment's match finder is primed with up to this much input before it.
-pub const DICT: usize = 32 << 10;
 /// The strongest level.
 pub const LEVELS: u8 = 12;
 
 /// Matches reach back at most this far: one less than Deflate allows, so that the table slot of the
 /// position being added never belongs to one still in reach.
 const MAX_DIST: usize = WINDOW - 1;
-/// Segments given to the threads at once (bounds the finished output held before it is written).
-const GROUP: usize = 16;
 /// An empty table entry: as a position it is always out of reach.
 const NIL: u32 = u32::MAX;
 
@@ -100,6 +99,8 @@ enum Mode {
     Optimal,
 }
 
+/// How one level works: its row of the rules' table of levels, then the fast encoder's other rules, which are
+/// the same at every level (see `FlateRules` for each).
 #[derive(Clone, Copy, Debug)]
 struct Level {
     mode: Mode,
@@ -112,39 +113,106 @@ struct Level {
     passes: u32,
     /// Hash chains: also look for 3-byte matches.
     short: bool,
+    /// Segments start at multiples of this.
+    segment: usize,
+    /// Each segment's match finder is primed with up to this much input before it.
+    dict: usize,
+    /// Segments given to the threads at once (bounds the finished output held before it is written).
+    group: usize,
+    /// Which block type is written when two cost the same (`block_tie`).
+    tie: usize,
+    /// Observations every block-end check compares.
+    batch: u32,
+    /// Blocks are at least this long (bytes), unless the segment is shorter...
+    min_block: usize,
+    /// ...and at most about this long.
+    max_block: usize,
+    /// When the latest batch ends a block (see `Split::changed`).
+    end_threshold: u64,
+    young_block: u64,
+    age_step: u64,
+    /// The most bits of the tables of 4-byte and of 3-byte hashes.
+    hash4_bits: u32,
+    hash3_bits: u32,
+    /// Lazy matching: the units a byte longer is worth, and the gain a match one and two positions ahead needs.
+    gain_per_byte: i32,
+    gain_per_halving: i32,
+    lazy_gain: i32,
+    lazy2_gain: i32,
+    /// The greedy pass behind the first costs takes a 3-byte match only this close (farther ones are rarely
+    /// worth it in the end).
+    far3: usize,
+    /// Candidate matches kept per position at most (the longest replaces the last one beyond this).
+    max_cands: usize,
+    /// Positions of one block for the optimal levels at most.
+    max_opt_block: usize,
+    /// Costs of a literal, a length and a distance a histogram doesn't have: rare, but not out of the question.
+    unused: [u32; 3],
+    /// The weight of the previous block's path in a block's first costs, in percent.
+    blend_percent: u64,
+    /// How many of the greedy pass's last distances are tried again at every position.
+    reps: usize,
 }
 
-const fn lv(mode: Mode, depth: u32, nice: usize, passes: u32, short: bool) -> Level {
-    Level { mode, depth, nice, passes, short }
+impl Level {
+    /// Level 1 to `LEVELS` (others are clamped to that range) under the rules `r`. By default the levels are
+    /// those chosen on 3373 Flate streams of PDF files (152.5 MB) for the smallest output at each speed.
+    fn of(level: u8, r: &FlateRules) -> Level {
+        const AT: usize = FlateRules::at("level1_mode");
+        const WIDTH: usize = FlateRules::at("level2_mode") - AT;
+        let v = |column: usize| r.v(AT + WIDTH * (level.clamp(1, LEVELS) as usize - 1) + column);
+        Level {
+            mode: match v(0) {
+                0 => Mode::Greedy,
+                1 => Mode::Lazy,
+                2 => Mode::Lazy2,
+                _ => Mode::Optimal,
+            },
+            depth: v(1) as u32,
+            nice: v(2),
+            passes: v(3) as u32,
+            short: v(4) != 0,
+            segment: rule!(r, "fast_segment"),
+            dict: rule!(r, "fast_dict"),
+            group: rule!(r, "fast_group"),
+            tie: rule!(r, "block_tie"),
+            batch: rule!(r, "fast_batch") as u32,
+            min_block: rule!(r, "fast_min_block"),
+            max_block: rule!(r, "fast_max_block"),
+            end_threshold: rule!(r, "fast_end_threshold") as u64,
+            young_block: rule!(r, "fast_young_block") as u64,
+            age_step: rule!(r, "fast_age_step") as u64,
+            hash4_bits: rule!(r, "fast_hash4_bits") as u32,
+            hash3_bits: rule!(r, "fast_hash3_bits") as u32,
+            gain_per_byte: rule!(r, "fast_gain_per_byte") as i32,
+            gain_per_halving: rule!(r, "fast_gain_per_halving") as i32,
+            lazy_gain: rule!(r, "fast_lazy_gain") as i32,
+            lazy2_gain: rule!(r, "fast_lazy2_gain") as i32,
+            far3: rule!(r, "fast_far3_distance"),
+            max_cands: rule!(r, "fast_max_candidates"),
+            max_opt_block: rule!(r, "fast_max_opt_block"),
+            unused: [
+                rule!(r, "fast_unused_literal_bits") as u32,
+                rule!(r, "fast_unused_length_bits") as u32,
+                rule!(r, "fast_unused_distance_bits") as u32,
+            ],
+            blend_percent: rule!(r, "fast_blend_percent") as u64,
+            reps: rule!(r, "fast_repeat_distances"),
+        }
+    }
 }
 
-/// The levels, chosen on 3373 Flate streams of PDF files (152.5 MB) for the smallest output at each speed.
-const TABLE: [Level; LEVELS as usize] = [
-    lv(Mode::Greedy, 2, 16, 0, false),
-    lv(Mode::Lazy, 3, 16, 0, false),
-    lv(Mode::Lazy, 6, 16, 0, true),
-    lv(Mode::Lazy, 12, 32, 0, true),
-    lv(Mode::Lazy, 24, 48, 0, true),
-    lv(Mode::Lazy, 64, 96, 0, true),
-    lv(Mode::Lazy2, 100, 258, 0, true),
-    lv(Mode::Optimal, 6, 24, 1, true),
-    lv(Mode::Optimal, 12, 32, 1, true),
-    lv(Mode::Optimal, 12, 32, 2, true),
-    lv(Mode::Optimal, 24, 64, 2, true),
-    lv(Mode::Optimal, 35, 100, 2, true),
-];
-
-/// Raw Deflate data for `data` at fast level 1 to `LEVELS` (others are clamped to that range). Segments run
-/// on `pool`; once `deadline` has passed, the segments still to do are written stored (the caller drops
-/// such an output). The output never depends on the number of threads.
-pub fn deflate(data: &[u8], level: u8, pool: Option<&Pool>, deadline: Deadline) -> Vec<u8> {
-    let lv = TABLE[level.clamp(1, LEVELS) as usize - 1];
+/// Raw Deflate data for `data` at fast level 1 to `LEVELS` (others are clamped to that range) under the rules
+/// `r`. Segments run on `pool`; once `deadline` has passed, the segments still to do are written stored (the
+/// caller drops such an output). The output never depends on the number of threads.
+pub fn deflate(data: &[u8], level: u8, pool: Option<&Pool>, deadline: Deadline, r: &FlateRules) -> Vec<u8> {
+    let lv = Level::of(level, r);
     if data.is_empty() {
         let mut w = BitWriter::new();
         write_fixed(&mut w, &[], true);
         return w.finish();
     }
-    let n = data.len().div_ceil(SEGMENT);
+    let n = data.len().div_ceil(lv.segment);
     if n == 1 {
         let mut pieces = segment(data, 0, &lv, deadline);
         // Usual case: the segment's bits are the whole stream.
@@ -162,7 +230,7 @@ pub fn deflate(data: &[u8], level: u8, pool: Option<&Pool>, deadline: Deadline) 
     let mut s = Stream { w: BitWriter::with_capacity(data.len() / 3 + 64), pending: None };
     let mut k = 0;
     while k < n {
-        let m = GROUP.min(n - k);
+        let m = lv.group.min(n - k);
         let outs = par::map(pool, m, None, |i| segment(data, k + i, &lv, deadline));
         for pieces in outs {
             for p in pieces {
@@ -189,11 +257,13 @@ struct Out {
     w: BitWriter,
     /// Bits of the pieces before `w`, as the segment counts them (stored blocks priced from bit 0).
     before: u64,
+    /// Which block type is written when two cost the same (`Level::tie`).
+    tie: usize,
 }
 
 impl Out {
-    fn new(cap: usize) -> Out {
-        Out { pieces: Vec::new(), w: BitWriter::with_capacity(cap), before: 0 }
+    fn new(cap: usize, tie: usize) -> Out {
+        Out { pieces: Vec::new(), w: BitWriter::with_capacity(cap), before: 0, tie }
     }
 
     fn close(&mut self) {
@@ -206,22 +276,22 @@ impl Out {
     }
 
     /// Writes the block of `syms` (counted in `h`, end-of-block included) for input `a..b` as the smallest
-    /// of dynamic, fixed and stored.
+    /// of dynamic, fixed and stored (see `block::smallest`).
     fn block(&mut self, syms: &[Sym], h: &Hist, a: usize, b: usize, last: bool) {
         let code = dynamic_code(h);
         let dyn_bits = 3 + code.bits;
         let fix_bits = 3 + fixed_bits(h);
         let here = self.before + self.w.bit_len();
         let st_bits = stored_bits(b - a, here);
-        if st_bits < dyn_bits.min(fix_bits) {
-            // The final pass writes it, as the last block of the stream when nothing follows.
-            self.close();
-            self.before = here + st_bits;
-            self.pieces.push(Piece::Stored(a, b));
-        } else if fix_bits <= dyn_bits {
-            write_fixed(&mut self.w, syms, last);
-        } else {
-            write_dynamic(&mut self.w, syms, &code, last);
+        match smallest(st_bits, fix_bits, dyn_bits, self.tie) {
+            BlockType::Stored => {
+                // The final pass writes it, as the last block of the stream when nothing follows.
+                self.close();
+                self.before = here + st_bits;
+                self.pieces.push(Piece::Stored(a, b));
+            }
+            BlockType::Fixed => write_fixed(&mut self.w, syms, last),
+            BlockType::Dynamic => write_dynamic(&mut self.w, syms, &code, last),
         }
     }
 
@@ -434,12 +504,6 @@ fn count_match(h: &mut Hist, len: usize, dist: usize) {
 
 // ---------------------------------------------------------------- where blocks end
 
-/// Observations every block-end check compares.
-const BATCH: u32 = 512;
-/// Blocks are at least this long (bytes), unless the segment is shorter...
-const MIN_BLOCK: usize = 2000;
-/// ...and at most about this long.
-const MAX_BLOCK: usize = 300_000;
 /// Kinds of observation: eight for literals, two for matches.
 const KINDS: usize = 10;
 
@@ -482,7 +546,7 @@ impl Split {
     }
 
     /// Whether the latest batch differs enough from the block so far (`len` bytes) to start a new block.
-    fn changed(&self, len: usize) -> bool {
+    fn changed(&self, len: usize, lv: &Level) -> bool {
         let (a, b) = (self.n_now as u64, self.n_seen as u64);
         if a == 0 || b == 0 {
             return false;
@@ -492,14 +556,14 @@ impl Split {
         for i in 0..KINDS {
             diff += (self.now[i] as u64 * b).abs_diff(self.seen[i] as u64 * a);
         }
-        // A difference over about 0.3 ends the block. Short blocks need more (a new header costs more than
-        // their small gain), long ones less.
-        let mut limit = a * b * 10 / 32;
+        // A difference over about 0.3 (10/32) ends the block. Short blocks (under 8192 symbols) need more (a new
+        // header costs more than their small gain), long ones less (by one part in `b` for every 2048 bytes).
+        let mut limit = a * b * lv.end_threshold / 32;
         let total = a + b;
-        if total < 8192 {
-            limit += limit * (8192 - total) / 8192;
+        if total < lv.young_block {
+            limit += limit * (lv.young_block - total) / lv.young_block;
         }
-        diff + (len as u64 / 2048) * b >= limit
+        diff + (len as u64 / lv.age_step) * b >= limit
     }
 
     /// The batch joins the block.
@@ -544,14 +608,15 @@ impl Seg<'_> {
 
 /// The pieces of segment `k`.
 fn segment(data: &[u8], k: usize, lv: &Level, deadline: Deadline) -> Vec<Piece> {
-    let a = k * SEGMENT;
-    let b = (a + SEGMENT).min(data.len());
+    let a = k * lv.segment;
+    let b = (a + lv.segment).min(data.len());
     // Out of time: stored (the caller drops the output).
     if deadline.passed() {
         return vec![Piece::Stored(a, b)];
     }
-    let base = a.saturating_sub(DICT);
-    let mut seg = Seg { buf: &data[base..b], base, start: a - base, last: b == data.len(), out: Out::new((b - a) / 3) };
+    let base = a.saturating_sub(lv.dict);
+    let out = Out::new((b - a) / 3, lv.tie);
+    let mut seg = Seg { buf: &data[base..b], base, start: a - base, last: b == data.len(), out };
     match lv.mode {
         Mode::Optimal => optimal(&mut seg, lv),
         _ => hashed(&mut seg, lv),
@@ -630,9 +695,10 @@ struct Chains {
 }
 
 impl Chains {
-    fn new(len: usize, short: bool) -> Chains {
-        let b4 = table_bits(len, 16);
-        let b3 = if short { table_bits(len, 15) } else { 1 };
+    fn new(len: usize, lv: &Level) -> Chains {
+        let short = lv.short;
+        let b4 = table_bits(len, lv.hash4_bits);
+        let b3 = if short { table_bits(len, lv.hash3_bits) } else { 1 };
         let w = window_slots(len);
         Chains {
             head4: vec![NIL; 1 << b4],
@@ -715,18 +781,22 @@ impl Chains {
     }
 }
 
-/// How much better a match of `nl` at `nd` is than one of `cl` at `cd`: four units per byte longer, one
-/// per halving of the distance.
+/// How much better a match of `nl` at `nd` is than one of `cl` at `cd`: `per_byte` units (four) per byte
+/// longer, `per_halving` (one) per halving of the distance.
 #[inline(always)]
-fn gain(nl: usize, nd: usize, cl: usize, cd: usize) -> i32 {
+fn gain(nl: usize, nd: usize, cl: usize, cd: usize, per_byte: i32, per_halving: i32) -> i32 {
     if nl < cl {
         return i32::MIN;
     }
-    4 * (nl - cl) as i32 + floor_log2(cd) - floor_log2(nd)
+    per_byte * (nl - cl) as i32 + per_halving * (floor_log2(cd) - floor_log2(nd))
 }
 
 /// The symbols of the block being made, their counts and the split statistics.
-struct Blocks {
+struct Blocks<'a> {
+    lv: &'a Level,
+    /// `lv.batch` and `lv.max_block`, at hand for every step.
+    batch: u32,
+    max_block: usize,
     syms: Vec<Sym>,
     /// Counts of the symbols before the mark (end-of-block included) and since the mark.
     seen: Hist,
@@ -739,9 +809,12 @@ struct Blocks {
     mark_sym: usize,
 }
 
-impl Blocks {
-    fn new(start: usize, cap: usize) -> Blocks {
+impl<'a> Blocks<'a> {
+    fn new(start: usize, cap: usize, lv: &'a Level) -> Blocks<'a> {
         Blocks {
+            lv,
+            batch: lv.batch,
+            max_block: lv.max_block,
             syms: Vec::with_capacity(cap),
             seen: Hist::empty(),
             now: zero_hist(),
@@ -770,23 +843,23 @@ impl Blocks {
     /// latest batch of symbols differs from the block so far.
     #[inline(always)]
     fn step(&mut self, p: usize, seg: &mut Seg) {
-        if self.split.n_now >= BATCH || p - self.start >= MAX_BLOCK {
+        if self.split.n_now >= self.batch || p - self.start >= self.max_block {
             self.check(p, seg);
         }
     }
 
     fn check(&mut self, p: usize, seg: &mut Seg) {
         // (Never at the end of the segment, which would leave an empty last block.)
-        if p - self.start >= MAX_BLOCK && p < seg.buf.len() {
+        if p - self.start >= self.max_block && p < seg.buf.len() {
             take_into(&mut self.seen, &mut self.now);
             seg.block(&self.syms, &self.seen, self.start, p, false);
             self.syms.clear();
             self.seen = Hist::empty();
             self.split = Split::new();
             self.start = p;
-        } else if self.mark - self.start >= MIN_BLOCK
-            && seg.buf.len() - self.mark >= MIN_BLOCK
-            && self.split.changed(self.mark - self.start)
+        } else if self.mark - self.start >= self.lv.min_block
+            && seg.buf.len() - self.mark >= self.lv.min_block
+            && self.split.changed(self.mark - self.start, self.lv)
         {
             // The block ends where the batch began; the batch starts the next one.
             seg.block(&self.syms[..self.mark_sym], &self.seen, self.start, self.mark, false);
@@ -818,13 +891,15 @@ fn hashed(seg: &mut Seg, lv: &Level) {
     let end = buf.len();
     // Positions below `stop` have four bytes to hash.
     let stop = end.saturating_sub(3);
-    let mut mf = Chains::new(end, lv.short);
+    let mut mf = Chains::new(end, lv);
     for q in 0..seg.start.min(stop) {
         mf.insert(buf, q);
     }
-    let mut bk = Blocks::new(seg.start, (end - seg.start).min(MAX_BLOCK) + 2 * MAX_MATCH);
+    let mut bk = Blocks::new(seg.start, (end - seg.start).min(lv.max_block) + 2 * MAX_MATCH, lv);
     let lazy = lv.mode != Mode::Greedy;
     let two = lv.mode == Mode::Lazy2;
+    let (per_byte, per_halving) = (lv.gain_per_byte, lv.gain_per_halving);
+    let (lazy_gain, lazy2_gain) = (lv.lazy_gain, lv.lazy2_gain);
     let mut p = seg.start;
     while p < end {
         if p >= stop {
@@ -846,7 +921,7 @@ fn hashed(seg: &mut Seg, lv: &Level) {
             while len < lv.nice && p + 1 < stop {
                 let (l1, d1) = mf.find(buf, p + 1, (end - p - 1).min(MAX_MATCH), lv.nice, lv.depth, len - 1);
                 ins = p + 2;
-                if gain(l1, d1, len, dist) > 1 {
+                if gain(l1, d1, len, dist, per_byte, per_halving) > lazy_gain {
                     bk.lit(buf[p]);
                     p += 1;
                     bk.step(p, seg);
@@ -856,7 +931,7 @@ fn hashed(seg: &mut Seg, lv: &Level) {
                 if two && p + 2 < stop {
                     let (l2, d2) = mf.find(buf, p + 2, (end - p - 2).min(MAX_MATCH), lv.nice, lv.depth, len - 1);
                     ins = p + 3;
-                    if gain(l2, d2, len, dist) > 4 {
+                    if gain(l2, d2, len, dist, per_byte, per_halving) > lazy2_gain {
                         bk.lit(buf[p]);
                         bk.lit(buf[p + 1]);
                         p += 2;
@@ -880,16 +955,6 @@ fn hashed(seg: &mut Seg, lv: &Level) {
 
 // ---------------------------------------------------------------- binary trees (levels 8 to 12)
 
-/// The greedy pass behind the first costs takes a 3-byte match only this close (farther ones are rarely
-/// worth it in the end).
-const STATS_FAR3: usize = 1024;
-/// Candidate matches kept per position at most (the longest replaces the last one beyond this).
-const MAX_CANDS: usize = 64;
-/// Positions of one block for the optimal levels at most.
-const MAX_OPT_BLOCK: usize = 1 << 18;
-/// Candidate matches of one block at most (a block ends early when they would not fit).
-const CAND_CAP: usize = 3 * MAX_OPT_BLOCK;
-
 struct Tree {
     head4: Vec<u32>,
     shift4: u32,
@@ -898,12 +963,14 @@ struct Tree {
     /// Per window slot: the roots of the subtrees with smaller and with larger text.
     son: Vec<u32>,
     wmask: usize,
+    /// `Level::max_cands`.
+    max_cands: usize,
 }
 
 impl Tree {
-    fn new(len: usize) -> Tree {
-        let b4 = table_bits(len, 16);
-        let b3 = table_bits(len, 15);
+    fn new(len: usize, lv: &Level) -> Tree {
+        let b4 = table_bits(len, lv.hash4_bits);
+        let b3 = table_bits(len, lv.hash3_bits);
         let w = window_slots(len);
         Tree {
             head4: vec![NIL; 1 << b4],
@@ -912,6 +979,7 @@ impl Tree {
             shift3: 32 - b3,
             son: vec![NIL; 2 * w],
             wmask: w - 1,
+            max_cands: lv.max_cands,
         }
     }
 
@@ -968,7 +1036,7 @@ impl Tree {
                 len += 1 + common(buf, c + len + 1, p + len + 1, reach - len - 1);
                 if RECORD && len > best {
                     best = len;
-                    if out.len() - first < MAX_CANDS {
+                    if out.len() - first < self.max_cands {
                         out.push((len as u16, d as u16));
                     } else if let Some(e) = out.last_mut() {
                         *e = (len as u16, d as u16);
@@ -1010,14 +1078,12 @@ struct Costs {
 }
 
 const BIT: u32 = 16;
-/// Costs of symbols a histogram doesn't have: rare, but not out of the question.
-const LIT_NOSTAT: u32 = 11;
-const LEN_NOSTAT: u32 = 13;
-const DIST_NOSTAT: u32 = 10;
 
 impl Costs {
-    /// Costs from the code lengths a histogram would get.
-    fn of(h: &Hist) -> Costs {
+    /// Costs from the code lengths a histogram would get; a symbol it doesn't have costs `lv.unused` (11 bits a
+    /// literal, 13 a length, 10 a distance).
+    fn of(h: &Hist, lv: &Level) -> Costs {
+        let [lit_nostat, len_nostat, dist_nostat] = lv.unused;
         let mut ll = [0u8; LITLEN_SYMS];
         let mut d = [0u8; DIST_SYMS];
         lengths_into(&h.ll, 15, &mut ll);
@@ -1025,14 +1091,14 @@ impl Costs {
         let or = |l: u8, none: u32| if l == 0 { none } else { l as u32 };
         let mut c = Costs { lit: [0; 256], len: [0; MAX_MATCH + 1], dist: [0; DIST_SYMS] };
         for i in 0..256 {
-            c.lit[i] = or(ll[i], LIT_NOSTAT) * BIT;
+            c.lit[i] = or(ll[i], lit_nostat) * BIT;
         }
         for l in MIN_MATCH..=MAX_MATCH {
             let s = LEN_CODE[l] as usize;
-            c.len[l] = (or(ll[257 + s], LEN_NOSTAT) + LEN_EXTRA[s] as u32) * BIT;
+            c.len[l] = (or(ll[257 + s], len_nostat) + LEN_EXTRA[s] as u32) * BIT;
         }
         for k in 0..DIST_SYMS {
-            c.dist[k] = (or(d[k], DIST_NOSTAT) + DIST_EXTRA[k] as u32) * BIT;
+            c.dist[k] = (or(d[k], dist_nostat) + DIST_EXTRA[k] as u32) * BIT;
         }
         c
     }
@@ -1155,15 +1221,15 @@ fn optimal_block(
     // The first costs: the greedy pass's counts, with those of the previous block's path when there is one
     // (a much better start, since a path's costs settle only over several passes).
     let first = match &o.prev {
-        Some(p) => Costs::of(&blend(greedy, p)),
-        None => Costs::of(greedy),
+        Some(p) => Costs::of(&blend(greedy, p, lv.blend_percent), lv),
+        None => Costs::of(greedy, lv),
     };
     let mut h = parse(buf, a, b, counts, cands, &first, nice, o);
     if passes > 1 {
         let mut bits = block_bits(&h);
         let mut syms = std::mem::take(&mut o.syms);
         for _ in 1..passes {
-            let h2 = parse(buf, a, b, counts, cands, &Costs::of(&h), nice, o);
+            let h2 = parse(buf, a, b, counts, cands, &Costs::of(&h, lv), nice, o);
             let bits2 = block_bits(&h2);
             if bits2 >= bits {
                 break;
@@ -1180,10 +1246,10 @@ fn optimal_block(
     o.prev = Some(h);
 }
 
-/// `g` plus `p` scaled to the same number of literal/length symbols.
-fn blend(g: &Hist, p: &Hist) -> Hist {
-    let tg: u64 = g.ll.iter().map(|&x| x as u64).sum();
-    let tp: u64 = p.ll.iter().map(|&x| x as u64).sum::<u64>().max(1);
+/// `g` plus `percent` (100) hundredths of `p` scaled to the same number of literal/length symbols.
+fn blend(g: &Hist, p: &Hist, percent: u64) -> Hist {
+    let tg: u64 = g.ll.iter().map(|&x| x as u64).sum::<u64>() * percent;
+    let tp: u64 = p.ll.iter().map(|&x| x as u64).sum::<u64>().max(1) * 100;
     let mut h = g.clone();
     for (x, &y) in h.ll.iter_mut().zip(&p.ll) {
         *x += (y as u64 * tg / tp) as u32;
@@ -1200,12 +1266,15 @@ fn optimal(seg: &mut Seg, lv: &Level) {
     let end = buf.len();
     let stop = end.saturating_sub(3);
     let nice = lv.nice;
-    let mut mf = Tree::new(end);
-    let mut cands: Vec<(u16, u16)> = Vec::with_capacity(CAND_CAP.min(4 * (end - seg.start)) + MAX_CANDS);
+    let (far3, max_cands, max_opt_block) = (lv.far3, lv.max_cands, lv.max_opt_block);
+    // Candidate matches of one block at most (a block ends early when they would not fit).
+    let cand_cap = 3 * max_opt_block;
+    let mut mf = Tree::new(end, lv);
+    let mut cands: Vec<(u16, u16)> = Vec::with_capacity(cand_cap.min(4 * (end - seg.start)) + max_cands);
     for q in 0..seg.start.min(stop) {
         mf.walk::<false>(buf, q, (end - q).min(MAX_MATCH), nice, lv.depth, &mut cands);
     }
-    let mut counts: Vec<u8> = Vec::with_capacity((end - seg.start).min(MAX_OPT_BLOCK) + MAX_MATCH);
+    let mut counts: Vec<u8> = Vec::with_capacity((end - seg.start).min(max_opt_block) + MAX_MATCH);
     let mut o = Parse::default();
     let mut split = Split::new();
     // Counts of a greedy parse (before the mark, end-of-block included, and since): the first costs.
@@ -1224,11 +1293,11 @@ fn optimal(seg: &mut Seg, lv: &Level) {
             let mut best = mf.walk::<true>(buf, p, max, nice, lv.depth, &mut cands);
             // The greedy pass's last distances often come back (rows of an image, columns of a table): a
             // match there longer than the trees found is kept too.
-            for r in reps {
+            for &r in &reps[..lv.reps] {
                 if r != 0 && r <= p && best < max {
                     let l = common(buf, p - r, p, max);
                     if l > best && l >= MIN_MATCH {
-                        if cands.len() - k0 < MAX_CANDS {
+                        if cands.len() - k0 < max_cands {
                             cands.push((l as u16, r as u16));
                         } else if let Some(e) = cands.last_mut() {
                             *e = (l as u16, r as u16);
@@ -1240,7 +1309,7 @@ fn optimal(seg: &mut Seg, lv: &Level) {
             counts.push((cands.len() - k0) as u8);
             if p >= next {
                 let d = cands.last().map_or(0, |e| e.1 as usize);
-                if best > MIN_MATCH || (best == MIN_MATCH && d <= STATS_FAR3) {
+                if best > MIN_MATCH || (best == MIN_MATCH && d <= far3) {
                     count_match(&mut now, best, d);
                     split.mat(best);
                     next = p + best;
@@ -1272,8 +1341,8 @@ fn optimal(seg: &mut Seg, lv: &Level) {
             }
         }
         p += step;
-        let full = (p - start >= MAX_OPT_BLOCK || cands.len() + MAX_CANDS > CAND_CAP) && p < end;
-        if split.n_now >= BATCH || full {
+        let full = (p - start >= max_opt_block || cands.len() + max_cands > cand_cap) && p < end;
+        if split.n_now >= lv.batch || full {
             if full {
                 take_into(&mut seen, &mut now);
                 optimal_block(seg, &mut o, start, p, &counts, &cands, &seen, lv, false);
@@ -1282,7 +1351,7 @@ fn optimal(seg: &mut Seg, lv: &Level) {
                 seen = Hist::empty();
                 split = Split::new();
                 start = p;
-            } else if mark - start >= MIN_BLOCK && end - mark >= MIN_BLOCK && split.changed(mark - start) {
+            } else if mark - start >= lv.min_block && end - mark >= lv.min_block && split.changed(mark - start, lv) {
                 optimal_block(seg, &mut o, start, mark, &counts[..mark - start], &cands[..mark_k], &seen, lv, false);
                 counts.drain(..mark - start);
                 cands.drain(..mark_k);
@@ -1309,6 +1378,14 @@ mod tests {
     use super::*;
     use crate::flate::inflate;
     use std::time::Duration;
+
+    /// Where segments start by default (the rule `fast_segment`).
+    const SEGMENT: usize = FlateRules::RULES[FlateRules::at("fast_segment")].1 as usize;
+
+    /// `super::deflate` under the default rules.
+    fn deflate(data: &[u8], level: u8, pool: Option<&Pool>, deadline: Deadline) -> Vec<u8> {
+        super::deflate(data, level, pool, deadline, &FlateRules::default())
+    }
 
     fn rng(s: &mut u64) -> u64 {
         *s ^= *s << 13;

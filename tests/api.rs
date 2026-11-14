@@ -461,3 +461,17 @@ fn a_damaged_archive_is_an_error_with_a_message_and_never_a_file() {
     }
     assert!(matches!(expand(&c.data[..c.data.len() / 2], &base()), Err(Error::Damaged(_))));
 }
+
+#[test]
+fn flate_rules_reach_the_encoders() {
+    // A rule only the fast encoder's choice of level reads (effort 0) and one only effort 100's row reads: each
+    // changes the output, and the thread count still does not.
+    let pdf = plain_pdf();
+    for (effort, name, value) in [(0, "fast_level", 1), (100, "e100_depth", 0)] {
+        let mut opt = base().effort(effort);
+        assert!(opt.flate_rules.set(name, value));
+        let with = optimize(&pdf, &opt).unwrap().data;
+        assert_ne!(with, optimize(&pdf, &base().effort(effort)).unwrap().data, "{name} = {value}");
+        assert_eq!(with, optimize(&pdf, &opt.threads(2)).unwrap().data, "{name} = {value}");
+    }
+}

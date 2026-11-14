@@ -275,6 +275,33 @@ test("optimize returns untouched with a reason for non-PDF input", () => {
   assert.ok(r.reason && r.reason.length > 0);
 });
 
+test("a file of two saves keeps both, or only the newest with dropHistory", () => {
+  // Plain ASCII, so a string offset is a byte offset. The second save changes the page's text.
+  let s = "%PDF-1.5\n";
+  const at = [];
+  const obj = (n, body) => { at[n] = s.length; s += `${n} 0 obj\n${body}\nendobj\n`; };
+  const text = (t) => { const d = `BT /F1 12 Tf 10 10 Td (${t}) Tj ET\n`.repeat(50); return `<< /Length ${d.length} >>\nstream\n${d}\nendstream`; };
+  const row = (n) => `${String(at[n]).padStart(10, "0")} 00000 n \n`;
+  obj(1, "<< /Type /Catalog /Pages 2 0 R >>");
+  obj(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+  obj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>");
+  obj(4, text("FIRST"));
+  obj(5, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+  const x1 = s.length;
+  s += `xref\n0 6\n0000000000 65535 f \n${[1, 2, 3, 4, 5].map(row).join("")}trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${x1}\n%%EOF\n`;
+  obj(4, text("SECOND"));
+  const x2 = s.length;
+  s += `xref\n4 1\n${row(4)}trailer\n<< /Size 6 /Root 1 0 R /Prev ${x1} >>\nstartxref\n${x2}\n%%EOF\n`;
+  const pdf = new TextEncoder().encode(s);
+  const saves = (d) => new TextDecoder().decode(d).split("startxref").length - 1;
+  const kept = g.optimize(pdf, { effort: 0 });
+  const dropped = g.optimize(pdf, { effort: 0, dropHistory: true });
+  assert.equal(kept.outcome, "smaller", kept.reason);
+  assert.equal(dropped.outcome, "smaller", dropped.reason);
+  assert.equal(saves(kept.data), 2);
+  assert.equal(saves(dropped.data), 1);
+});
+
 archiveTest("the limits are the caller's", () => {
   const big = new Uint8Array(3 << 20);
   assert.throws(() => g.compress(big, { maxInputMiB: 2 }), (e) => e instanceof GpressError && e.code === GpressError.TOO_LARGE);
