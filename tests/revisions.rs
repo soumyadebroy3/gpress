@@ -817,6 +817,18 @@ fn a_reference_to_an_object_that_is_not_there_leaves_the_file_untouched() {
     }
 }
 
+#[test]
+fn a_root_that_is_not_a_catalog_leaves_the_file_untouched() {
+    // The update's trailer names the page tree as its /Root: PDFium opens no such file, pypdf shows the first
+    // save's catalog.
+    let (mut p, x) = first_save();
+    p.table(0, 0, &format!("/Size 6 /Root 2 0 R /Prev {x}"), None);
+    let why = "keeps earlier revisions: a /Root that isn't a catalog";
+    for drop_history in [false, true] {
+        untouched_for(&p.d, why, &Options { drop_history, ..Options::effort(0) });
+    }
+}
+
 /// An update's table and trailer written by hand: `rows` after `xref`, the trailer's entries, the table's place.
 fn table_by_hand(p: &mut Pdf, rows: &str, trailer: &str) {
     let x = p.d.len();

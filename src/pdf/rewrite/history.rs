@@ -24,6 +24,7 @@ const GENERATION: &str = "keeps earlier revisions: a reference to another genera
 const ABSENT: &str = "keeps earlier revisions: a reference to an object that isn't there";
 const ELSEWHERE: &str = "keeps earlier revisions: a row that doesn't point at its object";
 const LACKS: &str = "keeps earlier revisions: a trailer key that only an earlier save has";
+const NOT_CATALOG: &str = "keeps earlier revisions: a /Root that isn't a catalog";
 const TOO_HIGH: &str = "keeps earlier revisions: numbers too high for a revision's length";
 const ENCRYPTION: &str = "encrypted: revisions differ in their encryption";
 
@@ -155,6 +156,15 @@ fn read<'a>(
     // The saves are told apart already: this one is checked as a file of one save.
     doc.has_revisions = false;
     gate(&doc, &objs, true)?;
+    // A /Root that names some other dictionary: PDFium opens no such file, and pypdf shows an earlier save's
+    // catalog, which a file of the newest save alone no longer has.
+    let root = match doc.trailer.get(b"Root") {
+        Some(Obj::Ref(n, _)) => objs.get(n).map(|(_, o)| o),
+        direct => direct,
+    };
+    if root.and_then(Obj::as_dict).and_then(|d| d.name(b"Type")) != Some(b"Catalog") {
+        return Err(NOT_CATALOG.into());
+    }
     // Every reference this save makes, a stream's /Length and the trailer's /Encrypt too.
     let mut refs = Vec::new();
     objs.values().for_each(|(_, o)| o.refs(&mut refs));
