@@ -43,14 +43,20 @@ export interface GpressOptions {
    */
   engineEffort?: number;
   /**
-   * Lossy overrides for optimize(), each 0 or absent = what the effort says; any of them set makes the output
-   * lossy at any effort. Photos shown at more than this many pixels per inch are resampled down to it (never
-   * below 150, whatever is asked).
+   * Lossy overrides for optimize(), each 0 or absent = what the effort says. Photos shown at 5/4 of this many
+   * pixels per inch or more are resampled down to it (never below 150, whatever is asked) on their way to a
+   * JPEG: alone it changes nothing below effort 60, where no JPEG quality is set.
    */
   photoPpi?: number;
-  /** Line art and scans shown at more than this many pixels per inch are resampled down to it (never below 300). */
+  /**
+   * Line art and scans shown at 5/4 of this many pixels per inch or more are resampled down to it (never below
+   * 300). Set, it makes the output lossy at any effort.
+   */
   artPpi?: number;
-  /** JPEG quality, kept within 50 to 95, for a photo that is resampled or stored without JPEG. */
+  /**
+   * JPEG quality, kept within 50 to 95, for a photo that is resampled or stored without JPEG. Set, it makes
+   * the output lossy at any effort.
+   */
   jpegQuality?: number;
   /** Largest accepted input in MiB (default 1024). */
   maxInputMiB?: number;
@@ -272,8 +278,11 @@ export class Gpress {
     if (o.photoPpi || o.artPpi || o.jpegQuality) {
       throw new GpressError(GpressError.INVALID_OPTIONS, "invalid options: a target size picks the effort itself: lossy overrides must not be set");
     }
-    // Every output is under 4 GiB here, so a larger target is as good as that.
-    const target = clamp(targetBytes, 0, 0xffffffff);
+    if (typeof targetBytes !== "number" || Number.isNaN(targetBytes)) {
+      throw new GpressError(GpressError.INVALID_OPTIONS, "invalid options: the target size must be a number of bytes");
+    }
+    // Every output is under 4 GiB here, so a larger target (Infinity too) is as good as that.
+    const target = Math.min(0xffffffff, Math.max(0, Math.floor(targetBytes)));
     let picked = 0;
     const r = this.run(input, (ptr, len) => {
       const code = this.ex.gpress_optimize_to_size(ptr, len, target, o.maxIn, o.maxStream, o.objectsPerStream, o.flags);

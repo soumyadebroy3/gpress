@@ -92,14 +92,15 @@ typedef struct gpress_options {
                                      expand) */
   uint8_t use_existing_libraries; /* 1: use the optional existing library (Lepton) when built in */
   uint8_t effort_is_engine_level; /* 1: for measuring: effort is the engine's own lossless level, 0..100,
-                                     and nothing is lossy */
-  uint16_t photo_ppi;             /* lossy overrides, each 0 = what the effort says: photos shown at more
-                                     than this many pixels per inch are resampled down to it (never below
-                                     150, whatever is asked), */
-  uint16_t art_ppi;               /* line art and scans likewise (never below 300), */
+                                     and nothing is lossy unless an override below is set */
+  uint16_t photo_ppi;             /* lossy overrides, each 0 = what the effort says: photos shown at 5/4 of
+                                     this many pixels per inch or more are resampled down to it (never
+                                     below 150, whatever is asked) on their way to a JPEG, */
+  uint16_t art_ppi;               /* line art and scans likewise, without the JPEG (never below 300), */
   uint8_t jpeg_quality;           /* and the JPEG quality, kept within 50 to 95, for a photo that is
-                                     resampled or stored without JPEG. Any of the three set makes the
-                                     output lossy at any effort */
+                                     resampled or stored without JPEG. art_ppi or jpeg_quality set makes
+                                     the output lossy at any effort; photo_ppi alone changes nothing below
+                                     effort 60, where no JPEG quality is set */
 } gpress_options;
 
 typedef struct gpress_buffer {

@@ -5,7 +5,8 @@ pikepdf test resources). Many of them are deliberately broken or unusual. Measur
 in October 2026. Every number below comes from the scripts in this folder.
 
 Every "effort" in this file is the engine's own level, 0 to 100 (`--engine-effort` today), measured before
-the public effort got its six steps: the public effort 40, the default, is the engine's 100.
+the public effort got its six steps: the public effort 40, the default, is the engine's 100. The one
+exception is the section "Sizes at the six efforts", whose efforts are the public ones.
 
 Which build: sections 1 to 5 are the phase-1 engine (commit d85cd7a) at maximum effort. Sections 6 and 7
 (time and space) and the Security section are the `speed` build (branch `speed`, commit ca8fa92:

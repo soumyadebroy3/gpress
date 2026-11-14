@@ -20,7 +20,8 @@ test("the web module optimizes to the same bytes as the whole module", { skip: !
   const tail = enc.encode("\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
   const page = new Uint8Array([...head, ...content, ...tail]);
   for (const pdf of [onePagePdf(), page, enc.encode("not a PDF")]) {
-    // Three of the engine's lossless levels, and the strongest lossy effort.
+    // Three of the engine's lossless levels, and the strongest effort (none of these inputs has an image the
+    // lossy step works on, so what is compared there is the lossless work behind it).
     for (const options of [{ engineEffort: 0 }, { engineEffort: 50 }, { engineEffort: 100 }, { effort: 100 }]) {
       const a = whole.optimize(pdf, options);
       const b = web.optimize(pdf, options);

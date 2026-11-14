@@ -17,9 +17,8 @@
 //! budget, for pack and unpack), --max-len BYTES (unpack: a file declaring more is refused),
 //! --objects-per-stream N, --time-budget MS (give up after that long), --ignore-conformance,
 //! --no-flate-over-jpeg, --no-jpeg-tables, --no-jbig2, --keep-encrypted, --store-budget BYTES (normal PDF),
-//! --lossy N (normal PDF: the lossy image step at level 0 to 3 in place of what the effort means, 0 = off; see
-//! `gpress::Lossy`), --photo-ppi N, --art-ppi N, --jpeg-quality N (each sets one of the step's settings, over
-//! the level's or the effort's; 0 leaves it as it is),
+//! --photo-ppi N, --art-ppi N, --jpeg-quality N (normal PDF: each sets one setting of the lossy image step, see
+//! `gpress::Lossy`, over the effort's; 0 leaves it as it is),
 //! --no-decrypt (archive), --no-existing. The output never depends on the thread count or the time budget: a
 //! budget that runs out gives an error and no file.
 //!
@@ -82,8 +81,7 @@ options: --effort N (0, 20, 40 lossless: fast .. smallest, default 40; 60, 80, 1
          --max-input BYTES   --max-stream BYTES (normal PDF)   --max-stream-archive BYTES   --max-decoded BYTES (archive,
          pack and unpack)   --max-len BYTES (unpack)   --objects-per-stream N   --time-budget MS   --ignore-conformance
          --no-flate-over-jpeg   --no-jpeg-tables   --no-jbig2   --keep-encrypted   --store-budget BYTES (normal PDF)
-         --lossy N (lossy image step, level 0 off .. 3, in place of the effort's)   --photo-ppi N   --art-ppi N
-         --jpeg-quality N (one setting of the step each, over the effort's)
+         --photo-ppi N   --art-ppi N   --jpeg-quality N (one setting of the lossy image step each, over the effort's)
          --no-decrypt (archive)   --no-existing
 measuring tools: deflate, inflate, batch, pdf-batch, repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info,
          fax-decode, fax-encode, fax-scan, fax-model, jbig2-encode, claim-archive (see the comments at the top of
@@ -108,7 +106,6 @@ const WITH_VALUE: &[&str] = &[
     "--objects-per-stream",
     "--time-budget",
     "--store-budget",
-    "--lossy",
     "--photo-ppi",
     "--art-ppi",
     "--jpeg-quality",
@@ -179,14 +176,8 @@ fn main() {
     lib.jpeg_tables = !flag("--no-jpeg-tables");
     lib.jbig2 = !flag("--no-jbig2");
     lib.rewrite_encrypted = !flag("--keep-encrypted");
-    // The lossy image step: a level in place of what the effort means, then single settings over it (after
-    // --effort and --engine-effort: an override starts from what they mean).
-    if let Some(n) = num("--lossy") {
-        if n > 3 {
-            die("--lossy: a level from 0 to 3");
-        }
-        lib.lossy = Some(gpress::Lossy::level(n as u8));
-    }
+    // The lossy image step: single settings over what the effort means (after --effort and --engine-effort:
+    // an override starts from what they mean).
     let setting = |name: &str, most: u64| num(name).unwrap_or(0).min(most);
     lib = lib.lossy_overrides(
         setting("--photo-ppi", u16::MAX as u64) as u16,

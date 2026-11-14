@@ -58,7 +58,8 @@ pub const FLAG_NO_JPEG_TABLES: u32 = 8;
 pub const FLAG_NO_JBIG2: u32 = 16;
 pub const FLAG_KEEP_ENCRYPTED: u32 = 32;
 pub const FLAG_NO_DECRYPT: u32 = 64;
-/// For measuring: the `effort` argument is the engine's own lossless level, and nothing is lossy.
+/// For measuring: the `effort` argument is the engine's own lossless level, and nothing is lossy unless a
+/// lossy override is set.
 pub const FLAG_ENGINE_EFFORT: u32 = 256;
 
 /// A size given in MiB, or the default for 0, clamped to what this module can address.
