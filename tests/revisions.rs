@@ -808,9 +808,9 @@ fn a_reference_to_an_object_that_is_not_there_leaves_the_file_untouched() {
     let (mut t, x) = first_save();
     t.table(0, 0, &format!("/Size 6 /Root 1 0 R /Info 9 0 R /Prev {x}"), None);
     let why = "keeps earlier revisions: a reference to an object that isn't there";
-    // The freed document information's header is still in the bytes, which the gate finds first.
+    // The freed objects' headers are still in the bytes, which the gate finds first.
     let gate = "an object in the file is missing from its cross-reference data";
-    for (pdf, why) in [(&p.d, gate), (&q.d, why), (&r.d, why), (&t.d, why)] {
+    for (pdf, why) in [(&p.d, gate), (&q.d, gate), (&r.d, why), (&t.d, why)] {
         for drop_history in [false, true] {
             untouched_for(pdf, why, &Options { drop_history, ..Options::effort(0) });
         }
