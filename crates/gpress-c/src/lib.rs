@@ -57,6 +57,9 @@ pub struct GpressOptions {
     pub art_ppi: u16,
     /// and the JPEG quality for a photo that is resampled or stored without JPEG.
     pub jpeg_quality: u8,
+    /// The rules of the lossy step, in the order of `gpress::LossyRules::NAMES` (the header's `GPRESS_RULE_*`
+    /// are the indexes). Each 0 = the default; a value outside its rule's range counts as the nearest inside.
+    pub lossy_rules: [u32; gpress::LossyRules::NAMES.len()],
 }
 
 /// A buffer gpress allocated. Free it with `gpress_free`; never with `free()`.
@@ -143,6 +146,9 @@ fn options_from(o: Option<&GpressOptions>) -> gpress::Options {
         opt.decrypt = o.decrypt != 0;
         opt.use_existing_libraries = o.use_existing_libraries != 0;
         opt = opt.lossy_overrides(o.photo_ppi, o.art_ppi, o.jpeg_quality);
+        for (name, v) in gpress::LossyRules::NAMES.into_iter().zip(o.lossy_rules) {
+            opt.lossy_rules.set(name, v);
+        }
     }
     opt
 }
@@ -213,6 +219,7 @@ pub unsafe extern "C" fn gpress_options_default(out: *mut GpressOptions) {
         photo_ppi: 0,
         art_ppi: 0,
         jpeg_quality: 0,
+        lossy_rules: [0; gpress::LossyRules::NAMES.len()],
     };
     // SAFETY: `out` is non-null and the caller owns the struct it points to.
     unsafe { ptr::write(out, o) };
@@ -387,6 +394,18 @@ mod tests {
         assert_eq!(photos.lossy, Some(Lossy { photo_ppi: 200, ..Lossy::level(2) }));
         let quality = options_from(Some(&GpressOptions { art_ppi: 400, jpeg_quality: 60, ..o }));
         assert_eq!(quality.lossy, Some(Lossy { art_ppi: 400, jpeg_quality: 60, ..Lossy::OFF }));
+        // A rule arrives by its index, and the header numbers the rules as the library names them.
+        let header = include_str!("../include/gpress.h");
+        let names = gpress::LossyRules::NAMES;
+        assert!(header.contains(&format!("#define GPRESS_RULES {}\n", names.len())));
+        for (i, name) in names.into_iter().enumerate() {
+            assert!(header.contains(&format!("#define GPRESS_RULE_{} {i} /*", name.to_uppercase())), "{name}");
+            let mut one = GpressOptions { ..o };
+            one.lossy_rules[i] = 77;
+            let got = options_from(Some(&one)).lossy_rules;
+            let mut want = gpress::LossyRules::default();
+            assert!(want.set(name, 77) && got == want, "{name}");
+        }
 
         let input = b"%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n";
         unsafe {

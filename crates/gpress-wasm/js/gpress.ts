@@ -45,13 +45,21 @@ export interface GpressOptions {
   /**
    * Lossy overrides for optimize(), each 0 or absent = what the effort says; any of them set makes the output
    * lossy at any effort. Photos shown at more than this many pixels per inch are resampled down to it (never
-   * below 150, whatever is asked).
+   * below the rule `photo_floor`, 150 unless `lossyRules` sets it).
    */
   photoPpi?: number;
-  /** Line art and scans shown at more than this many pixels per inch are resampled down to it (never below 300). */
+  /** Line art and scans shown at more than this many pixels per inch are resampled down to it (never below the rule `art_floor`, 300). */
   artPpi?: number;
-  /** JPEG quality, kept within 50 to 95, for a photo that is resampled or stored without JPEG. */
+  /** JPEG quality, kept within the rules `quality_min` and `quality_max` (50 and 95), for a photo that is resampled or stored without JPEG. */
   jpegQuality?: number;
+  /**
+   * The rules of the lossy image step, by name (LOSSY_RULES): the floors, margins and quality checks that are
+   * the same at every lossy effort, such as `{ photo_floor: 100, min_saving: 20 }`. A rule that is absent or
+   * 0 has its default, and a value outside the rule's range counts as the nearest one inside it; the package's
+   * reference lists each rule's default and range. They change nothing at a lossless effort, and
+   * optimizeToSize() takes them too.
+   */
+  lossyRules?: Partial<Record<LossyRule, number>>;
   /** Largest accepted input in MiB (default 1024). */
   maxInputMiB?: number;
   /** Largest decoded stream re-encoded (normal PDF) or stored decoded (archive), MiB (default 64 / 256). */
@@ -140,6 +148,10 @@ export class GpressFeatureError extends GpressError {
   }
 }
 
+/** The rules of the lossy image step, in the module's order (the library's `LossyRules::NAMES`). */
+export const LOSSY_RULES = ["min_pixels", "photo_floor", "art_floor", "resample_margin", "min_saving", "quality_min", "quality_max", "quality_step", "quality_tries", "min_psnr", "min_block_psnr", "psnr_block", "scan_cover", "walk_operators", "walk_draws"] as const;
+export type LossyRule = (typeof LOSSY_RULES)[number];
+
 /** Largest input the 32-bit module takes: under 2 GiB. */
 export const MAX_INPUT_BYTES = 0x7fffffff;
 
@@ -160,6 +172,7 @@ interface Exports {
   gpress_free_input(ptr: number, len: number): void;
   gpress_optimize(ptr: number, len: number, effort: number, maxIn: number, maxStream: number, objectsPerStream: number, flags: number, photoPpi: number, artPpi: number, jpegQuality: number): number;
   gpress_optimize_to_size(ptr: number, len: number, target: number, maxIn: number, maxStream: number, objectsPerStream: number, flags: number): number;
+  gpress_lossy_rule(index: number, value: number): number;
   gpress_compress(ptr: number, len: number, effort: number, maxIn: number, maxStream: number, maxDecoded: number, flags: number): number;
   gpress_expand(ptr: number, len: number, maxIn: number, maxLen: number, maxDecoded: number): number;
   gpress_out_ptr(): number;
@@ -256,9 +269,15 @@ export class Gpress {
    */
   optimize(input: Uint8Array, options: GpressOptions = {}): GpressResult {
     const o = pack(options);
-    return this.run(input, (ptr, len) =>
-      this.ex.gpress_optimize(ptr, len, o.effort, o.maxIn, o.maxStream, o.objectsPerStream, o.flags, o.photoPpi, o.artPpi, o.jpegQuality),
-    );
+    return this.run(input, (ptr, len) => {
+      this.rules(options);
+      return this.ex.gpress_optimize(ptr, len, o.effort, o.maxIn, o.maxStream, o.objectsPerStream, o.flags, o.photoPpi, o.artPpi, o.jpegQuality);
+    });
+  }
+
+  /** Sets every rule of the lossy step for the call that follows: one that is not given goes back to its default. */
+  private rules(options: GpressOptions): void {
+    LOSSY_RULES.forEach((name, i) => this.ex.gpress_lossy_rule(i, clamp(options.lossyRules?.[name] ?? 0, 0, 0xffffffff)));
   }
 
   /**
@@ -276,6 +295,7 @@ export class Gpress {
     const target = clamp(targetBytes, 0, 0xffffffff);
     let picked = 0;
     const r = this.run(input, (ptr, len) => {
+      this.rules(options);
       const code = this.ex.gpress_optimize_to_size(ptr, len, target, o.maxIn, o.maxStream, o.objectsPerStream, o.flags);
       // The outcome also carries the effort (bits 8 to 15) and whether the target was reached (bit 16).
       picked = this.ex.gpress_outcome();

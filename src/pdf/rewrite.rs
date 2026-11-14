@@ -62,6 +62,8 @@ pub struct Options {
     pub rewrite_encrypted: bool,
     /// The lossy image step (see `crate::pdf::lossy`); `Lossy::OFF` leaves every image to the lossless path.
     pub lossy: super::lossy::Lossy,
+    /// The rules that step works by, the same whatever `lossy` asks for.
+    pub rules: super::lossy::LossyRules,
     /// Stop when this passes (checked between streams and Flate segments): the outcome is then `TimedOut`
     /// and nothing is returned. A rewrite that finishes gives the same bytes with or without a deadline.
     pub deadline: Deadline,
@@ -82,6 +84,7 @@ impl Default for Options {
             jpeg_tables: true,
             rewrite_encrypted: true,
             lossy: super::lossy::Lossy::OFF,
+            rules: Default::default(),
             deadline: Deadline::NONE,
         }
     }

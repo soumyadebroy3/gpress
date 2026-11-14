@@ -15,6 +15,9 @@
 //! has as bits, and after a call that returned 10 (a part it leaves out) `gpress_needed_feature` gives that
 //! part's bit; the wrapper turns the pair into a `GpressFeatureError` naming the part.
 //!
+//! The rules of the lossy step (`gpress::LossyRules`) are not arguments: `gpress_lossy_rule(index, value)` sets
+//! one for the calls that follow, and the wrapper sets all of them before each call.
+//!
 //! Panics: `wasm32-unknown-unknown` builds with `panic = "abort"`, so there is no unwinding and the panic
 //! guards here and in the library catch nothing. A bug in the engine therefore traps the module
 //! (`WebAssembly.RuntimeError` in the host, like a failed memory growth) instead of returning code 4; the
@@ -35,7 +38,10 @@ thread_local! {
     static MSG: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static OUTCOME: RefCell<i32> = const { RefCell::new(0) };
     static NEEDED: RefCell<u32> = const { RefCell::new(0) };
+    static RULES: RefCell<[u32; RULE_COUNT]> = const { RefCell::new([0; RULE_COUNT]) };
 }
+
+const RULE_COUNT: usize = gpress::LossyRules::NAMES.len();
 
 fn set_out(v: Vec<u8>) {
     OUT.with(|o| *o.borrow_mut() = v);
@@ -89,7 +95,18 @@ fn options(effort: u32, max_input_mb: u32, max_stream_mb: u32, objects_per_strea
     o.jbig2 = flags & FLAG_NO_JBIG2 == 0;
     o.rewrite_encrypted = flags & FLAG_KEEP_ENCRYPTED == 0;
     o.decrypt = flags & FLAG_NO_DECRYPT == 0;
+    for (name, v) in gpress::LossyRules::NAMES.into_iter().zip(RULES.with(|r| *r.borrow())) {
+        o.lossy_rules.set(name, v);
+    }
     o
+}
+
+/// Sets one rule of the lossy step for every call after it, until it is set again: `index` counts
+/// `gpress::LossyRules::NAMES` (the wrapper's `LOSSY_RULES`), 0 is the rule's default, and a value outside
+/// the rule's range counts as the nearest one inside it. Returns 1, or 0 when there is no such rule.
+#[no_mangle]
+pub extern "C" fn gpress_lossy_rule(index: u32, value: u32) -> i32 {
+    RULES.with(|r| r.borrow_mut().get_mut(index as usize).map(|at| *at = value).is_some()) as i32
 }
 
 /// # Safety
@@ -407,6 +424,21 @@ mod tests {
         let ts = include_str!("../js/gpress.ts");
         assert!(ts.contains(&format!("options.effort ?? {default},")));
         assert!(ts.contains(&format!("const FLAG_ENGINE_EFFORT = {FLAG_ENGINE_EFFORT};")));
+        // A rule set by its index reaches the options and stays until it is set again; the wrapper's list of
+        // names is the library's, in the same order.
+        let names = gpress::LossyRules::NAMES;
+        let listed = ts.split_once("export const LOSSY_RULES = [").and_then(|(_, t)| t.split_once(']')).unwrap().0;
+        let listed: Vec<&str> =
+            listed.split(',').map(|n| n.trim().trim_matches('"')).filter(|n| !n.is_empty()).collect();
+        assert_eq!(listed, names);
+        for (i, name) in names.into_iter().enumerate() {
+            assert_eq!(gpress_lossy_rule(i as u32, 77), 1);
+            let mut want = gpress::LossyRules::default();
+            assert!(want.set(name, 77) && options(60, 0, 0, 0, 0).lossy_rules == want, "{name}");
+            assert_eq!(gpress_lossy_rule(i as u32, 0), 1);
+        }
+        assert_eq!(gpress_lossy_rule(names.len() as u32, 77), 0);
+        assert_eq!(options(default as u32, 0, 0, 0, 0), d);
         // A size past the module's address space is clamped, never wrapped; a budget is a u64 everywhere.
         assert_eq!(mib(u32::MAX, 0), usize::try_from((u32::MAX as u64) << 20).unwrap_or(usize::MAX));
         assert_eq!(budget(u32::MAX, 0), (u32::MAX as u64) << 20);

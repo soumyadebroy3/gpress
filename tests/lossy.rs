@@ -409,3 +409,159 @@ fn the_lossy_efforts_are_the_three_levels() {
     assert_eq!((p.effort.level(), p.reached), (60, true));
     assert!(p.result.data == at(base().effort(60)));
 }
+
+/// The rules of the step are settings. Each at its default, by name or as 0, gives the bytes of options that
+/// never set one; each at either end of its range gives a file that reads back and is not larger than the
+/// lossless output; and a rule that is moved does what its name says.
+#[cfg(feature = "jpeg")]
+#[test]
+fn the_rules_are_settings_and_their_defaults_change_nothing() {
+    // A photo of 300 by 300 at 600 pixels an inch (object 4) and line art of 600 by 600 at 1,200 (object 6).
+    let art = image(600, 600, "DeviceGray", 8, "", &line_art(600, 600));
+    let shot = image(300, 300, "DeviceRGB", 8, "", &photo(300, 300, 3));
+    let pdf = page(shot, 36, "/Im1 6 0 R", "q 36 0 0 36 100 20 cm /Im1 Do Q", &[art]);
+    let base = |effort: u8| Options::default().threads(1).effort(effort);
+    let at = |o: Options| gpress::optimize(&pdf, &o).expect("optimize").data;
+    let with = |effort: u8, rules: &[(&str, u32)]| {
+        let mut o = base(effort);
+        assert!(rules.iter().all(|(name, v)| o.lossy_rules.set(name, *v)));
+        at(o)
+    };
+    // The size of an image (object `n`) of an output, and whether it is a JPEG.
+    let image_at = |out: &[u8], n: u32| {
+        let doc = gpress::pdf::xref::open(out).expect("readable");
+        let Obj::Stream(s) = doc.load(n).expect("image object").1 else { panic!("not a stream") };
+        let jpeg = chain(&s.dict).expect("chain").iter().any(|st| st.name == b"DCTDecode");
+        (s.dict.get(b"Width").and_then(|v| v.as_int()).unwrap(), jpeg)
+    };
+    let lossless = at(base(40));
+    let zeros: Vec<(&str, u32)> = gpress::LossyRules::NAMES.map(|name| (name, 0)).into();
+    let defaults: Vec<(&str, u32)> =
+        gpress::LossyRules::NAMES.map(|name| (name, gpress::LossyRules::default().get(name).unwrap())).into();
+    for effort in [60, 80, 100] {
+        let plain = at(base(effort));
+        assert!(plain.len() < lossless.len(), "effort {effort}");
+        assert!(with(effort, &zeros) == plain && with(effort, &defaults) == plain, "effort {effort}");
+    }
+    // The defaults at effort 100: the photo a JPEG at 150 pixels an inch, the line art at 300.
+    assert_eq!((image_at(&at(base(100)), 4), image_at(&at(base(100)), 6)), ((75, true), (150, false)));
+    // Either end of every rule: 1 counts as the least a rule can be, and the largest number as the most.
+    for name in gpress::LossyRules::NAMES {
+        for end in [1, u32::MAX] {
+            let out = with(100, &[(name, end)]);
+            assert!(out.len() <= lossless.len(), "{name} at {end}: {} of {}", out.len(), lossless.len());
+            let ((w4, jpeg4), (w6, jpeg6)) = (image_at(&out, 4), image_at(&out, 6));
+            assert!((1..=300).contains(&w4) && (1..=600).contains(&w6) && !jpeg6, "{name} at {end}");
+            if jpeg4 {
+                let pic = gpress::jpeg::decode(&image_of(&out).3, 1 << 30, gpress::clock::Deadline::NONE);
+                assert_eq!(pic.map(|p| p.width as i64).ok(), Some(w4), "{name} at {end}");
+            } else {
+                assert_eq!(image_of(&out).3.len() as i64, w4 * w4 * 3, "{name} at {end}");
+            }
+        }
+    }
+    // A rule moved. The floors go down only as far as their ranges (72 and 150), and only when asked.
+    let low = |rules: &[(&str, u32)]| {
+        let mut o = base(40).lossy(Some(Lossy { photo_ppi: 1, art_ppi: 1, ..Lossy::level(3) }));
+        assert!(rules.iter().all(|(name, v)| o.lossy_rules.set(name, *v)));
+        let out = at(o);
+        (image_at(&out, 4).0, image_at(&out, 6).0)
+    };
+    assert_eq!(low(&[]), (75, 150));
+    assert_eq!(low(&[("photo_floor", 1), ("art_floor", 1)]), (36, 75));
+    assert_eq!(low(&[("photo_floor", 100), ("art_floor", 200)]), (50, 100));
+    // An image of at most `min_pixels` pixels is not touched: the photo has 90,000.
+    assert_eq!(image_at(&with(100, &[("min_pixels", 90_000)]), 4), (300, false));
+    assert_eq!(image_at(&with(100, &[("min_pixels", 89_999)]), 4), (75, true));
+    // A walk that may read one operator, or make one draw, measures nothing: the lossless output.
+    assert!(with(100, &[("walk_operators", 1)]) == lossless && with(100, &[("walk_draws", 1)]) == lossless);
+    // A floor of 99 dB no JPEG meets: the photo stays as it is, the line art is still resampled.
+    let strict = with(100, &[("min_psnr", 99)]);
+    assert_eq!((image_at(&strict, 4), image_at(&strict, 6)), ((300, false), (150, false)));
+    // A margin of 500 percent: neither is shown at five times its floor, so neither is resampled, and the photo
+    // becomes a JPEG of its own size.
+    let wide = with(100, &[("resample_margin", 500)]);
+    assert_eq!((image_at(&wide, 4), image_at(&wide, 6)), ((300, true), (600, false)));
+    // The photo an inch square is 1.07 percent of its page. With `scan_cover` at 1 that is a scan, which has
+    // the line-art floor of 300 pixels an inch: its own resolution, so it keeps its size.
+    let pdf = page(image(300, 300, "DeviceRGB", 8, "", &photo(300, 300, 3)), 72, "", "", &[]);
+    let mut scans = base(100);
+    assert!(scans.lossy_rules.set("scan_cover", 1));
+    let plain = gpress::optimize(&pdf, &base(100)).unwrap().data;
+    let scan = gpress::optimize(&pdf, &scans).unwrap().data;
+    assert_eq!((image_at(&plain, 4), image_at(&scan, 4)), ((150, true), (300, true)));
+
+    // The smallest images `min_pixels` lets in, in odd shapes and blank ones too, with every floor at its
+    // lowest and any JPEG taken: still a file that reads back and is not larger than the lossless one.
+    let mut loose = base(40).lossy(Some(Lossy { photo_ppi: 1, art_ppi: 1, ..Lossy::level(3) }));
+    for name in
+        ["min_pixels", "photo_floor", "art_floor", "resample_margin", "quality_min", "min_psnr", "min_block_psnr"]
+    {
+        assert!(loose.lossy_rules.set(name, 1));
+    }
+    for (w, h) in [(101, 100), (64, 200), (400, 26), (3, 4000)] {
+        let mut kinds = vec![
+            ("DeviceRGB", photo(w, h, 3)),
+            ("DeviceGray", photo(w, h, 1)),
+            ("DeviceRGB", vec![255; w * h * 3]),
+            ("DeviceGray", vec![0; w * h]),
+        ];
+        if w >= 20 {
+            kinds.push(("DeviceGray", line_art(w, h)));
+        }
+        for (k, (cs, px)) in kinds.into_iter().enumerate() {
+            // Shown a point square: thousands of pixels an inch.
+            let pdf = page(image(w, h, cs, 8, "", &px), 1, "", "", &[]);
+            let lossless = gpress::optimize(&pdf, &base(40)).expect("optimize").data;
+            let out = gpress::optimize(&pdf, &loose).expect("optimize").data;
+            assert!(out.len() <= lossless.len(), "{w} by {h}, {k}: {} of {}", out.len(), lossless.len());
+            let (tw, th, jpeg, bytes) = image_of(&out);
+            assert!((1..=w as i64).contains(&tw) && (1..=h as i64).contains(&th), "{w} by {h}, {k}");
+            if jpeg {
+                let pic = gpress::jpeg::decode(&bytes, 1 << 30, gpress::clock::Deadline::NONE).expect("decodes");
+                assert_eq!((pic.width as i64, pic.height as i64), (tw, th), "{w} by {h}, {k}");
+            } else {
+                assert_eq!(bytes.len() as i64, tw * th * if cs == "DeviceRGB" { 3 } else { 1 }, "{w} by {h}, {k}");
+            }
+        }
+    }
+}
+
+/// The command line has one flag for each rule, its name with dashes: the output is the library's with that
+/// rule set, whether the flag comes before or after the file names.
+#[cfg(feature = "jpeg")]
+#[test]
+fn the_rule_flags_are_the_library_rules() {
+    let dir = std::env::temp_dir().join(format!("gpress-lossy-rules-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (i, o) = (dir.join("in.pdf"), dir.join("out.pdf"));
+    let pdf = page(image(300, 300, "DeviceRGB", 8, "", &photo(300, 300, 3)), 36, "", "", &[]);
+    std::fs::write(&i, &pdf).unwrap();
+    let cli = |before: &[&str], after: &[&str]| {
+        let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_gpress"));
+        let st = c.arg("optimize").args(before).arg(&i).arg(&o).args(["--threads", "1", "--effort", "100"]).args(after);
+        assert!(st.status().unwrap().success(), "{before:?} {after:?}");
+        std::fs::read(&o).unwrap()
+    };
+    let lib = |rules: &[(&str, u32)]| {
+        let mut opt = Options::default().threads(1).effort(100);
+        assert!(rules.iter().all(|(name, v)| opt.lossy_rules.set(name, *v)));
+        gpress::optimize(&pdf, &opt).unwrap().data
+    };
+    let plain = lib(&[]);
+    assert!(cli(&[], &[]) == plain);
+    for name in gpress::LossyRules::NAMES {
+        let flag = format!("--{}", name.replace('_', "-"));
+        // 0 is the default, and a number no rule takes as it is comes back as the end of its range.
+        assert!(cli(&[&flag, "0"], &[]) == plain, "{flag}");
+        assert!(cli(&[], &[&flag, "4000000000"]) == lib(&[(name, 4_000_000_000)]), "{flag}");
+    }
+    // Rules that change this file's output, before and after the file names.
+    let kept = lib(&[("min_pixels", 90_000)]);
+    assert!(
+        kept != plain && cli(&["--min-pixels", "90000"], &[]) == kept && cli(&[], &["--min-pixels", "90000"]) == kept
+    );
+    let strict = lib(&[("min_psnr", 99), ("quality_tries", 1)]);
+    assert!(cli(&["--min-psnr", "99"], &["--quality-tries", "1"]) == strict);
+    let _ = std::fs::remove_dir_all(&dir);
+}

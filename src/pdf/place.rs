@@ -29,6 +29,7 @@
 //! The sizes are the same on every machine: f64 with + - * / and square roots only, numbers read by hand.
 
 use super::filters;
+use super::lossy::LossyRules;
 use super::object::{is_regular, is_white, Dict, Obj, Stream, Writer};
 use super::parse::Lexer;
 use crate::clock::Deadline;
@@ -54,13 +55,16 @@ pub fn shown(
     trailer: &Dict,
     max_stream: usize,
     deadline: Deadline,
+    rules: &LossyRules,
 ) -> BTreeMap<u32, Shown> {
     let walk = Walk {
         objs,
         max_stream,
         deadline,
-        left: OPERATORS,
-        dos: DOS,
+        left: rules.walk_operators as u64,
+        dos: rules.walk_draws as usize,
+        draws: rules.walk_draws as usize,
+        scan_cover: rules.scan_cover,
         nodes: BTreeSet::new(),
         followed: BTreeMap::new(),
         xdicts: BTreeMap::new(),
@@ -71,12 +75,6 @@ pub fn shown(
     };
     walk.run(trailer).unwrap_or_default()
 }
-
-/// Operators the whole walk may read. Decoding is taken from it too (see `Walk::decoded`).
-const OPERATORS: u64 = 20_000_000;
-
-/// `Do` operators the whole walk may draw.
-const DOS: usize = 1_000_000;
 
 /// What a page-tree node passes down, a node's own value in place of the one from above.
 const INHERITED: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"UserUnit"];
@@ -184,8 +182,9 @@ fn spend(left: &mut u64, n: u64) -> bool {
 }
 
 /// The `Do` operators of a content, or None when it is not measured. Each operator read is taken from `left`,
-/// and 16 more for each `Do` kept, which bounds what the walk holds in memory at about a million of them.
-fn read(data: &[u8], left: &mut u64) -> Option<Dos> {
+/// and 16 more for each `Do` kept; a content holds at most `draws` of them (`walk_draws`), which bounds what
+/// the walk holds in memory.
+fn read(data: &[u8], left: &mut u64, draws: usize) -> Option<Dos> {
     let mut lx = Lexer::new(data, 0);
     let (mut ctm, mut saved, mut args, mut dos) = (ID, Vec::new(), Vec::new(), Vec::new());
     loop {
@@ -223,7 +222,7 @@ fn read(data: &[u8], left: &mut u64) -> Option<Dos> {
                 // A name as long as a PDF may have: each is kept, and compared at every draw.
                 [Obj::Name(name)] if name.len() <= 127 => {
                     // More than the whole walk may draw: nothing is left.
-                    if dos.len() == DOS {
+                    if dos.len() >= draws {
                         *left = 0;
                         return None;
                     }
@@ -284,10 +283,15 @@ struct Walk<'a> {
     objs: &'a BTreeMap<u32, (u16, Obj)>,
     max_stream: usize,
     deadline: Deadline,
-    /// What is left of `OPERATORS`.
+    /// What is left of the operators the whole walk may read (`walk_operators`). Decoding is taken from it
+    /// too (see `Walk::decoded`).
     left: u64,
-    /// What is left of `DOS`.
+    /// What is left of the `Do` operators the whole walk may draw (`walk_draws`).
     dos: usize,
+    /// `walk_draws` itself: the most one content may hold.
+    draws: usize,
+    /// The percent of its page an image covers to be a scan (`scan_cover`).
+    scan_cover: u32,
     /// The page-tree nodes met.
     nodes: BTreeSet<u32>,
     /// The references followed to resources and to /XObject dictionaries, by address: the object each names,
@@ -473,7 +477,7 @@ impl<'a> Walk<'a> {
             return None;
         }
         let x = self.xobjects(inh[0], None);
-        let dos = self.contents(d).and_then(|c| read(&c, &mut self.left));
+        let dos = self.contents(d).and_then(|c| read(&c, &mut self.left, self.draws));
         if self.left == 0 {
             return None;
         }
@@ -547,7 +551,8 @@ impl<'a> Walk<'a> {
         if height > s.height {
             s.height = height;
         }
-        s.scan |= covers >= 0.7 * area;
+        // 70 gives the 0.7 this was: a division rounds the same way on every machine.
+        s.scan |= covers >= self.scan_cover as f64 / 100.0 * area;
         Some(())
     }
 
@@ -596,7 +601,7 @@ impl<'a> Walk<'a> {
             Some(_) => return None,
         };
         let data = self.decoded(s)?;
-        Some((m, read(&data, &mut self.left)?))
+        Some((m, read(&data, &mut self.left, self.draws)?))
     }
 
     /// A content the walk did not read, with the /Resources that go with it: fine when each name it draws is
@@ -610,7 +615,7 @@ impl<'a> Walk<'a> {
         }
         let data = self.decoded(s)?;
         // Parsed when it can be, so that a `Do` inside a string is not taken for one.
-        let parsed = read(&data, &mut self.left);
+        let parsed = read(&data, &mut self.left, self.draws);
         let names = match &parsed {
             Some(dos) => dos.iter().map(|d| d.1.as_slice()).collect(),
             None => drawn(&data)?,
@@ -766,7 +771,7 @@ mod tests {
     }
 
     fn run(objs: &BTreeMap<u32, (u16, Obj)>) -> BTreeMap<u32, Shown> {
-        shown(objs, &trailer(), 1 << 20, Deadline::NONE)
+        shown(objs, &trailer(), 1 << 20, Deadline::NONE, &LossyRules::default())
     }
 
     fn shown_in(objects: &[(u32, &str)]) -> BTreeMap<u32, Shown> {
@@ -897,8 +902,9 @@ mod tests {
         objs.insert(4, (0, stream(&dict, &crate::flate::deflate_zlib(&row, &quick))));
         assert_eq!(run(&objs), one(2.0, 1.0, false));
         // A content longer than the limit is not measured.
-        assert!(shown(&objs, &trailer(), 16, Deadline::NONE).is_empty());
-        assert!(shown(&objs, &trailer(), 1 << 20, Deadline::after(std::time::Duration::ZERO)).is_empty());
+        assert!(shown(&objs, &trailer(), 16, Deadline::NONE, &LossyRules::default()).is_empty());
+        assert!(shown(&objs, &trailer(), 1 << 20, Deadline::after(std::time::Duration::ZERO), &LossyRules::default())
+            .is_empty());
     }
 
     #[test]
@@ -1093,11 +1099,11 @@ mod tests {
         let long = |n: usize| format!("/{} Do", "n".repeat(n));
         assert_eq!(drawn(long(127).as_bytes()).map(|names| names[0].len()), Some(127));
         assert_eq!(drawn(long(128).as_bytes()), None);
-        assert_eq!(read(long(127).as_bytes(), &mut 99).map(|dos| dos.len()), Some(1));
-        assert_eq!(read(long(128).as_bytes(), &mut 99), None);
+        assert_eq!(read(long(127).as_bytes(), &mut 99, 1_000_000).map(|dos| dos.len()), Some(1));
+        assert_eq!(read(long(128).as_bytes(), &mut 99, 1_000_000), None);
         // A `Do` that is kept takes 17 operators from the budget.
-        assert_eq!(read(b"/A Do", &mut 18).map(|dos| dos.len()), Some(1));
-        assert_eq!(read(b"/A Do", &mut 17), None);
+        assert_eq!(read(b"/A Do", &mut 18, 1_000_000).map(|dos| dos.len()), Some(1));
+        assert_eq!(read(b"/A Do", &mut 17, 1_000_000), None);
     }
 
     #[test]
@@ -1172,7 +1178,8 @@ mod tests {
     #[test]
     fn a_walk_in_doubt_gives_nothing() {
         // No /Root, a catalog without /Pages, a /Pages that is no dictionary.
-        assert!(shown(&file(&[CATALOG, PAGES]), &Dict::default(), 1 << 20, Deadline::NONE).is_empty());
+        assert!(shown(&file(&[CATALOG, PAGES]), &Dict::default(), 1 << 20, Deadline::NONE, &LossyRules::default())
+            .is_empty());
         assert!(shown_in(&[(1, "<</Type/Catalog>>")]).is_empty());
         assert!(shown_in(&[CATALOG, (2, IMAGE)]).is_empty());
         // A good page beside each bad tree: still nothing.

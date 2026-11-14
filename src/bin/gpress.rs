@@ -19,7 +19,11 @@
 //! --no-flate-over-jpeg, --no-jpeg-tables, --no-jbig2, --keep-encrypted, --store-budget BYTES (normal PDF),
 //! --lossy N (normal PDF: the lossy image step at level 0 to 3 in place of what the effort means, 0 = off; see
 //! `gpress::Lossy`), --photo-ppi N, --art-ppi N, --jpeg-quality N (each sets one of the step's settings, over
-//! the level's or the effort's; 0 leaves it as it is),
+//! the level's or the effort's; 0 leaves it as it is), one flag for each rule of the step, its name with dashes
+//! (`gpress::LossyRules`: --min-pixels N, --photo-floor N, --art-floor N, --resample-margin N, --min-saving N,
+//! --quality-min N, --quality-max N, --quality-step N, --quality-tries N, --min-psnr N, --min-block-psnr N,
+//! --psnr-block N, --scan-cover N, --walk-operators N, --walk-draws N; 0 is the default, and a value outside
+//! the rule's range counts as the nearest one inside it),
 //! --no-decrypt (archive), --no-existing. The output never depends on the thread count or the time budget: a
 //! budget that runs out gives an error and no file.
 //!
@@ -84,6 +88,10 @@ options: --effort N (0, 20, 40 lossless: fast .. smallest, default 40; 60, 80, 1
          --no-flate-over-jpeg   --no-jpeg-tables   --no-jbig2   --keep-encrypted   --store-budget BYTES (normal PDF)
          --lossy N (lossy image step, level 0 off .. 3, in place of the effort's)   --photo-ppi N   --art-ppi N
          --jpeg-quality N (one setting of the step each, over the effort's)
+         the step's rules (0: the default; docs/reference.md has each range): --min-pixels N   --photo-floor N
+         --art-floor N   --resample-margin N   --min-saving N   --quality-min N   --quality-max N   --quality-step N
+         --quality-tries N   --min-psnr N   --min-block-psnr N   --psnr-block N   --scan-cover N   --walk-operators N
+         --walk-draws N
          --no-decrypt (archive)   --no-existing
 measuring tools: deflate, inflate, batch, pdf-batch, repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info,
          fax-decode, fax-encode, fax-scan, fax-model, jbig2-encode, claim-archive (see the comments at the top of
@@ -114,6 +122,12 @@ const WITH_VALUE: &[&str] = &[
     "--jpeg-quality",
 ];
 
+/// The rule of the lossy step a flag names: `--photo-floor` is `photo_floor`.
+fn rule_of(flag: &str) -> Option<&'static str> {
+    let name = flag.strip_prefix("--")?.replace('-', "_");
+    gpress::LossyRules::NAMES.into_iter().find(|n| *n == name)
+}
+
 /// The flags that fine-tune the strong encoder's settings in the deflate tools.
 const TUNING: [&str; 8] = ["--iter", "--exact", "--chain", "--nice", "--nosplit", "--noalt", "--nomulti", "--nopolish"];
 
@@ -128,7 +142,7 @@ fn main() {
             continue;
         }
         if a.starts_with("--") {
-            skip_next = WITH_VALUE.contains(&a.as_str());
+            skip_next = WITH_VALUE.contains(&a.as_str()) || rule_of(a).is_some();
             continue;
         }
         pos.push(a);
@@ -193,6 +207,9 @@ fn main() {
         setting("--art-ppi", u16::MAX as u64) as u16,
         setting("--jpeg-quality", u8::MAX as u64) as u8,
     );
+    for (name, n) in args.iter().filter_map(|a| Some((rule_of(a)?, num(a)?))) {
+        lib.lossy_rules.set(name, n.min(u32::MAX as u64) as u32);
+    }
     lib.decrypt = !flag("--no-decrypt");
     lib.use_existing_libraries = !flag("--no-existing");
     lib.check().unwrap_or_else(|e| fail(&e));

@@ -41,7 +41,7 @@ use crate::pack;
 // Without the archive: its format's constants, which the options and `is_archive` use in every build.
 #[cfg(not(feature = "archive"))]
 use crate::off::pack;
-pub use crate::pdf::lossy::Lossy;
+pub use crate::pdf::lossy::{Lossy, LossyRules};
 use crate::pdf::rewrite;
 use crate::Feature;
 
@@ -66,7 +66,8 @@ pub const MAX_STORE_BUDGET: usize = crate::flate::deflate::MAX_STORE_BUDGET;
 /// more than 300 pixels per inch is resampled down to 300, and a photo that is resampled, or stored without
 /// JPEG, becomes a JPEG at quality 85 (line art stays lossless Flate). 80 is the same with photos down to 150
 /// pixels per inch. 100 is as 80 at JPEG quality 75, and an existing JPEG photo is written again at that
-/// quality when that is at least a tenth smaller. Floors that hold at every lossy level: a photo is never
+/// quality when that is at least a tenth smaller. What holds at every lossy level (the numbers are the
+/// defaults of [`LossyRules`], which `Options::lossy_rules` can move within each rule's range): a photo is never
 /// taken below 150 pixels per inch at its displayed size, and line art (screenshots, charts, diagrams) and
 /// scans never below 300; 1-bit images and small images (at most 65,536 pixels) are never touched; a lossy
 /// result is kept only when it is clearly smaller than what the lossless path makes of the image and a
@@ -173,6 +174,11 @@ pub struct Options {
     /// [`Effort`]); `Some`: exactly these settings whatever the effort (`Some(Lossy::OFF)` keeps any effort
     /// lossless).
     pub lossy: Option<Lossy>,
+    /// Normal PDF: the rules the lossy image step works by, the same at every lossy effort and with a target
+    /// size: the least resolutions, the smallest image it touches, how much smaller a result must be, the
+    /// quality checks and so on. Each has a name, a default and a range ([`LossyRules`]); change one with
+    /// `lossy_rules.set("photo_floor", 100)`. They decide nothing while the step is off.
+    pub lossy_rules: LossyRules,
     /// Archive: store the streams of a file the empty user password opens decrypted (so they can be rebuilt
     /// and modelled) and encrypt them again on expand. Off, encrypted streams are stored as they are.
     pub decrypt: bool,
@@ -207,6 +213,7 @@ impl Default for Options {
             jbig2: true,
             rewrite_encrypted: true,
             lossy: None,
+            lossy_rules: LossyRules::default(),
             decrypt: true,
             use_existing_libraries: true,
             time_budget: None,
@@ -394,6 +401,7 @@ impl Options {
             jpeg_tables: self.jpeg_tables,
             rewrite_encrypted: self.rewrite_encrypted,
             lossy: self.lossy_settings(),
+            rules: self.lossy_rules,
             deadline: self.deadline(),
         }
     }

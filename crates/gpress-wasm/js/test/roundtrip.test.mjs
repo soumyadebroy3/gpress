@@ -263,6 +263,26 @@ test("efforts 60, 80 and 100 and the lossy overrides reach the lossy image step"
   assert.deepEqual(fits.data, at({ effort: 60 }));
 });
 
+test("the rules of the lossy step are options, and one call's rules do not reach the next", () => {
+  const pdf = photoPdf();
+  const at = (options) => g.optimize(pdf, options).data;
+  const [lossless, plain] = [at({ effort: 40 }), at({ effort: 100 })];
+  assert.ok(plain.length < lossless.length);
+  // The picture has 76,800 pixels: with `min_pixels` at that it is not touched.
+  assert.deepEqual(at({ effort: 100, lossyRules: { min_pixels: 76800 } }), lossless);
+  // The call after it has the defaults again, and a rule at 0 or at its default is the default.
+  assert.deepEqual(at({ effort: 100 }), plain);
+  assert.deepEqual(at({ effort: 100, lossyRules: { min_pixels: 0, min_saving: 10 } }), plain);
+  // A lower floor, when a lower resolution is asked for: 75 pixels an inch is a smaller file than the 150
+  // the request is raised to without the rule.
+  const low = at({ effort: 100, photoPpi: 75, lossyRules: { photo_floor: 75 } });
+  assert.ok(low.length < at({ effort: 100, photoPpi: 75 }).length);
+  // A target size takes the rules too: with the picture out of reach no effort gets under the lossless size.
+  const least = Math.min(...[0, 20, 40].map((effort) => at({ effort }).length));
+  assert.equal(g.optimizeToSize(pdf, least - 1, { lossyRules: { min_pixels: 76800 } }).reached, false);
+  assert.equal(g.optimizeToSize(pdf, least - 1).reached, true);
+});
+
 test("optimize returns untouched with a reason for non-PDF input", () => {
   const r = g.optimize(new TextEncoder().encode("hello"), { jbig2: false, jpegTables: false, objectsPerStream: 50 });
   assert.equal(r.outcome, "untouched");
