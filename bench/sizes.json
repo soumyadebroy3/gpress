@@ -85,20 +85,20 @@
         ]
       },
       "tool": {
-        "raw": 1553400,
-        "gzip": 696074
+        "raw": 1680392,
+        "gzip": 752573
       },
       "c_shared": {
-        "raw": 1423024,
-        "gzip": 637717
+        "raw": 1548592,
+        "gzip": 695928
       },
       "c_static": {
-        "raw": 10389864,
-        "gzip": 2230235
+        "raw": 10674856,
+        "gzip": 2305980
       },
       "wasm": {
-        "raw": 738099,
-        "gzip": 281617
+        "raw": 813911,
+        "gzip": 311102
       },
       "wasm_opt": "wasm-opt version 120 (version_120)",
       "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
