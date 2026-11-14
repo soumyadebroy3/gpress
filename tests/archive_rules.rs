@@ -147,12 +147,12 @@ fn one_stream(dict: &str, data: &[u8]) -> Vec<u8> {
 /// bytes.
 #[cfg(all(feature = "fax", feature = "encryption"))]
 fn encrypted_twice(data: &[u8]) -> Vec<u8> {
-    use gpress::pdf::crypt::{key_r4, seal, user_value_r4, Method};
+    use gpress::pdf::crypt::{key_r4, object_key, rc4, user_value_r4, Method};
     let (o, id0, p) = ([0x11u8; 32], [0x42u8; 16], 0xFFFF_FFFCu32);
     let key = key_r4(3, 16, &o, p, &id0, true);
     let mut u = user_value_r4(3, &key, &id0);
     u.resize(32, 0);
-    let sealed = seal(&key, Method::Rc4, 3, 0, &[0; 16], data).unwrap();
+    let sealed = rc4(&object_key(&key, Method::Rc4, 3, 0), data);
     let stream = |d: &mut Vec<u8>| {
         d.extend_from_slice(format!("3 0 obj\n<< /Length {} >>\nstream\n", sealed.len()).as_bytes());
         d.extend_from_slice(&sealed);
