@@ -220,5 +220,9 @@ fn the_target_size_flag_picks_the_effort() {
     // The picker sets the effort itself, so the engine's level is refused as the library refuses it.
     let refused = gpress::optimize_to_size(&pdf, 0, &opt.clone().engine_effort(Some(0))).unwrap_err();
     assert_eq!(run(&["--target-size", "0", "--engine-effort", "0"]).0, Some(refused.code()));
+    // The lossy flags too, each of which reaches the options.
+    for flags in [["--lossy", "0"], ["--photo-ppi", "200"], ["--art-ppi", "400"], ["--jpeg-quality", "80"]] {
+        assert_eq!(run(&["--target-size", "0", flags[0], flags[1]]).0, Some(refused.code()), "{flags:?}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

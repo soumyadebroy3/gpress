@@ -36,7 +36,7 @@ the encoding time its answers saved, roughly), and the segments written from an 
 | `jpeg_tables` | on | Normal PDF: JPEGs get optimal Huffman tables (the same coefficients). |
 | `jbig2` | on | Normal PDF: CCITT fax images become JBIG2 when that is at least 5% smaller (the same pixels). |
 | `rewrite_encrypted` | on | Normal PDF: files the empty user password opens are rewritten with their encryption kept exactly. Off, every encrypted file is left untouched. |
-| `lossy` | none | Normal PDF: the lossy image step. `None`: what the effort means (efforts 60, 80 and 100 turn it on). `Some`: exactly these settings whatever the effort, and `Some(Lossy::OFF)` keeps any effort lossless. The settings are `photo_ppi` and `art_ppi` (photos, and line art and scans, shown at more pixels per inch than this are resampled down to it; never below 150 and 300, whatever is asked; 0: never resampled), `jpeg_quality` (kept within 50 to 95, for a photo that is resampled or stored without JPEG; 0: no image becomes a JPEG) and `rejpeg` (an existing JPEG photo is written again at that quality when that is at least a tenth smaller); `Lossy::level(1)`, `(2)` and `(3)` are what efforts 60, 80 and 100 mean. Command line: `--lossy N` (0 to 3) sets exactly that level, and `--photo-ppi N`, `--art-ppi N` and `--jpeg-quality N` change one setting each. C (`photo_ppi`, `art_ppi`, `jpeg_quality`) and TypeScript (`photoPpi`, `artPpi`, `jpegQuality`) have those three overrides, where 0 or absent means what the effort says, and any of them set makes the output lossy at any effort. |
+| `lossy` | none | Normal PDF: the lossy image step. `None`: what the effort means (efforts 60, 80 and 100 turn it on). `Some`: exactly these settings whatever the effort, and `Some(Lossy::OFF)` keeps any effort lossless. The settings are `photo_ppi` and `art_ppi` (photos, and line art and scans, shown at more pixels per inch than this are resampled down to it; never below 150 and 300, whatever is asked; 0: never resampled), `jpeg_quality` (kept within 50 to 95, for a photo that is resampled or stored without JPEG; 0: no image becomes a JPEG) and `rejpeg` (an existing JPEG photo is written again at that quality when that is at least a tenth smaller); `Lossy::level(1)`, `(2)` and `(3)` are what efforts 60, 80 and 100 mean. Command line: `--lossy N` (0 to 3) sets exactly that level, and `--photo-ppi N`, `--art-ppi N` and `--jpeg-quality N` change one setting each, over the level's or the effort's (0: as it is); a run that changed an image adds `resampled=`, `to_jpeg=` and `rejpeg=` to its output line. `Report` counts the same (`images_resampled`, `images_to_jpeg`, `jpegs_rewritten`). A build without the `jpeg` feature resamples line art only. C (`photo_ppi`, `art_ppi`, `jpeg_quality`) and TypeScript (`photoPpi`, `artPpi`, `jpegQuality`) have those three overrides, where 0 or absent means what the effort says, and any of them set makes the output lossy at any effort. |
 | `decrypt` | on | Archive: the streams of such files are stored decrypted (so they get the zlib rebuild, Lepton and the model) and encrypted again on expand. |
 | `use_existing_libraries` | on | Use Lepton for JPEG streams in the archive when the build has it (`--features existing`). An archive with parts Lepton made expands only with such a build (the error says so). |
 | `time_budget` | none | Give up after this much wall time: `Error::TimeBudget` and no output, the input unchanged. Checked between streams, Flate segments and archive parts (every 64 KiB of model work) in all three operations, so it can be overshot by a little (on expand by one part's zlib re-creation). A call that finishes in time gives the same bytes as one without a budget. |
@@ -79,17 +79,22 @@ effort (40 and above all mean its strongest setting) and nothing else.
 | 0 | lossless | 0 | The fast path. |
 | 20 | lossless | 20 | The strong encoder's first step. |
 | 40 (default) | lossless | 100 | The smallest lossless output: everything the engine knows how to do. |
-| 60 | lossy | 100 | The work of 40, after the lossy image step at `Lossy::level(1)`: an image shown at more than 300 pixels per inch is resampled down to 300, and a photo that is resampled, or stored without JPEG, becomes a JPEG at quality 85 (line art stays lossless Flate). |
-| 80 | lossy | 100 | `Lossy::level(2)`: as 60, with photos down to 150 pixels per inch. |
+| 60 | lossy | 100 | The work of 40, after the lossy image step at `Lossy::level(1)`: an image shown at 375 pixels per inch or more is resampled down to 300 (an area average), and a photo that was resampled, or is not a JPEG, is written as a baseline JPEG at quality 85 (line art stays samples behind Flate). |
+| 80 | lossy | 100 | `Lossy::level(2)`: as 60, with photos down to 150 pixels per inch (those shown at 187.5 or more). |
 | 100 | lossy | 100 | `Lossy::level(3)`: as 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
 
 Floors that hold at every lossy level:
 
-- photos are never taken below 150 pixels per inch at their displayed size;
-- line art (screenshots, charts, diagrams) and scans are never taken below 300 pixels per inch;
-- 1-bit images are never touched, and neither are small images (at most 65,536 pixels);
-- a lossy result is kept only when it is clearly smaller than what the lossless path makes of the image, and
-  only when a per-image quality check passes; otherwise the image goes through the lossless path as before;
+- photos are never taken below 150 pixels per inch at their displayed size, and line art (screenshots, charts,
+  diagrams) and scans (an image that covers most of a page) never below 300; an image is resampled only when
+  it is shown at 5/4 of its floor or more, and line art never becomes a JPEG;
+- the step works only on 8-bit grey and RGB images of more than 65,536 pixels whose every use on a page it
+  could measure: 1-bit, indexed, CMYK and 16-bit images, image masks, images with a colour-key mask, a `/Decode`
+  array or a soft mask with `/Matte`, and small images (logos, icons) are never touched, and neither is a JPEG
+  that looks like line art;
+- a lossy result is kept only when it is at most nine tenths of the image's lossless size and, for a JPEG, only
+  when it decodes close to the samples it was made from (one that does not is first coded again at a higher
+  quality); otherwise the image goes through the lossless path as before;
 - a file the safety gate leaves untouched (signed, PDF/A, PDF/X, needing a password...) stays untouched, and an
   encrypted file keeps its encryption.
 

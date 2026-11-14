@@ -375,3 +375,37 @@ fn settings_are_floors_and_single_overrides() {
         assert_eq!((w, h, jpeg), (300, 300, true));
     }
 }
+
+/// The six efforts through the public options: 0, 20 and 40 never run the step; 60, 80 and 100 are the work of
+/// 40 after the step at levels 1, 2 and 3; an override starts from what the effort means; the engine's level
+/// turns the step off; and a target size goes to a lossy effort only when no lossless one reaches it.
+#[cfg(feature = "jpeg")]
+#[test]
+fn the_lossy_efforts_are_the_three_levels() {
+    // 600 pixels over an inch.
+    let pdf = page(image(600, 600, "DeviceRGB", 8, "", &photo(600, 600, 3)), 72, "", "", &[]);
+    let base = || Options::default().threads(1);
+    let at = |o: Options| gpress::optimize(&pdf, &o).expect("optimize").data;
+    let lossless: Vec<Vec<u8>> = [0, 20, 40].map(|effort| at(base().effort(effort))).into();
+    for out in &lossless {
+        assert!(image_of(out).3 == photo(600, 600, 3), "a lossless effort keeps every sample");
+    }
+    for (effort, level) in [(60u8, 1u8), (80, 2), (100, 3)] {
+        let out = at(base().effort(effort));
+        assert!(out == at(base().effort(40).lossy(Some(Lossy::level(level)))), "effort {effort}");
+        assert!(out.len() < lossless[2].len() / 4, "effort {effort}");
+    }
+    // Effort 60 with photos at 150 pixels an inch is effort 80; quality alone on a lossless effort writes the
+    // photo as a JPEG of its own size.
+    assert!(at(base().effort(60).lossy_overrides(150, 0, 0)) == at(base().effort(80)));
+    let (w, h, jpeg, _) = image_of(&at(base().effort(40).lossy_overrides(0, 0, 85)));
+    assert_eq!((w, h, jpeg), (600, 600, true));
+    assert!(at(base().effort(100).engine_effort(Some(100))) == lossless[2]);
+    // The smallest lossless size is reached without loss; one byte less takes effort 60.
+    let least = lossless.iter().map(Vec::len).min().unwrap() as u64;
+    let p = gpress::optimize_to_size(&pdf, least, &base()).unwrap();
+    assert!(p.reached && p.effort.level() <= 40 && p.result.data.len() as u64 == least);
+    let p = gpress::optimize_to_size(&pdf, least - 1, &base()).unwrap();
+    assert_eq!((p.effort.level(), p.reached), (60, true));
+    assert!(p.result.data == at(base().effort(60)));
+}

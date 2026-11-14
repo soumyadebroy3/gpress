@@ -67,7 +67,8 @@ gpress unpack in.gpz back.pdf             # the original, byte for byte
 ```
 
 `optimize` prints one tab-separated line: the input, `SMALLER` or `UNTOUCHED`, bytes in, bytes out, seconds and
-the details. `pack` prints the input, bytes in, bytes out, seconds, then `PACKED` or `STORED` with the archive's
+the details (a lossy run that changed an image adds `resampled=`, `to_jpeg=` and `rejpeg=`, the images it
+resampled, wrote as JPEG, and wrote as JPEG again). `pack` prints the input, bytes in, bytes out, seconds, then `PACKED` or `STORED` with the archive's
 statistics. For `tests/data/format-v9.pdf`, copied to `in.pdf`:
 
 ```
@@ -174,17 +175,22 @@ strongest setting. The output is the same for any thread count.
 | 0 (`--quick`) | lossless | The fast path: our fast Flate encoder and the cheap steps. |
 | 20 | lossless | The strong encoder's first step. |
 | 40 (default) | lossless | The smallest lossless output: everything the engine knows how to do. |
-| 60 | lossy | The work of 40, after the lossy image step: an image shown at more than 300 pixels per inch is resampled down to 300, and a photo that is resampled, or stored without JPEG, becomes a JPEG at quality 85 (line art stays lossless Flate). |
-| 80 | lossy | As 60, with photos down to 150 pixels per inch. |
+| 60 | lossy | The work of 40, after the lossy image step: an image shown at 375 pixels per inch or more is resampled down to 300, and a photo that was resampled, or is not a JPEG, is written as a JPEG at quality 85 (line art stays samples behind Flate). |
+| 80 | lossy | As 60, with photos down to 150 pixels per inch (those shown at 187.5 or more). |
 | 100 | lossy | As 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
 
 Floors that hold at every lossy level:
 
-- photos are never taken below 150 pixels per inch at their displayed size;
-- line art (screenshots, charts, diagrams) and scans are never taken below 300 pixels per inch;
-- 1-bit images are never touched, and neither are small images (at most 65,536 pixels);
-- a lossy result is kept only when it is clearly smaller than what the lossless path makes of the image, and
-  only when a per-image quality check passes; otherwise the image goes through the lossless path as before;
+- photos are never taken below 150 pixels per inch at their displayed size, and line art (screenshots, charts,
+  diagrams) and scans (an image that covers most of a page) never below 300; an image is resampled only when
+  it is shown at 5/4 of its floor or more, and line art never becomes a JPEG;
+- the step works only on 8-bit grey and RGB images of more than 65,536 pixels whose every use on a page it
+  could measure: 1-bit, indexed, CMYK and 16-bit images, image masks, images with a colour-key mask, a `/Decode`
+  array or a soft mask with `/Matte`, and small images (logos, icons) are never touched, and neither is a JPEG
+  that looks like line art;
+- a lossy result is kept only when it is at most nine tenths of the image's lossless size and, for a JPEG, only
+  when it decodes close to the samples it was made from (one that does not is first coded again at a higher
+  quality); otherwise the image goes through the lossless path as before;
 - a file the safety gate leaves untouched (signed, PDF/A, PDF/X, needing a password...) stays untouched, and an
   encrypted file keeps its encryption.
 
