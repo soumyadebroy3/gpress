@@ -330,6 +330,21 @@ const archive = g.compress(bytes);
 const original = g.expand(archive.data, { maxLenMiB: 512 });       // throws GpressError on a damaged archive
 ```
 
+In a page, the same calls work on the file a visitor picks. A call blocks its thread until it returns, so a
+page that must stay responsive makes it in a Web Worker (the caller's choice; the module needs none):
+
+```ts
+const g = await Gpress.load(fetch("/gpress-web.wasm"));
+input.onchange = async () => {                                      // <input type="file" accept="application/pdf">
+  const bytes = new Uint8Array(await input.files[0].arrayBuffer());
+  const r = g.optimizeToSize(bytes, bytes.length / 2);              // half the size, or the smallest of the six efforts
+  note.textContent = `${bytes.length} to ${r.data.length} bytes, effort ${r.effort}${r.reached ? "" : ", target missed"}`;
+  link.href = URL.createObjectURL(new Blob([r.data], { type: "application/pdf" }));
+};
+g.optimize(bytes, { effort: 60 });                                  // one effort: 60 is the first lossy one
+g.optimize(bytes, { effort: 100, photoPpi: 200 });                  // effort 100 with photos kept at 200 pixels per inch
+```
+
 The module gives the same bytes as the native library (the web module too, for `optimize`; see
 [Building only what a product needs](docs/reference.md#building-only-what-a-product-needs)), is
 single-threaded and has no clock (so no time budget: run it in a Web Worker to keep a page responsive and to
