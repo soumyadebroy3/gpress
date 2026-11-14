@@ -497,13 +497,16 @@ enum Look {
 /// floor: it is line art that may become a JPEG, which the quality floor guards (`close`).
 ///
 /// Small print, measured on labels drawn on a real photograph (5 to 12 point: black, white, outlined, grey)
-/// and on drawn pictures: each one with more than a word or two that the counts over the whole picture take
-/// for a photo has a tile of it, and so have most of them made half as large, which are sharp photos (all but an
-/// outlined subtitle). Of 13 photographs (scikit-image's samples and two of the corpus; as stored, as JPEGs of
-/// quality 60 and 90, and halved) one has such a tile at 150 percent, an astronaut's mission patch halved; at
-/// 100 percent five have, the patch's lettering at every size among them. Not found: a word or two (a tile
-/// may hold too little of them), and print that is soft itself (a photographed or scanned note), which no
-/// count of edges tells from a photograph.
+/// and on drawn pictures: each one with more than a word or two, 64 levels or more from the photograph around
+/// it, that the counts over the whole picture take for a photo has a tile of it, and so have most of them made
+/// half as large, which are sharp photos (all but an outlined subtitle). Of 13 photographs (scikit-image's
+/// samples and two of the corpus; as stored, as JPEGs of quality 60 and 90, and halved) one has such a tile at
+/// 150 percent, an astronaut's mission patch halved; at 100 percent five have, the patch's lettering at every
+/// size among them. Not found: a word or two (a tile may hold too little of them), print that is soft itself
+/// (a photographed or scanned note), and print close in brightness to the photograph around it (black labels
+/// on a dark sky or rock, white ones on pale rock: edges under 64 levels). No count of edges tried tells those
+/// from a photograph: lower steps, steps over two samples, or edges at black ink each gave real photographs
+/// a tile, or missed the labels stored as a JPEG.
 ///
 /// Everything else, and everything in doubt, is line art.
 fn look(luma: &[u8], w: usize, h: usize, rules: &LossyRules) -> Look {

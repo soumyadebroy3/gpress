@@ -202,8 +202,9 @@ and everything in doubt, is line art, and so is an image with small print in it:
 that outnumber its soft ones half as much again, as labels, a caption or a subtitle on a photograph are. A page
 scanned in uneven light, a map on shaded relief or a halftone can pass for a sharp photo, so a sharp photo is
 treated as line art that may become a JPEG: it keeps the line-art floor, and the two quality checks guard the
-JPEG. What the test does not find: a word or two of print, and print that is soft itself (a photographed or
-scanned note).
+JPEG. What the test does not find: a word or two of print, print that is soft itself (a photographed or
+scanned note), and print close in brightness to the photograph around it (black labels on a dark sky or rock,
+white ones on pale rock: their edges are under 64 levels); such a photo still becomes a JPEG at the photo floor.
 
 What is not a rule: which images the step can read at all (8-bit grey and RGB, sides up to 65,535), the limits
 of its content reader, which are those other readers have, and what the JPEG format fixes (the standard's
