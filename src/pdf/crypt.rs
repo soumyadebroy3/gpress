@@ -559,9 +559,13 @@ impl Crypt {
     }
 
     /// The initialization vector for the `counter`-th string or stream of object `num gen` in our output:
-    /// derived from the file key, so the output is the same on every run.
-    fn iv(&self, num: u32, gen: u16, counter: u32) -> [u8; 16] {
-        let h = sha256(&[&self.key, &num.to_le_bytes(), &gen.to_le_bytes(), &counter.to_le_bytes(), b"iv"]);
+    /// derived from the file key, so the output is the same on every run. A file that keeps its revisions can
+    /// write one object in several of them: each revision after the first (`rev` above 0) gets vectors of its
+    /// own, so two values of an object never share one.
+    fn iv(&self, rev: u32, num: u32, gen: u16, counter: u32) -> [u8; 16] {
+        let rev = rev.to_le_bytes();
+        let rev: &[u8] = if rev == [0; 4] { &[] } else { &rev };
+        let h = sha256(&[&self.key, &num.to_le_bytes(), &gen.to_le_bytes(), &counter.to_le_bytes(), b"iv", rev]);
         let mut iv = [0u8; 16];
         iv.copy_from_slice(&h[..16]);
         iv
@@ -569,25 +573,42 @@ impl Crypt {
 
     /// A non-stream object with its strings encrypted for object `num gen`.
     pub fn seal_object(&self, num: u32, gen: u16, o: &Obj) -> Result<Obj, &'static str> {
+        self.seal_object_at(0, num, gen, o)
+    }
+
+    /// `seal_object` for revision `rev` of a file that keeps its revisions (see `iv`).
+    pub fn seal_object_at(&self, rev: u32, num: u32, gen: u16, o: &Obj) -> Result<Obj, &'static str> {
         let mut o = o.clone();
         let mut k = 0u32;
         map_strings(&mut o, &mut |s| {
             k += 1;
-            seal(&self.key, self.strs, num, gen, &self.iv(num, gen, k - 1), s)
+            seal(&self.key, self.strs, num, gen, &self.iv(rev, num, gen, k - 1), s)
         })?;
         Ok(o)
     }
 
     /// A stream's dictionary and data encrypted for object `num gen` (the caller sets /Length afterwards).
     pub fn seal_stream(&self, num: u32, gen: u16, dict: &Dict, data: &[u8]) -> Result<(Dict, Vec<u8>), &'static str> {
+        self.seal_stream_at(0, num, gen, dict, data)
+    }
+
+    /// `seal_stream` for revision `rev` of a file that keeps its revisions (see `iv`).
+    pub fn seal_stream_at(
+        &self,
+        rev: u32,
+        num: u32,
+        gen: u16,
+        dict: &Dict,
+        data: &[u8],
+    ) -> Result<(Dict, Vec<u8>), &'static str> {
         let m = self.stream_method(num, dict)?;
         let mut d = Obj::Dict(dict.clone());
         let mut k = 0u32;
         map_strings(&mut d, &mut |s| {
             k += 1;
-            seal(&self.key, self.strs, num, gen, &self.iv(num, gen, k - 1), s)
+            seal(&self.key, self.strs, num, gen, &self.iv(rev, num, gen, k - 1), s)
         })?;
-        let data = seal(&self.key, m, num, gen, &self.iv(num, gen, k), data)?;
+        let data = seal(&self.key, m, num, gen, &self.iv(rev, num, gen, k), data)?;
         match d {
             Obj::Dict(d) => Ok((d, data)),
             _ => unreachable!(),

@@ -47,6 +47,8 @@ pub struct GpressOptions {
     pub decrypt: u8,
     /// 1 = use the optional existing library (Lepton) when the build has it.
     pub use_existing_libraries: u8,
+    /// 1 = write only the newest save of a file that keeps earlier ones (the earlier saves are gone for good).
+    pub drop_history: u8,
 }
 
 /// A buffer gpress allocated. Free it with `gpress_free`; never with `free()`.
@@ -125,6 +127,7 @@ fn options_from(o: Option<&GpressOptions>) -> gpress::Options {
         opt.rewrite_encrypted = o.rewrite_encrypted != 0;
         opt.decrypt = o.decrypt != 0;
         opt.use_existing_libraries = o.use_existing_libraries != 0;
+        opt.drop_history = o.drop_history != 0;
     }
     opt
 }
@@ -187,6 +190,7 @@ pub unsafe extern "C" fn gpress_options_default(out: *mut GpressOptions) {
         rewrite_encrypted: d.rewrite_encrypted as u8,
         decrypt: d.decrypt as u8,
         use_existing_libraries: d.use_existing_libraries as u8,
+        drop_history: d.drop_history as u8,
     };
     // SAFETY: `out` is non-null and the caller owns the struct it points to.
     unsafe { ptr::write(out, o) };

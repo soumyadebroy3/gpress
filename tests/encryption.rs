@@ -306,3 +306,36 @@ fn unencrypted_files_with_a_raw_carriage_return_in_a_string_are_left_untouched()
         assert_eq!(matches!(r.outcome, Outcome::Untouched(_)), untouched, "{}", String::from_utf8_lossy(title));
     }
 }
+
+#[test]
+fn an_update_to_an_encrypted_file_keeps_both_saves_with_the_same_encryption() {
+    // The update writes the pages object (4) again with one more entry: no string or stream, so nothing of it
+    // is encrypted.
+    for name in ["r3_rc4_128", "r4_aes_128"] {
+        let mut input = file(name);
+        let first = input.len();
+        let t = find(&input, b"trailer << ").unwrap() + 11;
+        let trailer =
+            String::from_utf8(input[t..t + find(&input[t..], b" >>\nstartxref\n").unwrap()].to_vec()).unwrap();
+        let p = find(&input, b"startxref\n").unwrap() + 10;
+        let prev = String::from_utf8(input[p..p + find(&input[p..], b"\n").unwrap()].to_vec()).unwrap();
+        let at = input.len();
+        input.extend_from_slice(b"4 0 obj\n<< /Count 1 /Kids [ 5 0 R ] /Type /Pages /Rotate 0 >>\nendobj\n");
+        let x = input.len();
+        let table =
+            format!("xref\n4 1\n{at:010} 00000 n \ntrailer << {trailer} /Prev {prev} >>\nstartxref\n{x}\n%%EOF\n");
+        input.extend_from_slice(table.as_bytes());
+        let r = optimize(&input, &opts());
+        let Outcome::Smaller(s) = &r.outcome else { panic!("{name}: {:?}", r.outcome) };
+        assert_eq!(s.history_kept, 1, "{name}");
+        let ends = xref::saves(&r.data).unwrap();
+        assert_eq!(ends.len(), 2, "{name}");
+        // Each save opens with the input's encryption and gives the input's objects, decrypted.
+        for (old, new) in [(&input[..first], &r.data[..ends[0].end]), (&input[..], &r.data[..])] {
+            let (a, b) = (xref::open(old).unwrap(), xref::open(new).unwrap());
+            assert!(matches!((&a.crypt, &b.crypt), (Some(Ok(ca)), Some(Ok(cb))) if ca == cb), "{name}");
+            assert_eq!(values(&a), values(&b), "{name}");
+        }
+        assert_eq!(optimize(&input, &opts()).data, r.data, "{name}");
+    }
+}

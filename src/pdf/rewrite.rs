@@ -18,6 +18,9 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
+mod history;
+pub use history::Dropped;
+
 #[derive(Clone, Debug)]
 pub struct Options {
     pub flate: flate::Options,
@@ -60,6 +63,10 @@ pub struct Options {
     /// Rewrite files the empty user password opens, keeping their encryption (see `crate::pdf::crypt`). Off,
     /// every encrypted file is left untouched.
     pub rewrite_encrypted: bool,
+    /// A file that keeps earlier saves (incremental updates) is written with every one of them kept (see
+    /// `history`). With `true` only the newest is written, as a file of one save: what the earlier saves held
+    /// and the newest doesn't is gone (`Stats::history_dropped` lists them).
+    pub drop_history: bool,
     /// Stop when this passes (checked between streams and Flate segments): the outcome is then `TimedOut`
     /// and nothing is returned. A rewrite that finishes gives the same bytes with or without a deadline.
     pub deadline: Deadline,
@@ -79,6 +86,7 @@ impl Default for Options {
             jbig2: true,
             jpeg_tables: true,
             rewrite_encrypted: true,
+            drop_history: false,
             deadline: Deadline::NONE,
         }
     }
@@ -109,6 +117,10 @@ pub struct Stats {
     pub fax_to_jbig2: usize,
     /// How the file is encrypted (kept exactly as it was), e.g. "R4/AESV2"; empty when it isn't.
     pub encryption: String,
+    /// Earlier saves kept, each written again and checked (see `history`).
+    pub history_kept: usize,
+    /// Earlier saves dropped because `Options::drop_history` asked, oldest first.
+    pub history_dropped: Vec<Dropped>,
 }
 
 #[derive(Debug)]
@@ -1259,8 +1271,20 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         );
     }
     let objs = objs?;
-    gate(&doc, &objs, opt.respect_conformance)?;
+    // A file that keeps earlier saves: every save is kept and written by `history`, or, when the caller asks,
+    // every save is checked there and the newest goes on alone.
+    let mut history_dropped = Vec::new();
+    match gate(&doc, &objs, opt.respect_conformance) {
+        Err(why) if why == history::KEEPS && !opt.drop_history => {
+            drop((objs, doc));
+            return history::keep(input, opt);
+        }
+        // Every save passes the gate there, the newest among them.
+        Err(why) if why == history::KEEPS => history_dropped = history::dropped(input, opt, &objs)?,
+        gated => gated?,
+    }
     let mut stats = Stats {
+        history_dropped,
         objects: objs.len(),
         dropped_unreachable: doc
             .entries

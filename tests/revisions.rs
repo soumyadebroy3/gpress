@@ -1,12 +1,17 @@
-//! Files that keep earlier saves (incremental updates) are left untouched, whatever the later saves changed; one
-//! save is still rewritten, the two sections of a linearised file or of a Prince hybrid file included.
+//! Files that keep earlier saves (incremental updates) are written with every save kept, each the same as the
+//! input's when the file is cut at its end, or with only the newest when the caller asks; a file whose saves can't
+//! be told apart for certain is left untouched. One save is rewritten as before, the two sections of a linearised
+//! file or of a Prince hybrid file included.
 
-use gpress::pdf::object::Obj;
-use gpress::pdf::rewrite::{optimize, Options, Outcome};
+use gpress::clock::Deadline;
+use gpress::pdf::object::{Dict, Obj};
+use gpress::pdf::rewrite::{optimize, Dropped, Options, Outcome};
 use gpress::pdf::xref;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 const KEEPS: &str = "keeps earlier revisions (incremental updates)";
+const UNLINKED: &str = "keeps earlier revisions: a save the newest doesn't link";
 
 /// A file written piece by piece, remembering where each object starts.
 struct Pdf {
@@ -81,9 +86,82 @@ fn first_save() -> (Pdf, usize) {
 }
 
 fn untouched(input: &[u8]) {
-    let r = optimize(input, &Options::effort(0));
-    assert!(matches!(&r.outcome, Outcome::Untouched(w) if w == KEEPS), "{:?}", r.outcome);
+    untouched_for(input, KEEPS, &Options::effort(0));
+}
+
+/// `input` comes back as it is, for the reason `why`.
+fn untouched_for(input: &[u8], why: &str, opt: &Options) {
+    let r = optimize(input, opt);
+    assert!(matches!(&r.outcome, Outcome::Untouched(w) if w == why), "{:?}", r.outcome);
     assert_eq!(r.data, input);
+}
+
+/// Everything the trailer of `data` reaches, read here without the writer's help: each object's generation and
+/// value, a stream as its dictionary without the entries about its encoding and its decoded bytes.
+fn reached(data: &[u8]) -> BTreeMap<u32, (u16, Obj, Option<Vec<u8>>)> {
+    let doc = xref::open(data).unwrap();
+    let mut todo = Vec::new();
+    for (k, v) in &doc.trailer.0 {
+        if !xref::STRUCTURAL.contains(&k.as_slice()) {
+            v.refs(&mut todo);
+        }
+    }
+    let mut out = BTreeMap::new();
+    while let Some((n, _)) = todo.pop() {
+        if out.contains_key(&n) {
+            continue;
+        }
+        let Ok((g, o)) = doc.load(n) else { continue };
+        o.refs(&mut todo);
+        out.insert(
+            n,
+            match o {
+                Obj::Stream(s) => {
+                    let about = |k: &[u8]| matches!(k, b"Length" | b"Filter" | b"DecodeParms");
+                    let dict = Dict(s.dict.0.iter().filter(|(k, _)| !about(k)).cloned().collect());
+                    (g, Obj::Dict(dict), Some(xref::decode_fully(&s.dict, &s.data, 1 << 20).unwrap()))
+                }
+                o => (g, o, None),
+            },
+        );
+    }
+    out
+}
+
+/// `input` is written smaller with each of its `revisions` saves kept: the output cut at a save's end reaches what
+/// the input cut at that save's end reaches, and its trailer says the same about the document. Returns the output.
+fn kept_with(input: &[u8], revisions: usize, opt: &Options) -> Vec<u8> {
+    let r = optimize(input, opt);
+    let Outcome::Smaller(stats) = &r.outcome else { panic!("{:?}", r.outcome) };
+    assert_eq!((stats.history_kept, stats.history_dropped.len()), (revisions - 1, 0));
+    let (a, b) = (xref::saves(input).unwrap(), xref::saves(&r.data).unwrap());
+    assert_eq!((a.len(), b.len()), (revisions, revisions));
+    for (a, b) in a.iter().zip(&b) {
+        let (old, new) = (&input[..a.end], &r.data[..b.end]);
+        assert_eq!(reached(old), reached(new));
+        let about = |d: &[u8]| -> Vec<(Vec<u8>, Obj)> {
+            let doc = xref::open(d).unwrap();
+            doc.trailer.0.iter().filter(|(k, _)| !xref::STRUCTURAL.contains(&k.as_slice())).cloned().collect()
+        };
+        assert_eq!(about(old), about(new));
+    }
+    r.data
+}
+
+fn kept(input: &[u8], revisions: usize) -> Vec<u8> {
+    kept_with(input, revisions, &Options::effort(0))
+}
+
+/// With `drop_history`, `input` is written as its newest save alone: the bytes that save gives as a file of its
+/// own would not be the same (the numbers differ), so what it reaches is compared. Returns what was dropped.
+fn dropped(input: &[u8]) -> Vec<Dropped> {
+    let r = optimize(input, &Options { drop_history: true, ..Options::effort(0) });
+    let Outcome::Smaller(stats) = &r.outcome else { panic!("{:?}", r.outcome) };
+    assert_eq!(stats.history_kept, 0);
+    assert_eq!(xref::saves(&r.data).unwrap().len(), 1);
+    assert!(!xref::open(&r.data).unwrap().has_revisions);
+    assert_eq!(reached(input), reached(&r.data));
+    stats.history_dropped.clone()
 }
 
 /// `input` is rewritten smaller, and objects 1 to 5 read back the same (streams by their decoded bytes).
@@ -108,7 +186,7 @@ fn rewritten(input: &[u8]) {
 }
 
 #[test]
-fn a_save_that_only_adds_objects_is_a_revision() {
+fn a_save_that_only_adds_objects_is_kept_with_the_first() {
     // The update writes a new catalog, pages, page and content and names the new catalog: no number is defined
     // twice, so only the second section shows that the first save is still in the file.
     let (mut p, x) = first_save();
@@ -117,41 +195,42 @@ fn a_save_that_only_adds_objects_is_a_revision() {
     p.obj(8, b"<< /Type /Page /Parent 7 0 R /MediaBox [0 0 200 200] /Contents 9 0 R /Resources << /Font << /F1 5 0 R >> >> >>");
     p.obj(9, &text("NEW VERSION"));
     p.table(6, 4, &format!("/Size 10 /Root 6 0 R /Prev {x}"), None);
-    untouched(&p.d);
+    kept(&p.d, 2);
 }
 
 #[test]
-fn a_save_that_adds_only_document_information_is_a_revision() {
+fn a_save_that_adds_only_document_information_is_kept_with_the_first() {
     let (mut p, x) = first_save();
     p.obj(6, b"<< /Title (Second save) >>");
     p.table(6, 1, &format!("/Size 7 /Root 1 0 R /Info 6 0 R /Prev {x}"), None);
-    untouched(&p.d);
+    kept(&p.d, 2);
 }
 
 #[test]
-fn a_save_that_lists_every_row_again_unchanged_is_a_revision() {
+fn a_save_that_lists_every_row_again_unchanged_is_kept_with_the_first() {
     let (mut p, x) = first_save();
     p.obj(6, b"<< /Title (Second save) >>");
     p.table(0, 7, &format!("/Size 7 /Root 1 0 R /Info 6 0 R /Prev {x}"), None);
-    untouched(&p.d);
+    kept(&p.d, 2);
 }
 
 #[test]
-fn a_save_that_changes_only_the_trailer_is_a_revision() {
+fn a_save_that_changes_only_the_trailer_is_kept_with_the_first() {
     let (mut p, x) = first_save();
     p.table(0, 0, &format!("/Size 6 /Root 1 0 R /ID [<01> <02>] /Prev {x}"), None);
-    untouched(&p.d);
+    kept(&p.d, 2);
 }
 
 #[test]
-fn a_save_no_section_links_is_a_revision() {
+fn a_save_no_section_links_is_kept_only_to_be_dropped() {
     // A whole second file appended after the first, with no /Prev: the newest chain is one section, but the
     // first save is still in the bytes.
     let (mut p, _) = first_save();
     p.d.extend_from_slice(b"%PDF-1.5\n");
     page(&mut p, "NEW VERSION");
     p.table(0, 6, "/Size 6 /Root 1 0 R", None);
-    untouched(&p.d);
+    untouched_for(&p.d, UNLINKED, &Options::effort(0));
+    assert_eq!(dropped(&p.d).len(), 1);
 }
 
 #[test]
@@ -275,25 +354,26 @@ fn a_main_stream_after_a_first_page_table_is_rewritten_with_every_object() {
 }
 
 #[test]
-fn an_update_to_a_linearised_file_is_a_revision() {
+fn an_update_to_a_linearised_file_is_kept_with_the_first() {
     let (mut p, first) = linearised_save(Pdf::new(), true);
     p.obj(20, b"<< /Title (Second save) >>");
     p.table(20, 1, &format!("/Size 21 /Root 1 0 R /Info 20 0 R /Prev {first}"), None);
-    untouched(&p.d);
+    kept(&p.d, 2);
 }
 
 #[test]
-fn a_linearised_save_appended_without_prev_is_a_revision() {
+fn a_linearised_save_appended_without_prev_is_kept_only_to_be_dropped() {
     // Two linearised saves, the second appended whole with no /Prev: as many `startxref` as the newest save has
     // sections, but the first one comes before them.
     let (mut p, _) = linearised_save(Pdf::new(), false);
     p.d.extend_from_slice(b"%PDF-1.5\n");
     let (p, _) = linearised_save(p, false);
-    untouched(&p.d);
+    untouched_for(&p.d, UNLINKED, &Options::effort(0));
+    assert_eq!(dropped(&p.d).len(), 1);
 }
 
 #[test]
-fn an_update_after_one_section_and_a_linearisation_dictionary_is_a_revision() {
+fn an_update_after_one_section_and_a_linearisation_dictionary_is_kept_with_the_first() {
     // Two sections and /Linearized near the start, but the newer section comes after the older one.
     let mut p = Pdf::new();
     p.obj(10, b"<< /Linearized 1 >>");
@@ -301,7 +381,7 @@ fn an_update_after_one_section_and_a_linearisation_dictionary_is_a_revision() {
     let x = p.table(0, 11, "/Size 11 /Root 1 0 R", None);
     p.obj(11, b"<< /Title (Second save) >>");
     p.table(11, 1, &format!("/Size 12 /Root 1 0 R /Info 11 0 R /Prev {x}"), None);
-    untouched(&p.d);
+    kept(&p.d, 2);
 }
 
 #[test]
@@ -408,11 +488,11 @@ fn trailers_that_give_a_key_two_values_are_a_revision() {
 }
 
 #[test]
-fn an_empty_update_that_changes_nothing_is_a_revision() {
+fn an_empty_update_that_changes_nothing_is_kept_with_the_first() {
     // An empty table with the first save's trailer and no /XRefStm: an update, though it changes nothing.
     let (mut p, x) = first_save();
     p.table(0, 0, &format!("/Size 6 /Root 1 0 R /Prev {x}"), None);
-    untouched(&p.d);
+    kept(&p.d, 2);
 }
 
 #[test]
@@ -507,4 +587,182 @@ fn a_linearised_file_whose_main_trailer_adds_an_entry_is_a_revision() {
 fn one_save_is_rewritten() {
     let (p, _) = first_save();
     assert!(matches!(optimize(&p.d, &Options::effort(0)).outcome, Outcome::Smaller(_)));
+}
+
+/// The first save, then an update that changes the page's content (4), adds document information (6) and takes
+/// the font (5) away, the page (3) written again without it. Returns where the update's table is.
+fn changed_save() -> (Pdf, usize) {
+    let (mut p, x) = first_save();
+    p.obj(3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R >>");
+    p.obj(4, &text("NEW VERSION"));
+    p.obj(6, b"<< /Title (Second save) >>");
+    p.at.remove(&5);
+    let x = p.table(3, 4, &format!("/Size 7 /Root 1 0 R /Info 6 0 R /Prev {x}"), None);
+    (p, x)
+}
+
+fn in_use(data: &[u8], n: u32) -> bool {
+    matches!(xref::open(data).unwrap().entries.get(&n), Some(xref::Entry::Offset(..) | xref::Entry::InStream(..)))
+}
+
+#[test]
+fn a_save_that_changes_and_frees_objects_keeps_both_views() {
+    let (p, _) = changed_save();
+    let out = kept(&p.d, 2);
+    // The font is gone from the newest view only, and the first save's text can still be read.
+    let first = &out[..xref::saves(&out).unwrap()[0].end];
+    assert!(in_use(first, 5) && !in_use(&out, 5));
+    assert!(reached(first)[&4].2.as_ref().unwrap().starts_with(b"BT /F1 12 Tf 10 10 Td (ORIGINAL SECRET TEXT)"));
+    assert!(reached(&out)[&4].2.as_ref().unwrap().starts_with(b"BT /F1 12 Tf 10 10 Td (NEW VERSION)"));
+}
+
+#[test]
+fn a_number_freed_and_used_again_keeps_each_view() {
+    // A third save gives the font's number (5), free since the second, to new document information.
+    let (mut p, x) = changed_save();
+    p.obj(5, b"<< /Title (Third save) >>");
+    p.table(5, 1, &format!("/Size 7 /Root 1 0 R /Info 5 0 R /Prev {x}"), None);
+    let out = kept(&p.d, 3);
+    let ends = xref::saves(&out).unwrap();
+    assert!(in_use(&out[..ends[0].end], 5) && !in_use(&out[..ends[1].end], 5) && in_use(&out, 5));
+}
+
+#[test]
+fn an_object_the_first_save_holds_unused_is_kept_once_a_later_save_uses_it() {
+    // The first save lists document information (6) that nothing names; the update's trailer names it.
+    let mut p = Pdf::new();
+    page(&mut p, "ORIGINAL SECRET TEXT");
+    p.obj(6, b"<< /Title (Held from the start) >>");
+    let x = p.table(0, 7, "/Size 7 /Root 1 0 R", None);
+    p.table(0, 0, &format!("/Size 7 /Root 1 0 R /Info 6 0 R /Prev {x}"), None);
+    let out = kept(&p.d, 2);
+    assert!(!reached(&out[..xref::saves(&out).unwrap()[0].end]).contains_key(&6) && reached(&out).contains_key(&6));
+}
+
+#[test]
+fn an_update_written_as_streams_is_kept_with_the_first() {
+    // The update holds its document information (6) in an object stream (7) under a cross-reference stream (8).
+    let (mut p, x) = first_save();
+    p.obj(7, &stream("/Type /ObjStm /N 1 /First 4", b"6 0 << /Title (Second save) >>"));
+    let (at7, at8) = (p.at[&7], p.d.len());
+    let rows = [[2, 0, 7, 0], [1, (at7 >> 8) as u8, at7 as u8, 0], [1, (at8 >> 8) as u8, at8 as u8, 0]].concat();
+    let dict = format!("/Type /XRef /Size 9 /Index [6 3] /W [1 2 1] /Root 1 0 R /Info 6 0 R /Prev {x}");
+    p.obj(8, &stream(&dict, &rows));
+    p.d.extend_from_slice(format!("startxref\n{at8}\n%%EOF\n").as_bytes());
+    kept(&p.d, 2);
+}
+
+/// The first save with `more` in its catalog and object 6 as `six`, then an update whose catalog no longer has it.
+fn claimed_once(more: &str, six: &[u8]) -> Vec<u8> {
+    let mut p = Pdf::new();
+    page(&mut p, "ORIGINAL SECRET TEXT");
+    p.obj(1, format!("<< /Type /Catalog /Pages 2 0 R {more} >>").as_bytes());
+    p.obj(6, six);
+    let x = p.table(0, 7, "/Size 7 /Root 1 0 R", None);
+    p.obj(1, b"<< /Type /Catalog /Pages 2 0 R >>");
+    p.table(1, 1, &format!("/Size 7 /Root 1 0 R /Prev {x}"), None);
+    p.d
+}
+
+#[test]
+fn a_claim_in_any_save_leaves_the_file_untouched_whatever_the_options() {
+    // Only the first save is signed, or PDF/A (its metadata compressed, so the claim is not in the file's bytes).
+    let xmp = gpress::flate::deflate_zlib(
+        b"<x:xmpmeta><pdfaid:part>1</pdfaid:part></x:xmpmeta>",
+        &gpress::flate::Options::quick(),
+    );
+    let cases = [
+        (claimed_once("/Sig 6 0 R", b"<< /Type /Sig /ByteRange [0 0 0 0] >>"), "digitally signed"),
+        (claimed_once("/Metadata 6 0 R", &stream("/Type /Metadata /Subtype /XML /Filter /FlateDecode", &xmp)), "PDF/A"),
+    ];
+    for (pdf, why) in &cases {
+        for (respect_conformance, drop_history) in [(true, false), (false, false), (true, true), (false, true)] {
+            untouched_for(pdf, why, &Options { respect_conformance, drop_history, ..Options::effort(0) });
+        }
+    }
+}
+
+#[test]
+fn drop_history_writes_the_newest_save_alone_and_lists_the_rest() {
+    let (p, _) = changed_save();
+    let first = xref::saves(&p.d).unwrap()[0].end;
+    // The first save alone holds the font, and its own page and content.
+    assert_eq!(dropped(&p.d), vec![Dropped { index: 0, start: 0, end: first, versions: 3 }]);
+    // A file of one save has nothing to drop.
+    let (one, _) = first_save();
+    let plain = optimize(&one.d, &Options::effort(0));
+    let asked = optimize(&one.d, &Options { drop_history: true, ..Options::effort(0) });
+    assert!(matches!(&asked.outcome, Outcome::Smaller(s) if s.history_dropped.is_empty() && s.history_kept == 0));
+    assert_eq!(asked.data, plain.data);
+}
+
+#[test]
+fn the_saves_are_kept_at_every_effort_and_the_same_for_any_thread_count() {
+    let (p, _) = changed_save();
+    for effort in [0, 20, 100] {
+        let one = kept_with(&p.d, 2, &Options { threads: 1, ..Options::effort(effort) });
+        for threads in [2, 0] {
+            assert_eq!(kept_with(&p.d, 2, &Options { threads, ..Options::effort(effort) }), one, "{effort} {threads}");
+        }
+    }
+}
+
+#[test]
+fn a_deadline_that_has_passed_gives_nothing() {
+    let (p, _) = changed_save();
+    for drop_history in [false, true] {
+        let gone = Options { deadline: Deadline::after(Duration::ZERO), drop_history, ..Options::effort(0) };
+        let r = optimize(&p.d, &gone);
+        assert!(matches!(r.outcome, Outcome::TimedOut), "{:?}", r.outcome);
+        assert_eq!(r.data, p.d);
+    }
+}
+
+#[test]
+fn saves_that_come_out_no_smaller_are_left_untouched() {
+    let mut p = Pdf::new();
+    p.obj(1, b"<< /Type /Catalog >>");
+    let x = p.table(0, 2, "/Size 2 /Root 1 0 R", None);
+    p.table(0, 0, &format!("/Size 2 /Root 1 0 R /ID [<01> <02>] /Prev {x}"), None);
+    untouched_for(&p.d, "no saving possible", &Options::effort(0));
+}
+
+#[test]
+fn numbers_too_high_for_the_first_save_leave_the_file_untouched() {
+    // New objects are numbered above every save's numbers: here above the update's 594 objects, which is more
+    // than a file as short as the first save may list (a third of its length, as qpdf reads it).
+    let (mut p, x) = first_save();
+    for n in 6..600 {
+        p.obj(n, b"<< >>");
+    }
+    p.table(6, 594, &format!("/Size 600 /Root 1 0 R /Prev {x}"), None);
+    let why = "keeps earlier revisions: numbers too high for an early revision";
+    untouched_for(&p.d, why, &Options::effort(0));
+    // The newest save alone has no early revision to hold.
+    assert_eq!(dropped(&p.d).len(), 1);
+}
+
+#[test]
+fn a_reference_to_another_generation_leaves_the_file_untouched() {
+    let (mut p, x) = first_save();
+    p.obj(6, b"<< /Title (Second save) /Font 5 1 R >>");
+    p.table(6, 1, &format!("/Size 7 /Root 1 0 R /Info 6 0 R /Prev {x}"), None);
+    untouched_for(&p.d, "keeps earlier revisions: a reference to another generation", &Options::effort(0));
+}
+
+#[test]
+fn a_startxref_in_a_comment_after_another_leaves_the_file_untouched() {
+    // The number after the first `startxref` lies past the second one, which the comment holds.
+    let (mut p, x) = first_save();
+    p.d.extend_from_slice(format!("startxref %startxref\n{x}\n%%EOF\n").as_bytes());
+    untouched(&p.d);
+}
+
+#[test]
+fn more_saves_than_are_taken_apart_leave_the_file_untouched() {
+    let (mut p, mut x) = first_save();
+    for _ in 0..xref::MOST_SAVES {
+        x = p.table(0, 0, &format!("/Size 6 /Root 1 0 R /Prev {x}"), None);
+    }
+    untouched_for(&p.d, xref::TOO_MANY, &Options::effort(0));
 }

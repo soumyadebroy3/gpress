@@ -57,6 +57,8 @@ pub const FLAG_NO_JPEG_TABLES: u32 = 8;
 pub const FLAG_NO_JBIG2: u32 = 16;
 pub const FLAG_KEEP_ENCRYPTED: u32 = 32;
 pub const FLAG_NO_DECRYPT: u32 = 64;
+/// Write only the newest save of a file that keeps earlier ones (see `gpress::Options::drop_history`).
+pub const FLAG_DROP_HISTORY: u32 = 512;
 
 /// A size given in MiB, or the default for 0, clamped to what this module can address.
 fn mib(v: u32, default: usize) -> usize {
@@ -82,6 +84,7 @@ fn options(effort: u32, max_input_mb: u32, max_stream_mb: u32, objects_per_strea
     o.jbig2 = flags & FLAG_NO_JBIG2 == 0;
     o.rewrite_encrypted = flags & FLAG_KEEP_ENCRYPTED == 0;
     o.decrypt = flags & FLAG_NO_DECRYPT == 0;
+    o.drop_history = flags & FLAG_DROP_HISTORY != 0;
     o
 }
 
@@ -347,6 +350,7 @@ mod tests {
         assert_eq!(o.objects_per_stream, 9);
         assert!(!o.jpeg_tables && !o.rewrite_encrypted && !o.decrypt);
         assert!(o.jbig2 && o.respect_conformance && o.flate_over_jpeg && o.use_existing_libraries);
+        assert!(!o.drop_history && options(100, 0, 0, 0, FLAG_DROP_HISTORY).drop_history);
         let d = options(100, 0, 0, 0, 0);
         assert_eq!(d, gpress::Options::default().threads(1));
         // A size past the module's address space is clamped, never wrapped; a budget is a u64 everywhere.

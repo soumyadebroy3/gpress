@@ -51,6 +51,11 @@ export interface GpressOptions {
   jbig2?: boolean;
   /** Rewrite files the empty password opens, keeping their encryption (default true). */
   rewriteEncrypted?: boolean;
+  /**
+   * Normal PDF: write only the newest save of a file that keeps earlier ones (incremental updates); the earlier
+   * saves are gone for good (default false: every save is kept).
+   */
+  dropHistory?: boolean;
   /** Archive: store the streams of such files decrypted, encrypted again on expand (default true). */
   decrypt?: boolean;
   /** Use the optional existing library (Lepton) when the build has it (default true). */
@@ -120,6 +125,7 @@ const FLAG_NO_JPEG_TABLES = 8;
 const FLAG_NO_JBIG2 = 16;
 const FLAG_KEEP_ENCRYPTED = 32;
 const FLAG_NO_DECRYPT = 64;
+const FLAG_DROP_HISTORY = 512;
 
 interface Exports {
   memory: WebAssembly.Memory;
@@ -301,7 +307,8 @@ function pack(options: GpressOptions): Packed {
       (options.jpegTables === false ? FLAG_NO_JPEG_TABLES : 0) |
       (options.jbig2 === false ? FLAG_NO_JBIG2 : 0) |
       (options.rewriteEncrypted === false ? FLAG_KEEP_ENCRYPTED : 0) |
-      (options.decrypt === false ? FLAG_NO_DECRYPT : 0),
+      (options.decrypt === false ? FLAG_NO_DECRYPT : 0) |
+      (options.dropHistory === true ? FLAG_DROP_HISTORY : 0),
   };
 }
 
