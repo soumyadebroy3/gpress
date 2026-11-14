@@ -47,7 +47,8 @@ pub struct GpressOptions {
     pub decrypt: u8,
     /// 1 = use the optional existing library (Lepton) when the build has it.
     pub use_existing_libraries: u8,
-    /// 1 = write only the newest save of a file that keeps earlier ones (the earlier saves are gone for good).
+    /// Exactly 1 = write only the newest save of a file that keeps earlier ones (the earlier saves are gone for
+    /// good). Any other value keeps every save, so a byte the caller never set rarely drops anything.
     pub drop_history: u8,
 }
 
@@ -127,7 +128,7 @@ fn options_from(o: Option<&GpressOptions>) -> gpress::Options {
         opt.rewrite_encrypted = o.rewrite_encrypted != 0;
         opt.decrypt = o.decrypt != 0;
         opt.use_existing_libraries = o.use_existing_libraries != 0;
-        opt.drop_history = o.drop_history != 0;
+        opt.drop_history = o.drop_history == 1;
     }
     opt
 }

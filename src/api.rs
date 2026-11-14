@@ -454,7 +454,9 @@ pub struct Report {
     pub fax_to_jbig2: usize,
     /// How the file is encrypted, kept exactly as it was (e.g. "R4/AESV2"); empty when it isn't.
     pub encryption: String,
-    /// Earlier saves (incremental updates) kept, each one read back and compared with the input's.
+    /// Earlier saves (incremental updates) kept, each one read back and compared with the input's. The counts
+    /// above are then of what was written: an object or stream once for each revision that adds or changes it,
+    /// and no count of unreachable objects.
     pub history_kept: usize,
     /// Earlier saves dropped because [`Options::drop_history`] asked, oldest first.
     pub history_dropped: Vec<Dropped>,

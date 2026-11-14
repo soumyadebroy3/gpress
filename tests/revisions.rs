@@ -687,7 +687,7 @@ fn drop_history_writes_the_newest_save_alone_and_lists_the_rest() {
     let (p, _) = changed_save();
     let first = xref::saves(&p.d).unwrap()[0].end;
     // The first save alone holds the font, and its own page and content.
-    assert_eq!(dropped(&p.d), vec![Dropped { index: 0, start: 0, end: first, versions: 3 }]);
+    assert_eq!(dropped(&p.d), vec![Dropped { start: 0, end: first, versions: 3 }]);
     // A file of one save has nothing to drop.
     let (one, _) = first_save();
     let plain = optimize(&one.d, &Options::effort(0));
@@ -736,7 +736,7 @@ fn numbers_too_high_for_the_first_save_leave_the_file_untouched() {
         p.obj(n, b"<< >>");
     }
     p.table(6, 594, &format!("/Size 600 /Root 1 0 R /Prev {x}"), None);
-    let why = "keeps earlier revisions: numbers too high for an early revision";
+    let why = "keeps earlier revisions: numbers too high for a revision's length";
     untouched_for(&p.d, why, &Options::effort(0));
     // The newest save alone has no early revision to hold.
     assert_eq!(dropped(&p.d).len(), 1);

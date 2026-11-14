@@ -84,8 +84,8 @@ typedef struct gpress_options {
   uint8_t decrypt;                /* 1: archive: store such files' streams decrypted (encrypted again on
                                      expand) */
   uint8_t use_existing_libraries; /* 1: use the optional existing library (Lepton) when built in */
-  uint8_t drop_history;           /* 1: write only the newest save of a file that keeps earlier ones (the
-                                     earlier saves are gone for good); 0: keep every save */
+  uint8_t drop_history;           /* exactly 1: write only the newest save of a file that keeps earlier ones
+                                     (the earlier saves are gone for good); any other value keeps every save */
 } gpress_options;
 
 typedef struct gpress_buffer {

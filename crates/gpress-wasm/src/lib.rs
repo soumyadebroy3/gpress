@@ -49,7 +49,8 @@ fn set_needed(bit: u32) {
     NEEDED.with(|n| *n.borrow_mut() = bit);
 }
 
-/// Switches in the `flags` argument: a set bit turns the step off (the defaults are all on).
+/// Switches in the `flags` argument: a set bit turns the step off (the defaults are all on), except
+/// `FLAG_DROP_HISTORY`, which turns dropping on. Bits 128 and 256 are kept free for other switches.
 pub const FLAG_IGNORE_CONFORMANCE: u32 = 1;
 pub const FLAG_NO_FLATE_OVER_JPEG: u32 = 2;
 pub const FLAG_NO_EXISTING_LIBRARIES: u32 = 4;
@@ -57,7 +58,7 @@ pub const FLAG_NO_JPEG_TABLES: u32 = 8;
 pub const FLAG_NO_JBIG2: u32 = 16;
 pub const FLAG_KEEP_ENCRYPTED: u32 = 32;
 pub const FLAG_NO_DECRYPT: u32 = 64;
-/// Write only the newest save of a file that keeps earlier ones (see `gpress::Options::drop_history`).
+/// Set: write only the newest save of a file that keeps earlier ones (see `gpress::Options::drop_history`).
 pub const FLAG_DROP_HISTORY: u32 = 512;
 
 /// A size given in MiB, or the default for 0, clamped to what this module can address.

@@ -18,19 +18,15 @@ use super::*;
 use crate::pdf::xref::{Limits, Save};
 use std::sync::Arc;
 
-/// The reason `gate` gives for a file with earlier saves, and this module for one whose saves can't be told apart.
-pub(super) const KEEPS: &str = xref::KEEPS;
 const UNLINKED: &str = "keeps earlier revisions: a save the newest doesn't link";
 const OPENS: &str = "keeps earlier revisions: a save that doesn't open on its own";
 const GENERATION: &str = "keeps earlier revisions: a reference to another generation";
-const TOO_HIGH: &str = "keeps earlier revisions: numbers too high for an early revision";
+const TOO_HIGH: &str = "keeps earlier revisions: numbers too high for a revision's length";
 const ENCRYPTION: &str = "encrypted: revisions differ in their encryption";
 
 /// An earlier save that `Options::drop_history` dropped.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Dropped {
-    /// Its place among the file's saves, the oldest 0.
-    pub index: usize,
     /// The input bytes it spans: from the end of the save before it to its own end.
     pub start: usize,
     pub end: usize,
@@ -71,7 +67,7 @@ fn find(input: &[u8], drop: bool) -> Result<Vec<Save>, String> {
     let saves = xref::saves(input)?;
     // One save in a layout `open_with` doesn't take for one (a hybrid file, say): left as it is, as before.
     if saves.len() < 2 {
-        return Err(KEEPS.into());
+        return Err(xref::KEEPS.into());
     }
     if !drop && saves.iter().any(|s| !s.linked) {
         return Err(UNLINKED.into());
@@ -176,7 +172,7 @@ pub(super) fn dropped(input: &[u8], opt: &Options, newest: &BTreeMap<u32, (u16, 
         let (_, objs) = read(input, save.end, (k, saves.len()), opt, &mut budget)?;
         if k + 1 < saves.len() {
             let versions = objs.iter().filter(|(n, v)| newest.get(n) != Some(v)).count();
-            out.push(Dropped { index: k, start, end: save.end, versions });
+            out.push(Dropped { start, end: save.end, versions });
         }
         start = save.end;
     }
@@ -194,24 +190,28 @@ struct Values {
 }
 
 impl Values {
-    fn intern(&mut self, o: Obj) -> usize {
-        if let Some(&i) = self.index.get(&o) {
+    /// Where `o` is held. `before` is a value it is likely to be: compared first, which costs less than hashing.
+    fn intern(&mut self, o: Obj, before: Option<usize>) -> usize {
+        if let Some(i) = before.filter(|&i| *self.list[i] == o) {
             return i;
         }
-        if let Obj::Stream(s) = &o {
-            self.stored = self.stored.saturating_add(s.data.len());
+        match self.index.entry(Arc::new(o)) {
+            std::collections::hash_map::Entry::Occupied(e) => *e.get(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                if let Obj::Stream(s) = &**e.key() {
+                    self.stored = self.stored.saturating_add(s.data.len());
+                }
+                self.list.push(e.key().clone());
+                *e.insert(self.list.len() - 1)
+            }
         }
-        let o = Arc::new(o);
-        self.list.push(o.clone());
-        self.index.insert(o, self.list.len() - 1);
-        self.list.len() - 1
     }
 }
 
-/// What decides a stream's new encoding: its value, whether it is encrypted XMP (see `reencode_xmp`), and the
-/// values its revision gives the objects its encoders look up (see `job_refs`). One stream whose lookups change
-/// from a revision to the next is encoded for each, and written again where they change.
-type JobKey = (usize, bool, Vec<(u32, usize)>);
+/// What decides a stream's new encoding: its value, and the values its revision gives the objects its encoders
+/// look up (see `job_refs`). One stream whose lookups change from a revision to the next is encoded for each, and
+/// written again where they change.
+type JobKey = (usize, Vec<(u32, usize)>);
 
 /// An object of a revision: its generation, its value, and its job when it is a stream.
 type Def = (u16, usize, Option<usize>);
@@ -225,8 +225,6 @@ struct Rev {
     objs: BTreeMap<u32, Def>,
     /// Numbers the revisions before it reach that it no longer has in use.
     frees: Vec<u32>,
-    /// The highest number its cross-reference data lists.
-    listed: u32,
 }
 
 /// A writer's mistake that the tests plant, to see `check` catch it.
@@ -269,20 +267,16 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
     let mut jobs_by_key: HashMap<JobKey, usize> = HashMap::new();
     // The numbers the revisions so far reach, so the ones the output defines.
     let mut known: BTreeSet<u32> = BTreeSet::new();
-    let mut crypt: Option<Option<Crypt>> = None;
-    let (mut top, mut reached, mut version) = (0u32, 0usize, (1, 5));
+    let mut crypt: Option<Crypt> = None;
+    let (mut top, mut version) = (0u32, (1, 5));
     for (k, save) in saves.iter().enumerate() {
         let (doc, objs) = read(input, save.end, (k, of), opt, &mut budget)?;
         // Every revision opens with the same encryption, or none is encrypted.
         let c = doc.crypt.as_ref().and_then(|c| c.as_ref().ok());
-        match &crypt {
-            None => crypt = Some(c.cloned()),
-            Some(first) if first.as_ref() != c => return Err(ENCRYPTION.into()),
-            Some(_) => {}
-        }
-        reached = reached.saturating_add(objs.len());
-        if reached > xref::row_limit(input.len()) {
-            return Err(xref::TOO_MANY.into());
+        if k == 0 {
+            crypt = c.cloned();
+        } else if crypt.as_ref() != c {
+            return Err(ENCRYPTION.into());
         }
         let listed = doc.entries.keys().next_back().copied().unwrap_or(0);
         top = top.max(listed).max(highest_number(&doc, &objs, c));
@@ -292,24 +286,24 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
         }
         known.extend(objs.keys());
         // What each stream's job is given, by number, before the values move into the table.
-        let looked: Vec<(u32, bool, Vec<u32>)> = objs
+        let looked: Vec<(u32, Vec<u32>)> = objs
             .iter()
-            .filter_map(|(&n, (_, o))| {
-                let Obj::Stream(s) = o else { return None };
-                let xmp = s.dict.name(b"Type") == Some(b"Metadata")
-                    && c.is_some_and(|c| c.stream_method(n, &s.dict).is_ok_and(|m| m != Method::Identity));
-                Some((n, xmp, job_refs(&s.dict, &objs).iter().map(|r| r.0).collect()))
+            .filter_map(|(&n, (_, o))| match o {
+                Obj::Stream(s) => Some((n, job_refs(&s.dict, &objs).iter().map(|r| r.0).collect())),
+                _ => None,
             })
             .collect();
+        // Most objects are the ones the revision before has under their number.
+        let before = |n: &u32| revs.last().and_then(|r| r.objs.get(n)).map(|d| d.1);
         let mut table: BTreeMap<u32, Def> =
-            objs.into_iter().map(|(n, (g, o))| (n, (g, values.intern(o), None))).collect();
+            objs.into_iter().map(|(n, (g, o))| (n, (g, values.intern(o, before(&n)), None))).collect();
         if values.stored > input.len() {
             return Err(xref::TOO_MANY.into());
         }
-        for (n, xmp, refs) in looked {
+        for (n, refs) in looked {
             let value = |n: &u32| table.get(n).map(|d| d.1);
             let Some(v) = value(&n) else { continue };
-            let key: JobKey = (v, xmp, refs.iter().filter_map(|m| Some((*m, value(m)?))).collect());
+            let key: JobKey = (v, refs.iter().filter_map(|m| Some((*m, value(m)?))).collect());
             let job = *jobs_by_key.entry(key.clone()).or_insert_with(|| {
                 keys.push((n, key));
                 keys.len() - 1
@@ -319,10 +313,9 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
             }
         }
         version = doc.version;
-        revs.push(Rev { end: save.end, trailer: doc.trailer.clone(), objs: table, frees, listed });
+        revs.push(Rev { end: save.end, trailer: doc.trailer.clone(), objs: table, frees });
     }
     drop(jobs_by_key);
-    let crypt = crypt.flatten();
     let crypt = crypt.as_ref();
 
     // One pool of threads, one plan and one store of encoded outputs for the streams of every revision, as for a
@@ -351,10 +344,13 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
             n,
             s,
             settings,
-            xmp: key.1,
+            // XMP stays as it is unless it is encrypted, which its dictionary and the encryption decide (see
+            // `rewrite`): the same in every revision.
+            xmp: s.dict.name(b"Type") == Some(b"Metadata")
+                && crypt.is_some_and(|c| c.stream_method(n, &s.dict).is_ok_and(|m| m != Method::Identity)),
             shares: false,
             refs: key
-                .2
+                .1
                 .iter()
                 .map(|&(m, v)| match &*values.list[v] {
                     Obj::Stream(s) => (m, Looked::Dict(&s.dict)),
@@ -415,29 +411,31 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
             match &*values.list[v] {
                 Obj::Stream(s) => {
                     stats.streams += 1;
-                    let (dict, mut data) = match job.and_then(|j| encoded[j].clone()) {
+                    let (dict, mut data) = match job.and_then(|j| encoded[j].as_ref()) {
                         Some((d, z, change)) => {
                             stats.streams_reencoded += 1;
                             stats.jpegs_retabled += change.jpeg_retabled as usize;
                             stats.fax_to_jbig2 += change.fax_to_jbig2 as usize;
-                            (d, z)
+                            (d, Cow::Borrowed(z.as_slice()))
                         }
                         None => {
                             stats.streams_kept += 1;
-                            (s.dict.clone(), s.data.clone())
+                            (&s.dict, Cow::Borrowed(s.data.as_slice()))
                         }
                     };
                     if k == 0 && planted(Fault::StreamByte) {
-                        if let Some(b) = data.last_mut() {
+                        if let Some(b) = data.to_mut().last_mut() {
                             *b ^= 1;
                         }
                     }
                     // Encrypted again with this object's key.
                     let (mut dict, data) = match crypt {
                         Some(c) => {
-                            c.seal_stream_at(k as u32, n, g, &dict, &data).map_err(|e| format!("object {n}: {e}"))?
+                            let sealed = c.seal_stream_at(k as u32, n, g, dict, &data);
+                            let (d, z) = sealed.map_err(|e| format!("object {n}: {e}"))?;
+                            (d, Cow::Owned(z))
                         }
-                        None => (dict, data),
+                        None => (dict.clone(), data),
                     };
                     dict.set(b"Length", Obj::Int(data.len() as i64));
                     let mut body = Vec::with_capacity(data.len() + 64);
@@ -461,8 +459,9 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
         }
 
         // Its own object streams, grouped by kind.
-        packable.sort_by(|a, b| kind_key(a.1).cmp(&kind_key(b.1)).then(a.0.cmp(&b.0)));
-        let mut in_stm: BTreeMap<u32, (u32, u32)> = BTreeMap::new();
+        packable.sort_by_cached_key(|&(n, o)| (kind_key(o), n));
+        // The rows of this revision's section: one for each object written, each object taken away, and itself.
+        let mut rows: Vec<(u32, u8, u64, u64)> = Vec::new();
         let mut raws = Vec::new();
         for chunk in packable.chunks(opt.objstm_size.max(1)) {
             let sn = number()?;
@@ -474,7 +473,7 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
                 }
                 head.extend_from_slice(format!("{} {} ", n, body.len()).as_bytes());
                 body.extend_from_slice(&to_bytes(o));
-                in_stm.insert(*n, (sn, i as u32));
+                rows.push((*n, 2, sn as u64, i as u64));
             }
             let first = head.len();
             head.extend_from_slice(&body);
@@ -514,8 +513,6 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
             }
         }
 
-        // The rows of this revision's section: one for each object written, each object taken away, and itself.
-        let mut rows: Vec<(u32, u8, u64, u64)> = Vec::new();
         if k == 0 {
             rows.push((0, 0, 0, 65535));
         }
@@ -529,7 +526,6 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
             out.extend_from_slice(&body);
             out.extend_from_slice(b"\nendobj\n");
         }
-        rows.extend(in_stm.iter().map(|(&n, &(sn, i))| (n, 2, sn as u64, i as u64)));
         let xn = number()?;
         let xref_off = out.len();
         rows.push((xn, 1, xref_off as u64, 0));
@@ -550,14 +546,7 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
             }
         }
         // With PNG "Up" prediction when that is smaller, its parameters counted (as in `rewrite`).
-        let mut up = Vec::with_capacity(plain.len() + rows.len());
-        for (r, row) in plain.chunks(cols).enumerate() {
-            up.push(2u8);
-            for (i, &b) in row.iter().enumerate() {
-                let above = if r == 0 { 0 } else { plain[(r - 1) * cols + i] };
-                up.push(b.wrapping_sub(above));
-            }
-        }
+        let up = images::png_filter(&plain, cols, 1, images::Choice::Fixed(2));
         let structure = structure_flate(opt, objstm_bytes + plain.len() + up.len(), input.len());
         let mut both = par::map(pool, 2, None, |i| flate::deflate_zlib(if i == 0 { &plain } else { &up }, &structure));
         let (Some(z_up), Some(z_plain)) = (both.pop(), both.pop()) else {
@@ -606,11 +595,10 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
         if out.len() >= input.len() {
             return Err("no saving possible".into());
         }
-        // Readers refuse a file that lists a number past a third of its length (qpdf, without recovery). The new
-        // numbers lie above every revision's, so a small early revision under a large later one would list one:
-        // the file cut there must still open wherever the input cut there does.
-        let too_high = |number: u32, len: usize| (number as u64 + 1) * 3 > len as u64;
-        if too_high(xn, out.len()) && !too_high(rev.listed, rev.end) {
+        // qpdf reads no object numbered above a third of a file's length, and can't open a file whose
+        // cross-reference stream has such a number. The new numbers lie above every revision's, so a short early
+        // revision under a long later one could have one: the output cut at each revision's end stays below.
+        if (xn as u64 + 1) * 3 > out.len() as u64 {
             return Err(TOO_HIGH.into());
         }
         ends.push(out.len());
@@ -618,7 +606,11 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
     }
     drop(encoded);
 
-    let taken = check(input, &out, &ends, &revs, &values, &keys, &proofs, first_new, opt, pool)?;
+    // Of the values, the check needs only the streams whose jobs checked their own encoding.
+    let proved: Vec<Option<(Arc<Obj>, Proof)>> =
+        keys.iter().zip(proofs).map(|((_, key), proof)| Some((values.list[key.0].clone(), proof?))).collect();
+    drop(values);
+    let taken = check(input, &out, &ends, &revs, &proved, first_new, opt, pool)?;
     if dbg {
         eprintln!("revisions: {of} kept; self-check: {taken} stream comparisons taken on their jobs' checks");
     }
@@ -643,9 +635,7 @@ fn check(
     out: &[u8],
     ends: &[usize],
     revs: &[Rev],
-    values: &Values,
-    keys: &[(u32, JobKey)],
-    proofs: &[Option<Proof>],
+    proved: &[Option<(Arc<Obj>, Proof)>],
     first_new: u64,
     opt: &Options,
     pool: Option<&par::Pool>,
@@ -703,9 +693,8 @@ fn check(
         let proven: Vec<(u32, Proof)> = objs
             .iter()
             .filter_map(|(&n, (_, o))| {
-                let job = rev.objs.get(&n)?.2?;
-                let p = proofs.get(job)?.as_ref()?;
-                (*values.list[keys.get(job)?.1 .0] == *o)
+                let (encoded, p) = proved.get(rev.objs.get(&n)?.2?)?.as_ref()?;
+                (**encoded == *o)
                     .then(|| (n, Proof { of: n, sha: p.sha, filter: p.filter.clone(), parms: p.parms.clone() }))
             })
             .collect();
@@ -786,16 +775,9 @@ mod tests {
     }
 
     #[test]
-    fn the_gate_gives_the_reason_this_module_takes_over_for() {
-        let pdf = two_saves();
-        let doc = xref::open(&pdf).unwrap();
-        assert_eq!(gate(&doc, &load_reachable(&doc).unwrap(), true), Err(KEEPS.to_string()));
-        assert!(matches!(outcome(&pdf, None), Outcome::Smaller(s) if s.history_kept == 1));
-    }
-
-    #[test]
     fn the_check_catches_each_mistake_of_the_writer() {
         let pdf = two_saves();
+        assert!(matches!(outcome(&pdf, None), Outcome::Smaller(s) if s.history_kept == 1));
         let faults = [
             (Fault::StreamByte, 0),
             (Fault::Unwritten, 1),

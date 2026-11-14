@@ -821,7 +821,7 @@ pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
 
     let mut out = Vec::new();
     // For each revision in file order, its section's place in the newest chain: older ones come first, further down.
-    let mut linked: Vec<usize> = Vec::new();
+    let mut revisions: Vec<usize> = Vec::new();
     let mut marker = None;
     for (i, &(s, n, eof, end)) in marks.iter().enumerate() {
         // A linearised file's `startxref 0`, after its first-page section: not an end.
@@ -834,12 +834,13 @@ pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
             return Err(KEEPS);
         }
         let at = section_start(data, n);
-        let own = match newest.iter().position(|&c| c == at) {
+        let place = newest.iter().position(|&c| c == at);
+        let own = match place {
             Some(j) => {
-                if linked.last().is_some_and(|&older| j >= older) {
+                if revisions.last().is_some_and(|&older| j >= older) {
                     return Err(KEEPS);
                 }
-                linked.push(j);
+                revisions.push(j);
                 newest[j..].to_vec()
             }
             None => chain(n, &mut sections)?,
@@ -848,12 +849,12 @@ pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
         if own.iter().any(|c| sections[c].2 > eof) {
             return Err(KEEPS);
         }
-        out.push(Save { end, section: at, linked: newest.contains(&at) });
+        out.push(Save { end, section: at, linked: place.is_some() });
     }
     // Each revision owns the sections from its own down to the older revision's: one section, or the two of a
     // linearised first save (as `open_with` takes them for one save).
     let mut upper = newest.len();
-    for (t, &j) in linked.iter().enumerate() {
+    for (t, &j) in revisions.iter().enumerate() {
         let own = &newest[j..upper];
         let (first_page, main) = (&sections[&own[0]], &sections[&own[own.len() - 1]]);
         let linearised = t == 0
@@ -868,7 +869,7 @@ pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
         }
         upper = j;
     }
-    if linked.last() != Some(&0) {
+    if revisions.last() != Some(&0) {
         return Err(KEEPS);
     }
     if out.len() > MOST_SAVES {

@@ -117,7 +117,7 @@ export class GpressFeatureError extends GpressError {
 /** Largest input the 32-bit module takes: under 2 GiB. */
 export const MAX_INPUT_BYTES = 0x7fffffff;
 
-/** The switches in the module's flags word: a set bit turns the step off. */
+/** The switches in the module's flags word: a set bit turns the step off, except the last, which turns dropping on. */
 const FLAG_IGNORE_CONFORMANCE = 1;
 const FLAG_NO_FLATE_OVER_JPEG = 2;
 const FLAG_NO_EXISTING_LIBRARIES = 4;

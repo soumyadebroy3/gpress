@@ -117,7 +117,9 @@ pub struct Stats {
     pub fax_to_jbig2: usize,
     /// How the file is encrypted (kept exactly as it was), e.g. "R4/AESV2"; empty when it isn't.
     pub encryption: String,
-    /// Earlier saves kept, each written again and checked (see `history`).
+    /// Earlier saves kept, each written again and checked (see `history`). The counts above are then of what
+    /// was written: an object or stream once for each revision that adds or changes it, and no count of
+    /// unreachable objects.
     pub history_kept: usize,
     /// Earlier saves dropped because `Options::drop_history` asked, oldest first.
     pub history_dropped: Vec<Dropped>,
@@ -220,7 +222,7 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, conformance: bool) -> Resul
         None => {}
     }
     if doc.has_revisions {
-        return Err("keeps earlier revisions (incremental updates)".into());
+        return Err(xref::KEEPS.into());
     }
     if doc.trailing > 1024 {
         return Err("data after the end of the file".into());
@@ -1275,12 +1277,12 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     // every save is checked there and the newest goes on alone.
     let mut history_dropped = Vec::new();
     match gate(&doc, &objs, opt.respect_conformance) {
-        Err(why) if why == history::KEEPS && !opt.drop_history => {
+        Err(why) if why == xref::KEEPS && !opt.drop_history => {
             drop((objs, doc));
             return history::keep(input, opt);
         }
         // Every save passes the gate there, the newest among them.
-        Err(why) if why == history::KEEPS => history_dropped = history::dropped(input, opt, &objs)?,
+        Err(why) if why == xref::KEEPS => history_dropped = history::dropped(input, opt, &objs)?,
         gated => gated?,
     }
     let mut stats = Stats {

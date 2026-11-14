@@ -649,10 +649,9 @@ fn describe(name: &str, in_len: usize, r: &gpress::Optimized, secs: f64) -> Stri
 /// One line on standard error for each earlier save `--drop-history` dropped.
 fn list_dropped(name: &str, r: &gpress::Optimized) {
     let gpress::Outcome::Smaller(s) = &r.outcome else { return };
-    for d in &s.history_dropped {
+    for (k, d) in s.history_dropped.iter().enumerate() {
         eprintln!(
-            "{name}\tdropped revision {} of {}: bytes {}-{}, {} object versions the output doesn't hold",
-            d.index,
+            "{name}\tdropped revision {k} of {}: bytes {}-{}, {} object versions the output doesn't hold",
             s.history_dropped.len() + 1,
             d.start,
             d.end,
