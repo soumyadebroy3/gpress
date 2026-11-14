@@ -60,6 +60,8 @@ pub struct Options {
     /// Rewrite files the empty user password opens, keeping their encryption (see `crate::pdf::crypt`). Off,
     /// every encrypted file is left untouched.
     pub rewrite_encrypted: bool,
+    /// The lossy image step (see `crate::pdf::lossy`); `Lossy::OFF` leaves every image to the lossless path.
+    pub lossy: super::lossy::Lossy,
     /// Stop when this passes (checked between streams and Flate segments): the outcome is then `TimedOut`
     /// and nothing is returned. A rewrite that finishes gives the same bytes with or without a deadline.
     pub deadline: Deadline,
@@ -79,6 +81,7 @@ impl Default for Options {
             jbig2: true,
             jpeg_tables: true,
             rewrite_encrypted: true,
+            lossy: super::lossy::Lossy::OFF,
             deadline: Deadline::NONE,
         }
     }
@@ -107,6 +110,12 @@ pub struct Stats {
     pub jpegs_retabled: usize,
     /// CCITT fax images written as JBIG2 (the same pixels).
     pub fax_to_jbig2: usize,
+    /// Images the lossy step resampled to a lower resolution (see `crate::pdf::lossy`).
+    pub images_resampled: usize,
+    /// Photos stored without JPEG that the lossy step wrote as a JPEG.
+    pub images_to_jpeg: usize,
+    /// JPEG photos the lossy step wrote again at a lower quality (not resampled).
+    pub jpegs_rewritten: usize,
     /// How the file is encrypted (kept exactly as it was), e.g. "R4/AESV2"; empty when it isn't.
     pub encryption: String,
 }
@@ -643,7 +652,7 @@ fn samples<'a>(
 }
 
 /// The PNG predictor parameters for an image of geometry `g`.
-fn png_parms(g: &images::Geometry) -> Dict {
+pub(super) fn png_parms(g: &images::Geometry) -> Dict {
     let mut p = Dict::default();
     p.set(b"Predictor", Obj::Int(15));
     p.set(b"Colors", Obj::Int(g.colors as i64));
@@ -786,7 +795,7 @@ fn predictor_budget(effort: u8) -> usize {
 /// Rows for ranking the predictor candidates of an image below effort 100: bands of whole rows spread over
 /// the image (neighbouring rows keep what predictors and matches see), at most a budget of bytes that grows
 /// with the effort. None: rank on the whole image (effort 100, or a small image).
-fn predictor_sample(nrows: usize, row: usize, effort: u8) -> Option<Vec<(usize, usize)>> {
+pub(super) fn predictor_sample(nrows: usize, row: usize, effort: u8) -> Option<Vec<(usize, usize)>> {
     if effort >= 100 || row == 0 {
         return None;
     }
@@ -883,7 +892,7 @@ fn decoded_size(s: &Stream, limit: usize, last: usize) -> Option<usize> {
 
 /// The fast encoder's level for image streams below `FAST_BELOW` (other streams get `flate::Options::effort`).
 /// Images are most of the decoded bytes and gain least from a closer parse, so they get a lazy level.
-fn image_level(effort: u8) -> u8 {
+pub(super) fn image_level(effort: u8) -> u8 {
     IMAGE_LEVEL[effort.min(FAST_BELOW - 1) as usize]
 }
 
@@ -1258,7 +1267,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
             s.shared
         );
     }
-    let objs = objs?;
+    let mut objs = objs?;
     gate(&doc, &objs, opt.respect_conformance)?;
     let mut stats = Stats {
         objects: objs.len(),
@@ -1283,6 +1292,14 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         },
         ..opt.clone()
     };
+
+    // The lossy image step, when asked for: the images it reduces are new streams to everything below.
+    if !opt.lossy.is_off() {
+        let done = super::lossy::reduce(&mut objs, &doc.trailer, opt, pool);
+        stats.images_resampled = done.resampled;
+        stats.images_to_jpeg = done.to_jpeg;
+        stats.jpegs_rewritten = done.rejpeg;
+    }
 
     // Streams are re-encoded first, in parallel (the biggest first, identical streams once); the results are
     // used in object order below, so the output doesn't depend on the number of threads.

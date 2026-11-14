@@ -11,6 +11,8 @@
 //! budget, for pack and unpack), --max-len BYTES (unpack: a file declaring more is refused),
 //! --objects-per-stream N, --time-budget MS (give up after that long), --ignore-conformance,
 //! --no-flate-over-jpeg, --no-jpeg-tables, --no-jbig2, --keep-encrypted, --store-budget BYTES (normal PDF),
+//! --lossy N (normal PDF: the lossy image step at level 0 to 3, 0 = off; see `gpress::Lossy`), --photo-ppi N,
+//! --art-ppi N, --jpeg-quality N (each sets one of the step's settings, over the level's),
 //! --no-decrypt (archive), --no-existing. The output never depends on the thread count or the time budget: a
 //! budget that runs out gives an error and no file.
 //!
@@ -70,6 +72,7 @@ options: --effort N (0 fast .. 100 smallest, default 100; --quick = 0)   --threa
          --max-input BYTES   --max-stream BYTES (normal PDF)   --max-stream-archive BYTES   --max-decoded BYTES (archive,
          pack and unpack)   --max-len BYTES (unpack)   --objects-per-stream N   --time-budget MS   --ignore-conformance
          --no-flate-over-jpeg   --no-jpeg-tables   --no-jbig2   --keep-encrypted   --store-budget BYTES (normal PDF)
+         --lossy N (lossy image step, level 0 off .. 3)   --photo-ppi N   --art-ppi N   --jpeg-quality N (one setting each)
          --no-decrypt (archive)   --no-existing
 measuring tools: deflate, inflate, batch, pdf-batch, repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info,
          fax-decode, fax-encode, fax-scan, fax-model, jbig2-encode, claim-archive (see the comments at the top of
@@ -92,6 +95,10 @@ const WITH_VALUE: &[&str] = &[
     "--objects-per-stream",
     "--time-budget",
     "--store-budget",
+    "--lossy",
+    "--photo-ppi",
+    "--art-ppi",
+    "--jpeg-quality",
 ];
 
 /// The flags that fine-tune the strong encoder's settings in the deflate tools.
@@ -154,6 +161,22 @@ fn main() {
     lib.jpeg_tables = !flag("--no-jpeg-tables");
     lib.jbig2 = !flag("--no-jbig2");
     lib.rewrite_encrypted = !flag("--keep-encrypted");
+    // The lossy image step: a level, then single settings over it.
+    if let Some(n) = num("--lossy") {
+        if n > 3 {
+            die("--lossy: a level from 0 to 3");
+        }
+        lib.lossy = Some(gpress::Lossy::level(n as u8));
+    }
+    let (photo, art, quality) = (num("--photo-ppi"), num("--art-ppi"), num("--jpeg-quality"));
+    if photo.is_some() || art.is_some() || quality.is_some() {
+        let mut lossy = lib.lossy.unwrap_or(gpress::Lossy::OFF);
+        lossy.photo_ppi = photo.map_or(lossy.photo_ppi, |n| n.min(u16::MAX as u64) as u16);
+        lossy.art_ppi = art.map_or(lossy.art_ppi, |n| n.min(u16::MAX as u64) as u16);
+        lossy.jpeg_quality = quality.map_or(lossy.jpeg_quality, |n| n.min(u8::MAX as u64) as u8);
+        lib.lossy = Some(lossy);
+    }
+    let lossy_on = lib.lossy.is_some_and(|l| !l.is_off());
     lib.decrypt = !flag("--no-decrypt");
     lib.use_existing_libraries = !flag("--no-existing");
     lib.check().unwrap_or_else(|e| fail(&e));
@@ -252,7 +275,7 @@ fn main() {
             let t = Instant::now();
             let r = gpress::optimize(&data, &lib).unwrap_or_else(|e| fail(&e));
             std::fs::write(o, &r.data).unwrap_or_else(|e| die(&format!("{o}: {e}")));
-            println!("{}", describe(i, data.len(), &r, t.elapsed().as_secs_f64()));
+            println!("{}", describe(i, data.len(), &r, t.elapsed().as_secs_f64(), lossy_on));
         }
         Some("pdf-batch") => {
             // stdin lines "IN<TAB>OUT"
@@ -273,7 +296,7 @@ fn main() {
                 match gpress::optimize(&data, &lib) {
                     Ok(r) => {
                         std::fs::write(o, &r.data).unwrap();
-                        writeln!(out, "{}", describe(i, data.len(), &r, t.elapsed().as_secs_f64())).unwrap();
+                        writeln!(out, "{}", describe(i, data.len(), &r, t.elapsed().as_secs_f64(), lossy_on)).unwrap();
                     }
                     Err(e) => writeln!(out, "{i}\tERROR\t{}\t{e}", data.len()).unwrap(),
                 }
@@ -615,11 +638,12 @@ fn read_pbm(d: &[u8]) -> Option<gpress::fax::ccitt::Image> {
     Some(img)
 }
 
-fn describe(name: &str, in_len: usize, r: &gpress::Optimized, secs: f64) -> String {
+/// The output line of one normal-PDF result; `lossy` (the lossy image step was on) adds what the step did.
+fn describe(name: &str, in_len: usize, r: &gpress::Optimized, secs: f64, lossy: bool) -> String {
     match &r.outcome {
         gpress::Outcome::Smaller(s) => format!(
             "{name}\tSMALLER\t{in_len}\t{}\t{secs:.2}\tobjects={} streams={} reencoded={} kept={} objstms={} dropped={} \
-             jpegs_retabled={} fax_to_jbig2={}{}",
+             jpegs_retabled={} fax_to_jbig2={}{}{}",
             r.data.len(),
             s.objects,
             s.streams,
@@ -629,7 +653,12 @@ fn describe(name: &str, in_len: usize, r: &gpress::Optimized, secs: f64) -> Stri
             s.unreachable_objects_dropped,
             s.jpegs_retabled,
             s.fax_to_jbig2,
-            if s.encryption.is_empty() { String::new() } else { format!(" encrypted={}", s.encryption) }
+            if s.encryption.is_empty() { String::new() } else { format!(" encrypted={}", s.encryption) },
+            if lossy {
+                format!(" resampled={} to_jpeg={} rejpeg={}", s.images_resampled, s.images_to_jpeg, s.jpegs_rewritten)
+            } else {
+                String::new()
+            }
         ),
         gpress::Outcome::Untouched(why) => format!("{name}\tUNTOUCHED\t{in_len}\t{}\t{secs:.2}\t{why}", r.data.len()),
     }

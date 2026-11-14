@@ -15,9 +15,14 @@
 //! read back and compared with the original: the same bytes outside the tables and the coded data, the same
 //! symbols in every scan.
 
+mod decode;
+mod encode;
 mod huffman;
 mod parse;
 mod scan;
+
+pub use decode::{decode, Picture, Plane};
+pub use encode::{encode, ycc_planes};
 
 use huffman::{Order, Spec};
 use parse::{parse, Jpeg, Piece, Scan};

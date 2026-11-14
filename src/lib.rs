@@ -43,6 +43,7 @@ use off::jpeg;
 use off::pack;
 
 pub use api::{
-    compress, expand, is_archive, optimize, Compressed, Effort, Error, Optimized, Options, Outcome, Report, VERSION,
+    compress, expand, is_archive, optimize, Compressed, Effort, Error, Lossy, Optimized, Options, Outcome, Report,
+    VERSION,
 };
 pub use feature::Feature;

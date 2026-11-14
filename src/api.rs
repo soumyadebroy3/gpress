@@ -40,6 +40,7 @@ use crate::pack;
 // Without the archive: its format's constants, which the options and `is_archive` use in every build.
 #[cfg(not(feature = "archive"))]
 use crate::off::pack;
+pub use crate::pdf::lossy::Lossy;
 use crate::pdf::rewrite;
 use crate::Feature;
 
@@ -144,6 +145,10 @@ pub struct Options {
     /// Normal PDF: rewrite files the empty user password opens, keeping their encryption exactly. Off,
     /// every encrypted file is left untouched.
     pub rewrite_encrypted: bool,
+    /// Normal PDF: the lossy image step. `None`: what the effort means (efforts 60, 80 and 100 turn it on, see
+    /// [`Effort`]); `Some`: exactly these settings whatever the effort (`Some(Lossy::OFF)` keeps any effort
+    /// lossless).
+    pub lossy: Option<Lossy>,
     /// Archive: store the streams of a file the empty user password opens decrypted (so they can be rebuilt
     /// and modelled) and encrypt them again on expand. Off, encrypted streams are stored as they are.
     pub decrypt: bool,
@@ -176,6 +181,7 @@ impl Default for Options {
             jpeg_tables: true,
             jbig2: true,
             rewrite_encrypted: true,
+            lossy: None,
             decrypt: true,
             use_existing_libraries: true,
             time_budget: None,
@@ -241,6 +247,10 @@ impl Options {
     }
     pub fn rewrite_encrypted(mut self, yes: bool) -> Options {
         self.rewrite_encrypted = yes;
+        self
+    }
+    pub fn lossy(mut self, lossy: Option<Lossy>) -> Options {
+        self.lossy = lossy;
         self
     }
     pub fn decrypt(mut self, yes: bool) -> Options {
@@ -314,6 +324,7 @@ impl Options {
             jbig2: self.jbig2,
             jpeg_tables: self.jpeg_tables,
             rewrite_encrypted: self.rewrite_encrypted,
+            lossy: self.lossy.unwrap_or(Lossy::OFF),
             deadline: self.deadline(),
         }
     }
@@ -440,6 +451,12 @@ pub struct Report {
     pub jpegs_retabled: usize,
     /// CCITT fax images written as JBIG2 (the same pixels).
     pub fax_to_jbig2: usize,
+    /// Images the lossy step resampled to a lower resolution (see [`Lossy`]).
+    pub images_resampled: usize,
+    /// Photos stored without JPEG that the lossy step wrote as a JPEG.
+    pub images_to_jpeg: usize,
+    /// JPEG photos the lossy step wrote again at a lower quality (not resampled).
+    pub jpegs_rewritten: usize,
     /// How the file is encrypted, kept exactly as it was (e.g. "R4/AESV2"); empty when it isn't.
     pub encryption: String,
 }
@@ -521,6 +538,9 @@ pub fn optimize(input: &[u8], opt: &Options) -> Result<Optimized, Error> {
                 unreachable_objects_dropped: s.dropped_unreachable,
                 jpegs_retabled: s.jpegs_retabled,
                 fax_to_jbig2: s.fax_to_jbig2,
+                images_resampled: s.images_resampled,
+                images_to_jpeg: s.images_to_jpeg,
+                jpegs_rewritten: s.jpegs_rewritten,
                 encryption: s.encryption,
             }),
             rewrite::Outcome::Untouched(why) => Outcome::Untouched(why),
