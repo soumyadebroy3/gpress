@@ -67,12 +67,19 @@ fn the_shared_rows_keep_their_order() {
 }
 
 /// Every rule at its lowest and at its highest value, alone, on the mixed document (a page, a Type 1 font, a
-/// JPEG, a fax image, a zlib content stream; the decryption rules on it encrypted) at effort 40, below
-/// `plain_below`, so that the plain-coding rules decide something too.
+/// JPEG, a fax image, a zlib content stream) with a stream of random bytes added, at effort 40, below
+/// `plain_below`, so that the plain-coding rules decide something too; the decryption rules on the document
+/// encrypted.
 #[cfg(all(feature = "fax", feature = "encryption"))]
 #[test]
 fn every_rule_at_its_ends_restores_and_changes_the_archive() {
-    let docs = [common::plain_pdf(), common::encrypted_pdf(false)];
+    let mut doc = common::plain_pdf();
+    let mut seed = 7;
+    let noise: Vec<u8> = (0..40_000).map(|_| common::next(&mut seed) as u8).collect();
+    doc.extend_from_slice(format!("11 0 obj\n<< /Length {} >>\nstream\n", noise.len()).as_bytes());
+    doc.extend_from_slice(&noise);
+    doc.extend_from_slice(b"\nendstream\nendobj\n");
+    let docs = [doc, common::encrypted_pdf(false)];
     let base: Vec<Vec<u8>> = docs.iter().map(|d| pack_by(d, &ArchiveRules::default(), 40, 1)).collect();
     let check = |i: usize| -> Option<&'static str> {
         let (name, def, lo, hi) = ArchiveRules::RULES[i];
@@ -102,10 +109,22 @@ fn every_rule_at_its_ends_restores_and_changes_the_archive() {
         workers.into_iter().flat_map(|w| w.join().unwrap()).collect()
     });
     unchanged.sort_unstable();
-    // `deadline_step` never changes the output. Without Lepton its rules decide nothing; with it, the JPEG of the
-    // document is a stream of its own (not behind Flate) and small enough for one partition.
-    let mut want = vec!["deadline_step", "lepton_min_saving", "lepton_partitions"];
-    if !cfg!(feature = "existing") {
+    // `deadline_step` never changes the output. The others decide nothing on these files: `decrypt_recheck` and
+    // `decrypt_tie` choose between two packs that are far apart here; no fax stream is left partly undecoded
+    // (`fax_max_leftover`); the font's /Length1 finds its encrypted part at once, and that part decrypts to
+    // plain text (`font_tries`, `font_text_bytes`); the random stream is smaller than the 16 windows
+    // (`plain_windows`); zlib's "filtered" strategy made no stream (`zlib_filtered`). Without Lepton its rules
+    // decide nothing; with it, the JPEG of the document is a stream of its own (not behind Flate) and small
+    // enough for one partition, and as Lepton takes it, only the random stream is judged for plain coding, which
+    // looks random at any distance (`plain_distances`).
+    #[rustfmt::skip]
+    let mut want = vec![
+        "deadline_step", "decrypt_recheck", "decrypt_tie", "fax_max_leftover", "font_text_bytes", "font_tries",
+        "lepton_min_saving", "lepton_partitions", "plain_windows", "zlib_filtered",
+    ];
+    if cfg!(feature = "existing") {
+        want.push("plain_distances");
+    } else {
         want.extend(["lepton_min_bytes", "lepton_min_gain", "lepton_plain"]);
     }
     want.sort_unstable();
@@ -113,19 +132,21 @@ fn every_rule_at_its_ends_restores_and_changes_the_archive() {
 }
 
 /// Every shared rule at its lowest at once, and every one at its highest (the largest profile: 160 MiB of
-/// context tables, 16 MiB of match table), restore; the same rules give the same bytes at any thread count.
+/// context tables, 16 MiB of match table), restore; the same rules give the same bytes at any thread count. Some
+/// repeated text is added, so that even the lowest values make an archive smaller than the file stored as it is.
 #[test]
 fn all_shared_rules_at_their_ends_at_once() {
+    let input = [PLAIN_PDF, &b"BT /F1 12 Tf 72 700 Td (Line of a page) Tj ET\n".repeat(700)].concat();
     for end in [2, 3] {
         let mut r = ArchiveRules::default();
         for rule in &ArchiveRules::RULES[..ArchiveRules::SHARED] {
             let v = if end == 2 { rule.2 } else { rule.3 };
             assert!(r.set(rule.0, v));
         }
-        let a = pack_by(PLAIN_PDF, &r, 100, 1);
+        let a = pack_by(&input, &r, 100, 1);
         assert_eq!(a[4], VERSION_PROFILE);
-        assert_eq!(unpack(&a).unwrap(), PLAIN_PDF);
-        assert!(pack_by(PLAIN_PDF, &r, 100, 4) == a);
+        assert!(unpack(&a).unwrap() == input);
+        assert!(pack_by(&input, &r, 100, 4) == a);
     }
 }
 
