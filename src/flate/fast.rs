@@ -136,6 +136,7 @@ struct Level {
     hash3_bits: u32,
     /// Lazy matching: the units a byte longer is worth, and the gain a match one and two positions ahead needs.
     gain_per_byte: i32,
+    gain_per_halving: i32,
     lazy_gain: i32,
     lazy2_gain: i32,
     /// The greedy pass behind the first costs takes a 3-byte match only this close (farther ones are rarely
@@ -184,6 +185,7 @@ impl Level {
             hash4_bits: rule!(r, "fast_hash4_bits") as u32,
             hash3_bits: rule!(r, "fast_hash3_bits") as u32,
             gain_per_byte: rule!(r, "fast_gain_per_byte") as i32,
+            gain_per_halving: rule!(r, "fast_gain_per_halving") as i32,
             lazy_gain: rule!(r, "fast_lazy_gain") as i32,
             lazy2_gain: rule!(r, "fast_lazy2_gain") as i32,
             far3: rule!(r, "fast_far3_distance"),
@@ -780,13 +782,13 @@ impl Chains {
 }
 
 /// How much better a match of `nl` at `nd` is than one of `cl` at `cd`: `per_byte` units (four) per byte
-/// longer, one per halving of the distance.
+/// longer, `per_halving` (one) per halving of the distance.
 #[inline(always)]
-fn gain(nl: usize, nd: usize, cl: usize, cd: usize, per_byte: i32) -> i32 {
+fn gain(nl: usize, nd: usize, cl: usize, cd: usize, per_byte: i32, per_halving: i32) -> i32 {
     if nl < cl {
         return i32::MIN;
     }
-    per_byte * (nl - cl) as i32 + floor_log2(cd) - floor_log2(nd)
+    per_byte * (nl - cl) as i32 + per_halving * (floor_log2(cd) - floor_log2(nd))
 }
 
 /// The symbols of the block being made, their counts and the split statistics.
@@ -896,7 +898,8 @@ fn hashed(seg: &mut Seg, lv: &Level) {
     let mut bk = Blocks::new(seg.start, (end - seg.start).min(lv.max_block) + 2 * MAX_MATCH, lv);
     let lazy = lv.mode != Mode::Greedy;
     let two = lv.mode == Mode::Lazy2;
-    let (per_byte, lazy_gain, lazy2_gain) = (lv.gain_per_byte, lv.lazy_gain, lv.lazy2_gain);
+    let (per_byte, per_halving) = (lv.gain_per_byte, lv.gain_per_halving);
+    let (lazy_gain, lazy2_gain) = (lv.lazy_gain, lv.lazy2_gain);
     let mut p = seg.start;
     while p < end {
         if p >= stop {
@@ -918,7 +921,7 @@ fn hashed(seg: &mut Seg, lv: &Level) {
             while len < lv.nice && p + 1 < stop {
                 let (l1, d1) = mf.find(buf, p + 1, (end - p - 1).min(MAX_MATCH), lv.nice, lv.depth, len - 1);
                 ins = p + 2;
-                if gain(l1, d1, len, dist, per_byte) > lazy_gain {
+                if gain(l1, d1, len, dist, per_byte, per_halving) > lazy_gain {
                     bk.lit(buf[p]);
                     p += 1;
                     bk.step(p, seg);
@@ -928,7 +931,7 @@ fn hashed(seg: &mut Seg, lv: &Level) {
                 if two && p + 2 < stop {
                     let (l2, d2) = mf.find(buf, p + 2, (end - p - 2).min(MAX_MATCH), lv.nice, lv.depth, len - 1);
                     ins = p + 3;
-                    if gain(l2, d2, len, dist, per_byte) > lazy2_gain {
+                    if gain(l2, d2, len, dist, per_byte, per_halving) > lazy2_gain {
                         bk.lit(buf[p]);
                         bk.lit(buf[p + 1]);
                         p += 2;

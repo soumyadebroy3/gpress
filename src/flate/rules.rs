@@ -172,9 +172,9 @@ impl FlateRules {
         ("level12_passes", 2, 0, 8),
         ("level12_short", 1, 0, 1),
         // The strong encoder (`deflate.rs`). A block below this many bytes is priced with a real code search
-        // when parses are compared, a larger one with an estimate (0: always the estimate; 1 MiB: every
-        // block, since a segment is no longer).
-        ("exact_price_below", 65536, 0, 1 << 20),
+        // when parses are compared, a larger one with an estimate (0: always the estimate; 1 MiB and one byte:
+        // every block, since a segment is at most 1 MiB).
+        ("exact_price_below", 65536, 0, (1 << 20) + 1),
         // Both encoders: the block type written when two cost the same. 0: fixed, then dynamic, then stored;
         // 1: dynamic before fixed; 2: stored before both.
         ("block_tie", 0, 0, 2),
@@ -207,8 +207,7 @@ impl FlateRules {
         // between candidate boundaries (the segment's symbols divided by this, and at least so many: at least
         // 1), the most candidates one block may span, the bits an uncompressed block is priced at over 8 a
         // byte, how far each chosen boundary is fine-tuned (in candidate distances either side; 0: not at
-        // all) and in what steps (the candidate distance divided by this). The highest values keep the
-        // search within about eight times the work it has by default.
+        // all) and in what steps (the candidate distance divided by this).
         ("split_min_symbols", 64, 2, 1 << 20),
         ("split_step_div", 160, 1, 640),
         ("split_step_min", 32, 1, 1 << 16),
@@ -237,9 +236,9 @@ impl FlateRules {
         ("first_distance_bits", 5, 1, 15),
         // In the pricing rounds a symbol the last parse never used costs the bits of one used once, plus this.
         ("unused_symbol_bits", 1, 0, 16),
-        // Block codes (`block.rs`). Count smoothing evens out runs of at least this many symbols (286: never,
-        // an alphabet has no more).
-        ("smooth_min_run", 4, 1, 286),
+        // Block codes (`block.rs`). Count smoothing evens out runs of at least this many symbols (287: never,
+        // an alphabet has at most 286).
+        ("smooth_min_run", 4, 1, 287),
         // Which of the six code variants are tried for a block that is written, and for one that is only
         // priced (sets of bits, 1 for the first variant to 32 for the sixth, tried in that order). The
         // variants: plain counts, counts smoothed by a quarter, by a half, codes of at most 12 bits, of at
@@ -278,10 +277,10 @@ impl FlateRules {
         // most what they always were).
         ("fast_hash4_bits", 16, 8, 16),
         ("fast_hash3_bits", 15, 8, 15),
-        // Lazy matching: the units a later match gains per byte it is longer (it gains 1 per halving of the
-        // distance), and the gain over which the match one position ahead, and two ahead, replaces the
-        // current one.
+        // Lazy matching: the units a later match gains per byte it is longer and per halving of the distance,
+        // and the gain over which the match one position ahead, and two ahead, replaces the current one.
         ("fast_gain_per_byte", 4, 0, 64),
+        ("fast_gain_per_halving", 1, 0, 64),
         ("fast_lazy_gain", 1, 0, 1024),
         ("fast_lazy2_gain", 4, 0, 1024),
         // The cheapest-path levels: how far back the first pass still counts a 3-byte match, the candidate
@@ -301,10 +300,11 @@ impl FlateRules {
         // Speed and memory only; these never change the output. The largest input whose output a store
         // remembers (at most 1 MiB, the bound it always had), the segments the strong encoder plans as one
         // group (at most the 8 it always was, which bound the plans held) and the segments the fast encoder
-        // hands to the threads at once (at most 64, the most threads there can be).
+        // hands to the threads at once (at most the 16 it always was, which bound the finished output held
+        // before it is written).
         ("remember_up_to", 256 << 10, 0, 1 << 20),
         ("segments_at_once", 8, 1, 8),
-        ("fast_group", 16, 1, 64),
+        ("fast_group", 16, 1, 16),
     ];
 
     /// The row of a rule in `RULES`.
@@ -554,17 +554,26 @@ mod tests {
             assert!(deflate_zlib(&data, &opt) == deflate_zlib(&data, &Options::effort(effort)), "effort {effort}");
         }
         assert!(deflate_zlib(&data, &Options::quick_with(&by_hand)) == deflate_zlib(&data, &Options::quick()));
-        // The settings are remembered by their rules too: another value, another output.
-        assert!(!Options::effort_with(40, &with(&[("hash_bits", 12)])).same_output(&Options::effort(40)));
+        // The settings are remembered by their rules too: another value, another output, also from one store.
+        let other = with(&[("e40_depth", 0)]);
+        assert!(!Options::effort_with(40, &other).same_output(&Options::effort(40)));
+        let shared = Shared::new(1);
+        let outputs = [FlateRules::default(), other].map(|r| {
+            let fresh = deflate_zlib(&data, &Options::effort_with(40, &r));
+            let opt = Options { shared: Some(shared.clone()), ..Options::effort_with(40, &r) };
+            assert!(deflate_zlib(&data, &opt) == fresh);
+            fresh
+        });
+        assert!(outputs[0] != outputs[1]);
     }
 
     #[test]
     fn the_lowest_and_the_highest_of_every_rule_give_a_valid_stream() {
         let tiny: [&[u8]; 4] = [b"", b"a", b"abcabcabcabc", &[0; 300]];
         for &(name, _, lowest, highest) in FlateRules::RULES {
-            let (sample, _) = scene(name);
+            let (sample, around) = scene(name);
             for value in [lowest, highest] {
-                for opt in settings(name, &with(&[(name, value)])) {
+                for opt in settings(name, &with(&[&around[..], &[(name, value)]].concat())) {
                     for data in tiny.into_iter().chain([&sample[..]]) {
                         let z = deflate_zlib(data, &opt);
                         assert!(decodes_to(&z, data), "{name} = {value}, {} bytes, fast {}", data.len(), opt.fast);
@@ -641,7 +650,7 @@ mod tests {
     #[test]
     fn any_values_together_give_a_valid_stream_whatever_the_threads() {
         let data = sample(24_000);
-        // One store of outputs for every set of values: an output remembered under other values would show.
+        // One store of outputs for every set of values: what it gives back must be what these values make.
         let shared = Shared::new(3);
         let mut s = 0x9E37_79B9;
         for k in 0..24u8 {
