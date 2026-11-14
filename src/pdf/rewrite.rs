@@ -358,27 +358,31 @@ fn contains(h: &[u8], n: &[u8]) -> bool {
     h.windows(n.len()).any(|w| w == n)
 }
 
-/// Whether `o` holds arrays or dictionaries nested `levels` deep.
+/// Whether `o` is an array or a dictionary with others nested in it `levels` deep, `o` counted.
 fn nested(o: &Obj, levels: usize) -> bool {
-    levels == 0
-        || match o {
-            Obj::Array(a) => a.iter().any(|x| nested(x, levels - 1)),
-            Obj::Dict(d) => d.0.iter().any(|(_, v)| nested(v, levels - 1)),
-            _ => false,
-        }
+    match o {
+        Obj::Array(_) | Obj::Dict(_) if levels <= 1 => true,
+        Obj::Array(a) => a.iter().any(|x| nested(x, levels - 1)),
+        Obj::Dict(d) => d.0.iter().any(|(_, v)| nested(v, levels - 1)),
+        _ => false,
+    }
 }
 
-/// Whether `data` holds the header of an object numbered as one of `nums`, anywhere and however it is spelt:
-/// the number, white space, the digits of a generation, white space or none, `obj`. Poppler rebuilds a damaged
-/// file's cross-reference data from headers, and takes one with any white space between its parts and with
-/// its generation spelt "00". The search asks less of a header than that, to stay simple: the generation's
-/// value is not compared, and no white space needs to stand before `obj`. The number is every number of up to
-/// ten digits that the digits before the white space end with ("112 0 obj" holds 12, and "012 0 obj" too).
+/// Whether `data` holds the header of an object numbered as one of `nums`, anywhere: the number, a gap, the
+/// digits of a generation, a gap or none, `obj`. A gap is white space, and when that white space holds a line
+/// end, a comment may come before it on the line that it ends. Poppler rebuilds a damaged file's
+/// cross-reference data from headers, and takes one with spaces, tabs, line ends or form feeds between its
+/// parts, with its generation spelt "00", and with a NUL and a comment before a line end in a gap (the
+/// lexer then reads the comment as white space). The search asks less of a header than that, to stay simple:
+/// the generation's value is not compared, a NUL alone counts as white space, any `%` on the line may start
+/// the comment, and no white space needs to stand before `obj`. The number is every number of up to ten digits
+/// that the digits before the gap end with ("112 0 obj" holds 12, and "012 0 obj" too).
 fn holds_header(data: &[u8], nums: &HashSet<u32>) -> bool {
     if nums.is_empty() {
         return false;
     }
     let white = |c: u8| matches!(c, 0 | b'\t' | b'\n' | 0x0c | b'\r' | b' ');
+    let eol = |c: u8| c == b'\n' || c == b'\r';
     // Where the run of bytes that `is` holds for, ending at `end`, starts.
     let back = |mut end: usize, is: &dyn Fn(u8) -> bool| {
         while end > 0 && is(data[end - 1]) {
@@ -386,23 +390,40 @@ fn holds_header(data: &[u8], nums: &HashSet<u32>) -> bool {
         }
         end
     };
+    // Where digits may end before a gap that ends at `end`: before its white space (if there is any, or
+    // `empty`), and, when that white space holds a line end, before each `%` of the line that it ends and the
+    // white space before that `%`. Each line is looked at for the one gap that holds its line end, so the
+    // search stays one pass over the bytes.
+    let ends = |end: usize, empty: bool| {
+        let s = back(end, &white);
+        let line = match data[s..end].iter().any(|&c| eol(c)) {
+            true => data[..s].iter().rposition(|&c| eol(c)).map_or(0, |i| i + 1),
+            false => s,
+        };
+        (empty || s < end)
+            .then_some(s)
+            .into_iter()
+            .chain((line..s).filter(|&q| data[q] == b'%').map(move |q| back(q, &white)))
+    };
     for at in 0..data.len().saturating_sub(2) {
         if &data[at..at + 3] != b"obj" {
             continue;
         }
-        // Backwards from "obj": white space or none, the generation's digits, white space, the number's.
-        let g_end = back(at, &white);
-        let g = back(g_end, &|c| c.is_ascii_digit());
-        let end = back(g, &white);
-        if g == g_end || end == g {
-            continue;
-        }
-        let (mut n, mut place) = (0u64, 1u64);
-        for &c in data[end.saturating_sub(10)..end].iter().rev().take_while(|c| c.is_ascii_digit()) {
-            n += (c - b'0') as u64 * place;
-            place *= 10;
-            if u32::try_from(n).is_ok_and(|n| nums.contains(&n)) {
-                return true;
+        // Backwards from "obj": a gap or none, the generation's digits, a gap, the number's.
+        for g_end in ends(at, true) {
+            let g = back(g_end, &|c| c.is_ascii_digit());
+            if g == g_end {
+                continue;
+            }
+            for end in ends(g, false) {
+                let (mut n, mut place) = (0u64, 1u64);
+                for &c in data[end.saturating_sub(10)..end].iter().rev().take_while(|c| c.is_ascii_digit()) {
+                    n += (c - b'0') as u64 * place;
+                    place *= 10;
+                    if u32::try_from(n).is_ok_and(|n| nums.contains(&n)) {
+                        return true;
+                    }
+                }
             }
         }
     }
@@ -2620,26 +2641,38 @@ mod effort_tests {
 
     #[test]
     fn headers_are_found_however_they_are_spelt() {
-        // A header read forwards from `a`: the number's digits (ten at most), white space, the generation's
-        // digits, white space or none, "obj". The search under test reads backwards from "obj".
+        // A header read forwards from `a`: the number's digits (ten at most), a gap, the generation's digits, a
+        // gap or none, "obj". A gap is white space, or white space, a comment to the first line end, and the
+        // white space from there. The search under test reads backwards from "obj".
         let white = |c: u8| matches!(c, 0 | b'\t' | b'\n' | 0x0c | b'\r' | b' ');
         let header_at = |soup: &[u8], a: usize| -> Option<u32> {
             let run = |from: usize, is: &dyn Fn(u8) -> bool| from + soup[from..].iter().take_while(|&&c| is(c)).count();
             let digit = |c: u8| c.is_ascii_digit();
+            // Where the part after a gap from `from` may start.
+            let gaps = |from: usize| {
+                let w = run(from, &white);
+                let comment = (soup.get(w) == Some(&b'%'))
+                    .then(|| soup[w..].iter().position(|&c| c == b'\n' || c == b'\r').map(|e| run(w + e, &white)))
+                    .flatten();
+                [Some(w), comment].into_iter().flatten()
+            };
             let n_end = run(a, &digit);
-            let g = run(n_end, &white);
-            let g_end = run(g, &digit);
-            if n_end == a
-                || n_end - a > 10
-                || g == n_end
-                || g_end == g
-                || !soup[run(g_end, &white)..].starts_with(b"obj")
-            {
+            let held = gaps(n_end).filter(|&g| g > n_end).any(|g| {
+                let g_end = run(g, &digit);
+                g_end > g && gaps(g_end).any(|o| soup[o..].starts_with(b"obj"))
+            });
+            if n_end == a || n_end - a > 10 || !held {
                 return None;
             }
             std::str::from_utf8(&soup[a..n_end]).ok()?.parse::<u64>().ok().and_then(|n| u32::try_from(n).ok())
         };
-        let planted: [&[u8]; 17] = [
+        let planted: [&[u8]; 23] = [
+            b"6\x00%c\n0 obj",
+            b"6 0\x00%c\r\nobj",
+            b"6\x00%a\r0\x00 %b\n \tobj",
+            b"9\x00%x%y 3\n0 obj",
+            b"4 %c\n\n%d\n1 obj",
+            b"2\x00%",
             b"5\r\n0\tobj",
             b"3 \x00\x0c 4obj",
             b"0000000000012 1 obj",
@@ -2659,7 +2692,10 @@ mod effort_tests {
             b"1 0 obj",
         ];
         // Soups of these, so that near-headers of every kind come up.
-        let tokens: [&[u8]; 13] = [b"0", b"1", b"2", b"5", b"7", b"9", b"0", b" ", b" ", b" obj", b"obj", b"x", b"\n"];
+        let tokens: [&[u8]; 17] = [
+            b"0", b"1", b"2", b"5", b"7", b"9", b"0", b" ", b" ", b" obj", b"obj", b"x", b"\n", b"%", b"\r", b"\x00",
+            b"\n",
+        ];
         let mut r = 0x9E37_79B9_7F4A_7C15u64;
         let mut next = move |k: usize| {
             r ^= r << 13;
