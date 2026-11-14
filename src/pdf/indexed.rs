@@ -118,7 +118,8 @@ pub fn convert(d: &Dict, px: &[u8], resolve: Resolve) -> Option<(Dict, Vec<u8>)>
     d2.remove(b"Filter");
     d2.remove(b"DecodeParms");
     let base = d.get(b"ColorSpace")?.clone();
-    let space = vec![Obj::Name(b"Indexed".to_vec()), base, Obj::Int(colours.len() as i64 - 1), Obj::Str(colours.concat())];
+    let space =
+        vec![Obj::Name(b"Indexed".to_vec()), base, Obj::Int(colours.len() as i64 - 1), Obj::Str(colours.concat())];
     d2.set(b"ColorSpace", Obj::Array(space));
     d2.set(b"BitsPerComponent", Obj::Int(bits as i64));
     Some((d2, out))
@@ -190,7 +191,8 @@ mod tests {
 
     #[test]
     fn the_indexes_look_up_every_pixel_at_each_depth() {
-        for (n, m, bits) in [(1, 3, 1), (2, 3, 1), (3, 3, 2), (4, 1, 2), (5, 3, 4), (16, 1, 4), (17, 3, 8), (256, 3, 8)] {
+        for (n, m, bits) in [(1, 3, 1), (2, 3, 1), (3, 3, 2), (4, 1, 2), (5, 3, 4), (16, 1, 4), (17, 3, 8), (256, 3, 8)]
+        {
             // Widths whose rows end inside a byte, too.
             for w in [1, 5, 8, 13] {
                 let cs = if m == 1 { "/DeviceGray" } else { "/DeviceRGB" };

@@ -632,21 +632,20 @@ fn exact_form(
     resolve: &dyn Fn(&Obj) -> Option<Obj>,
     other: (usize, &Dict),
 ) -> Option<Reencoded> {
-    let (d, z, change) = if let Some((d, z)) =
-        opt.jbig2.then(|| crate::fax::pdf::bilevel_candidate(s, px, other.0)).flatten()
-    {
-        (d, z, Change { bilevel_to_jbig2: true, ..Change::default() })
-    } else {
-        let (dict, data) = opt.palette.then(|| indexed::convert(&s.dict, px, resolve)).flatten()?;
-        let raw = Stream { dict, data };
-        // Neither form is tried again on the Indexed image.
-        let plain = Options { jbig2: false, palette: false, ..opt.clone() };
-        let (d, z) = match reencode(&raw, &plain, resolve, &mut None) {
-            Some((d, z, _)) => (d, z),
-            None => (raw.dict, raw.data),
+    let (d, z, change) =
+        if let Some((d, z)) = opt.jbig2.then(|| crate::fax::pdf::bilevel_candidate(s, px, other.0)).flatten() {
+            (d, z, Change { bilevel_to_jbig2: true, ..Change::default() })
+        } else {
+            let (dict, data) = opt.palette.then(|| indexed::convert(&s.dict, px, resolve)).flatten()?;
+            let raw = Stream { dict, data };
+            // Neither form is tried again on the Indexed image.
+            let plain = Options { jbig2: false, palette: false, ..opt.clone() };
+            let (d, z) = match reencode(&raw, &plain, resolve, &mut None) {
+                Some((d, z, _)) => (d, z),
+                None => (raw.dict, raw.data),
+            };
+            (d, z, Change { indexed: true, ..Change::default() })
         };
-        (d, z, Change { indexed: true, ..Change::default() })
-    };
     let whole = |len: usize, d: &Dict| len + to_bytes(&Obj::Dict(d.clone())).len();
     (whole(z.len(), &d) < whole(other.0, other.1)).then_some((d, z, change))
 }
@@ -1293,10 +1292,13 @@ fn run_job(
     let resolve = |o: &Obj| job.resolve(o);
     let t = clock::now();
     let mut content = None;
+    let palette = job.palette;
+    #[cfg(test)]
+    let palette = check_tests::planner_fault(n, palette);
     let r = job.settings.as_ref().and_then(|o| {
         let o = Options {
             flate: flate::Options { shared: Some(store.clone()), ..o.flate.clone() },
-            palette: o.palette && job.palette,
+            palette: o.palette && palette,
             ..o.clone()
         };
         if job.xmp {
@@ -2808,6 +2810,12 @@ pub(super) mod check_tests {
         Parms,
         /// The new dictionary written without its filter.
         Filter,
+        /// One byte of an Indexed image's colour table changed as it is written.
+        Palette,
+        /// One pixel of an image written as JBIG2 changed as it is written.
+        Pixel,
+        /// The image planned as one that may become Indexed, whatever the object table says.
+        Mask,
     }
 
     thread_local! {
@@ -2821,6 +2829,28 @@ pub(super) mod check_tests {
     fn flip(z: &mut [u8]) {
         let i = z.len() / 2;
         z[i] ^= 0x10;
+    }
+
+    pub(super) fn planner_fault(n: u32, palette: bool) -> bool {
+        palette || FAULT.get() == Some((Fault::Mask, n))
+    }
+
+    /// The JBIG2 stream `z` (as `fax::pdf::bilevel_candidate` writes it) with one pixel of its image changed.
+    #[cfg(feature = "fax")]
+    fn flip_pixel(z: &mut Vec<u8>) {
+        use crate::fax::{ccitt, jbig2};
+        let img = jbig2::read_pdf_stream(z, true, usize::MAX).expect("a JBIG2 stream of ours");
+        let mut flipped = ccitt::Image::new(img.width);
+        let (mut px, mut ch) = (vec![0u8; img.width], Vec::new());
+        for r in 0..img.rows() {
+            ccitt::expand_row(img.row(r), &mut px);
+            if r == img.rows() / 2 {
+                px[img.width / 2] ^= 1;
+            }
+            ccitt::row_changes(&px, &mut ch);
+            flipped.push_row(&ch);
+        }
+        *z = jbig2::pdf_stream(&flipped, true);
     }
 
     pub(super) fn encoder_fault(n: u32, r: Option<Reencoded>) -> Option<Reencoded> {
@@ -2859,6 +2889,13 @@ pub(super) mod check_tests {
             Some((Fault::Filter, at)) if at == n => {
                 d.remove(b"Filter");
             }
+            Some((Fault::Palette, at)) if at == n => {
+                let Some(Obj::Array(space)) = d.get_mut(b"ColorSpace") else { panic!("stream {n} is not Indexed") };
+                let Some(Obj::Str(table)) = space.get_mut(3) else { panic!("stream {n} is not Indexed") };
+                table[4] ^= 1;
+            }
+            #[cfg(feature = "fax")]
+            Some((Fault::Pixel, at)) if at == n => flip_pixel(&mut z),
             _ => {}
         }
         (Some((d, z, change)), u)
@@ -3046,6 +3083,92 @@ pub(super) mod check_tests {
                 assert!(caught(&r), "{fault:?} in stream {n}: {:?}", r.outcome);
                 assert!(r.data == pdf, "{fault:?} in stream {n}");
             }
+        }
+    }
+
+    /// A page with a 1-bit scan (5), a chart of five colours (6) and the chart's soft mask of four greys (7),
+    /// each under Flate in stored blocks.
+    fn forms_pdf() -> Vec<u8> {
+        use super::job_tests::{file_of, stream_of};
+        let mut r = 0x9E37_79B9u64;
+        let mut next = move |k: u64| {
+            r ^= r << 13;
+            r ^= r >> 7;
+            r ^= r << 17;
+            (r % k) as usize
+        };
+        // White (1) with letter-sized dark blobs, like a scan.
+        let (w, h) = (400usize, 300usize);
+        let row = w.div_ceil(8);
+        let mut bits = vec![0xFFu8; row * h];
+        for y in (10..h - 14).step_by(18) {
+            for x in (8..w - 9).step_by(9) {
+                let (bw, bh) = (3 + next(5), 6 + next(6));
+                for yy in y..y + bh {
+                    for xx in x..x + bw {
+                        if next(9) != 0 {
+                            bits[yy * row + xx / 8] &= !(0x80 >> (xx % 8));
+                        }
+                    }
+                }
+            }
+        }
+        let colours = [[255u8, 255, 255], [0, 0, 0], [200, 30, 30], [30, 90, 200], [240, 200, 20]];
+        let chart: Vec<u8> = (0..120 * 80).flat_map(|_| colours[next(5)]).collect();
+        let greys: Vec<u8> = (0..120 * 80).map(|_| [0u8, 85, 170, 255][next(4)]).collect();
+        let image = "/Type /XObject /Subtype /Image /Filter /FlateDecode";
+        file_of(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /XObject << /A 5 0 R /B 6 0 R >> >> >>".to_vec(),
+            stream_of("", b"q 400 0 0 300 50 400 cm /A Do Q q 240 0 0 160 50 100 cm /B Do Q\n"),
+            stream_of(
+                &format!("{image} /Width {w} /Height {h} /ColorSpace /DeviceGray /BitsPerComponent 1"),
+                &stored(&bits),
+            ),
+            stream_of(
+                &format!("{image} /Width 120 /Height 80 /ColorSpace /DeviceRGB /BitsPerComponent 8 /SMask 7 0 R"),
+                &stored(&chart),
+            ),
+            stream_of(
+                &format!("{image} /Width 120 /Height 80 /ColorSpace /DeviceGray /BitsPerComponent 8"),
+                &stored(&greys),
+            ),
+        ])
+    }
+
+    #[test]
+    fn a_wrong_colour_table_or_pixel_is_caught() {
+        let pdf = forms_pdf();
+        let (clean, taken) = rewrite_with(&pdf, 1, None);
+        let Outcome::Smaller(stats) = &clean.outcome else { panic!("{:?}", clean.outcome) };
+        // The chart is Indexed; its soft mask, of four greys, is not (a soft mask stays DeviceGray).
+        assert_eq!((stats.images_indexed, stats.streams_reencoded), (1, 3));
+        assert_eq!(stats.bilevel_to_jbig2, cfg!(feature = "fax") as usize);
+        // Neither form is taken on its job's check: the self-check compares their pixels.
+        assert_eq!(taken, 1 + !cfg!(feature = "fax") as usize);
+        let (four, _) = rewrite_with(&pdf, 4, None);
+        assert!(four.data == clean.data);
+        let mut faults = vec![
+            (Fault::Palette, 6, "dictionary"),
+            (Fault::EncoderContent, 6, "dictionary"),
+            (Fault::Writer, 6, "dictionary"),
+            (Fault::Filter, 6, "dictionary"),
+            // The soft mask written as Indexed: the pixels are right, but it may not be.
+            (Fault::Mask, 7, "dictionary"),
+        ];
+        if cfg!(feature = "fax") {
+            faults.extend([(Fault::Pixel, 5, "content"), (Fault::Writer, 5, "content")]);
+        }
+        for (fault, n, what) in faults {
+            let (r, _) = rewrite_with(&pdf, 1, Some((fault, n)));
+            let why = format!("self-check: {what} of stream {n} differs");
+            assert!(
+                matches!(&r.outcome, Outcome::Untouched(w) if *w == why),
+                "{fault:?} in stream {n}: {:?}",
+                r.outcome
+            );
+            assert!(r.data == pdf, "{fault:?} in stream {n}");
         }
     }
 
@@ -3328,7 +3451,7 @@ pub(super) mod job_tests {
     }
 
     /// A PDF of these objects, numbered from 1 (the first is the catalog).
-    fn file_of(objs: &[Vec<u8>]) -> Vec<u8> {
+    pub(super) fn file_of(objs: &[Vec<u8>]) -> Vec<u8> {
         let mut pdf = b"%PDF-1.4\n".to_vec();
         let mut offsets = Vec::new();
         for (i, o) in objs.iter().enumerate() {
@@ -3349,7 +3472,7 @@ pub(super) mod job_tests {
     }
 
     /// A stream object: `entries` and `/Length` (direct, unless `entries` has one) around `data`.
-    fn stream_of(entries: &str, data: &[u8]) -> Vec<u8> {
+    pub(super) fn stream_of(entries: &str, data: &[u8]) -> Vec<u8> {
         let length = if entries.contains("/Length") { String::new() } else { format!(" /Length {}", data.len()) };
         let mut o = format!("<< {entries}{length} >>\nstream\n").into_bytes();
         o.extend_from_slice(data);
