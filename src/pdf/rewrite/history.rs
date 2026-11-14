@@ -383,6 +383,8 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
             xmp: s.dict.name(b"Type") == Some(b"Metadata")
                 && crypt.is_some_and(|c| c.stream_method(n, &s.dict).is_ok_and(|m| m != Method::Identity)),
             shares: false,
+            // `may_index` reads one object table; a kept revision's images stay as they are coloured.
+            palette: false,
             refs: key
                 .1
                 .iter()

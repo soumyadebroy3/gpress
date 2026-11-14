@@ -70,7 +70,7 @@ the details. `pack` prints the input, bytes in, bytes out, seconds, then `PACKED
 statistics. For `tests/data/format-v9.pdf`, copied to `in.pdf`:
 
 ```
-in.pdf	SMALLER	8791	4955	0.15	objects=6 streams=2 reencoded=2 kept=0 objstms=1 dropped=1 jpegs_retabled=0 fax_to_jbig2=0
+in.pdf	SMALLER	8791	4955	0.15	objects=6 streams=2 reencoded=2 kept=0 objstms=1 dropped=1 jpegs_retabled=0 fax_to_jbig2=0 bilevel_to_jbig2=0 images_indexed=0
 in.pdf	8791	6963	0.10	PACKED streams=3 rebuilt=3 rebuilt_bytes=7909 lepton=0 type1=0 fax=0 decrypted=0 decoded_bytes=54664
 ```
 
@@ -249,7 +249,8 @@ Errors are a plain `Error` enum with a stable numeric code and a message without
 | 5 | invalid options | 10 | needs a part this build leaves out ([building only what a product needs](docs/reference.md#building-only-what-a-product-needs)) |
 
 `Optimized.outcome` says what happened: `Smaller` with a `Report` (objects, streams re-encoded and kept, object
-streams, JPEGs given new tables, fax images written as JBIG2, how the file is encrypted), or `Untouched` with
+streams, JPEGs given new tables, fax and other 1-bit images written as JBIG2, images written as Indexed, how the
+file is encrypted), or `Untouched` with
 the reason. `Compressed` carries the archive's statistics (streams rebuilt, through Lepton, Type 1 fonts opened,
 fax images, streams stored decrypted, decoded bytes, and `stored` when nothing could be made smaller).
 
@@ -331,7 +332,7 @@ ones most callers need:
 | `max_decoded` | `--max-decoded BYTES` | 256 MiB | Archive: the most decoded bytes the parts of one archive may claim, both ways. |
 | `respect_conformance` | `--ignore-conformance` | on | Normal PDF: leave PDF/A, PDF/X, signed, certified and usage-rights files untouched. |
 | `drop_history` | `--drop-history` | off | Normal PDF: write only the newest save of a file that keeps earlier ones (incremental updates). Off, every save is kept. |
-| `jpeg_tables`, `jbig2`, `flate_over_jpeg` | `--no-jpeg-tables`, `--no-jbig2`, `--no-flate-over-jpeg` | on | Normal PDF: turn single steps off. |
+| `jpeg_tables`, `jbig2`, `palette`, `flate_over_jpeg` | `--no-jpeg-tables`, `--no-jbig2`, `--no-palette`, `--no-flate-over-jpeg` | on | Normal PDF: turn single steps off. |
 
 Every other option, the memory each limit bounds, the parts of the engine a build can leave out
 (`--no-default-features --features ...`, for example the smaller `web` build without the archive), how

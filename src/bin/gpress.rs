@@ -10,10 +10,10 @@
 //! --max-stream BYTES (normal PDF), --max-stream-archive BYTES, --max-decoded BYTES (the archive's decoded-bytes
 //! budget, for pack and unpack), --max-len BYTES (unpack: a file declaring more is refused),
 //! --objects-per-stream N, --time-budget MS (give up after that long), --ignore-conformance,
-//! --no-flate-over-jpeg, --no-jpeg-tables, --no-jbig2, --keep-encrypted, --store-budget BYTES (normal PDF),
-//! --drop-history (normal PDF: a file that keeps earlier saves is written with only the newest; each dropped
-//! save is listed on standard error), --no-decrypt (archive), --no-existing. The output never depends on the thread count or the time budget: a
-//! budget that runs out gives an error and no file.
+//! --no-flate-over-jpeg, --no-jpeg-tables, --no-jbig2, --no-palette, --keep-encrypted, --store-budget BYTES
+//! (normal PDF), --drop-history (normal PDF: a file that keeps earlier saves is written with only the newest;
+//! each dropped save is listed on standard error), --no-decrypt (archive), --no-existing. The output never
+//! depends on the thread count or the time budget: a budget that runs out gives an error and no file.
 //!
 //! Measuring tools (the engine's own modules, for the benchmarks): deflate, inflate, batch, pdf-batch,
 //! repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info, fax-decode, fax-encode, fax-scan,
@@ -70,7 +70,8 @@ usage: gpress optimize IN OUT [options]   a smaller PDF that any reader opens (o
 options: --effort N (0 fast .. 100 smallest, default 100; --quick = 0)   --threads N (0: up to 8 cores; max 64)
          --max-input BYTES   --max-stream BYTES (normal PDF)   --max-stream-archive BYTES   --max-decoded BYTES (archive,
          pack and unpack)   --max-len BYTES (unpack)   --objects-per-stream N   --time-budget MS   --ignore-conformance
-         --no-flate-over-jpeg   --no-jpeg-tables   --no-jbig2   --keep-encrypted   --store-budget BYTES (normal PDF)
+         --no-flate-over-jpeg   --no-jpeg-tables   --no-jbig2   --no-palette   --keep-encrypted
+         --store-budget BYTES (normal PDF)
          --drop-history (normal PDF: write only the newest save of a file that keeps earlier ones)
          --no-decrypt (archive)   --no-existing
 measuring tools: deflate, inflate, batch, pdf-batch, repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info,
@@ -155,6 +156,7 @@ fn main() {
     lib.flate_over_jpeg = !flag("--no-flate-over-jpeg");
     lib.jpeg_tables = !flag("--no-jpeg-tables");
     lib.jbig2 = !flag("--no-jbig2");
+    lib.palette = !flag("--no-palette");
     lib.rewrite_encrypted = !flag("--keep-encrypted");
     lib.drop_history = flag("--drop-history");
     lib.decrypt = !flag("--no-decrypt");
@@ -624,7 +626,7 @@ fn describe(name: &str, in_len: usize, r: &gpress::Optimized, secs: f64) -> Stri
     match &r.outcome {
         gpress::Outcome::Smaller(s) => format!(
             "{name}\tSMALLER\t{in_len}\t{}\t{secs:.2}\tobjects={} streams={} reencoded={} kept={} objstms={} dropped={} \
-             jpegs_retabled={} fax_to_jbig2={}{}{}{}",
+             jpegs_retabled={} fax_to_jbig2={} bilevel_to_jbig2={} images_indexed={}{}{}{}",
             r.data.len(),
             s.objects,
             s.streams,
@@ -634,6 +636,8 @@ fn describe(name: &str, in_len: usize, r: &gpress::Optimized, secs: f64) -> Stri
             s.unreachable_objects_dropped,
             s.jpegs_retabled,
             s.fax_to_jbig2,
+            s.bilevel_to_jbig2,
+            s.images_indexed,
             if s.encryption.is_empty() { String::new() } else { format!(" encrypted={}", s.encryption) },
             if s.history_kept == 0 { String::new() } else { format!(" revisions_kept={}", s.history_kept) },
             if s.history_dropped.is_empty() {
