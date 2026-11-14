@@ -203,6 +203,15 @@ fn adds_nothing(a: &Dict, b: &Dict) -> bool {
     a.0.iter().all(|(k, v)| STRUCTURAL.contains(&k.as_slice()) || b.get(k.as_slice()) == Some(&v))
 }
 
+/// How deep arrays and dictionaries nest in `o` (the parser reads no more than 256 levels).
+fn nesting(o: &Obj) -> usize {
+    match o {
+        Obj::Array(a) => 1 + a.iter().map(nesting).max().unwrap_or(0),
+        Obj::Dict(d) => 1 + d.0.iter().map(|(_, v)| nesting(v)).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
 /// How many times `startxref` appears in `d`, and where it first does: its 'x' is looked for first, the rarest of
 /// its bytes.
 fn find_startxref(d: &[u8]) -> (usize, Option<usize>) {
@@ -541,12 +550,36 @@ fn count_row(rows_left: &mut usize) -> Result<(), LoadError> {
 /// dictionary, or after the stream's `endobj`.
 type Section = (Vec<(u32, Entry)>, Dict, usize);
 
+/// Rows that readers take differently once a file has several sections: `saves` asks for them.
+#[derive(Default)]
+struct Rare {
+    /// The free rows with a generation above 0, object 0's aside: number and generation.
+    freed: Vec<(u32, u16)>,
+    /// A row has a generation beyond 16 bits, or a type that is not 0, 1 or 2.
+    odd: bool,
+}
+
+impl Rare {
+    /// Takes note of a row of type `t` (0 free, 1 in use, 2 in an object stream) with the generation `gen`.
+    fn note(&mut self, num: u32, t: u64, gen: u64) {
+        self.odd |= t > 2 || (t < 2 && gen > u16::MAX as u64);
+        if t == 0 && num != 0 && gen > 0 {
+            self.freed.push((num, gen.min(u16::MAX as u64) as u16));
+        }
+    }
+}
+
 fn read_section(d: &[u8], off: usize, rows_left: &mut usize) -> Result<Section, LoadError> {
+    read_rows(d, off, rows_left, None)
+}
+
+/// `read_section`, taking note of the rare rows when `rare` is given.
+fn read_rows(d: &[u8], off: usize, rows_left: &mut usize, mut rare: Option<&mut Rare>) -> Result<Section, LoadError> {
     if off >= d.len() {
         return Err(LoadError::BadXref("offset past the end"));
     }
     if d[off..].starts_with(b"xref") {
-        return read_table(d, off + 4, rows_left);
+        return read_table(d, off + 4, rows_left, rare);
     }
     // An xref stream.
     let (_, _, o, end) = parse_indirect(d, off, &|l| match l {
@@ -614,6 +647,7 @@ fn read_section(d: &[u8], off: usize, rows_left: &mut usize) -> Result<Section, 
             let t = if w[0] == 0 { 1 } else { field(&r[..w[0]]) };
             let f2 = field(&r[w[0]..w[0] + w[1]]);
             let f3 = field(&r[w[0] + w[1]..]);
+            let num = start.checked_add(k).ok_or(LoadError::BadXref("object number beyond 32 bits"))?;
             let e = match t {
                 0 => Entry::Free,
                 // An offset past what this platform addresses is past the end of the file on every platform.
@@ -621,13 +655,21 @@ fn read_section(d: &[u8], off: usize, rows_left: &mut usize) -> Result<Section, 
                 2 => Entry::InStream(f2 as u32, f3 as u32),
                 _ => Entry::Free, // unknown types are treated as null references by the spec
             };
-            out.push((start.checked_add(k).ok_or(LoadError::BadXref("object number beyond 32 bits"))?, e));
+            if let Some(rare) = rare.as_deref_mut() {
+                rare.note(num, t, f3);
+            }
+            out.push((num, e));
         }
     }
     Ok((out, s.dict, end))
 }
 
-fn read_table(d: &[u8], mut pos: usize, rows_left: &mut usize) -> Result<Section, LoadError> {
+fn read_table(
+    d: &[u8],
+    mut pos: usize,
+    rows_left: &mut usize,
+    mut rare: Option<&mut Rare>,
+) -> Result<Section, LoadError> {
     let mut out = Vec::new();
     loop {
         let mut lx = Lexer::new(d, pos);
@@ -671,6 +713,9 @@ fn read_table(d: &[u8], mut pos: usize, rows_left: &mut usize) -> Result<Section
                 .checked_add(k)
                 .and_then(|n| u32::try_from(n).ok())
                 .ok_or(LoadError::BadXref("object number beyond 32 bits"))?;
+            if let Some(rare) = rare.as_deref_mut() {
+                rare.note(num, (e != Entry::Free) as u64, gen as u64);
+            }
             out.push((num, e));
             p += 18;
             // Two end-of-line bytes in well-formed files; tolerate one.
@@ -705,6 +750,9 @@ pub const TOO_MANY: &str = "keeps earlier revisions: too many to check for its s
 /// The most saves a file is taken apart into.
 pub const MOST_SAVES: usize = 64;
 
+/// How deep the arrays and dictionaries in a trailer may nest for its file to be taken apart.
+const MOST_NESTED: usize = 16;
+
 /// One save of a file, as `saves` finds it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Save {
@@ -715,6 +763,10 @@ pub struct Save {
     /// The newest save's /Prev chain reaches it: a revision of the file. Otherwise it is an earlier save the newest
     /// doesn't link (a whole file appended after another, say).
     pub linked: bool,
+    /// Its trailer lacks a key about the document that the trailer of the revision before it has, one whose value
+    /// there names no object. Readers that fill a trailer in from older ones still see the key: the save can be
+    /// kept after the others, not written alone.
+    pub lacks_key: bool,
 }
 
 /// Every place `pat` starts in `d`, at most `most` of them.
@@ -757,7 +809,11 @@ fn rows_agree<'r>(rows: impl Iterator<Item = &'r (u32, Entry)>) -> bool {
 /// section, the `startxref 0` after that, and its main section). Anything else is an error, the reason to leave the
 /// file as it is: a `startxref` without a number or without a `%%EOF` before the next one, an end the file cut
 /// there doesn't open from, two ends naming one section, a section without an end of its own, a hybrid section
-/// (/XRefStm), one number given two different rows by one save, a chain that doesn't read.
+/// (/XRefStm), one number given two different rows by one save, a chain that doesn't read or that a /Prev of 0 goes
+/// on, a trailer without a key that the save before it has and that names an object there, a trailer nested 16
+/// levels deep, a
+/// row with a lower generation than an older row of its number, a row with a generation beyond 16 bits or of an
+/// unknown type, a linearisation dictionary whose /L is the length of the whole file.
 ///
 /// No object is loaded. Each section is read once, all of them within the rows a file of this size may have.
 pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
@@ -788,6 +844,8 @@ pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
 
     // Sections by where they start: their end, trailer and rows.
     let mut sections: HashMap<usize, Section> = HashMap::new();
+    // Each section's free rows with a generation above 0.
+    let mut freed: HashMap<usize, Vec<(u32, u16)>> = HashMap::new();
     let mut rows_left = row_limit(data.len());
     // The chain from the section `off` names, newest first.
     let mut chain = |off: usize, sections: &mut HashMap<usize, Section>| -> Result<Vec<usize>, &'static str> {
@@ -802,14 +860,21 @@ pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
                 if sections.len() > 1000 {
                     return Err(TOO_MANY);
                 }
-                let read = read_section(data, off, &mut rows_left).map_err(|_| KEEPS)?;
-                if read.1.has(b"XRefStm") || !rows_agree(read.0.iter()) {
+                let mut rare = Rare::default();
+                let read = read_rows(data, off, &mut rows_left, Some(&mut rare)).map_err(|_| KEEPS)?;
+                // (A reader that gives up inside a deep trailer loses the keys after that place: PDFium reads 63
+                // levels.)
+                let deep = read.1 .0.iter().any(|(_, v)| nesting(v) >= MOST_NESTED);
+                if read.1.has(b"XRefStm") || !rows_agree(read.0.iter()) || deep || rare.odd {
                     return Err(KEEPS);
                 }
                 sections.insert(at, read);
+                freed.insert(at, rare.freed);
             }
+            // (A /Prev of 0 ends the chain for qpdf and PDFium; `read_section` would read on from the file's first
+            // object.)
             next = match sections[&at].1.get(b"Prev") {
-                Some(Obj::Int(p)) if *p >= 0 => Some(usize::try_from(*p).unwrap_or(usize::MAX)),
+                Some(Obj::Int(p)) if *p > 0 => Some(usize::try_from(*p).unwrap_or(usize::MAX)),
                 None => None,
                 _ => return Err(KEEPS),
             };
@@ -818,7 +883,6 @@ pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
         Ok(out)
     };
     let newest = chain(newest_at, &mut sections)?;
-
     let mut out = Vec::new();
     // For each revision in file order, its section's place in the newest chain: older ones come first, further down.
     let mut revisions: Vec<usize> = Vec::new();
@@ -849,11 +913,30 @@ pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
         if own.iter().any(|c| sections[c].2 > eof) {
             return Err(KEEPS);
         }
-        out.push(Save { end, section: at, linked: place.is_some() });
+        out.push(Save { end, section: at, linked: place.is_some(), lacks_key: false });
+    }
+    // PDFium keeps the row with the higher generation where the others keep the newer row: no row in use has a
+    // lower generation than an older section's row of its number, free rows counted.
+    let mut highest: HashMap<u32, u16> = HashMap::new();
+    for at in newest.iter().rev() {
+        let used = sections[at].0.iter().filter_map(|&(n, e)| match e {
+            Entry::Offset(_, g) => Some((n, g)),
+            Entry::InStream(..) => Some((n, 0)),
+            Entry::Free => None,
+        });
+        if used.clone().any(|(n, g)| highest.get(&n).is_some_and(|&h| h > g)) {
+            return Err(KEEPS);
+        }
+        for (n, g) in used.chain(freed[at].iter().copied()).filter(|r| r.0 != 0 && r.1 > 0) {
+            let h = highest.entry(n).or_insert(0);
+            *h = (*h).max(g);
+        }
     }
     // Each revision owns the sections from its own down to the older revision's: one section, or the two of a
     // linearised first save (as `open_with` takes them for one save).
     let mut upper = newest.len();
+    let mut older: Option<&Dict> = None;
+    let linked: Vec<usize> = (0..out.len()).filter(|&i| out[i].linked).collect();
     for (t, &j) in revisions.iter().enumerate() {
         let own = &newest[j..upper];
         let (first_page, main) = (&sections[&own[0]], &sections[&own[own.len() - 1]]);
@@ -867,6 +950,22 @@ pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
         if !(linearised || own.len() == 1 && (t > 0 || marker.is_none())) {
             return Err(KEEPS);
         }
+        // Some readers fill in what the newest trailer lacks from older ones (see `adds_nothing`): a revision's
+        // trailer has every key about the document that the trailer of the one before it has, whatever its value.
+        // A key it lacks may only have a value that names no object: such a reader then sees that same value in
+        // every later revision, in the input and in what is written with every save kept.
+        let trailer = &first_page.1;
+        for (k, v) in older.iter().flat_map(|o| &o.0) {
+            if !STRUCTURAL.contains(&k.as_slice()) && !trailer.has(k) {
+                let mut refs = Vec::new();
+                v.refs(&mut refs);
+                if !refs.is_empty() {
+                    return Err(KEEPS);
+                }
+                out[linked[t]].lacks_key = true;
+            }
+        }
+        older = Some(trailer);
         upper = j;
     }
     if revisions.last() != Some(&0) {
@@ -874,6 +973,28 @@ pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
     }
     if out.len() > MOST_SAVES {
         return Err(TOO_MANY);
+    }
+    // Poppler, and PDFium when it loads a file the way Chrome does, take a linearised file from its first-page
+    // section when the first object's /L is the file's length: they then never see a later save.
+    let whole = |l: &Obj| match l {
+        Obj::Int(l) => *l as f64 == data.len() as f64,
+        Obj::Real(l) => std::str::from_utf8(l).ok().and_then(|l| l.parse().ok()) == Some(data.len() as f64),
+        _ => false,
+    };
+    let mut lx = Lexer::new(data, 0);
+    lx.skip_ws();
+    lx.regular_token();
+    lx.skip_ws();
+    lx.regular_token();
+    if out.len() > 1 && lx.expect_keyword(b"obj") {
+        match lx.parse_obj() {
+            Ok(Obj::Dict(first)) if first.has(b"Linearized") && first.get(b"L").is_some_and(whole) => {
+                return Err(KEEPS)
+            }
+            // Another reader may still read a dictionary here.
+            Err(_) => return Err(KEEPS),
+            Ok(_) => {}
+        }
     }
     Ok(out)
 }

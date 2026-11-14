@@ -766,3 +766,139 @@ fn more_saves_than_are_taken_apart_leave_the_file_untouched() {
     }
     untouched_for(&p.d, xref::TOO_MANY, &Options::effort(0));
 }
+
+#[test]
+fn a_prev_of_zero_leaves_the_file_untouched() {
+    // The first save's cross-reference stream (7) is the file's first object, so a chain that goes on at a /Prev of
+    // 0 finds it there. qpdf and PDFium end the chain instead, and show nothing that only the first save lists.
+    let mut p = Pdf::new();
+    p.obj(7, &stream("/Type /XRef /Size 8 /W [1 2 1] /Index [1 5 7 1] /Root 1 0 R", &[0; 24]));
+    let rows_at = p.d.len() - 24 - b"\nendstream\nendobj\n".len();
+    page(&mut p, "ORIGINAL SECRET TEXT");
+    let rows: Vec<u8> = [1, 2, 3, 4, 5, 7].iter().flat_map(|n| [1, (p.at[n] >> 8) as u8, p.at[n] as u8, 0]).collect();
+    p.d[rows_at..rows_at + 24].copy_from_slice(&rows);
+    p.d.extend_from_slice(b"startxref\n9\n%%EOF\n");
+    p.obj(6, b"<< /Title (Second save) >>");
+    p.table(6, 1, "/Size 8 /Root 1 0 R /Info 6 0 R /Prev 0", None);
+    assert_eq!(xref::open(&p.d).unwrap().sections, 2);
+    untouched(&p.d);
+    untouched_for(&p.d, KEEPS, &Options { drop_history: true, ..Options::effort(0) });
+}
+
+#[test]
+fn a_reference_to_an_object_a_later_save_frees_leaves_the_file_untouched() {
+    // Here and for qpdf the reference is null; readers that keep the earlier save's row still show the object.
+    // The update frees the document information (6), which its trailer still names.
+    let mut p = Pdf::new();
+    page(&mut p, "ORIGINAL SECRET TEXT");
+    p.obj(6, b"<< /Title (First save) >>");
+    let x = p.table(0, 7, "/Size 7 /Root 1 0 R /Info 6 0 R", None);
+    p.at.remove(&6);
+    p.table(6, 1, &format!("/Size 7 /Root 1 0 R /Info 6 0 R /Prev {x}"), None);
+    // The update frees the font (5) and writes the page (3) again, naming the font at another generation.
+    let (mut q, x) = first_save();
+    q.obj(3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << /Font << /F1 5 1 R >> >> >>");
+    q.at.remove(&5);
+    q.table_of(&[(3, 1), (5, 1)], &format!("/Size 6 /Root 1 0 R /Prev {x}"), None);
+    let why = "keeps earlier revisions: a reference to an object a later save frees";
+    for pdf in [&p.d, &q.d] {
+        for drop_history in [false, true] {
+            untouched_for(pdf, why, &Options { drop_history, ..Options::effort(0) });
+        }
+    }
+}
+
+#[test]
+fn a_trailer_without_a_key_the_save_before_it_has_leaves_the_file_untouched() {
+    // PDFium and others take the document information the first trailer names when the newest names none: the
+    // update's new value for it (6) would be left at the first save's.
+    let mut p = Pdf::new();
+    page(&mut p, "ORIGINAL SECRET TEXT");
+    p.obj(6, b"<< /Title (First save) >>");
+    let x = p.table(0, 7, "/Size 7 /Root 1 0 R /Info 6 0 R", None);
+    p.obj(6, b"<< /Title (Second save) >>");
+    let named = p.d.len();
+    p.table(6, 1, &format!("/Size 7 /Root 1 0 R /Prev {x}"), None);
+    untouched(&p.d);
+    untouched_for(&p.d, KEEPS, &Options { drop_history: true, ..Options::effort(0) });
+    // The same when the key comes after a value nested deeper than such a reader reads: it never gets to the key.
+    p.d.truncate(named);
+    let deep = format!("{}1{}", "<< /A ".repeat(16), " >>".repeat(16));
+    p.table(6, 1, &format!("/Size 7 /Root 1 0 R /Prev {x} /X {deep} /Info 6 0 R"), None);
+    untouched(&p.d);
+    // Not as deep, the file is kept.
+    p.d.truncate(named);
+    p.table(6, 1, &format!("/Size 7 /Root 1 0 R /Prev {x} /X [[[1]]] /Info 6 0 R"), None);
+    kept(&p.d, 2);
+
+    // A key that names no object (as LibreOffice writes one, and other editors leave out of their updates) reads
+    // the same for such a reader in every revision: the saves are kept, but the newest is not written alone.
+    let mut p = Pdf::new();
+    page(&mut p, "ORIGINAL SECRET TEXT");
+    let x = p.table(0, 6, "/Size 6 /Root 1 0 R /DocChecksum /0123456789ABCDEF", None);
+    p.obj(6, b"<< /Title (Second save) >>");
+    p.table(6, 1, &format!("/Size 7 /Root 1 0 R /Info 6 0 R /Prev {x}"), None);
+    kept(&p.d, 2);
+    untouched_for(&p.d, KEEPS, &Options { drop_history: true, ..Options::effort(0) });
+}
+
+#[test]
+fn a_generation_that_goes_down_leaves_the_file_untouched() {
+    // PDFium keeps the row with the higher generation where the others keep the newer row.
+    // The first save's document information (6) has generation 1, the update's has generation 0.
+    let mut p = Pdf::new();
+    page(&mut p, "ORIGINAL SECRET TEXT");
+    let at6 = p.d.len();
+    p.d.extend_from_slice(b"6 1 obj\n<< /Title (First save) >>\nendobj\n");
+    let x = p.d.len();
+    let rows: String = (1..6).map(|n| format!("{:010} 00000 n \n", p.at[&n])).collect();
+    let trailer = "trailer\n<< /Size 7 /Root 1 0 R /Info 6 1 R >>";
+    let table = format!("xref\n0 7\n0000000000 65535 f \n{rows}{at6:010} 00001 n \n{trailer}\nstartxref\n{x}\n%%EOF\n");
+    p.d.extend_from_slice(table.as_bytes());
+    p.obj(6, b"<< /Title (Second save) >>");
+    p.table(6, 1, &format!("/Size 7 /Root 1 0 R /Info 6 0 R /Prev {x}"), None);
+    untouched(&p.d);
+    untouched_for(&p.d, KEEPS, &Options { drop_history: true, ..Options::effort(0) });
+
+    // The first save's cross-reference stream (7) lists the number as free with the generation `free`.
+    let with = |free: u8| {
+        let mut p = Pdf::new();
+        page(&mut p, "ORIGINAL SECRET TEXT");
+        let at7 = p.d.len();
+        let mut rows: Vec<u8> = (1..6).flat_map(|n| [1, (p.at[&n] >> 8) as u8, p.at[&n] as u8, 0]).collect();
+        rows.extend([0, 0, 0, free, 1, (at7 >> 8) as u8, at7 as u8, 0]);
+        p.obj(7, &stream("/Type /XRef /Size 8 /W [1 2 1] /Index [1 7] /Root 1 0 R", &rows));
+        p.d.extend_from_slice(format!("startxref\n{at7}\n%%EOF\n").as_bytes());
+        p.obj(6, b"<< /Title (Second save) >>");
+        p.table(6, 1, &format!("/Size 8 /Root 1 0 R /Info 6 0 R /Prev {at7}"), None);
+        p.d
+    };
+    untouched(&with(1));
+    kept(&with(0), 2);
+}
+
+#[test]
+fn a_generation_beyond_16_bits_leaves_the_file_untouched() {
+    // Only the low 16 bits are read here (generation 0), so the rule on generations can't be held for such a row.
+    let (mut p, x) = first_save();
+    p.obj(6, b"<< /Title (Second save) >>");
+    let (at6, t) = (p.at[&6], p.d.len());
+    let trailer = format!("trailer\n<< /Size 7 /Root 1 0 R /Info 6 0 R /Prev {x} >>");
+    p.d.extend_from_slice(format!("xref\n6 1\n{at6:010} 65536 n \n{trailer}\nstartxref\n{t}\n%%EOF\n").as_bytes());
+    untouched(&p.d);
+}
+
+#[test]
+fn a_linearisation_dictionary_that_gives_the_whole_length_leaves_the_file_untouched() {
+    // Poppler, and PDFium loading the way Chrome does, take a linearised file from its first-page section when /L is
+    // the file's length: they never see the update. With another /L they start from the end, like the others.
+    let (mut p, first) = linearised_save(Pdf::new(), true);
+    p.obj(20, b"<< /Title (Second save) >>");
+    p.table(20, 1, &format!("/Size 21 /Root 1 0 R /Info 20 0 R /Prev {first}"), None);
+    let old = b"/L 0 /O 3 /E 0 /N 1 /T 0 /H [0 0]";
+    let at = p.d.windows(old.len()).position(|w| w == old).unwrap();
+    let new = format!("{:<1$}", format!("/L {}", p.d.len()), old.len());
+    p.d[at..at + old.len()].copy_from_slice(new.as_bytes());
+    untouched(&p.d);
+    untouched_for(&p.d, KEEPS, &Options { drop_history: true, ..Options::effort(0) });
+}
