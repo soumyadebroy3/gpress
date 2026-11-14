@@ -105,32 +105,30 @@ fn build_as(
 const PAGES: &[u8] = b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>";
 const PAGE: &[u8] = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>";
 
-/// The catalog (referring to `refs` too), the pages and a page, and with `pad` an image of that many bytes that
-/// don't compress, so that the file is larger.
+/// The catalog (referring to `refs` too), the pages, a page, and an image of `pad` bytes that don't compress, so
+/// that the file is larger. The image has at least 4 KiB: these files number their objects from 1000, and a file
+/// is rewritten only while its highest object number stays within a third of the new length (qpdf 12's bound).
 fn catalog(refs: impl Iterator<Item = u32>, pad: usize) -> Vec<(u32, Vec<u8>)> {
     let refs: Vec<String> = refs.map(|n| format!("{n} 0 R")).collect();
-    let mut plain = vec![
-        (1, format!("<< /Type /Catalog /Pages 2 0 R /C [{}] >>", refs.join(" ")).into_bytes()),
+    let pad = pad.max(4096);
+    let mut x = 0x2545_f491_u32;
+    let noise: Vec<u8> = (0..pad)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x as u8
+        })
+        .collect();
+    let mut s = format!("<< /Type /XObject /Subtype /Image /Width {pad} /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length {pad} >>\nstream\n").into_bytes();
+    s.extend_from_slice(&noise);
+    s.extend_from_slice(b"\nendstream");
+    vec![
+        (1, format!("<< /Type /Catalog /Pages 2 0 R /C [{} 4 0 R] >>", refs.join(" ")).into_bytes()),
         (2, PAGES.to_vec()),
         (3, PAGE.to_vec()),
-    ];
-    if pad > 0 {
-        let mut x = 0x2545_f491_u32;
-        let noise: Vec<u8> = (0..pad)
-            .map(|_| {
-                x ^= x << 13;
-                x ^= x >> 17;
-                x ^= x << 5;
-                x as u8
-            })
-            .collect();
-        let mut s = format!("<< /Type /XObject /Subtype /Image /Width {pad} /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length {pad} >>\nstream\n").into_bytes();
-        s.extend_from_slice(&noise);
-        s.extend_from_slice(b"\nendstream");
-        plain.push((4, s));
-        plain[0].1 = format!("<< /Type /Catalog /Pages 2 0 R /C [{} 4 0 R] >>", refs.join(" ")).into_bytes();
-    }
-    plain
+        (4, s),
+    ]
 }
 
 /// `k` object streams with the same `len` decoded bytes. Each lists objects 1000..1000+k (the catalog refers to
@@ -530,8 +528,8 @@ fn a_length_in_a_refused_object_stream_gives_its_reason() {
     // A content stream whose /Length is object 1000, an integer in 64 KiB of object stream: past the stream
     // limit, the file is left as it is for that reason (not for an unusable /Length).
     let (raw, first) = objstm_raw(&[(1000, b"17".to_vec())], 64 << 10);
-    let mut plain = catalog(std::iter::once(4), 0);
-    plain.push((4, b"<< /Length 1000 0 R >>\nstream\nBT (seventeen) ET\nendstream".to_vec()));
+    let mut plain = catalog(std::iter::once(5), 0);
+    plain.push((5, b"<< /Length 1000 0 R >>\nstream\nBT (seventeen) ET\nendstream".to_vec()));
     let pdf = build(&plain, &[(100, raw, 1, first)], &[(1000, 100, 0)]);
     smaller(&optimize(&pdf, &opt(1 << 20)), &pdf);
     let why = untouched(&optimize(&pdf, &opt(32 << 10)), &pdf);
