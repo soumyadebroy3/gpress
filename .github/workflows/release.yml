@@ -23,9 +23,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # The tag the files are named after, and the source they are built from.
+  # The tag the files are named after and, for a start by hand, the source they are built from. Otherwise SOURCE
+  # is empty and every job checks out the commit that started the run: a tag moved since then stops the job.
   TAG: ${{ github.event_name == 'pull_request' && 'v0.0.0-trial' || inputs.tag || github.ref_name }}
-  SOURCE: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+  SOURCE: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || '' }}
 
 # Nothing here publishes: the last job makes a DRAFT release with the files attached, and the owner publishes
 # it by hand. This is also the only place gpress is built and tested off x86-64 Linux, each target on a runner
@@ -56,7 +57,7 @@ jobs:
       TARGET: ${{ matrix.target }}
     steps:
       # A tag that is not a version is not released ("v*" also matches a tag such as "various"). On Windows git
-      # would otherwise rewrite line ends in the test files it takes for text.
+      # would otherwise rewrite line ends in the files it takes for text: test files, and two built into the tool.
       - run: |
           [[ "$TAG" =~ ^v[0-9][0-9A-Za-z.+-]*$ ]] || { echo "not a version tag: $TAG" >&2; exit 1; }
           git config --global core.autocrlf false
@@ -64,6 +65,12 @@ jobs:
         with:
           ref: ${{ env.SOURCE }}
           persist-credentials: false
+      # The files say the version they are named after. A pull request's trial has a made-up tag.
+      - if: github.event_name != 'pull_request'
+        run: |
+          v=${TAG#v}
+          grep -qxF "version = \"$v\"" Cargo.toml && grep -qF "\"version\": \"$v\"" crates/gpress-wasm/js/package.json ||
+            { echo "tag $TAG is not the version in Cargo.toml and in the npm package.json" >&2; exit 1; }
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
@@ -72,7 +79,10 @@ jobs:
           host=$(rustc -vV | sed -n 's/^host: //p')
           [ "$host" = "$TARGET" ] || { echo "this runner builds for $host, not for $TARGET" >&2; exit 1; }
       - run: cargo test --release --workspace --locked
+      # The tool that ships is built by itself, so that no other member of the workspace decides how. The
+      # command-line tests then run that very file.
       - run: cargo build --release --locked -p gpress
+      - run: cargo test --release --locked -p gpress --test cli
       - name: Package the tool
         run: |
           name="gpress-$TAG-$TARGET"
@@ -122,7 +132,7 @@ jobs:
           package-manager-cache: false
       # binaryen's wasm-opt, which the package build runs on the modules (as CI's WebAssembly job does).
       - run: sudo apt-get update && sudo apt-get install -y binaryen
-      # The tarball `npm publish` would upload: dist/ with both modules, the wrapper and its types.
+      # The package as `npm pack` writes it: dist/ with both modules, the wrapper and its types.
       - working-directory: crates/gpress-wasm/js
         run: |
           npm ci
@@ -155,6 +165,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          # Another run for this tag may have left a release, and a second one would be a second draft.
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "a release for $TAG exists already: delete it on the Releases page, then run this again" >&2
+            exit 1
+          fi
           sha256sum -- * > ../SHA256SUMS
           mv ../SHA256SUMS .
           cat SHA256SUMS
