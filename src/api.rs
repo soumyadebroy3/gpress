@@ -35,12 +35,14 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
 
 use crate::clock::Deadline;
+use crate::flate::FlateRules;
 #[cfg(feature = "archive")]
 use crate::pack;
 // Without the archive: its format's constants, which the options and `is_archive` use in every build.
 #[cfg(not(feature = "archive"))]
 use crate::off::pack;
 use crate::pdf::rewrite;
+pub use crate::pdf::rewrite::Dropped;
 use crate::Feature;
 
 /// Library version, from Cargo.
@@ -142,11 +144,20 @@ pub struct Options {
     pub flate_over_jpeg: bool,
     /// Normal PDF: give JPEG images optimal Huffman tables (the same coefficients, read back and compared).
     pub jpeg_tables: bool,
-    /// Normal PDF: write CCITT fax images as JBIG2 when that is clearly smaller (the same pixels).
+    /// Normal PDF: write CCITT fax images, and 1-bit images stored without an image codec, as JBIG2 when that
+    /// is clearly smaller (the same pixels).
     pub jbig2: bool,
+    /// Normal PDF: write an 8-bit image of few colours as an Indexed image over its own colour space when
+    /// that is smaller (the same colour for every pixel).
+    pub palette: bool,
     /// Normal PDF: rewrite files the empty user password opens, keeping their encryption exactly. Off,
     /// every encrypted file is left untouched.
     pub rewrite_encrypted: bool,
+    /// Normal PDF: a file that keeps earlier saves (incremental updates) keeps every one of them, each read
+    /// back and compared. With `true` only the newest save is written and the earlier ones are gone for good:
+    /// [`Report::history_dropped`] lists them. A file where any save is signed, certified, PDF/A or PDF/X or
+    /// has usage rights stays untouched either way.
+    pub drop_history: bool,
     /// Archive: store the streams of a file the empty user password opens decrypted (so they can be rebuilt
     /// and modelled) and encrypt them again on expand. Off, encrypted streams are stored as they are.
     pub decrypt: bool,
@@ -166,6 +177,11 @@ pub struct Options {
     /// the archive carries them in its header and is version 10, which a build that reads only version 9
     /// refuses. Expand takes them from the archive, never from here (it reads `deadline_step` only).
     pub archive_rules: ArchiveRules,
+    /// The values the two Flate encoders work by: how hard each effort searches, where blocks end, and so on.
+    /// Each has a name, a default and a range ([`FlateRules`]); change one with
+    /// `flate_rules.set("e40_depth", 4096)`. With none set the output is what it always was; any value in a
+    /// rule's range gives a correct output, only smaller or larger, sooner or later.
+    pub flate_rules: FlateRules,
 }
 
 impl Default for Options {
@@ -184,11 +200,14 @@ impl Default for Options {
             flate_over_jpeg: true,
             jpeg_tables: true,
             jbig2: true,
+            palette: true,
             rewrite_encrypted: true,
+            drop_history: false,
             decrypt: true,
             use_existing_libraries: true,
             time_budget: None,
             archive_rules: ArchiveRules::default(),
+            flate_rules: FlateRules::default(),
         }
     }
 }
@@ -249,8 +268,16 @@ impl Options {
         self.jbig2 = yes;
         self
     }
+    pub fn palette(mut self, yes: bool) -> Options {
+        self.palette = yes;
+        self
+    }
     pub fn rewrite_encrypted(mut self, yes: bool) -> Options {
         self.rewrite_encrypted = yes;
+        self
+    }
+    pub fn drop_history(mut self, yes: bool) -> Options {
+        self.drop_history = yes;
         self
     }
     pub fn decrypt(mut self, yes: bool) -> Options {
@@ -299,9 +326,9 @@ impl Options {
     }
 
     /// The Flate encoder settings this effort level means: the fast encoder below 20, the strong encoder's
-    /// steps of 20 from there (see `flate::Options::effort`).
+    /// steps of 20 from there (see `flate::Options::effort_with`), under `flate_rules`.
     pub(crate) fn flate(&self) -> crate::flate::Options {
-        crate::flate::Options::effort(self.effort.level())
+        crate::flate::Options::effort_with(self.effort.level(), &self.flate_rules)
     }
 
     /// The Flate settings for this effort, for the command-line tool's fine-tuning flags.
@@ -322,8 +349,10 @@ impl Options {
             respect_conformance: self.respect_conformance,
             flate_over_jpeg: self.flate_over_jpeg,
             jbig2: self.jbig2,
+            palette: self.palette,
             jpeg_tables: self.jpeg_tables,
             rewrite_encrypted: self.rewrite_encrypted,
+            drop_history: self.drop_history,
             deadline: self.deadline(),
         }
     }
@@ -460,8 +489,18 @@ pub struct Report {
     pub jpegs_retabled: usize,
     /// CCITT fax images written as JBIG2 (the same pixels).
     pub fax_to_jbig2: usize,
+    /// 1-bit images stored without an image codec written as JBIG2 (the same pixels).
+    pub bilevel_to_jbig2: usize,
+    /// Images of few colours written as Indexed images (the same colours).
+    pub images_indexed: usize,
     /// How the file is encrypted, kept exactly as it was (e.g. "R4/AESV2"); empty when it isn't.
     pub encryption: String,
+    /// Earlier saves (incremental updates) kept, each one read back and compared with the input's. The counts
+    /// above are then of what was written: an object or stream once for each revision that adds or changes it,
+    /// and no count of unreachable objects.
+    pub history_kept: usize,
+    /// Earlier saves dropped because [`Options::drop_history`] asked, oldest first.
+    pub history_dropped: Vec<Dropped>,
 }
 
 /// A normal-PDF result.
@@ -541,7 +580,11 @@ pub fn optimize(input: &[u8], opt: &Options) -> Result<Optimized, Error> {
                 unreachable_objects_dropped: s.dropped_unreachable,
                 jpegs_retabled: s.jpegs_retabled,
                 fax_to_jbig2: s.fax_to_jbig2,
+                bilevel_to_jbig2: s.bilevel_to_jbig2,
+                images_indexed: s.images_indexed,
                 encryption: s.encryption,
+                history_kept: s.history_kept,
+                history_dropped: s.history_dropped,
             }),
             rewrite::Outcome::Untouched(why) => Outcome::Untouched(why),
             rewrite::Outcome::TimedOut => return Err(Error::TimeBudget(opt.time_budget.unwrap_or_default())),
@@ -727,13 +770,17 @@ mod tests {
             .flate_over_jpeg(false)
             .jpeg_tables(false)
             .jbig2(false)
+            .palette(false)
             .rewrite_encrypted(false)
+            .drop_history(true)
             .decrypt(false)
             .use_existing_libraries(false)
             .time_budget(Some(Duration::from_secs(9)));
         let r = opt.rewrite();
         assert_eq!((r.effort, r.threads, r.store_budget, r.max_stream, r.objstm_size), (40, 3, 4096, 1000, 7));
         assert!(!r.respect_conformance && !r.flate_over_jpeg && !r.jpeg_tables && !r.jbig2 && !r.rewrite_encrypted);
+        assert!(r.drop_history && !Options::default().rewrite().drop_history);
+        assert!(!r.palette && Options::default().rewrite().palette);
         assert!(r.deadline.is_set() && r.flate.deadline == Deadline::NONE, "the pool sets the Flate deadline");
         assert!(!Options::default().rewrite().deadline.is_set());
         #[cfg(feature = "archive")]

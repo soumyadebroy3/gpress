@@ -79,11 +79,17 @@ typedef struct gpress_options {
   uint8_t respect_conformance;    /* 1: leave PDF/A, PDF/X, signed and certified files untouched */
   uint8_t flate_over_jpeg;        /* 1: also try Flate in front of JPEG images */
   uint8_t jpeg_tables;            /* 1: give JPEG images optimal Huffman tables (same coefficients) */
-  uint8_t jbig2;                  /* 1: write CCITT fax images as JBIG2 when clearly smaller (same pixels) */
+  uint8_t jbig2;                  /* 1: write CCITT fax images, and 1-bit images stored without an image
+                                     codec, as JBIG2 when clearly smaller (same pixels) */
   uint8_t rewrite_encrypted;      /* 1: rewrite files the empty password opens, keeping their encryption */
   uint8_t decrypt;                /* 1: archive: store such files' streams decrypted (encrypted again on
                                      expand) */
   uint8_t use_existing_libraries; /* 1: use the optional existing library (Lepton) when built in */
+  uint8_t palette;                /* 1: write an 8-bit image of few colours as an Indexed image when smaller
+                                     (same colours). The last byte, which was padding: no other field moved */
+  uint8_t drop_history;           /* exactly 1: write only the newest save of a file that keeps earlier ones
+                                     (the earlier saves are gone for good); any other value keeps every save,
+                                     and the default is 0 */
 } gpress_options;
 
 typedef struct gpress_buffer {
@@ -102,7 +108,7 @@ typedef struct gpress_result {
 /* Version string, e.g. "0.1.0". Static; do not free. */
 const char *gpress_version(void);
 
-/* Fills *out with the defaults (effort 100, every step on). */
+/* Fills *out with the defaults (effort 100, every step on, drop_history 0). */
 void gpress_options_default(gpress_options *out);
 
 /* A smaller PDF that any reader opens, every object's value preserved; or the input untouched. */

@@ -4,10 +4,8 @@
 //! lengths and distances both increasing (followed, with alternatives, by farther matches). The optimal parser
 //! reads it to price every length.
 
+use super::rules::{rule, FlateRules};
 use super::tables::*;
-
-const HASH_BITS: u32 = 16;
-const HASH_SIZE: usize = 1 << HASH_BITS;
 
 /// One step in three bytes: its length less 3 (lengths are 3 to 258), then its distance.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -32,8 +30,9 @@ pub fn pairs(steps: &[Step]) -> Vec<(u16, u16)> {
     steps.iter().map(|s| s.get()).collect()
 }
 
-/// How many steps of each walk (the first it finds) the parse weighs with alternatives. Which alternatives are
-/// dropped as never winning depends on it.
+/// The most steps of each walk (the first it finds) the parse can weigh with alternatives: the room it has for
+/// them. How many it does weigh is the rule `alt_candidates` (`Matches::candidates`), by default as many. Which
+/// alternatives are dropped as never winning depends on it.
 pub const CANDIDATES: usize = 32;
 
 /// The run lengths the parser tells apart (see `Matches::same`).
@@ -46,7 +45,7 @@ pub struct Matches {
     /// Each position's chain first: the steps longer than every closer one (the smallest distance for each
     /// length), lengths and distances increasing. With alternatives, the farther matches that are no longer
     /// than a closer step follow it: by length (of equal lengths the farther first) when the walk found at
-    /// most `CANDIDATES` steps, otherwise by distance. In order of distance, the two together are the order the walk
+    /// most `candidates` steps, otherwise by distance. In order of distance, the two together are the order the walk
     /// found them in.
     pub(crate) steps: Vec<Step>,
     /// Whether the steps include alternatives; without them every step is in the chain.
@@ -57,6 +56,8 @@ pub struct Matches {
     /// `RUNS` lengths it is longer than: all the parser asks of it.
     pub(crate) same: Vec<u8>,
     pub(crate) from: usize,
+    /// How many steps of each walk (the first it finds) the parse weighs with alternatives, at most `CANDIDATES`.
+    pub(crate) candidates: usize,
 }
 
 impl Matches {
@@ -88,10 +89,11 @@ impl Matches {
     }
 }
 
+/// The hash of three bytes in the top bits of 32 (`shift`: 32 less the table's bits).
 #[inline]
-fn hash3(d: &[u8], i: usize) -> usize {
+fn hash3(d: &[u8], i: usize, shift: u32) -> usize {
     let v = d[i] as u32 | (d[i + 1] as u32) << 8 | (d[i + 2] as u32) << 16;
-    (v.wrapping_mul(0x9E37_79B1) >> (32 - HASH_BITS)) as usize
+    (v.wrapping_mul(0x9E37_79B1) >> shift) as usize
 }
 
 /// Length of the common prefix of `d[a..]` and `d[b..]`, at most `max`, starting the comparison at `skip`.
@@ -120,44 +122,69 @@ fn common(d: &[u8], a: usize, b: usize, skip: usize, max: usize) -> usize {
 /// and with newer positions above older ones. Walking down a tree visits ever older positions with ever
 /// longer common prefixes, which gives exactly the smallest distance for each length. Each comparison
 /// starts after the prefix already known to match, so repetitive data stays fast.
-pub fn find_matches(data: &[u8], from: usize, to: usize, max_depth: usize, alternatives: bool) -> Matches {
+///
+/// From the rules: how many trees there are (`hash_bits`), how many matches a position may have before no more
+/// alternatives are kept (`alt_keep`), how many the parse weighs (`alt_candidates`), and whether the runs of
+/// one byte are measured for the parse's shortcut (`run_shortcut`).
+pub fn find_matches(
+    data: &[u8],
+    from: usize,
+    to: usize,
+    max_depth: usize,
+    alternatives: bool,
+    r: &FlateRules,
+) -> Matches {
     // Two builds of the search: without alternatives the distance buckets are never looked at.
     if alternatives {
-        search::<true>(data, from, to, max_depth, false)
+        search::<true>(data, from, to, max_depth, false, r)
     } else {
-        search::<false>(data, from, to, max_depth, false)
+        search::<false>(data, from, to, max_depth, false, r)
     }
 }
 
 /// `find_matches` with alternatives, keeping the ones that never win as well (to prove they never do).
 #[cfg(test)]
 pub fn find_matches_keeping_all(data: &[u8], from: usize, to: usize, max_depth: usize) -> Matches {
-    search::<true>(data, from, to, max_depth, true)
+    search::<true>(data, from, to, max_depth, true, &FlateRules::default())
 }
 
 // The tree's insertion and search follow LzFind.c's GetMatchesSpec1 (Igor Pavlov's LZMA SDK, public domain);
 // fast.rs's Tree::walk does too.
-fn search<const ALT: bool>(data: &[u8], from: usize, to: usize, max_depth: usize, keep_all: bool) -> Matches {
+fn search<const ALT: bool>(
+    data: &[u8],
+    from: usize,
+    to: usize,
+    max_depth: usize,
+    keep_all: bool,
+    r: &FlateRules,
+) -> Matches {
     const NIL: u32 = u32::MAX;
+    let hash_bits = rule!(r, "hash_bits") as u32;
+    let shift = 32 - hash_bits;
+    let candidates = rule!(r, "alt_candidates").min(CANDIDATES);
+    let alt_keep = rule!(r, "alt_keep");
     let hist = from.saturating_sub(WINDOW);
     let n = to - from;
     let mut start = Vec::with_capacity(n + 1);
     let mut farther_count = if ALT { vec![0u8; n] } else { Vec::new() };
     let mut steps: Vec<Step> = Vec::with_capacity(n * 2);
 
-    // Only the segment's own positions: each run looks forward, never back into the history.
+    // Only the segment's own positions: each run looks forward, never back into the history. Without the
+    // parse's shortcut (the rule `run_shortcut`) no run is measured, so the parse prices every position.
     let mut same = vec![0u8; n];
-    let mut run = 0;
-    for i in (from..to).rev() {
-        run = if i + 1 < to && data[i + 1] == data[i] { run + 1 } else { 1 };
-        same[i - from] = RUNS.iter().map(|&t| (run > t) as u8).sum();
+    if rule!(r, "run_shortcut") != 0 {
+        let mut run = 0;
+        for i in (from..to).rev() {
+            run = if i + 1 < to && data[i + 1] == data[i] { run + 1 } else { 1 };
+            same[i - from] = RUNS.iter().map(|&t| (run > t) as u8).sum();
+        }
     }
 
     // Tree slots cycle every 64 KiB: twice the window, so the node exactly 32 KiB back (a legal distance)
     // never shares a slot with the position being inserted.
     const CYC: usize = 2 * WINDOW;
     const CMASK: usize = CYC - 1;
-    let mut head = vec![NIL; HASH_SIZE];
+    let mut head = vec![NIL; 1 << hash_bits];
     let mut son = vec![NIL; 2 * CYC];
     // A position's alternatives, put after its chain once the walk is done, each marked once a longer step
     // with the same distance code follows it.
@@ -171,7 +198,7 @@ fn search<const ALT: bool>(data: &[u8], from: usize, to: usize, max_depth: usize
         if lim < MIN_MATCH {
             continue;
         }
-        let h = hash3(data, i);
+        let h = hash3(data, i, shift);
         let mut cur = head[h];
         head[h] = i as u32;
         let slot = 2 * (i & CMASK);
@@ -206,7 +233,7 @@ fn search<const ALT: bool>(data: &[u8], from: usize, to: usize, max_depth: usize
                             bucket_best = MIN_MATCH - 1;
                         }
                     }
-                    if len > best || (ALT && len > bucket_best && kept < 24) {
+                    if len > best || (ALT && len > bucket_best && kept < alt_keep) {
                         if ALT && bucket == far_bucket {
                             // Longer than that alternative (as `bucket_best` was), at the same price.
                             farther.last_mut().unwrap().1 = true;
@@ -243,15 +270,15 @@ fn search<const ALT: bool>(data: &[u8], from: usize, to: usize, max_depth: usize
             }
         }
         if ALT && searching {
-            // The parse prices each length with the cheapest distance among the first `CANDIDATES` steps of the
+            // The parse prices each length with the cheapest distance among the first `candidates` steps of the
             // walk that reach it, and of equal prices takes the longer step: so an alternative followed by a
             // longer step with the same distance code (the same price) never wins when the whole walk is in those.
             let walk = steps.len() - start[i - from] as usize + farther.len();
             let before = steps.len();
             steps.extend(
-                farther.drain(..).filter(|&(_, beaten)| keep_all || !beaten || walk > CANDIDATES).map(|(s, _)| s),
+                farther.drain(..).filter(|&(_, beaten)| keep_all || !beaten || walk > candidates).map(|(s, _)| s),
             );
-            if walk <= CANDIDATES {
+            if walk <= candidates {
                 // In the order the parse sorts its candidates in: by length, of equal lengths the farther first.
                 // At most 24 steps, each distance once: sorted in one by one (the library's sort, built for
                 // any length, is 6 KB of the WebAssembly module).
@@ -274,12 +301,17 @@ fn search<const ALT: bool>(data: &[u8], from: usize, to: usize, max_depth: usize
         }
     }
     start.push(steps.len() as u32);
-    Matches { start, steps, alternatives: ALT, farther: farther_count, same, from }
+    Matches { start, steps, alternatives: ALT, farther: farther_count, same, from, candidates }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `find_matches` under the default rules.
+    fn find_matches(data: &[u8], from: usize, to: usize, max_depth: usize, alternatives: bool) -> Matches {
+        super::find_matches(data, from, to, max_depth, alternatives, &FlateRules::default())
+    }
 
     /// Brute force: for each length, the smallest distance.
     fn brute(data: &[u8], to: usize, i: usize) -> Vec<(u16, u16)> {
@@ -364,7 +396,7 @@ mod validity {
             data.push(if k % 1000 < 500 { (s % 3) as u8 + b'a' } else { (s >> 8) as u8 });
         }
         for (from, to) in [(0usize, 100_000usize), (100_000, 150_000), (150_000, 300_000)] {
-            let m = find_matches(&data, from, to, 64, false);
+            let m = find_matches(&data, from, to, 64, false, &FlateRules::default());
             for i in from..to {
                 let mut prev = (0u16, 0u16);
                 for (l, d) in pairs(m.at(i)) {
@@ -435,14 +467,14 @@ mod same_as_before {
             out.same[k] = if i + 1 < to && data[i + 1] == data[i] { out.same[k + 1].saturating_add(1) } else { 1 };
         }
         out.same.drain(..from - hist);
-        let mut head = vec![NIL; HASH_SIZE];
+        let mut head = vec![NIL; 1 << 16];
         let mut son = vec![NIL; 2 * CYC];
         for i in hist..to {
             let searching = i >= from;
             let (mut steps, mut chain) = (Vec::new(), Vec::new());
             let lim = (to - i).min(MAX_MATCH);
             if lim >= MIN_MATCH {
-                let h = hash3(data, i);
+                let h = hash3(data, i, 16);
                 let mut cur = head[h];
                 head[h] = i as u32;
                 let slot = 2 * (i & CMASK);
@@ -532,7 +564,7 @@ mod same_as_before {
             for (from, to) in [(0usize, 40_000usize), (40_000, 90_000), (89_990, 90_000), (5, 7)] {
                 for depth in [1usize, 16, 300, 8192] {
                     for alternatives in [false, true] {
-                        let new = find_matches(&d, from, to, depth, alternatives);
+                        let new = find_matches(&d, from, to, depth, alternatives, &FlateRules::default());
                         let old = old_find_matches(&d, from, to, depth, alternatives);
                         // What the parse test's reference reads: every step the old search kept.
                         let all = alternatives.then(|| find_matches_keeping_all(&d, from, to, depth));

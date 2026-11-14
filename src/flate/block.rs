@@ -3,6 +3,7 @@
 use super::bits::BitWriter;
 use super::huffman::{canonical_codes, fast_lengths, limited_lengths_into, LengthCoder};
 use super::lz::{d_extra, ll_extra, Hist, Sym};
+use super::rules::{rule, FlateRules};
 use super::tables::*;
 
 /// A dynamic block's codes and how its header is sent.
@@ -106,8 +107,9 @@ fn patch_litlen(ll: &mut [u8]) {
 }
 
 /// Smooths counts so that the code lengths form longer runs (cheaper header), at a small data cost.
-/// Runs of similar counts become equal; counts of zero stay zero. The smoothed counts go to `out`.
-fn smooth(counts: &[u32], tolerance: f64, out: &mut [u32]) {
+/// Runs of at least `min_run` similar counts become equal; counts of zero stay zero. The smoothed counts go to
+/// `out`.
+fn smooth(counts: &[u32], tolerance: f64, min_run: usize, out: &mut [u32]) {
     out.copy_from_slice(counts);
     let n = counts.len();
     let mut i = 0;
@@ -132,7 +134,7 @@ fn smooth(counts: &[u32], tolerance: f64, out: &mut [u32]) {
             sum += counts[j] as u64;
             j += 1;
         }
-        if j - i >= 4 {
+        if j - i >= min_run {
             let avg = ((sum as f64) / (j - i) as f64).round().max(1.0) as u32;
             for v in out[i..j].iter_mut() {
                 *v = avg;
@@ -143,13 +145,13 @@ fn smooth(counts: &[u32], tolerance: f64, out: &mut [u32]) {
 }
 
 /// The cheapest dynamic code we can find for a histogram, with its exact size.
-pub fn best_dynamic(h: &Hist) -> DynCode {
-    dynamic_search(h, Search::Best)
+pub fn best_dynamic(h: &Hist, r: &FlateRules) -> DynCode {
+    dynamic_search(h, Search::Best, r)
 }
 
 /// A cheaper search for comparing parses: fewer code variants and header strategies.
-pub fn good_dynamic(h: &Hist) -> DynCode {
-    dynamic_search(h, Search::Good)
+pub fn good_dynamic(h: &Hist, r: &FlateRules) -> DynCode {
+    dynamic_search(h, Search::Good, r)
 }
 
 /// The two searches for a dynamic code. Each tries its code variants (how much the counts are smoothed,
@@ -160,10 +162,11 @@ enum Search {
     Best,
 }
 
-const GOOD_VARIANTS: [(Option<f64>, u32); 2] = [(None, 15), (Some(0.25), 15)];
-const BEST_VARIANTS: [(Option<f64>, u32); 6] =
+/// The code variants a search may try, in this order. The rules `code_variants` and `price_code_variants` say
+/// which: by default all six for `Best` and the first two for `Good`.
+const VARIANTS: [(Option<f64>, u32); 6] =
     [(None, 15), (Some(0.25), 15), (Some(0.5), 15), (None, 12), (None, 10), (Some(1.0), 15)];
-const MAX_VARIANTS: usize = BEST_VARIANTS.len();
+const MAX_VARIANTS: usize = VARIANTS.len();
 
 /// Whether every limit leaves room for all the literal/length symbols, so that every variant can be tried.
 const fn room_for_all(variants: &[(Option<f64>, u32)]) -> bool {
@@ -176,21 +179,21 @@ const fn room_for_all(variants: &[(Option<f64>, u32)]) -> bool {
     }
     true
 }
-const _: () = assert!(room_for_all(&GOOD_VARIANTS) && room_for_all(&BEST_VARIANTS));
-const _: () = assert!(GOOD_VARIANTS.len() <= MAX_VARIANTS);
+const _: () = assert!(room_for_all(&VARIANTS));
 
 impl Search {
-    fn variants(self) -> &'static [(Option<f64>, u32)] {
+    /// The variants tried, as a set of bits over `VARIANTS`.
+    fn variants(self, r: &FlateRules) -> usize {
         match self {
-            Search::Good => &GOOD_VARIANTS,
-            Search::Best => &BEST_VARIANTS,
+            Search::Good => rule!(r, "price_code_variants"),
+            Search::Best => rule!(r, "code_variants"),
         }
     }
 
-    fn header(self, ll: &[u8], d: &[u8]) -> Header {
+    fn header(self, ll: &[u8], d: &[u8], r: &FlateRules) -> Header {
         match self {
-            Search::Good => quick_header(ll, d),
-            Search::Best => best_header(ll, d),
+            Search::Good => quick_header(ll, d, r),
+            Search::Best => best_header(ll, d, r),
         }
     }
 }
@@ -206,7 +209,7 @@ struct Variants {
 }
 
 /// Tries the variants of `search` in order and keeps the first code of the fewest bits.
-fn dynamic_search(h: &Hist, search: Search) -> DynCode {
+fn dynamic_search(h: &Hist, search: Search, r: &FlateRules) -> DynCode {
     // A constant, so that it is copied straight to the heap.
     const NEW: Variants =
         Variants { lit: Alphabet::NEW, dist: Alphabet::NEW, tried: [([0; LITLEN_SYMS], [0; DIST_SYMS]); MAX_VARIANTS] };
@@ -216,9 +219,13 @@ fn dynamic_search(h: &Hist, search: Search) -> DynCode {
     let mut ntried = 0;
     // The best so far: its bits, which variant tried, and its header.
     let mut best: Option<(u64, usize, Header)> = None;
-    for &(tol, maxb) in search.variants() {
-        let mut ll = v.lit.lengths(tol, maxb);
-        let mut d = v.dist.lengths(tol, maxb.min(15));
+    let (set, min_run) = (search.variants(r), rule!(r, "smooth_min_run"));
+    for (k, &(tol, maxb)) in VARIANTS.iter().enumerate() {
+        if set >> k & 1 == 0 {
+            continue;
+        }
+        let mut ll = v.lit.lengths(tol, maxb, min_run);
+        let mut d = v.dist.lengths(tol, maxb.min(15), min_run);
         patch_litlen(&mut ll);
         patch_distances(&mut d);
         if v.tried[..ntried].iter().any(|t| t.0 == ll && t.1 == d) {
@@ -233,13 +240,13 @@ fn dynamic_search(h: &Hist, search: Search) -> DynCode {
                 continue;
             }
         }
-        let header = search.header(&ll, &d);
+        let header = search.header(&ll, &d, r);
         let bits = header.bits + data;
         if best.as_ref().is_none_or(|b| bits < b.0) {
             best = Some((bits, ntried - 1, header));
         }
     }
-    // The first variant is always tried.
+    // The first variant of the set is always tried, and the set is never empty.
     let (bits, k, header) = best.unwrap();
     DynCode { ll: v.tried[k].0.to_vec(), d: v.tried[k].1.to_vec(), header, bits }
 }
@@ -276,12 +283,12 @@ impl<const N: usize> Alphabet<N> {
     }
 
     /// What `limited_lengths` gives for a variant's counts and longest code.
-    fn lengths(&mut self, tolerance: Option<f64>, max_bits: u32) -> [u8; N] {
+    fn lengths(&mut self, tolerance: Option<f64>, max_bits: u32, min_run: usize) -> [u8; N] {
         let k = match tolerance {
             None => 0,
             Some(t) => {
                 let mut c = [0; N];
-                smooth(&self.counts[0], t, &mut c);
+                smooth(&self.counts[0], t, min_run, &mut c);
                 self.find_or_add(&c)
             }
         };
@@ -815,14 +822,31 @@ fn header_bits(cl: &[u8; 19], f: &[u32; 19]) -> (usize, u64) {
     (hclen, bits)
 }
 
-/// The cheapest header we can find for these code lengths.
-pub fn best_header(ll: &[u8], d: &[u8]) -> Header {
-    header_search(ll, d, &[0, 1, 2, 3, 4, 5, 6, 7], 4)
+/// The starting strategies in a set of bits (strategy 0 to 7 for bit 1 to 128), and how many: the lowest first,
+/// or the highest first.
+fn starts(set: usize, highest_first: bool) -> ([u8; 8], usize) {
+    let mut out = [0; 8];
+    let mut n = 0;
+    for k in 0..8 {
+        let flags = if highest_first { 7 - k } else { k };
+        if set >> flags & 1 != 0 {
+            out[n] = flags;
+            n += 1;
+        }
+    }
+    (out, n)
 }
 
-/// Fewer strategies, for comparing parses.
-pub fn quick_header(ll: &[u8], d: &[u8]) -> Header {
-    header_search(ll, d, &[7, 6], 2)
+/// The cheapest header we can find for these code lengths: by default from all eight strategies, 4 rounds each.
+pub fn best_header(ll: &[u8], d: &[u8], r: &FlateRules) -> Header {
+    let (starts, n) = starts(rule!(r, "header_starts"), false);
+    header_search(ll, d, &starts[..n], rule!(r, "header_rounds"), rule!(r, "header_unused_bits") as u32)
+}
+
+/// Fewer strategies, for comparing parses: by default strategies 7 and 6, 2 rounds each.
+pub fn quick_header(ll: &[u8], d: &[u8], r: &FlateRules) -> Header {
+    let (starts, n) = starts(rule!(r, "price_header_starts"), true);
+    header_search(ll, d, &starts[..n], rule!(r, "price_header_rounds"), rule!(r, "header_unused_bits") as u32)
 }
 
 /// A token list met in a header search.
@@ -900,7 +924,7 @@ impl Lists {
 
     /// The list that follows a priced one. It depends only on the code-length code, so lists with the same
     /// code share it and the token search runs once per code.
-    fn next(&mut self, i: usize, seq: &Seq, buf: &mut Tokens) -> usize {
+    fn next(&mut self, i: usize, seq: &Seq, buf: &mut Tokens, unused: u32) -> usize {
         if let Some(n) = self.met[i].next {
             return n;
         }
@@ -908,8 +932,9 @@ impl Lists {
         let n = match self.met.iter().find_map(|m| m.next.filter(|_| m.cl == cl)) {
             Some(n) => n,
             None => {
-                // Re-tokenise for these code-length codes; unused symbols are priced at 7 bits plus a little.
-                let cost = cl.map(|l| if l != 0 { l as u32 } else { 8 });
+                // Re-tokenise for these code-length codes; unused symbols are priced at 7 bits plus a little
+                // (`unused`, 8 by default).
+                let cost = cl.map(|l| if l != 0 { l as u32 } else { unused });
                 self.find_or_add(dp_tokens(seq, &cost, buf))
             }
         };
@@ -919,8 +944,9 @@ impl Lists {
 }
 
 /// Starting from the greedy tokens of each flag set, re-tokenise for the code-length code of the last list,
-/// for `rounds` lists, and keep the first header of the fewest bits.
-fn header_search(ll: &[u8], d: &[u8], flag_sets: &[u8], rounds: usize) -> Header {
+/// for `rounds` lists, and keep the first header of the fewest bits. `unused`: the bits a symbol costs while the
+/// code-length code does not have it.
+fn header_search(ll: &[u8], d: &[u8], flag_sets: &[u8], rounds: usize, unused: u32) -> Header {
     let (hlit, hdist, seq) = sequence(ll, d);
     let mut buf: Tokens = [(0, 0); MAX_LENS];
     // Every list is kept once, priced once, and its next list worked out once. The searches from different
@@ -949,7 +975,7 @@ fn header_search(ll: &[u8], d: &[u8], flag_sets: &[u8], rounds: usize) -> Header
             if round + 1 == rounds {
                 break;
             }
-            let next = lists.next(i, &seq, &mut buf);
+            let next = lists.next(i, &seq, &mut buf, unused);
             if next == i {
                 break;
             }
@@ -959,6 +985,26 @@ fn header_search(ll: &[u8], d: &[u8], flag_sets: &[u8], rounds: usize) -> Header
     let b = best.unwrap();
     let m = &lists.met[b];
     Header { hlit, hdist, hclen: m.hclen, cl: m.cl, tokens: lists.tokens(b).to_vec(), bits: m.bits }
+}
+
+/// The three types of block.
+pub enum BlockType {
+    Stored,
+    Fixed,
+    Dynamic,
+}
+
+/// The smallest type of block, from the bits of each. Of equal sizes: fixed, then dynamic, then stored, unless
+/// `tie` (the rule `block_tie`) puts dynamic (1) or stored (2) first.
+pub fn smallest(stored: u64, fixed: u64, dynamic: u64, tie: usize) -> BlockType {
+    let coded = fixed.min(dynamic);
+    if stored < coded || (tie == 2 && stored == coded) {
+        BlockType::Stored
+    } else if fixed < dynamic || (tie != 1 && fixed == dynamic) {
+        BlockType::Fixed
+    } else {
+        BlockType::Dynamic
+    }
 }
 
 /// Exact bits of a stored block sequence for `len` bytes, starting at bit offset `bitpos` (mod 8 matters).
@@ -1446,8 +1492,8 @@ mod tests {
                 }
                 let (mut lc, mut dc) = (h.ll.to_vec(), h.d.to_vec());
                 if k % 6 == 1 {
-                    smooth(&h.ll, 0.5, &mut lc);
-                    smooth(&h.d, 0.5, &mut dc);
+                    smooth(&h.ll, 0.5, 4, &mut lc);
+                    smooth(&h.d, 0.5, 4, &mut dc);
                 }
                 let maxb = [15, 12, 10, 9][(rng(s) % 4) as usize];
                 ll = limited_lengths(&lc, maxb);
@@ -1514,9 +1560,9 @@ mod tests {
         let flags: Vec<u8> = (0..1 + rng(s) % 10).map(|_| (rng(s) % 8) as u8).collect();
         let rounds = 1 + (rng(s) % 6) as usize;
         let pairs = [
-            (best_header(ll, d), old::best_header(ll, d)),
-            (quick_header(ll, d), old::quick_header(ll, d)),
-            (header_search(ll, d, &flags, rounds), old::header_search(ll, d, &flags, rounds)),
+            (best_header(ll, d, &FlateRules::default()), old::best_header(ll, d)),
+            (quick_header(ll, d, &FlateRules::default()), old::quick_header(ll, d)),
+            (header_search(ll, d, &flags, rounds, 8), old::header_search(ll, d, &flags, rounds)),
         ];
         for (new, old) in &pairs {
             assert_eq!(
@@ -1552,7 +1598,7 @@ mod tests {
                     h.d[i] = (rng(&mut s) % 300) as u32;
                 }
             }
-            for code in [best_dynamic(&h), good_dynamic(&h)] {
+            for code in [best_dynamic(&h, &FlateRules::default()), good_dynamic(&h, &FlateRules::default())] {
                 let lens = expand(&code.header);
                 let (hl, hd) = (code.header.hlit, code.header.hdist);
                 assert_eq!(lens.len(), hl + hd);
@@ -2068,8 +2114,9 @@ mod search_tests {
         let mut s = 0xc0de_5eedu64;
         for k in 0..3000 {
             let h = histogram(&mut s, k);
-            assert_same(&best_dynamic(&h), &old::best_dynamic(&h), &format!("best, case {k}"), &h);
-            assert_same(&good_dynamic(&h), &old::good_dynamic(&h), &format!("good, case {k}"), &h);
+            let r = FlateRules::default();
+            assert_same(&best_dynamic(&h, &r), &old::best_dynamic(&h), &format!("best, case {k}"), &h);
+            assert_same(&good_dynamic(&h, &r), &old::good_dynamic(&h), &format!("good, case {k}"), &h);
         }
     }
 
@@ -2155,7 +2202,7 @@ mod search_tests {
             let mut f = vec![0u32; n];
             counts(&mut s, &mut f);
             let tolerance = [0.25, 0.5, 1.0, 0.0, 0.1, 3.0, (rng(&mut s) % 1000) as f64 / 250.0][round % 7];
-            smooth(&f, tolerance, &mut out[..n]);
+            smooth(&f, tolerance, 4, &mut out[..n]);
             assert_eq!(&out[..n], &old::smooth(&f, tolerance)[..], "{tolerance} {f:?}");
         }
     }
