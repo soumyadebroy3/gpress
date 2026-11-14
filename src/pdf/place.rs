@@ -13,13 +13,18 @@
 //! reached only through objects for which the same holds.
 //!
 //! Content the walk does not read may also draw by a name its own resources do not hold, and a reader then
-//! looks in the page's: a glyph of a Type 3 font, a tiling pattern, a form that something unwalked refers to
-//! (an annotation's appearance). One such `Do`, or such a content the walk cannot decode, gives no images at
-//! all (`Walk::stray`).
+//! looks in the page's: a glyph of a Type 3 font, a tiling pattern, an annotation's appearance, a soft mask's
+//! group, a form that something unwalked refers to. One such `Do`, or such a content the walk cannot decode,
+//! gives no images at all (`Walk::stray`).
+//!
+//! Readers must agree with the walk on what a content says: one with a word that is no operator, or a name
+//! with a byte that is not printable ASCII, is not measured (pdf.js cuts `DoQ` into `Do` and `Q`, PDFium ends
+//! a token at byte 128 or 255).
 //!
 //! Any doubt about the walk as a whole gives no images at all: a limit or the deadline passed, a malformed
-//! page tree, a form that draws itself, a size that is not finite. The limits: 20,000,000 operators and
-//! 1,000,000 `Do` operators drawn, a page tree 64 deep, forms 16 deep.
+//! page tree (a /Parent that is not the node above: some readers inherit along /Parent), a form that draws
+//! itself, a size that is not finite. The limits: 20,000,000 operators and 1,000,000 `Do` operators drawn, a
+//! page tree 64 deep, forms 16 deep.
 //!
 //! The sizes are the same on every machine: f64 with + - * / and square roots only, numbers read by hand.
 
@@ -125,9 +130,10 @@ fn num(o: &Obj) -> Option<f64> {
 }
 
 /// A real as written: sign, digits, point, digits. Read by hand, as the library's reader is a large routine:
-/// the first 18 digits make an integer, which is divided by the power of ten of the fraction digits among
-/// them (exact up to there). Later fraction digits are dropped; more than 18 integer digits is not a number,
-/// nor is a token over 64 bytes (an inherited one is read again for every page).
+/// the first 18 digits from the first that is not 0 make an integer, which is divided by the power of ten of
+/// the fraction digits read so far (exact up to 10^22, and past it still the same on every machine). Later
+/// fraction digits are dropped; more than 18 integer digits is not a number, nor is a token over 64 bytes (an
+/// inherited one is read again for every page).
 fn real(t: &[u8]) -> Option<f64> {
     if t.len() > 64 {
         return None;
@@ -137,22 +143,26 @@ fn real(t: &[u8]) -> Option<f64> {
         [b'+', rest @ ..] => (false, rest),
         _ => (false, t),
     };
-    let (mut mantissa, mut kept, mut scale, mut point) = (0u64, 0, 1.0, false);
+    let (mut mantissa, mut kept, mut scale, mut point, mut any) = (0u64, 0, 1.0, false, false);
     for &c in digits {
         if c == b'.' && !point {
             point = true;
         } else if !c.is_ascii_digit() || (kept == 18 && !point) {
             return None;
         } else if kept < 18 {
-            mantissa = mantissa * 10 + u64::from(c - b'0');
-            kept += 1;
+            any = true;
+            // A 0 before the first other digit is not one of the 18.
+            if mantissa > 0 || c != b'0' {
+                mantissa = mantissa * 10 + u64::from(c - b'0');
+                kept += 1;
+            }
             if point {
                 scale *= 10.0;
             }
         }
     }
     let v = mantissa as f64 / scale;
-    (kept > 0).then_some(if negative { -v } else { v })
+    any.then_some(if negative { -v } else { v })
 }
 
 /// A matrix from exactly six numbers.
@@ -173,7 +183,8 @@ fn spend(left: &mut u64, n: u64) -> bool {
     *left > 0
 }
 
-/// The `Do` operators of a content, or None when it is not measured. Each operator read is taken from `left`.
+/// The `Do` operators of a content, or None when it is not measured. Each operator read is taken from `left`,
+/// and 16 more for each `Do` kept, which bounds what the walk holds in memory at about a million of them.
 fn read(data: &[u8], left: &mut u64) -> Option<Dos> {
     let mut lx = Lexer::new(data, 0);
     let (mut ctm, mut saved, mut args, mut dos) = (ID, Vec::new(), Vec::new(), Vec::new());
@@ -187,7 +198,12 @@ fn read(data: &[u8], left: &mut u64) -> Option<Dos> {
             if args.len() == 64 {
                 return None;
             }
-            args.push(lx.parse_obj().ok()?);
+            let arg = lx.parse_obj().ok()?;
+            // A name a reader could cut short: PDFium ends a token at byte 128 or 255.
+            if matches!(&arg, Obj::Name(n) if !n.iter().all(|c| (0x21..=0x7e).contains(c))) {
+                return None;
+            }
+            args.push(arg);
             continue;
         }
         // An empty word is a delimiter that starts no operand.
@@ -211,12 +227,23 @@ fn read(data: &[u8], left: &mut u64) -> Option<Dos> {
                         *left = 0;
                         return None;
                     }
+                    if !spend(left, 16) {
+                        return None;
+                    }
                     dos.push((ctm, name.clone()));
                 }
                 _ => return None,
             },
-            b"BI" => return None,
-            _ => {}
+            // The other operators of ISO 32000-1, table 51, change nothing the walk follows.
+            b"b" | b"B" | b"b*" | b"B*" | b"BDC" | b"BMC" | b"BT" | b"BX" | b"c" | b"CS" | b"cs" | b"d" | b"d0"
+            | b"d1" | b"DP" | b"EMC" | b"ET" | b"EX" | b"f" | b"F" | b"f*" | b"G" | b"g" | b"gs" | b"h" | b"i"
+            | b"j" | b"J" | b"K" | b"k" | b"l" | b"m" | b"M" | b"MP" | b"n" | b"re" | b"RG" | b"rg" | b"ri" | b"s"
+            | b"S" | b"SC" | b"sc" | b"SCN" | b"scn" | b"sh" | b"T*" | b"Tc" | b"Td" | b"TD" | b"Tf" | b"Tj"
+            | b"TJ" | b"TL" | b"Tm" | b"Tr" | b"Ts" | b"Tw" | b"Tz" | b"v" | b"w" | b"W" | b"W*" | b"y" | b"'"
+            | b"\"" => {}
+            // An inline image (BI), or a word that is no operator: a reader that cuts words by the operators
+            // it knows (pdf.js) finds a `Q`, a `q` or a `Do` inside `Qq` or `DoQ`.
+            _ => return None,
         }
         args.clear();
     }
@@ -224,7 +251,8 @@ fn read(data: &[u8], left: &mut u64) -> Option<Dos> {
 
 /// The names the `Do` operators of a content draw, found without parsing it, so that the data of an inline
 /// image does not end the search: each `Do` that stands alone, with the name written before it. None when one
-/// has no name before it, or a name longer than `read` takes.
+/// has no name before it, or a name longer than `read` takes. A `Do` run together with other bytes is not
+/// seen here (to take every such pair for one would give up on most fonts whose glyphs are inline images).
 fn drawn(data: &[u8]) -> Option<Vec<&[u8]>> {
     let mut names = Vec::new();
     for i in 0..data.len().saturating_sub(1) {
@@ -239,20 +267,6 @@ fn drawn(data: &[u8]) -> Option<Vec<&[u8]>> {
         }
     }
     Some(names)
-}
-
-/// Every dictionary inside `o` with a /CharProcs entry: a Type 3 font.
-fn type3<'a>(o: &'a Obj, out: &mut Vec<&'a Dict>) {
-    let d = match o {
-        Obj::Array(a) => return a.iter().for_each(|o| type3(o, out)),
-        Obj::Dict(d) => d,
-        Obj::Stream(s) => &s.dict,
-        _ => return,
-    };
-    if d.has(b"CharProcs") {
-        out.push(d);
-    }
-    d.0.iter().for_each(|(_, v)| type3(v, out));
 }
 
 /// An address as a key: an object inside `objs` stays where it is while `objs` is borrowed.
@@ -418,10 +432,20 @@ impl<'a> Walk<'a> {
         Some(abs(num(x2)? - num(x1)?) * abs(num(y2)? - num(y1)?))
     }
 
-    /// Walks page-tree node `n`, `inh` being what the nodes above pass down (see `INHERITED`).
-    fn node(&mut self, n: u32, mut inh: [Option<&'a Obj>; 4], depth: usize) -> Option<()> {
+    /// Walks page-tree node `n` below node `above`, `inh` being what the nodes above pass down (see
+    /// `INHERITED`).
+    fn node(&mut self, n: u32, above: Option<u32>, mut inh: [Option<&'a Obj>; 4], depth: usize) -> Option<()> {
         let Some((_, Obj::Dict(d))) = self.objs.get(&n) else { return None };
         if depth > 64 || self.left == 0 || !self.nodes.insert(n) {
+            return None;
+        }
+        // A reader that finds what a page inherits by going up /Parent (PDFium, pdf.js) must come this way.
+        let parent = match d.get(b"Parent") {
+            None => None,
+            Some(Obj::Ref(p, _)) => Some(*p),
+            Some(_) => return None,
+        };
+        if parent != above {
             return None;
         }
         for (slot, key) in inh.iter_mut().zip(INHERITED) {
@@ -439,7 +463,7 @@ impl<'a> Walk<'a> {
         }
         for kid in self.value(kids)?.as_array()? {
             let Obj::Ref(k, _) = kid else { return None };
-            self.node(*k, inh, depth + 1)?;
+            self.node(*k, Some(n), inh, depth + 1)?;
         }
         Some(())
     }
@@ -593,12 +617,50 @@ impl<'a> Walk<'a> {
         };
         let own = resources.and_then(|r| self.dict(r)?.get(b"XObject")).and_then(|x| self.dict(x));
         for name in names {
-            // The search of the dictionary is paid for, an operator an entry.
-            if !spend(&mut self.left, own?.0.len() as u64 + 1) || !own?.has(name) {
+            // The search of the dictionary is paid for, an operator an entry. An entry that is no stream
+            // (null, a reference to nothing) is no entry to a reader that then looks further.
+            let held = own?.get(name).and_then(|v| self.value(v));
+            if !spend(&mut self.left, own?.0.len() as u64 + 1) || !matches!(held, Some(Obj::Stream(_))) {
                 return None;
             }
         }
         (self.left > 0).then_some(())
+    }
+
+    /// `stray` for the stream `o` is, or for the streams in it when it is a dictionary, `depth` dictionaries
+    /// deep. With `font`, the resources are that dictionary's; without, each stream's own.
+    fn strays(&mut self, o: &'a Obj, depth: u8, font: Option<&'a Dict>) -> Option<()> {
+        if !spend(&mut self.left, 1) {
+            return None;
+        }
+        match self.value(o) {
+            Some(Obj::Stream(s)) => self.stray(s, font.unwrap_or(&s.dict).get(b"Resources")),
+            Some(Obj::Dict(d)) if depth > 0 => d.0.iter().try_for_each(|(_, v)| self.strays(v, depth - 1, font)),
+            _ => Some(()),
+        }
+    }
+
+    /// Passes to `stray` the content inside `o` that hangs where the walk does not look: the glyphs of a
+    /// Type 3 font (the streams of /CharProcs, with the font's resources), an annotation's appearances (the
+    /// streams of an /AP dictionary, and of the dictionaries in it) and a soft mask's group (/G of an /SMask
+    /// dictionary). Readers run the last two whatever /Subtype they have.
+    fn unread(&mut self, o: &'a Obj) -> Option<()> {
+        let d = match o {
+            Obj::Array(a) => return a.iter().try_for_each(|o| self.unread(o)),
+            Obj::Dict(d) => d,
+            Obj::Stream(s) => &s.dict,
+            _ => return Some(()),
+        };
+        if let Some(glyphs) = d.get(b"CharProcs") {
+            self.strays(glyphs, 1, Some(d))?;
+        }
+        if let Some(appearances) = d.get(b"AP").and_then(|ap| self.dict(ap)) {
+            appearances.0.iter().try_for_each(|(_, v)| self.strays(v, 1, None))?;
+        }
+        if let Some(group) = d.get(b"SMask").and_then(|m| self.dict(m)?.get(b"G")) {
+            self.strays(group, 0, None)?;
+        }
+        d.0.iter().try_for_each(|(_, v)| self.unread(v))
     }
 
     /// The whole walk, then the reference rule: which images had every reference to them followed.
@@ -606,7 +668,7 @@ impl<'a> Walk<'a> {
         let Obj::Ref(root, _) = trailer.get(b"Root")? else { return None };
         let Obj::Dict(catalog) = &self.objs.get(root)?.1 else { return None };
         let Obj::Ref(pages, _) = catalog.get(b"Pages")? else { return None };
-        self.node(*pages, [None; 4], 0)?;
+        self.node(*pages, None, [None; 4], 0)?;
 
         // How many references name each object, in the whole file.
         let mut refs = Vec::new();
@@ -618,17 +680,19 @@ impl<'a> Walk<'a> {
         }
         // The followed references, in groups reached the same way: the objects they name, and the objects
         // they were reached through. The entries of a clean /XObject dictionary are one group.
-        let mut groups: Vec<(Vec<u32>, BTreeSet<u32>)> =
-            std::mem::take(&mut self.followed).into_values().map(|(n, via)| (vec![n], via)).collect();
+        let followed = std::mem::take(&mut self.followed);
+        let mut groups: Vec<(Vec<u32>, BTreeSet<u32>)> = Vec::new();
         for x in std::mem::take(&mut self.xdicts).into_values() {
             if !x.poisoned {
+                // An entry that was also followed (a dictionary that names itself) counts there, once.
                 let named = x.names.values().filter_map(|v| match v {
-                    Obj::Ref(n, _) => Some(*n),
+                    Obj::Ref(n, _) if !followed.contains_key(&addr(*v)) => Some(*n),
                     _ => None,
                 });
                 groups.push((named.collect(), x.via));
             }
         }
+        groups.extend(followed.into_values().map(|(n, via)| (vec![n], via)));
         // An object is accounted when the followed references to it are all there are. A group reached
         // through an object that is not accounted is dropped, which may leave others unaccounted.
         for _ in 0..64 {
@@ -642,24 +706,15 @@ impl<'a> Walk<'a> {
             if groups.len() != before {
                 continue;
             }
-            // Content the walk did not read: tiling patterns, forms with a reference the walk did not follow,
-            // and the glyphs of Type 3 fonts (see `stray`).
-            let (objs, mut fonts) = (self.objs, Vec::new());
+            // Content the walk did not read: what `unread` finds, tiling patterns, and forms with a reference
+            // the walk did not follow (see `stray`).
+            let objs = self.objs;
             for (n, (_, o)) in objs {
-                type3(o, &mut fonts);
+                self.unread(o)?;
                 let Obj::Stream(s) = o else { continue };
                 let form = s.dict.get(b"Subtype").and_then(|t| self.value(t)?.as_name()) == Some(b"Form");
                 if s.dict.has(b"PatternType") || form && !accounted(n) {
                     self.stray(s, s.dict.get(b"Resources"))?;
-                }
-            }
-            for font in fonts {
-                let Some(glyphs) = font.get(b"CharProcs").and_then(|p| self.dict(p)) else { continue };
-                self.searched(glyphs)?;
-                for (_, glyph) in &glyphs.0 {
-                    if let Some(Obj::Stream(s)) = self.value(glyph) {
-                        self.stray(s, font.get(b"Resources"))?;
-                    }
                 }
             }
             let mut shown = BTreeMap::new();
@@ -720,7 +775,7 @@ mod tests {
 
     /// One page, object 3, with these entries besides its content (object 4), and more objects.
     fn page(entries: &str, content: &str, more: &[(u32, &str)]) -> BTreeMap<u32, Shown> {
-        let page = format!("<</Type/Page/Contents 4 0 R{entries}>>");
+        let page = format!("<</Type/Page/Parent 2 0 R/Contents 4 0 R{entries}>>");
         let content = format!("<<>> stream {content}");
         let mut objects = vec![CATALOG, PAGES, (3, page.as_str()), (4, content.as_str())];
         objects.extend_from_slice(more);
@@ -733,9 +788,9 @@ mod tests {
         shown_in(&[
             CATALOG,
             (2, "<</Type/Pages/Kids[3 0 R 5 0 R]/MediaBox[0 0 612 792]>>"),
-            (3, "<</Type/Page/Contents 4 0 R/Resources<</XObject<</Im1 10 0 R/Im3 12 0 R>>>>>>"),
+            (3, "<</Type/Page/Parent 2 0 R/Contents 4 0 R/Resources<</XObject<</Im1 10 0 R/Im3 12 0 R>>>>>>"),
             (4, content),
-            (5, "<</Type/Page/Contents 6 0 R/Resources<</XObject<</Im2 11 0 R/Im3 12 0 R>>>>>>"),
+            (5, "<</Type/Page/Parent 2 0 R/Contents 6 0 R/Resources<</XObject<</Im2 11 0 R/Im3 12 0 R>>>>>>"),
             (6, "<<>> stream 72 0 0 72 0 0 cm /Im2 Do /Im3 Do"),
             (10, object10),
             (11, IMAGE),
@@ -770,7 +825,9 @@ mod tests {
         assert_eq!(page(LETTER, twice, &im), one(2.0, 3.0, false));
         assert_eq!(page(&format!("{LETTER}/UserUnit 2"), "144 0 0 72 0 0 cm /Im1 Do", &im), one(4.0, 2.0, false));
         // No content at all is a clean content: the image is not drawn.
-        assert!(shown_in(&[CATALOG, PAGES, (3, &format!("<</Type/Page{LETTER}>>")), (10, IMAGE)]).is_empty());
+        assert!(
+            shown_in(&[CATALOG, PAGES, (3, &format!("<</Type/Page/Parent 2 0 R{LETTER}>>")), (10, IMAGE)]).is_empty()
+        );
     }
 
     #[test]
@@ -787,7 +844,7 @@ mod tests {
         let got = shown_in(&[
             CATALOG,
             (2, "<</Type/Pages/Kids[3 0 R]/MediaBox[0 0 612 792]/Resources<</XObject<</Im1 10 0 R>>>>>>"),
-            (3, "<</Type/Page/Contents 4 0 R>>"),
+            (3, "<</Type/Page/Parent 2 0 R/Contents 4 0 R>>"),
             (4, "<<>> stream 144 0 0 72 0 0 cm /Im1 Do"),
             (10, IMAGE),
         ]);
@@ -796,7 +853,7 @@ mod tests {
         let got = shown_in(&[
             CATALOG,
             (2, "<</Type/Pages/Kids[3 0 R]/MediaBox[0 0 612 792]/Resources<</XObject<</Im1 10 0 R>>>>>>"),
-            (3, "<</Type/Page/Contents 4 0 R/Resources<</Font<<>>>>>>"),
+            (3, "<</Type/Page/Parent 2 0 R/Contents 4 0 R/Resources<</Font<<>>>>>>"),
             (4, "<<>> stream 144 0 0 72 0 0 cm /Im1 Do"),
             (10, IMAGE),
         ]);
@@ -806,7 +863,7 @@ mod tests {
             let got = shown_in(&[
                 CATALOG,
                 PAGES,
-                (3, &format!("<</Type/Page/Contents {contents}{LETTER}>>")),
+                (3, &format!("<</Type/Page/Parent 2 0 R/Contents {contents}{LETTER}>>")),
                 (4, "<<>> stream q 144 0 0 72 10"),
                 (5, "<<>> stream 10 cm /Im1 Do Q"),
                 (6, "[4 0 R 5 0 R]"),
@@ -818,7 +875,7 @@ mod tests {
         let got = shown_in(&[
             CATALOG,
             PAGES,
-            (3, &format!("<</Type/Page/Contents[4 0 R 5 0 R]{LETTER}>>")),
+            (3, &format!("<</Type/Page/Parent 2 0 R/Contents[4 0 R 5 0 R]{LETTER}>>")),
             (4, "<<>> stream q % 9 0 0 9 0 0 cm"),
             (5, "<<>> stream 144 0 0 72 0 0 cm /Im1 Do Q"),
             (10, IMAGE),
@@ -830,7 +887,7 @@ mod tests {
     fn content_streams_are_decoded() {
         let text = b"144 0 0 72 0 0 cm /Im1 Do";
         let quick = crate::flate::Options::quick();
-        let page = format!("<</Type/Page/Contents 4 0 R{LETTER}>>");
+        let page = format!("<</Type/Page/Parent 2 0 R/Contents 4 0 R{LETTER}>>");
         let mut objs = file(&[CATALOG, PAGES, (3, &page), (10, IMAGE)]);
         objs.insert(4, (0, stream("<</Filter/FlateDecode>>", &crate::flate::deflate_zlib(text, &quick))));
         assert_eq!(run(&objs), one(2.0, 1.0, false));
@@ -902,11 +959,23 @@ mod tests {
             "<<>> stream 1 0 0 1 0 cm /Im1 Do /Im3 Do",
             "<<>> stream 1 /Im1 Do /Im3 Do",
             "<<>> stream /Im1 Do /Im3 Do ]",
+            "<<>> stream /Im1 Do /Im3 DoQ",
+            "<<>> stream q Qq /Im1 Do /Im3 Do",
+            "<<>> stream /Im1 Do /Im3 Do EI",
+            "<<>> stream /Im1 Do /Im3 Do /G#80 gs",
+            "<<>> stream /Im1 Do /Im3#20 Do",
             "<</Filter/FlateDecode>> stream not zlib data",
             "<</Filter/DCTDecode>> stream /Im1 Do /Im3 Do",
         ] {
             assert_eq!(two_pages(IMAGE, bad), BTreeMap::from([(11, sh(1.0, 1.0, false))]), "{bad}");
         }
+        // Every operator of a content is read.
+        let all = "b B b* B* /T BMC /T <<>> BDC EMC BT ET BX EX 0 0 0 0 0 0 c /C CS /C cs [] 0 d 0 0 d0 \
+                   0 0 0 0 0 0 d1 /T <<>> DP f F f* 0 G 0 g /G gs h 0 i 0 j 0 J 0 0 0 0 K 0 0 0 0 k 0 0 l 0 0 m \
+                   0 M /T MP n 0 0 0 0 re 0 0 0 RG 0 0 0 rg /R ri s S 0 SC 0 sc 0 SCN 0 scn /S sh T* 0 Tc 0 0 Td \
+                   0 0 TD /F 1 Tf () Tj [] TJ 0 TL 1 0 0 1 0 0 Tm 0 Tr 0 Ts 0 Tw 0 Tz 0 0 0 0 v 0 w W W* \
+                   0 0 0 0 y () ' 0 0 () \" q Q";
+        assert_eq!(page(LETTER, &format!("{all} {DRAW}"), &[(10, IMAGE)]), one(1.0, 1.0, false));
         // 256 saved states and 64 operands are read, one more is not.
         let im = [(10, IMAGE)];
         let saved = |n: usize| page(LETTER, &format!("{}{DRAW}", "q ".repeat(n)), &im);
@@ -935,7 +1004,7 @@ mod tests {
         ];
         assert_eq!(keys(&page(&format!("{TWO}/Annots[30 0 R]"), draw2, &annotated)), [11]);
         // Image 10 is also in the resources of a page outside the page tree.
-        let stray = [(10, IMAGE), (40, "<</Type/Page/Resources<</XObject<</X 10 0 R>>>>>>")];
+        let stray = [(10, IMAGE), (40, "<</Type/Page/Parent 2 0 R/Resources<</XObject<</X 10 0 R>>>>>>")];
         assert!(page(LETTER, DRAW, &stray).is_empty());
     }
 
@@ -996,6 +1065,18 @@ mod tests {
         assert!(appearance("<</Subtype/Form/Resources<</XObject<</A 10 0 R>>>>>> stream /Im1 Do").is_empty());
         assert_eq!(appearance("<</Subtype/Form>> stream BT /F1 9 Tf (Do not fold) Tj ET"), [10]);
         assert!(appearance("<</Subtype/Form/Filter/DCTDecode>> stream x").is_empty());
+        // Readers run an appearance whatever its /Subtype, and pass by an entry that is no stream.
+        assert!(appearance("<</BBox[0 0 9 9]>> stream /Im1 Do").is_empty());
+        assert!(appearance("<</Subtype/Form/Resources<</XObject<</Im1 null>>>>>> stream /Im1 Do").is_empty());
+        assert!(appearance("<</Subtype/Form/Resources<</XObject<</Im1 99 0 R>>>>>> stream /Im1 Do").is_empty());
+        // One appearance for each state of the annotation.
+        let states = [im, (30, "<</Type/Annot/AP<</N<</On 31 0 R/Off 32 0 R>>>>>>"), (31, "<<>> stream n")];
+        assert_eq!(keys(&page(&entries, DRAW, &[states[0], states[1], states[2], (32, "<<>> stream n")])), [10]);
+        assert!(page(&entries, DRAW, &[states[0], states[1], states[2], (32, "<<>> stream /Im1 Do")]).is_empty());
+        // The group of a soft mask.
+        let mask = (9, "<</Type/ExtGState/SMask<</G 12 0 R>>>>");
+        assert!(page(LETTER, DRAW, &[im, mask, (12, "<<>> stream /Im1 Do")]).is_empty());
+        assert_eq!(keys(&page(LETTER, DRAW, &[im, mask, (12, "<<>> stream 0 g")])), [10]);
         // A form only the page's own dictionary names needs no resources: the page's are the ones it uses.
         let bare = "/MediaBox[0 0 612 792]/Resources<</XObject<</Fm1 20 0 R/Im1 10 0 R>>>>";
         assert_eq!(keys(&page(bare, "/Fm1 Do", &[im, (20, "<</Subtype/Form>> stream /Im1 Do")])), [10]);
@@ -1012,13 +1093,60 @@ mod tests {
         let long = |n: usize| format!("/{} Do", "n".repeat(n));
         assert_eq!(drawn(long(127).as_bytes()).map(|names| names[0].len()), Some(127));
         assert_eq!(drawn(long(128).as_bytes()), None);
-        assert_eq!(read(long(127).as_bytes(), &mut 9).map(|dos| dos.len()), Some(1));
-        assert_eq!(read(long(128).as_bytes(), &mut 9), None);
+        assert_eq!(read(long(127).as_bytes(), &mut 99).map(|dos| dos.len()), Some(1));
+        assert_eq!(read(long(128).as_bytes(), &mut 99), None);
+        // A `Do` that is kept takes 17 operators from the budget.
+        assert_eq!(read(b"/A Do", &mut 18).map(|dos| dos.len()), Some(1));
+        assert_eq!(read(b"/A Do", &mut 17), None);
+    }
+
+    #[test]
+    fn a_parent_that_is_not_the_node_above_gives_nothing() {
+        let tree = |root: &str, node6: &str, page8: &str| {
+            keys(&shown_in(&[
+                CATALOG,
+                (2, root),
+                (5, "<</Type/Pages/Parent 2 0 R/Kids[3 0 R]/Resources<</XObject<</Im1 10 0 R>>>>>>"),
+                (6, node6),
+                (3, "<</Type/Page/Parent 5 0 R/Contents 4 0 R>>"),
+                (4, "<<>> stream 612 0 0 792 0 0 cm /Im1 Do"),
+                (8, page8),
+                (9, "<<>> stream 1 0 0 1 0 0 cm /Im1 Do"),
+                (10, IMAGE),
+                (11, IMAGE),
+            ]))
+        };
+        let root = "<</Type/Pages/Kids[5 0 R 6 0 R]/MediaBox[0 0 612 792]>>";
+        let node6 = "<</Type/Pages/Parent 2 0 R/Kids[8 0 R]/Resources<</XObject<</Im1 11 0 R>>>>>>";
+        assert_eq!(tree(root, node6, "<</Type/Page/Parent 6 0 R/Contents 9 0 R>>"), [10, 11]);
+        // A page that names another node, or none, as its parent: readers differ on what it inherits.
+        assert!(tree(root, node6, "<</Type/Page/Parent 5 0 R/Contents 9 0 R>>").is_empty());
+        assert!(tree(root, node6, "<</Type/Page/Contents 9 0 R>>").is_empty());
+        assert!(tree(root, node6, "<</Type/Page/Parent 7/Contents 9 0 R>>").is_empty());
+        // The same for a node in between, and for a root with a parent.
+        let loose = "<</Type/Pages/Kids[8 0 R]/Resources<</XObject<</Im1 11 0 R>>>>>>";
+        assert!(tree(root, loose, "<</Type/Page/Parent 6 0 R/Contents 9 0 R>>").is_empty());
+        let under = "<</Type/Pages/Parent 6 0 R/Kids[5 0 R 6 0 R]/MediaBox[0 0 612 792]>>";
+        assert!(tree(under, node6, "<</Type/Page/Parent 6 0 R/Contents 9 0 R>>").is_empty());
+    }
+
+    #[test]
+    fn a_dictionary_that_names_itself_hides_no_reference() {
+        // Object 7 is the page's resources and its own /XObject dictionary; an appearance uses it too.
+        let entries = "/MediaBox[0 0 612 792]/Resources 7 0 R";
+        let more = [
+            (7, "<</XObject 7 0 R/ImA 11 0 R>>"),
+            (11, IMAGE),
+            (30, "<</Type/Annot/AP<</N 31 0 R>>>>"),
+            (31, "<</Subtype/Form/Resources 7 0 R>> stream 612 0 0 792 0 0 cm /ImA Do"),
+        ];
+        assert_eq!(keys(&page(entries, "/ImA Do", &more[..2])), [11]);
+        assert!(page(&format!("{entries}/Annots[30 0 R]"), "/ImA Do", &more).is_empty());
     }
 
     /// A page drawing a chain of `k` forms, objects 20 on, each inside the one before; the last draws image 10.
     fn nested(k: u32) -> BTreeMap<u32, Shown> {
-        let page = (3, "<</Type/Page/Contents 4 0 R/Resources<</XObject<</F 20 0 R>>>>>>");
+        let page = (3, "<</Type/Page/Parent 2 0 R/Contents 4 0 R/Resources<</XObject<</F 20 0 R>>>>>>");
         let mut objs = file(&[CATALOG, PAGES, page, (4, "<<>> stream 72 0 0 72 0 0 cm /F Do"), (10, IMAGE)]);
         for i in 0..k {
             let next = if i + 1 == k { 10 } else { 21 + i };
@@ -1030,12 +1158,13 @@ mod tests {
 
     /// A page tree of `k` nodes, objects 100 on, each the only kid of the one before, above page 3.
     fn deep(k: u32) -> BTreeMap<u32, Shown> {
-        let page = format!("<</Type/Page/Contents 4 0 R{LETTER}>>");
+        let page = format!("<</Type/Page/Parent {} 0 R/Contents 4 0 R{LETTER}>>", 99 + k);
         let mut objs =
             file(&[(1, "<</Pages 100 0 R>>"), (3, &page), (4, "<<>> stream 72 0 0 72 0 0 cm /Im1 Do"), (10, IMAGE)]);
         for i in 0..k {
             let kid = if i + 1 == k { 3 } else { 101 + i };
-            objs.insert(100 + i, (0, obj(&format!("<</Kids[{kid} 0 R]>>"))));
+            let parent = if i == 0 { String::new() } else { format!("/Parent {} 0 R", 99 + i) };
+            objs.insert(100 + i, (0, obj(&format!("<</Kids[{kid} 0 R]{parent}>>"))));
         }
         run(&objs)
     }
@@ -1047,7 +1176,7 @@ mod tests {
         assert!(shown_in(&[(1, "<</Type/Catalog>>")]).is_empty());
         assert!(shown_in(&[CATALOG, (2, IMAGE)]).is_empty());
         // A good page beside each bad tree: still nothing.
-        let good = format!("<</Type/Page/Contents 4 0 R{LETTER}>>");
+        let good = format!("<</Type/Page/Parent 2 0 R/Contents 4 0 R{LETTER}>>");
         for bad in [
             "<</Kids[3 0 R 1 2]>>",
             "<</Kids[3 0 R 2 0 R]>>",
@@ -1100,9 +1229,16 @@ mod tests {
         // Fraction digits after the 18th digit are dropped.
         assert_eq!(real(b"0.5000000000000000000000001"), Some(0.5));
         assert_eq!(real(b"123456789012345678.75"), Some(123456789012345678u64 as f64));
-        // 64 bytes are read, one more is not.
+        // Zeros before the first other digit are not among the 18: a small number keeps its value.
+        assert_eq!(real(b"0.00000000000000000999"), Some(9.99e-18));
+        assert_eq!(real(b"0.0000000000000000000001"), Some(1e-22));
+        assert!(real(b"0.0000000000000000000000000000000001").is_some_and(|v| v > 0.99e-34 && v < 1.01e-34));
         assert_eq!(real(format!("0.{}", "0".repeat(62)).as_bytes()), Some(0.0));
-        assert_eq!(real(format!("0.{}", "0".repeat(63)).as_bytes()), None);
+        assert_eq!(real(b"000000000000000000000012"), Some(12.0));
+        assert_eq!(real(b"0.000"), Some(0.0));
+        // 64 bytes are read, one more is not.
+        assert_eq!(real(format!("1.{}", "0".repeat(62)).as_bytes()), Some(1.0));
+        assert_eq!(real(format!("1.{}", "0".repeat(63)).as_bytes()), None);
         for bad in ["", "-", ".", "1.2.3", "1e5", "--1"] {
             assert_eq!(real(bad.as_bytes()), None, "{bad}");
         }
