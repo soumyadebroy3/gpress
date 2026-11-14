@@ -89,6 +89,11 @@ pub struct Done {
 /// image's dictionary and data, in object order, so the result is the same for any number of threads.
 pub fn reduce(objs: &mut BTreeMap<u32, (u16, Obj)>, trailer: &Dict, opt: &Options, pool: Option<&par::Pool>) -> Done {
     let dbg = std::env::var_os("PDFE_DEBUG").is_some();
+    // No image the step may work on: the pages are not walked.
+    let none = Shown { width: 0.0, height: 0.0, scan: false };
+    if !objs.values().any(|(_, o)| matches!(o, Obj::Stream(s) if eligible(s, none, objs, opt).is_some())) {
+        return Done::default();
+    }
     let shown = place::shown(objs, trailer, opt.max_stream, opt.deadline);
     let images: Vec<(u32, Image)> = shown
         .iter()
@@ -291,7 +296,7 @@ fn candidate(img: &Image, opt: &Options) -> Result<Candidate, &'static str> {
     }
     if img.jpeg {
         let quality = quality.ok_or("no JPEG in these settings")?;
-        return from_jpeg(img, &data, ppi, photo_floor, quality, opt);
+        return from_jpeg(img, &data, size(photo_floor), quality, opt);
     }
     // Fewer samples than the size needs: readers differ on such an image.
     let px = data.get(..w * h * img.channels).ok_or("fewer samples than its size")?;
@@ -564,14 +569,13 @@ fn close(coded: &[u8], y: &Plane, opt: &Options) -> Result<(), &'static str> {
 }
 
 /// A JPEG image (`data`: the JPEG file): decoded to its own planes, and when their luma is a photo's, resampled
-/// to its floor or, with `rejpeg`, only coded again. A JPEG that looks like line art is left alone: line art is
+/// to `size` or, without one, only coded again. A JPEG that looks like line art is left alone: line art is
 /// never made a JPEG, and its samples behind Flate would need a colour conversion.
 #[cfg(feature = "jpeg")]
 fn from_jpeg(
     img: &Image,
     data: &[u8],
-    ppi: f64,
-    floor: Option<f64>,
+    size: Option<(usize, usize)>,
     quality: u8,
     opt: &Options,
 ) -> Result<Candidate, &'static str> {
@@ -582,10 +586,6 @@ fn from_jpeg(
     }
     if !is_photo(&pic.planes[0].px, w, h) {
         return Err("a JPEG that looks like line art");
-    }
-    let size = floor.and_then(|f| target(w, h, ppi, f));
-    if size.is_none() && !opt.lossy.rejpeg {
-        return Err("a JPEG photo at or near its floor");
     }
     let lossless = || jpeg::optimize(data).map_or(data.len(), |j| j.len());
     let (coded, (w, h)) = photo_jpeg(pic.planes, size, quality, img.s.data.len(), lossless, opt)?;
@@ -619,7 +619,7 @@ fn from_photo(
 // Without the `jpeg` feature an image that would need a JPEG is left alone (`candidate` never gets this far:
 // it has no JPEG quality then).
 #[cfg(not(feature = "jpeg"))]
-fn from_jpeg(_: &Image, _: &[u8], _: f64, _: Option<f64>, _: u8, _: &Options) -> Result<Candidate, &'static str> {
+fn from_jpeg(_: &Image, _: &[u8], _: Option<(usize, usize)>, _: u8, _: &Options) -> Result<Candidate, &'static str> {
     Err("needs the jpeg feature")
 }
 
