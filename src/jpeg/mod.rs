@@ -21,12 +21,12 @@ mod huffman;
 mod parse;
 mod scan;
 
-pub use decode::{decode, Picture, Plane};
-pub use encode::{encode, ycc_planes};
-
 use huffman::{Order, Spec};
 use parse::{parse, Jpeg, Piece, Scan};
 use scan::{BitWriter, CountFF, Sink, Tokens, RESTART};
+
+pub use decode::{decode, Picture, Plane};
+pub use encode::{encode, ycc_planes};
 
 /// Why a JPEG was left as it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
