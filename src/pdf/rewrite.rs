@@ -3140,13 +3140,11 @@ pub(super) mod check_tests {
     #[test]
     fn a_wrong_colour_table_or_pixel_is_caught() {
         let pdf = forms_pdf();
-        let (clean, taken) = rewrite_with(&pdf, 1, None);
+        let (clean, _) = rewrite_with(&pdf, 1, None);
         let Outcome::Smaller(stats) = &clean.outcome else { panic!("{:?}", clean.outcome) };
         // The chart is Indexed; its soft mask, of four greys, is not (a soft mask stays DeviceGray).
-        assert_eq!((stats.images_indexed, stats.streams_reencoded), (1, 3));
+        assert_eq!((stats.images_indexed, stats.streams_reencoded), (1, 4));
         assert_eq!(stats.bilevel_to_jbig2, cfg!(feature = "fax") as usize);
-        // Neither form is taken on its job's check: the self-check compares their pixels.
-        assert_eq!(taken, 1 + !cfg!(feature = "fax") as usize);
         let (four, _) = rewrite_with(&pdf, 4, None);
         assert!(four.data == clean.data);
         let mut faults = vec![

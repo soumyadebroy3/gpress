@@ -464,8 +464,8 @@ fn palette_off_gives_the_bytes_of_before() {
 }
 
 /// `chart_pdf()` and main's output for it: (length, FNV-1a).
-const CHART_PDF: (usize, u64) = (0, 0);
-const CHART_BEFORE: (usize, u64) = (0, 0);
+const CHART_PDF: (usize, u64) = (29700, 0x2148_5f86_0c17_dcac);
+const CHART_BEFORE: (usize, u64) = (4923, 0xaeff_2c19_76aa_fac0);
 
 #[test]
 fn one_and_four_threads_give_the_same_bytes() {
