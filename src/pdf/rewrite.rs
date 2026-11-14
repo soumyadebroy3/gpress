@@ -369,63 +369,70 @@ fn nested(o: &Obj, levels: usize) -> bool {
 }
 
 /// Whether `data` holds the header of an object numbered as one of `nums`, anywhere: the number, a gap, the
-/// digits of a generation, a gap or none, `obj`. A gap is white space, and when that white space holds a line
-/// end, a comment may come before it on the line that it ends. Poppler rebuilds a damaged file's
-/// cross-reference data from headers, and takes one with spaces, tabs, line ends or form feeds between its
-/// parts, with its generation spelt "00", and with a NUL and a comment before a line end in a gap (the
-/// lexer then reads the comment as white space). The search asks less of a header than that, to stay simple:
-/// the generation's value is not compared, a NUL alone counts as white space, any `%` on the line may start
-/// the comment, and no white space needs to stand before `obj`. The number is every number of up to ten digits
-/// that the digits before the gap end with ("112 0 obj" holds 12, and "012 0 obj" too).
+/// digits of a generation, a gap or none, `obj`, where a gap is white space and comments (a comment runs from a
+/// `%` to the line end). Poppler rebuilds a damaged file's cross-reference data from headers. It takes, among
+/// others, one with two spaces, a tab or a line feed between its parts, with its generation spelt "00", or with
+/// a NUL right after the number's digits and a comment before the line end. The search asks less of a header
+/// than Poppler does, to stay simple: the generation's value is not compared, no NUL is needed before a
+/// comment, a NUL alone counts as white space, any `%` of a line may start its comment, and no white space needs
+/// to stand before `obj`. The number is every number of up to ten digits that the digits before the gap end
+/// with ("112 0 obj" holds 12, and "012 0 obj" too).
 fn holds_header(data: &[u8], nums: &HashSet<u32>) -> bool {
     if nums.is_empty() {
         return false;
     }
+    let digit = |c: u8| c.is_ascii_digit();
+    (0..data.len().saturating_sub(2)).any(|at| {
+        // Backwards from "obj": a gap or none, the generation's digits, a gap, the number's.
+        &data[at..at + 3] == b"obj"
+            && gap_starts(data, at, true, &mut |g_end| {
+                let g = run_start(data, g_end, digit);
+                g < g_end
+                    && gap_starts(data, g, false, &mut |end| {
+                        let (mut n, mut place) = (0u64, 1u64);
+                        data[end.saturating_sub(10)..end].iter().rev().take_while(|&&c| digit(c)).any(|&c| {
+                            n += (c - b'0') as u64 * place;
+                            place *= 10;
+                            u32::try_from(n).is_ok_and(|n| nums.contains(&n))
+                        })
+                    })
+            })
+    })
+}
+
+/// Where the run of bytes that `is` holds for, ending at `end`, starts.
+fn run_start(data: &[u8], mut end: usize, is: impl Fn(u8) -> bool) -> usize {
+    while end > 0 && is(data[end - 1]) {
+        end -= 1;
+    }
+    end
+}
+
+/// Calls `f` with each place where digits may end before a gap that ends at `end` (`empty`: a gap may also be
+/// no bytes at all), and says whether `f` said yes to one. Where the gap's white space holds a line end, each
+/// `%` of the line that it ends may start a comment; when only white space comes before that `%`, the gap goes
+/// on before it. A line is looked at only for the one gap that holds its line end, so a search stays one pass.
+fn gap_starts(data: &[u8], mut end: usize, empty: bool, f: &mut dyn FnMut(usize) -> bool) -> bool {
     let white = |c: u8| matches!(c, 0 | b'\t' | b'\n' | 0x0c | b'\r' | b' ');
     let eol = |c: u8| c == b'\n' || c == b'\r';
-    // Where the run of bytes that `is` holds for, ending at `end`, starts.
-    let back = |mut end: usize, is: &dyn Fn(u8) -> bool| {
-        while end > 0 && is(data[end - 1]) {
-            end -= 1;
-        }
-        end
-    };
-    // Where digits may end before a gap that ends at `end`: before its white space (if there is any, or
-    // `empty`), and, when that white space holds a line end, before each `%` of the line that it ends and the
-    // white space before that `%`. Each line is looked at for the one gap that holds its line end, so the
-    // search stays one pass over the bytes.
-    let ends = |end: usize, empty: bool| {
-        let s = back(end, &white);
-        let line = match data[s..end].iter().any(|&c| eol(c)) {
-            true => data[..s].iter().rposition(|&c| eol(c)).map_or(0, |i| i + 1),
-            false => s,
-        };
-        (empty || s < end)
-            .then_some(s)
-            .into_iter()
-            .chain((line..s).filter(|&q| data[q] == b'%').map(move |q| back(q, &white)))
-    };
-    for at in 0..data.len().saturating_sub(2) {
-        if &data[at..at + 3] != b"obj" {
-            continue;
-        }
-        // Backwards from "obj": a gap or none, the generation's digits, a gap, the number's.
-        for g_end in ends(at, true) {
-            let g = back(g_end, &|c| c.is_ascii_digit());
-            if g == g_end {
-                continue;
+    let mut s = run_start(data, end, white);
+    if (empty || s < end) && f(s) {
+        return true;
+    }
+    while data[s..end].iter().any(|&c| eol(c)) {
+        let line = data[..s].iter().rposition(|&c| eol(c)).map_or(0, |i| i + 1);
+        let mut first = None;
+        for q in (line..s).filter(|&q| data[q] == b'%') {
+            let w = run_start(data, q, white);
+            if f(w) {
+                return true;
             }
-            for end in ends(g, false) {
-                let (mut n, mut place) = (0u64, 1u64);
-                for &c in data[end.saturating_sub(10)..end].iter().rev().take_while(|c| c.is_ascii_digit()) {
-                    n += (c - b'0') as u64 * place;
-                    place *= 10;
-                    if u32::try_from(n).is_ok_and(|n| nums.contains(&n)) {
-                        return true;
-                    }
-                }
+            if w <= line {
+                first = Some((w, q));
             }
         }
+        let Some(gap) = first else { return false };
+        (s, end) = gap;
     }
     false
 }
@@ -2642,32 +2649,32 @@ mod effort_tests {
     #[test]
     fn headers_are_found_however_they_are_spelt() {
         // A header read forwards from `a`: the number's digits (ten at most), a gap, the generation's digits, a
-        // gap or none, "obj". A gap is white space, or white space, a comment to the first line end, and the
-        // white space from there. The search under test reads backwards from "obj".
+        // gap or none, "obj". A gap is white space and comments, each from a `%` to the line end. The search
+        // under test reads backwards from "obj".
         let white = |c: u8| matches!(c, 0 | b'\t' | b'\n' | 0x0c | b'\r' | b' ');
         let header_at = |soup: &[u8], a: usize| -> Option<u32> {
             let run = |from: usize, is: &dyn Fn(u8) -> bool| from + soup[from..].iter().take_while(|&&c| is(c)).count();
             let digit = |c: u8| c.is_ascii_digit();
-            // Where the part after a gap from `from` may start.
-            let gaps = |from: usize| {
-                let w = run(from, &white);
-                let comment = (soup.get(w) == Some(&b'%'))
-                    .then(|| soup[w..].iter().position(|&c| c == b'\n' || c == b'\r').map(|e| run(w + e, &white)))
-                    .flatten();
-                [Some(w), comment].into_iter().flatten()
+            // Where the part after a gap from `from` starts.
+            let gap = |mut from: usize| loop {
+                from = run(from, &white);
+                match soup[from..].iter().position(|&c| c == b'\n' || c == b'\r') {
+                    Some(e) if soup[from] == b'%' => from += e,
+                    _ => return from,
+                }
             };
             let n_end = run(a, &digit);
-            let held = gaps(n_end).filter(|&g| g > n_end).any(|g| {
-                let g_end = run(g, &digit);
-                g_end > g && gaps(g_end).any(|o| soup[o..].starts_with(b"obj"))
-            });
-            if n_end == a || n_end - a > 10 || !held {
+            let g = gap(n_end);
+            let g_end = run(g, &digit);
+            if n_end == a || n_end - a > 10 || g == n_end || g_end == g || !soup[gap(g_end)..].starts_with(b"obj") {
                 return None;
             }
             std::str::from_utf8(&soup[a..n_end]).ok()?.parse::<u64>().ok().and_then(|n| u32::try_from(n).ok())
         };
-        let planted: [&[u8]; 23] = [
+        let planted: [&[u8]; 25] = [
             b"6\x00%c\n0 obj",
+            b"6\x00%a\n %b\r\n\t%c\n\n0 obj",
+            b"6 0\x00%a\n%b%c\nobj",
             b"6 0\x00%c\r\nobj",
             b"6\x00%a\r0\x00 %b\n \tobj",
             b"9\x00%x%y 3\n0 obj",

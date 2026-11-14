@@ -276,8 +276,8 @@ fn a_dangling_reference_keeps_its_number_free() {
 fn a_dangling_reference_to_an_object_in_the_file_leaves_it_untouched() {
     // Object 9 is missing from the cross-reference data. When a header of it is in the file anyway (here in
     // the page's text), some readers find it, so the file is left as it is. The search takes a header at any
-    // generation, with any white space, and with a comment before a line end between its parts, and "19 0 obj"
-    // holds it too. Without two numbers before "obj" there is no header, nor with a comment that runs into it.
+    // generation, with any white space and comments between its parts, and "19 0 obj" holds it too. Without
+    // two numbers before "obj" there is no header, nor with a comment that runs into it.
     let texts = [
         ("9 0 obj", true),
         ("19 0 obj", true),
@@ -289,6 +289,7 @@ fn a_dangling_reference_to_an_object_in_the_file_leaves_it_untouched() {
         ("9\n0\tobj", true),
         ("9\x00%c\n0 obj", true),
         ("9 0\x00%c\nobj", true),
+        ("9\x00%c\n%d\n 0 obj", true),
         ("9 obj", false),
         ("9\x00%c 0 obj", false),
         ("90 obj", false),
