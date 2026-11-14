@@ -484,7 +484,7 @@ fn reencode(
         let fast = flate::Options {
             shared: opt.flate.shared.clone(),
             deadline: opt.flate.deadline,
-            ..flate::Options::effort(0)
+            ..flate::Options::effort_with(0, &opt.flate.rules)
         };
         if !opt.flate.same_output(&fast) && flate::deflate_zlib(&data, &fast).len() >= s.data.len() {
             return None;
@@ -731,7 +731,10 @@ fn repredict(
     // ranked side by side when threads are free.
     // On the fast path the candidates are ranked with the level effort 0 gives images, else with the quick
     // settings.
-    let rank = flate::Options { fast: if opt.flate.fast > 0 { image_level(0) } else { 0 }, ..flate::Options::quick() };
+    let rank = flate::Options {
+        fast: if opt.flate.fast > 0 { image_level(0) } else { 0 },
+        ..flate::Options::quick_with(&opt.flate.rules)
+    };
     let quick = flate::Options { shared: opt.flate.shared.as_ref().map(|sh| sh.without_store()), ..rank };
     let nrows = px.len() / row;
     let rows = predictor_sample(nrows, row, opt.effort);
@@ -945,7 +948,11 @@ fn structure_flate(opt: &Options, raw: usize, input_len: usize) -> flate::Option
         && (STRONG_FROM..FAST_BELOW).contains(&opt.effort)
         && raw as f64 <= bridge_budget(opt.effort, input_len)
     {
-        flate::Options { shared: opt.flate.shared.clone(), deadline: opt.flate.deadline, ..flate::Options::quick() }
+        flate::Options {
+            shared: opt.flate.shared.clone(),
+            deadline: opt.flate.deadline,
+            ..flate::Options::quick_with(&opt.flate.rules)
+        }
     } else {
         opt.flate.clone()
     }
@@ -1038,7 +1045,7 @@ fn effort_plan(
             flate: flate::Options {
                 shared: opt.flate.shared.clone(),
                 deadline: opt.flate.deadline,
-                ..flate::Options::quick()
+                ..flate::Options::quick_with(&opt.flate.rules)
             },
             ..opt.clone()
         };
@@ -1069,7 +1076,7 @@ fn effort_plan(
         flate: flate::Options {
             shared: opt.flate.shared.clone(),
             deadline: opt.flate.deadline,
-            ..flate::Options::effort(e)
+            ..flate::Options::effort_with(e, &opt.flate.rules)
         },
         effort: e,
         ..opt.clone()
@@ -1080,7 +1087,7 @@ fn effort_plan(
         flate: flate::Options {
             shared: opt.flate.shared.clone(),
             deadline: opt.flate.deadline,
-            ..flate::Options::quick()
+            ..flate::Options::quick_with(&opt.flate.rules)
         },
         effort: 0,
         ..opt.clone()

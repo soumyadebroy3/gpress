@@ -10,6 +10,7 @@ pub mod inflate;
 pub mod lz;
 pub mod matcher;
 pub mod parse;
+pub mod rules;
 pub mod tables;
 pub mod zlib;
 // The exact re-creation of zlib's own streams, which only the archive uses.
@@ -18,6 +19,7 @@ pub mod zlibexact;
 
 pub use deflate::{deflate, deflate_zlib, Options};
 pub use inflate::{inflate, InflateError};
+pub use rules::FlateRules;
 
 #[cfg(test)]
 mod tests {
@@ -69,6 +71,7 @@ mod tests {
                 shared: None,
                 deadline: crate::clock::Deadline::NONE,
                 fast: 0,
+                rules: FlateRules::default(),
             },
         ] {
             for d in samples() {
@@ -97,6 +100,9 @@ mod threads {
     use super::*;
     use crate::par::{self, Pool};
     use std::time::Duration;
+
+    /// The default of the rule `remember_up_to`.
+    const REMEMBER_UP_TO: usize = 256 << 10;
 
     #[test]
     fn segments_in_parallel_give_the_same_bytes() {
@@ -237,7 +243,7 @@ mod threads {
     #[test]
     fn big_inputs_skip_the_store() {
         let mut s = 11u64;
-        let noise: Vec<u8> = (0..deflate::REMEMBER_UP_TO + 1)
+        let noise: Vec<u8> = (0..REMEMBER_UP_TO + 1)
             .map(|_| {
                 s ^= s << 13;
                 s ^= s >> 7;
@@ -252,7 +258,7 @@ mod threads {
         }
         assert_eq!(store.stats(), deflate::StoreStats::default());
         // An input of REMEMBER_UP_TO bytes is remembered, unless it is more than one segment.
-        let last = &noise[..deflate::REMEMBER_UP_TO];
+        let last = &noise[..REMEMBER_UP_TO];
         assert!(deflate_zlib(last, &o) == deflate_zlib(last, &o));
         assert_eq!((store.stats().hits, store.stats().computed), (1, 1));
         let o = Options { segment: 100_000, ..o };

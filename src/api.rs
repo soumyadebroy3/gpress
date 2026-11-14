@@ -35,6 +35,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
 
 use crate::clock::Deadline;
+pub use crate::flate::FlateRules;
 #[cfg(feature = "archive")]
 use crate::pack;
 // Without the archive: its format's constants, which the options and `is_archive` use in every build.
@@ -157,6 +158,11 @@ pub struct Options {
     /// (on expand by one part's zlib re-creation). `None` = no limit. On a platform without a clock
     /// (WebAssembly without a host clock) there is no budget.
     pub time_budget: Option<Duration>,
+    /// The values the two Flate encoders work by: how hard each effort searches, where blocks end, and so on.
+    /// Each has a name, a default and a range ([`FlateRules`]); change one with
+    /// `flate_rules.set("e40_depth", 4096)`. With none set the output is what it always was; any value in a
+    /// rule's range gives a correct output, only smaller or larger, sooner or later.
+    pub flate_rules: FlateRules,
 }
 
 impl Default for Options {
@@ -179,6 +185,7 @@ impl Default for Options {
             decrypt: true,
             use_existing_libraries: true,
             time_budget: None,
+            flate_rules: FlateRules::default(),
         }
     }
 }
@@ -289,9 +296,9 @@ impl Options {
     }
 
     /// The Flate encoder settings this effort level means: the fast encoder below 20, the strong encoder's
-    /// steps of 20 from there (see `flate::Options::effort`).
+    /// steps of 20 from there (see `flate::Options::effort_with`), under `flate_rules`.
     pub(crate) fn flate(&self) -> crate::flate::Options {
-        crate::flate::Options::effort(self.effort.level())
+        crate::flate::Options::effort_with(self.effort.level(), &self.flate_rules)
     }
 
     /// The Flate settings for this effort, for the command-line tool's fine-tuning flags.

@@ -12,6 +12,7 @@ use super::block::*;
 use super::lz::{Hist, Sym};
 use super::matcher::{find_matches, Matches};
 use super::parse::{greedy, optimal_nice, Costs, ParseScratch};
+use super::rules::{rule, FlateRules};
 use super::tables::*;
 use crate::clock::{self, Deadline};
 use crate::par::{self, Memo, Pool};
@@ -47,82 +48,77 @@ pub struct Options {
     pub deadline: Deadline,
     /// 0: the encoder above; 1 to `fast::LEVELS`: the fast encoder (`fast.rs`) at that level instead.
     pub fast: u8,
+    /// Every other tuning value of the two encoders (see `FlateRules`). The settings above start from the
+    /// rules' table too (`quick_with`, `effort_with`).
+    pub rules: FlateRules,
 }
 
 impl Options {
     /// Our strongest setting.
     pub fn max() -> Options {
-        Options {
-            iterations: 8,
-            exact_rounds: 4,
-            max_chain: 8192,
-            segment: 1 << 20,
-            split: true,
-            alternatives: true,
-            multi_start_limit: 1 << 18,
-            nice: 259,
-            polish: true,
-            shared: None,
-            deadline: Deadline::NONE,
-            fast: 0,
-        }
+        Options::effort(100)
     }
     /// Fast but still optimal-parsed.
     pub fn quick() -> Options {
-        Options {
-            iterations: 2,
-            exact_rounds: 1,
-            max_chain: 128,
-            segment: 1 << 20,
-            split: true,
-            alternatives: false,
-            multi_start_limit: 0,
-            nice: 64,
-            polish: false,
-            shared: None,
-            deadline: Deadline::NONE,
-            fast: 0,
-        }
+        Options::quick_with(&FlateRules::default())
     }
 
     /// Settings for an effort from 0 to 100. Below 20 the fast encoder (`fast.rs`) at its near-optimal top
-    /// level (`FAST_LEVEL`; the PDF plan gives images faster levels and, from 10, some streams `quick`); from
-    /// 20 the encoder above in steps of 20 up to `max` at 100. Measured on 92 sampled PDF streams (3.4 MB) and
-    /// on 6 large images (14.9 MB), against `max` (CPU time; bytes):
+    /// level (the rule `fast_level`; the PDF plan gives images faster levels and, from 10, some streams `quick`);
+    /// from 20 the encoder above in steps of 20 up to `max` at 100. Measured on 92 sampled PDF streams (3.4 MB)
+    /// and on 6 large images (14.9 MB), against `max` (CPU time; bytes):
     ///   quick: 0.34x, 0.23x; +0.47%, +1.75%      20: 0.43x, 0.39x; +0.15%, +0.10%
     ///  40: 0.47x, 0.45x; +0.13%, +0.09%      60: 0.77x, 0.71x; +0.03%, +0.00%      80: 0.93x, 0.90x; +0.01%, +0.00%
     pub fn effort(effort: u8) -> Options {
-        let o = |iterations, exact_rounds, max_chain, alternatives, polish| Options {
-            iterations,
-            exact_rounds,
-            max_chain,
-            segment: 1 << 20,
-            split: true,
-            alternatives,
-            multi_start_limit: 0,
-            nice: 259,
-            polish,
-            shared: None,
-            deadline: Deadline::NONE,
-            fast: 0,
-        };
+        Options::effort_with(effort, &FlateRules::default())
+    }
+
+    /// `quick` under `rules`: the row `quick_` of their table.
+    pub fn quick_with(rules: &FlateRules) -> Options {
+        Options::row(0, rules)
+    }
+
+    /// `effort` under `rules`: their `fast_level` below 20, then the rows `e20_` to `e100_` of their table.
+    pub fn effort_with(effort: u8, rules: &FlateRules) -> Options {
         match effort {
-            0..=19 => Options { fast: FAST_LEVEL, ..Options::quick() },
-            20..=39 => o(2, 1, 1024, false, false),
-            40..=59 => o(3, 1, 1024, false, false),
-            60..=79 => o(4, 2, 2048, true, true),
-            80..=99 => o(6, 3, 4096, true, true),
-            _ => Options::max(),
+            0..=19 => Options { fast: rule!(rules, "fast_level") as u8, ..Options::row(0, rules) },
+            20..=39 => Options::row(1, rules),
+            40..=59 => Options::row(2, rules),
+            60..=79 => Options::row(3, rules),
+            80..=99 => Options::row(4, rules),
+            _ => Options::row(5, rules),
         }
     }
 
-    /// Whether two settings give the same output (`shared` and `deadline` never change it).
+    /// Row `k` of the rules' table of settings: the quick settings, then the bands from 20 to 100.
+    fn row(k: usize, rules: &FlateRules) -> Options {
+        const AT: usize = FlateRules::at("quick_rounds");
+        let v = |column: usize| rules.v(AT + 9 * k + column);
+        Options {
+            iterations: v(0),
+            exact_rounds: v(1),
+            max_chain: v(2),
+            segment: v(3),
+            split: v(4) != 0,
+            alternatives: v(5) != 0,
+            multi_start_limit: v(6),
+            nice: v(7),
+            polish: v(8) != 0,
+            shared: None,
+            deadline: Deadline::NONE,
+            fast: 0,
+            rules: rules.clone(),
+        }
+    }
+
+    /// Whether two settings give the same output (`shared` and `deadline` never change it; the rules count as a
+    /// whole, also those the settings do not use).
     pub fn same_output(&self, other: &Options) -> bool {
         self.fingerprint() == other.fingerprint()
     }
 
-    /// The settings that decide the output (everything but `shared` and `deadline`).
-    fn fingerprint(&self) -> [usize; 10] {
+    /// The settings that decide the output (everything but `shared` and `deadline`; the rules as their hash).
+    fn fingerprint(&self) -> [usize; 11] {
         [
             self.iterations,
             self.exact_rounds,
@@ -134,13 +130,10 @@ impl Options {
             self.nice,
             self.polish as usize,
             self.fast as usize,
+            self.rules.hash() as usize,
         ]
     }
 }
-
-/// The fast encoder's level for efforts 0 to 19: its near-optimal top level (images get a faster one, see
-/// `pdf::rewrite`).
-const FAST_LEVEL: u8 = super::fast::LEVELS;
 
 /// The most bytes a store of outputs keeps, whatever it is asked for (see `Shared::with_store`).
 pub const MAX_STORE_BUDGET: usize = 1 << 30;
@@ -159,7 +152,7 @@ pub struct Shared {
 }
 
 /// What an encoded input is remembered by: the hash and length of the data and the settings that matter.
-type MemoKey = (u64, usize, [usize; 10]);
+type MemoKey = (u64, usize, [usize; 11]);
 
 /// A remembered output, and how long it took to make (for the debug figures only).
 struct Done {
@@ -185,7 +178,7 @@ pub struct StoreStats {
 
 impl Shared {
     /// A new pool of `threads` threads, remembering every output of an input small enough to remember (at most
-    /// `REMEMBER_UP_TO` bytes and one segment, see `deflate_zlib`).
+    /// the rule `remember_up_to` and one segment, see `deflate_zlib`).
     pub fn new(threads: usize) -> Arc<Shared> {
         Shared::with_pool(Pool::new(threads), true)
     }
@@ -241,11 +234,6 @@ impl std::fmt::Debug for Shared {
     }
 }
 
-/// Segments in a group: a segment like an earlier one of its group is planned once, and with more than one
-/// thread a group's segments are optimised together before their blocks are written (this bounds the memory
-/// held by finished plans).
-const SEGMENTS_AT_ONCE: usize = 8;
-
 /// Raw Deflate data for `data`.
 pub fn deflate(data: &[u8], opt: &Options) -> Vec<u8> {
     deflate_with(data, opt, true)
@@ -269,7 +257,7 @@ fn same_segment(data: &[u8], (a, b): (usize, usize), (c, d): (usize, usize)) -> 
 /// `fast` set, the fast encoder, without reuse.
 fn deflate_with(data: &[u8], opt: &Options, reuse: bool) -> Vec<u8> {
     if opt.fast > 0 {
-        return super::fast::deflate(data, opt.fast, opt.shared.as_ref().map(|s| &*s.pool), opt.deadline);
+        return super::fast::deflate(data, opt.fast, opt.shared.as_ref().map(|s| &*s.pool), opt.deadline, &opt.rules);
     }
     let mut w = BitWriter::with_capacity(data.len() / 2 + 64);
     if data.is_empty() {
@@ -286,7 +274,10 @@ fn deflate_with(data: &[u8], opt: &Options, reuse: bool) -> Vec<u8> {
     // slowest), then written. With one thread each segment is planned and written before the next, and its
     // plans are kept only while a later segment of the group is still to be written from them.
     let side_by_side = pool.is_some_and(|p| p.threads() > 1);
-    for group in bounds.chunks(SEGMENTS_AT_ONCE) {
+    // Segments in a group (the rule `segments_at_once`): a segment like an earlier one of its group is planned
+    // once, and with more than one thread a group's segments are optimised together before their blocks are
+    // written (this bounds the memory held by finished plans).
+    for group in bounds.chunks(rule!(opt.rules, "segments_at_once")) {
         // For each segment, the first segment of the group like it (itself when there is none). Only those
         // are planned.
         let mut first: Vec<usize> = Vec::with_capacity(group.len());
@@ -312,7 +303,7 @@ fn deflate_with(data: &[u8], opt: &Options, reuse: bool) -> Vec<u8> {
                 return None;
             }
             let t0 = clock::now();
-            let m = find_matches(data, a, b, opt.max_chain, opt.alternatives);
+            let m = find_matches(data, a, b, opt.max_chain, opt.alternatives, &opt.rules);
             let t1 = clock::since(t0);
             let plans = optimize_segment(data, a, b, &m, opt);
             if dbg {
@@ -337,7 +328,7 @@ fn deflate_with(data: &[u8], opt: &Options, reuse: bool) -> Vec<u8> {
                 Some(plans) => {
                     let n = plans.len();
                     for (i, p) in plans.iter().enumerate() {
-                        write_best(&mut w, data, p, last_segment && i + 1 == n);
+                        write_best(&mut w, data, p, last_segment && i + 1 == n, &opt.rules);
                     }
                 }
                 None => write_stored(&mut w, &data[a..b], last_segment),
@@ -368,22 +359,18 @@ fn deflate_with(data: &[u8], opt: &Options, reuse: bool) -> Vec<u8> {
     w.finish()
 }
 
-/// The largest input whose output is remembered. Repeated inputs are small (the largest repeat in the sample
-/// corpus is 152,965 bytes), and an input this small is one segment, so encoding it on one thread (as a
-/// memo's compute does, see `par::Memo`) costs no parallelism.
-pub(crate) const REMEMBER_UP_TO: usize = 256 << 10;
-// Remembered inputs stay within one segment (of either encoder) for speed; freedom from deadlock does not need it.
-const _: () = assert!(REMEMBER_UP_TO <= super::fast::SEGMENT && REMEMBER_UP_TO <= 1 << 20);
-
 /// Zlib-wrapped data, as PDF's FlateDecode expects. With a remembering `shared`, an input already encoded with
 /// the same settings is not encoded again: the earlier output is reused after checking that it decodes to
-/// this input. Only inputs up to `REMEMBER_UP_TO` bytes and one segment are remembered, and never an output
-/// made after the deadline.
+/// this input. Only inputs up to the rule `remember_up_to` (256 KiB) and one segment are remembered, and never
+/// an output made after the deadline. Repeated inputs are small (the largest repeat in the sample corpus is
+/// 152,965 bytes), and one segment is encoded on one thread (as a memo's compute does, see `par::Memo`) at no
+/// cost in parallelism; freedom from deadlock does not need it.
 pub fn deflate_zlib(data: &[u8], opt: &Options) -> Vec<u8> {
     let encode = || super::zlib::wrap(&deflate(data, opt), data);
     let Some(sh) = opt.shared.as_deref() else { return encode() };
+    let one_segment = if opt.fast > 0 { rule!(opt.rules, "fast_segment") } else { opt.segment.max(1) };
     let memo = match &sh.memo {
-        Some(memo) if data.len() <= REMEMBER_UP_TO.min(opt.segment.max(1)) => memo,
+        Some(memo) if data.len() <= rule!(opt.rules, "remember_up_to").min(one_segment) => memo,
         _ => return encode(),
     };
     let key = (par::hash64(data), data.len(), opt.fingerprint());
@@ -412,23 +399,27 @@ struct Plan {
 
 /// Block size for comparing parses: a close search for small blocks (where the header matters most), a
 /// quick estimate for large ones.
-fn price(h: &Hist, nbytes: usize) -> u64 {
-    if nbytes < 65536 {
-        3 + good_dynamic(h).bits.min(fixed_bits(h))
+fn price(h: &Hist, nbytes: usize, r: &FlateRules) -> u64 {
+    if nbytes < rule!(r, "exact_price_below") {
+        3 + good_dynamic(h, r).bits.min(fixed_bits(h))
     } else {
         3 + estimate_dynamic_bits(h).min(fixed_bits(h))
     }
 }
 
-fn write_best(w: &mut BitWriter, data: &[u8], p: &Plan, last: bool) {
+fn write_best(w: &mut BitWriter, data: &[u8], p: &Plan, last: bool, r: &FlateRules) {
     let h = Hist::of(&p.syms);
-    let dyncode = best_dynamic(&h);
+    let dyncode = best_dynamic(&h, r);
     let dyn_bits = 3 + dyncode.bits;
     let fix_bits = 3 + fixed_bits(&h);
     let st_bits = stored_bits(p.b - p.a, w.bit_len());
-    if st_bits < dyn_bits.min(fix_bits) {
+    // Of equal sizes: fixed, then dynamic, then stored, unless the rule `block_tie` puts dynamic (1) or stored
+    // (2) first.
+    let tie = rule!(r, "block_tie");
+    let coded = dyn_bits.min(fix_bits);
+    if st_bits < coded || (tie == 2 && st_bits == coded) {
         write_stored(w, &data[p.a..p.b], last);
-    } else if fix_bits <= dyn_bits {
+    } else if fix_bits < dyn_bits || (tie != 1 && fix_bits == dyn_bits) {
         write_fixed(w, &p.syms, last);
     } else {
         write_dynamic(w, &p.syms, &dyncode, last);
@@ -439,24 +430,25 @@ fn optimize_segment(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options)
     let dbg = std::env::var_os("PDFE_DEBUG").is_some();
     let t = clock::now();
     let mut sc = ParseScratch::default();
+    let r = &opt.rules;
     // 1. The whole segment, from neutral prices and (for smaller segments) also from a greedy parse's
     //    statistics; the better result goes on.
     let mut first = Vec::new();
-    optimal_nice(data, a, b, m, &Costs::fixed(), false, opt.nice, &mut sc, &mut first);
+    optimal_nice(data, a, b, m, &Costs::first(r), false, opt.nice, &mut sc, &mut first);
     let mut syms = refine(data, a, b, m, opt, first, &mut sc);
     if b - a <= opt.multi_start_limit {
         let mut g = Vec::new();
         greedy(data, a, b, m, &mut g);
         let mut second = Vec::new();
-        optimal_nice(data, a, b, m, &Costs::entropy(&Hist::of(&g)), false, opt.nice, &mut sc, &mut second);
+        optimal_nice(data, a, b, m, &Costs::entropy(&Hist::of(&g), r), false, opt.nice, &mut sc, &mut second);
         let other = refine(data, a, b, m, opt, second, &mut sc);
-        if price(&Hist::of(&other), b - a) < price(&Hist::of(&syms), b - a) {
+        if price(&Hist::of(&other), b - a, r) < price(&Hist::of(&syms), b - a, r) {
             syms = other;
         }
     }
     let t1 = clock::since(t);
     // 2. Split into blocks.
-    let mut plans = if opt.split { split(data, a, b, syms) } else { vec![Plan { a, b, syms }] };
+    let mut plans = if opt.split { split(data, a, b, syms, r) } else { vec![Plan { a, b, syms }] };
     let t2 = clock::since(t);
     // 3. Each block under its own codes.
     for p in plans.iter_mut() {
@@ -475,8 +467,8 @@ fn optimize_segment(data: &[u8], a: usize, b: usize, m: &Matches, opt: &Options)
     plans
 }
 
-fn plan_price(p: &Plan) -> u64 {
-    price(&Hist::of(&p.syms), p.b - p.a)
+fn plan_price(p: &Plan, r: &FlateRules) -> u64 {
+    price(&Hist::of(&p.syms), p.b - p.a, r)
 }
 
 fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &mut ParseScratch) {
@@ -487,7 +479,11 @@ fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &m
     let mut no_merge: HashSet<(usize, usize)> = HashSet::new();
     let mut no_split: HashSet<usize> = HashSet::new();
     let (mut el, mut er) = (Estimator::new(), Estimator::new());
-    for _pass in 0..2 {
+    let r = &opt.rules;
+    let (merge_percent, merge_bits) = (rule!(r, "polish_merge_percent") as u64, rule!(r, "polish_merge_bits") as u64);
+    let (min_block, min_gain) = (rule!(r, "polish_min_block"), rule!(r, "polish_min_gain") as u64);
+    let (step_div, step_min) = (rule!(r, "polish_step_div"), rule!(r, "polish_step_min"));
+    for _pass in 0..rule!(r, "polish_passes") {
         let mut changed = false;
         // Merges.
         let mut k = 0;
@@ -497,16 +493,16 @@ fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &m
                 continue;
             }
             let (pa, pb) = (&plans[k], &plans[k + 1]);
-            let apart = plan_price(pa) + plan_price(pb);
+            let apart = plan_price(pa, r) + plan_price(pb, r);
             let mut joined: Vec<Sym> = Vec::with_capacity(pa.syms.len() + pb.syms.len());
             joined.extend_from_slice(&pa.syms);
             joined.extend_from_slice(&pb.syms);
             let (a, b) = (pa.a, pb.b);
-            let together = price(&Hist::of(&joined), b - a);
+            let together = price(&Hist::of(&joined), b - a, r);
             // Merging lets one parse span both, so re-parse before judging when it is close.
-            if together <= apart + (apart / 50).min(400) {
+            if together <= apart + (apart * merge_percent / 100).min(merge_bits) {
                 let better = exact(data, a, b, m, opt, joined, sc);
-                if price(&Hist::of(&better), b - a) < apart {
+                if price(&Hist::of(&better), b - a, r) < apart {
                     plans[k] = Plan { a, b, syms: better };
                     plans.remove(k + 1);
                     ids[k] = next_id;
@@ -524,13 +520,13 @@ fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &m
         while k < plans.len() {
             let p = &plans[k];
             let n = p.syms.len();
-            if n < 64 || no_split.contains(&ids[k]) {
+            if n < min_block || no_split.contains(&ids[k]) {
                 k += 1;
                 continue;
             }
-            let whole = plan_price(p);
+            let whole = plan_price(p, r);
             let total = Hist::of(&p.syms);
-            let step = (n / 64).max(4);
+            let step = (n / step_div).max(step_min);
             let mut left = Hist::of(&[]);
             let mut best = (u64::MAX, 0usize);
             let mut c = 0;
@@ -545,7 +541,7 @@ fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &m
                     best = (v, c);
                 }
             }
-            if best.1 == 0 || best.0 + 6 >= whole {
+            if best.1 == 0 || best.0 + min_gain >= whole {
                 no_split.insert(ids[k]);
                 k += 1;
                 continue;
@@ -554,11 +550,11 @@ fn polish(data: &[u8], m: &Matches, opt: &Options, plans: &mut Vec<Plan>, sc: &m
             let mid = p.a + p.syms[..cut].iter().map(|x| x.span()).sum::<usize>();
             let (a, b) = (p.a, p.b);
             let l = exact(data, a, mid, m, opt, p.syms[..cut].to_vec(), sc);
-            let r = exact(data, mid, b, m, opt, p.syms[cut..].to_vec(), sc);
-            let split_price = price(&Hist::of(&l), mid - a) + price(&Hist::of(&r), b - mid);
+            let right = exact(data, mid, b, m, opt, p.syms[cut..].to_vec(), sc);
+            let split_price = price(&Hist::of(&l), mid - a, r) + price(&Hist::of(&right), b - mid, r);
             if split_price < whole {
                 plans[k] = Plan { a, b: mid, syms: l };
-                plans.insert(k + 1, Plan { a: mid, b, syms: r });
+                plans.insert(k + 1, Plan { a: mid, b, syms: right });
                 ids[k] = next_id;
                 ids.insert(k + 1, next_id + 1);
                 next_id += 2;
@@ -585,17 +581,19 @@ fn refine(
     start: Vec<Sym>,
     sc: &mut ParseScratch,
 ) -> Vec<Sym> {
-    let mut best_bits = price(&Hist::of(&start), b - a);
+    let r = &opt.rules;
+    let mut best_bits = price(&Hist::of(&start), b - a, r);
     let mut best = start;
     let mut stats = Hist::of(&best);
     let mut last_bits = best_bits;
     let mut cur = Vec::with_capacity(best.len());
     let mut stuck = 0;
+    let stuck_rounds = rule!(r, "stuck_rounds") as u64;
     for it in 0..opt.iterations {
         cur.clear();
-        optimal_nice(data, a, b, m, &Costs::entropy(&stats), false, opt.nice, sc, &mut cur);
+        optimal_nice(data, a, b, m, &Costs::entropy(&stats, r), false, opt.nice, sc, &mut cur);
         let h = Hist::of(&cur);
-        let bits = price(&h, b - a);
+        let bits = price(&h, b - a, r);
         if bits < best_bits {
             best_bits = bits;
             best.clone_from(&cur);
@@ -603,8 +601,8 @@ fn refine(
         if bits >= last_bits {
             stuck += 1;
             // Blend in the previous statistics to step out of a cycle.
-            stats = blend(&h, &stats, it as u64 + stuck);
-            if stuck > 3 {
+            stats = blend(&h, &stats, it as u64 + stuck, r);
+            if stuck >= stuck_rounds {
                 break;
             }
         } else {
@@ -616,17 +614,18 @@ fn refine(
     best
 }
 
-fn blend(new: &Hist, old: &Hist, salt: u64) -> Hist {
+fn blend(new: &Hist, old: &Hist, salt: u64, r: &FlateRules) -> Hist {
+    let (old_div, noise_div) = (rule!(r, "blend_old_div") as u32, rule!(r, "blend_noise_div") as u32);
     let mut h = new.clone();
-    let mut r = 0x2545_F491_4F6C_DD1Du64 ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut seed = 0x2545_F491_4F6C_DD1Du64 ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     for i in 0..LITLEN_SYMS {
-        r ^= r << 13;
-        r ^= r >> 7;
-        r ^= r << 17;
-        h.ll[i] = new.ll[i] + old.ll[i] / 2 + (r % 2) as u32 * (new.ll[i] / 8);
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        h.ll[i] = new.ll[i] + old.ll[i] / old_div + (seed % 2) as u32 * (new.ll[i] / noise_div);
     }
     for i in 0..DIST_SYMS {
-        h.d[i] = new.d[i] + old.d[i] / 2;
+        h.d[i] = new.d[i] + old.d[i] / old_div;
     }
     h
 }
@@ -641,9 +640,15 @@ fn exact(
     start: Vec<Sym>,
     sc: &mut ParseScratch,
 ) -> Vec<Sym> {
-    let mut best_bits = price(&Hist::of(&start), b - a);
+    let r = &opt.rules;
+    let mut best_bits = price(&Hist::of(&start), b - a, r);
     let mut best = start;
     let mut cur = Vec::with_capacity(best.len());
+    // Which tries a round makes (a set of bits), and what each charges over the longest code for a symbol
+    // without a code.
+    let tries = rule!(r, "exact_tries");
+    let over = [rule!(r, "exact_try1_missing"), rule!(r, "exact_try2_missing"), rule!(r, "exact_try3_missing")];
+    let over = over.map(|bits| bits as f32);
     // The prices (and `alt`) of this round's parses and the last round's, by round parity and variant. The
     // same again give the same parse, which was priced then and so cannot beat `best_bits` now: it is not
     // made again. Without alternatives the third variant is the first, and a round whose code is the last
@@ -651,13 +656,13 @@ fn exact(
     let mut tried: [Option<(bool, Costs)>; 6] = Default::default();
     for round in 0..opt.exact_rounds {
         let h = Hist::of(&best);
-        let code = best_dynamic(&h);
+        let code = best_dynamic(&h, r);
         let maxlen = *code.ll.iter().max().unwrap_or(&15) as f32;
         let mut improved = false;
-        let variants = [(maxlen + 1.0, false), (maxlen + 4.0, false), (maxlen + 1.0, opt.alternatives)];
+        let variants = [(maxlen + over[0], false), (maxlen + over[1], false), (maxlen + over[2], opt.alternatives)];
         for (k, (missing, alt)) in variants.into_iter().enumerate() {
-            if !alt && missing > maxlen + 1.0 && opt.alternatives {
-                // keep the variety small when alternatives are tried
+            if tries >> k & 1 == 0 {
+                continue;
             }
             let costs = Costs::lengths(&code.ll, &code.d, missing);
             if tried.iter().flatten().any(|t| t.0 == alt && same_costs(&t.1, &costs)) {
@@ -665,7 +670,7 @@ fn exact(
             }
             cur.clear();
             optimal_nice(data, a, b, m, &costs, alt, opt.nice, sc, &mut cur);
-            let bits = price(&Hist::of(&cur), b - a);
+            let bits = price(&Hist::of(&cur), b - a, r);
             if bits < best_bits {
                 best_bits = bits;
                 best.clone_from(&cur);
@@ -689,12 +694,12 @@ fn same_costs(x: &Costs, y: &Costs) -> bool {
 }
 
 /// Chooses block boundaries by dynamic programming over candidate split points.
-fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>) -> Vec<Plan> {
+fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>, r: &FlateRules) -> Vec<Plan> {
     let n = syms.len();
-    if n < 64 {
+    if n < rule!(r, "split_min_symbols") {
         return vec![Plan { a, b, syms }];
     }
-    let g = (n / 160).max(32);
+    let g = (n / rule!(r, "split_step_div")).max(rule!(r, "split_step_min"));
     let mut cand: Vec<usize> = (0..n).step_by(g).collect();
     if *cand.last().unwrap() != n {
         cand.push(n);
@@ -715,7 +720,8 @@ fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>) -> Vec<Plan> {
         pos.push(bytes);
         pref.push(h.clone());
     }
-    let span_limit = 96usize;
+    let span_limit = rule!(r, "split_span");
+    let stored_extra = rule!(r, "split_stored_extra_bits") as u64;
     // One estimator for all pairs: for a given j, the histograms of i and i + 1 differ by one block. The fixed
     // code's size is a sum over the counts, so that of a pair is the difference of the prefixes' (which have no
     // end-of-block) plus the end-of-block's.
@@ -725,7 +731,7 @@ fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>) -> Vec<Plan> {
     let mut est = |i: usize, j: usize| -> u64 {
         let hh = Hist::diff(&pref[j], &pref[i]);
         let nbytes = pos[j] - pos[i];
-        3 + es.bits(&hh).min(fixed[j] - fixed[i] + end_of_block).min(8 * nbytes as u64 + 40)
+        3 + es.bits(&hh).min(fixed[j] - fixed[i] + end_of_block).min(8 * nbytes as u64 + stored_extra)
     };
     let mut best = vec![u64::MAX; k];
     let mut from = vec![0usize; k];
@@ -754,12 +760,13 @@ fn split(data: &[u8], a: usize, b: usize, syms: Vec<Sym>) -> Vec<Plan> {
     let mut idx: Vec<usize> = cuts.iter().map(|&c| cand[c]).collect();
     // The search's estimator serves the left side (it gives the same estimates whatever it priced before).
     let (mut el, mut er) = (es, Estimator::new());
+    let reach = g * rule!(r, "split_tune_reach");
+    let step = (g / rule!(r, "split_tune_div")).max(1);
     for t in 1..idx.len() - 1 {
         let (l, r) = (idx[t - 1], idx[t + 1]);
         let total = Hist::of(&syms[l..r]);
-        let lo = idx[t].saturating_sub(g).max(l + 1);
-        let hi = (idx[t] + g).min(r - 1);
-        let step = (g / 8).max(1);
+        let lo = idx[t].saturating_sub(reach).max(l + 1);
+        let hi = (idx[t] + reach).min(r - 1);
         let mut left = Hist::of(&syms[l..lo]);
         let mut c = lo;
         let mut bestc = idx[t];
@@ -830,7 +837,7 @@ mod tests {
                 let opt = Options { segment: seg, ..opt };
                 let plans = |k: usize| {
                     let (a, b) = at(k);
-                    let m = find_matches(&data, a, b, opt.max_chain, opt.alternatives);
+                    let m = find_matches(&data, a, b, opt.max_chain, opt.alternatives, &opt.rules);
                     optimize_segment(&data, a, b, &m, &opt)
                 };
                 let (p2, p3) = (plans(2), plans(3));
@@ -911,12 +918,12 @@ mod tests {
         start: Vec<Sym>,
     ) -> (Vec<Sym>, usize) {
         let mut sc = ParseScratch::default();
-        let mut best_bits = price(&Hist::of(&start), b - a);
+        let mut best_bits = price(&Hist::of(&start), b - a, &opt.rules);
         let mut best = start;
         let mut made: Vec<(bool, Costs, Vec<Sym>)> = Vec::new();
         let mut repeats = 0;
         for _ in 0..opt.exact_rounds {
-            let code = best_dynamic(&Hist::of(&best));
+            let code = best_dynamic(&Hist::of(&best), &opt.rules);
             let maxlen = *code.ll.iter().max().unwrap_or(&15) as f32;
             let mut improved = false;
             for (missing, alt) in [(maxlen + 1.0, false), (maxlen + 4.0, false), (maxlen + 1.0, opt.alternatives)] {
@@ -927,7 +934,7 @@ mod tests {
                     assert!(e.2 == cur, "the same prices gave another parse");
                     repeats += 1;
                 }
-                let bits = price(&Hist::of(&cur), b - a);
+                let bits = price(&Hist::of(&cur), b - a, &opt.rules);
                 if bits < best_bits {
                     best_bits = bits;
                     best.clone_from(&cur);
@@ -978,7 +985,7 @@ mod tests {
         for opt in &opts {
             for data in samples() {
                 let n = data.len();
-                let m = find_matches(&data, 0, n, opt.max_chain, opt.alternatives);
+                let m = find_matches(&data, 0, n, opt.max_chain, opt.alternatives, &opt.rules);
                 for (a, b) in [(0, n), (0, n / 2), (n / 3, n)] {
                     let mut sc = ParseScratch::default();
                     let mut first = Vec::new();
