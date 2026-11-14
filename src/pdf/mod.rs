@@ -10,5 +10,6 @@ pub mod images;
 pub mod lossy;
 pub mod object;
 pub mod parse;
+pub mod place;
 pub mod rewrite;
 pub mod xref;

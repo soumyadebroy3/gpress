@@ -522,6 +522,12 @@ pub struct Report {
     pub jpegs_retabled: usize,
     /// CCITT fax images written as JBIG2 (the same pixels).
     pub fax_to_jbig2: usize,
+    /// Images the lossy step resampled to a lower resolution (see [`Lossy`]).
+    pub images_resampled: usize,
+    /// Photos stored without JPEG that the lossy step wrote as a JPEG.
+    pub images_to_jpeg: usize,
+    /// JPEG photos the lossy step wrote again at a lower quality (not resampled).
+    pub jpegs_rewritten: usize,
     /// How the file is encrypted, kept exactly as it was (e.g. "R4/AESV2"); empty when it isn't.
     pub encryption: String,
 }
@@ -620,6 +626,9 @@ fn optimize_until(input: &[u8], opt: &Options, deadline: Deadline) -> Result<Opt
                 unreachable_objects_dropped: s.dropped_unreachable,
                 jpegs_retabled: s.jpegs_retabled,
                 fax_to_jbig2: s.fax_to_jbig2,
+                images_resampled: s.images_resampled,
+                images_to_jpeg: s.images_to_jpeg,
+                jpegs_rewritten: s.jpegs_rewritten,
                 encryption: s.encryption,
             }),
             rewrite::Outcome::Untouched(why) => Outcome::Untouched(why),

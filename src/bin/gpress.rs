@@ -12,11 +12,14 @@
 //! most V, which is bytes, with k or m for KiB or MiB, or N% of the input; up to six runs of the engine; the
 //! output line then ends with effort=E target=reached|missed, missed meaning the smallest of the six),
 //! --engine-effort N (for measuring: the engine's own lossless level, 0 to 100, in place of what the effort
-//! means, and nothing lossy), --threads N (0: every core the machine offers, at most 8; at most 64), --max-input BYTES,
+//! means, and nothing lossy unless a flag below asks), --threads N (0: every core the machine offers, at most 8; at most 64), --max-input BYTES,
 //! --max-stream BYTES (normal PDF), --max-stream-archive BYTES, --max-decoded BYTES (the archive's decoded-bytes
 //! budget, for pack and unpack), --max-len BYTES (unpack: a file declaring more is refused),
 //! --objects-per-stream N, --time-budget MS (give up after that long), --ignore-conformance,
 //! --no-flate-over-jpeg, --no-jpeg-tables, --no-jbig2, --keep-encrypted, --store-budget BYTES (normal PDF),
+//! --lossy N (normal PDF: the lossy image step at level 0 to 3 in place of what the effort means, 0 = off; see
+//! `gpress::Lossy`), --photo-ppi N, --art-ppi N, --jpeg-quality N (each sets one of the step's settings, over
+//! the level's or the effort's; 0 leaves it as it is),
 //! --no-decrypt (archive), --no-existing. The output never depends on the thread count or the time budget: a
 //! budget that runs out gives an error and no file.
 //!
@@ -79,6 +82,8 @@ options: --effort N (0, 20, 40 lossless: fast .. smallest, default 40; 60, 80, 1
          --max-input BYTES   --max-stream BYTES (normal PDF)   --max-stream-archive BYTES   --max-decoded BYTES (archive,
          pack and unpack)   --max-len BYTES (unpack)   --objects-per-stream N   --time-budget MS   --ignore-conformance
          --no-flate-over-jpeg   --no-jpeg-tables   --no-jbig2   --keep-encrypted   --store-budget BYTES (normal PDF)
+         --lossy N (lossy image step, level 0 off .. 3, in place of the effort's)   --photo-ppi N   --art-ppi N
+         --jpeg-quality N (one setting of the step each, over the effort's)
          --no-decrypt (archive)   --no-existing
 measuring tools: deflate, inflate, batch, pdf-batch, repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info,
          fax-decode, fax-encode, fax-scan, fax-model, jbig2-encode, claim-archive (see the comments at the top of
@@ -103,6 +108,10 @@ const WITH_VALUE: &[&str] = &[
     "--objects-per-stream",
     "--time-budget",
     "--store-budget",
+    "--lossy",
+    "--photo-ppi",
+    "--art-ppi",
+    "--jpeg-quality",
 ];
 
 /// The flags that fine-tune the strong encoder's settings in the deflate tools.
@@ -170,6 +179,20 @@ fn main() {
     lib.jpeg_tables = !flag("--no-jpeg-tables");
     lib.jbig2 = !flag("--no-jbig2");
     lib.rewrite_encrypted = !flag("--keep-encrypted");
+    // The lossy image step: a level in place of what the effort means, then single settings over it (after
+    // --effort and --engine-effort: an override starts from what they mean).
+    if let Some(n) = num("--lossy") {
+        if n > 3 {
+            die("--lossy: a level from 0 to 3");
+        }
+        lib.lossy = Some(gpress::Lossy::level(n as u8));
+    }
+    let setting = |name: &str, most: u64| num(name).unwrap_or(0).min(most);
+    lib = lib.lossy_overrides(
+        setting("--photo-ppi", u16::MAX as u64) as u16,
+        setting("--art-ppi", u16::MAX as u64) as u16,
+        setting("--jpeg-quality", u8::MAX as u64) as u8,
+    );
     lib.decrypt = !flag("--no-decrypt");
     lib.use_existing_libraries = !flag("--no-existing");
     lib.check().unwrap_or_else(|e| fail(&e));
@@ -657,11 +680,12 @@ fn read_pbm(d: &[u8]) -> Option<gpress::fax::ccitt::Image> {
     Some(img)
 }
 
+/// The output line of one normal-PDF result; what the lossy image step did is added when it changed an image.
 fn describe(name: &str, in_len: usize, r: &gpress::Optimized, secs: f64) -> String {
     match &r.outcome {
         gpress::Outcome::Smaller(s) => format!(
             "{name}\tSMALLER\t{in_len}\t{}\t{secs:.2}\tobjects={} streams={} reencoded={} kept={} objstms={} dropped={} \
-             jpegs_retabled={} fax_to_jbig2={}{}",
+             jpegs_retabled={} fax_to_jbig2={}{}{}",
             r.data.len(),
             s.objects,
             s.streams,
@@ -671,7 +695,12 @@ fn describe(name: &str, in_len: usize, r: &gpress::Optimized, secs: f64) -> Stri
             s.unreachable_objects_dropped,
             s.jpegs_retabled,
             s.fax_to_jbig2,
-            if s.encryption.is_empty() { String::new() } else { format!(" encrypted={}", s.encryption) }
+            if s.encryption.is_empty() { String::new() } else { format!(" encrypted={}", s.encryption) },
+            if s.images_resampled + s.images_to_jpeg + s.jpegs_rewritten > 0 {
+                format!(" resampled={} to_jpeg={} rejpeg={}", s.images_resampled, s.images_to_jpeg, s.jpegs_rewritten)
+            } else {
+                String::new()
+            }
         ),
         gpress::Outcome::Untouched(why) => format!("{name}\tUNTOUCHED\t{in_len}\t{}\t{secs:.2}\t{why}", r.data.len()),
     }
