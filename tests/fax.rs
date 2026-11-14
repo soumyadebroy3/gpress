@@ -421,10 +421,9 @@ fn archive_reads_eols_that_end_on_a_byte_boundary() {
     let mut lay = layout(&img, Scheme::G31D, true);
     let mut wr = ccitt::Writer::new();
     let mut enc = ccitt::RowEncoder::new(img.width, Scheme::G31D, Rule::Standard);
-    for r in 0..img.rows() {
-        lay.gaps[r].fill = ((16 - (wr.bit_pos() + 12) % 8) % 8) as u32;
-        let g = lay.gaps[r];
-        enc.row(&mut wr, &g, img.row(r));
+    for (r, g) in lay.gaps.iter_mut().enumerate().take(img.rows()) {
+        g.fill = ((16 - (wr.bit_pos() + 12) % 8) % 8) as u32;
+        enc.row(&mut wr, g, img.row(r));
     }
     let data = ccitt::encode(&img, &lay);
     // Read with the alignment the parameters give, an EOL that starts before a byte boundary is not found.
