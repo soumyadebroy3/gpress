@@ -69,7 +69,8 @@ jobs:
           toolchain: stable
       # The runner builds for its own kind of machine: stop if that is not the target the files are named after.
       - run: |
-          rustc -vV | grep -qx "host: $TARGET" || { rustc -vV >&2; echo "this runner does not build for $TARGET" >&2; exit 1; }
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          [ "$host" = "$TARGET" ] || { echo "this runner builds for $host, not for $TARGET" >&2; exit 1; }
       - run: cargo test --release --workspace --locked
       - run: cargo build --release --locked -p gpress
       - name: Package the tool
