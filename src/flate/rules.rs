@@ -475,6 +475,11 @@ mod tests {
             "first_long_length_bits" => (overlap(), vec![]),
             // Runs long enough for the shortcut.
             "run_shortcut" => (sample(48_000), vec![]),
+            // Polishing at the quick settings, the second start at effort 100 and the first exact try each win
+            // on some inputs only: these are such inputs.
+            "quick_polish" => (sample(48_000), vec![]),
+            "e100_second_start" => (sample(12_000), vec![]),
+            "exact_try1_missing" => (sample(96_000), vec![]),
             _ if of_fast(name) => (sample(150_000), vec![]),
             _ => (sample(24_000), vec![]),
         }
