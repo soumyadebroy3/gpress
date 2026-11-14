@@ -107,7 +107,7 @@ and the WebAssembly crate have the same features and pass them on to the engine.
 | Feature | The part | Without it |
 | --- | --- | --- |
 | `archive` | The gpress archive: `compress` and `expand`, the context-mixing model, the exact re-creation of zlib streams. | `compress` and `expand` return `Error::NeedsFeature(Feature::Archive)`. `optimize` is not touched. |
-| `jpeg` | Normal PDF: optimal Huffman tables for JPEG images. | The step is skipped: the output is the one `jpeg_tables` off gives. |
+| `jpeg` | Normal PDF: optimal Huffman tables for JPEG images, and the JPEG decoder and encoder of the lossy image step. | The tables step is skipped: the output is the one `jpeg_tables` off gives. The lossy step leaves photos and JPEG images alone and resamples line art only. |
 | `fax` | The CCITT fax and JBIG2 codecs: fax images become JBIG2 in a normal PDF and are stored as pixels in the archive. | The JBIG2 step is skipped (the output of `jbig2` off). The archive stores fax streams as they are, and `expand` of an archive with fax parts returns `NeedsFeature(Fax)`. |
 | `encryption` | Encrypted PDFs the empty password opens, with RustCrypto's AES, MD5 and SHA-2 (with the small crates they use, the only outside code in a default build). | An encrypted PDF is left untouched, with a reason that names the feature. The archive stores its streams as they are, and `expand` of an archive with decrypted streams returns `NeedsFeature(Encryption)`. |
 | `existing` | Lepton for JPEG streams in the archive. Off by default; it needs `archive`. | See "Existing library" below (`Error::NeedsExistingLibrary`). |
