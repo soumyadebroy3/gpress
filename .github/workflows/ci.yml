@@ -163,6 +163,9 @@ jobs:
       - if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         working-directory: crates/gpress-wasm/js
         run: npm run test:web
+      # The demo page's own logic (web/), and the web module through it.
+      - if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: node --test web/test/*.test.mjs
       # The size budget, whenever the package built: fails when the web module's gzip size is more than 5% over
       # bench/sizes.json, or over the 400 KB target. A wanted growth is recorded with `bench/sizes.py measure`;
       # so is a module more than 5% under the record, which gets a warning on the run.

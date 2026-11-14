@@ -1,0 +1,157 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+  # By hand, for a tag that exists: its source is built with this branch's copy of the workflow.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The tag to build and release, such as v0.1.0 (it must exist)
+        required: true
+        type: string
+  # A pull request that changes this file runs its builds and tests on every target, as a trial: the pull
+  # request's own source under a made-up tag, and no release.
+  pull_request:
+    paths: [.github/workflows/release.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The tag the files are named after, and the source they are built from.
+  TAG: ${{ github.event_name == 'pull_request' && 'v0.0.0-trial' || inputs.tag || github.ref_name }}
+  SOURCE: ${{ github.event_name == 'pull_request' && github.ref || format('refs/tags/{0}', inputs.tag || github.ref_name) }}
+
+# Nothing here publishes: the last job makes a DRAFT release with the files attached, and the owner publishes
+# it by hand. This is also the only place gpress is built and tested off x86-64 Linux, each target on a runner
+# of its own kind, so a target whose tests fail stops the release.
+jobs:
+  build:
+    name: Build and test (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest Ubuntu images, so that the tool asks for no newer C library than Ubuntu 22.04 has.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      # A tag that is not a version is not released ("v*" also matches a tag such as "various"). On Windows git
+      # would otherwise rewrite line ends in the test files it takes for text.
+      - run: |
+          [[ "$TAG" =~ ^v[0-9][0-9A-Za-z.+-]*$ ]] || { echo "not a version tag: $TAG" >&2; exit 1; }
+          git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      # The runner builds for its own kind of machine: stop if that is not the target the files are named after.
+      - run: rustc -vV | grep -qx "host: $TARGET" || { rustc -vV >&2; echo "this runner does not build for $TARGET" >&2; exit 1; }
+      - run: cargo test --release --workspace --locked
+      - run: cargo build --release --workspace --locked
+      - name: Package the tool
+        run: |
+          name="gpress-$TAG-$TARGET"
+          mkdir -p "out/$name"
+          cp README.md LICENSE-MIT LICENSE-APACHE "out/$name/"
+          cd out
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp ../target/release/gpress.exe "$name/"
+            pwsh -NoProfile -Command "Compress-Archive -Path '$name' -DestinationPath '$name.zip'"
+          else
+            cp ../target/release/gpress "$name/"
+            tar -czf "$name.tar.gz" "$name"
+          fi
+          rm -r "$name"
+      - name: Package the C library and its header
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          name="gpress-c-$TAG-$TARGET"
+          mkdir -p "out/$name/lib" "out/$name/include"
+          cp target/release/libgpress_c.so target/release/libgpress_c.a "out/$name/lib/"
+          cp crates/gpress-c/include/gpress.h "out/$name/include/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "out/$name/"
+          tar -C out -czf "out/$name.tar.gz" "$name"
+          rm -r "out/$name"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gpress-${{ matrix.target }}
+          path: out/
+          if-no-files-found: error
+
+  npm:
+    name: npm package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      # binaryen's wasm-opt, which the package build runs on the modules (as CI's WebAssembly job does).
+      - run: sudo apt-get update && sudo apt-get install -y binaryen
+      # The tarball `npm publish` would upload: dist/ with both modules, the wrapper and its types.
+      - working-directory: crates/gpress-wasm/js
+        run: |
+          npm ci
+          npm run build
+          npm test
+          npm run test:web
+          mkdir out
+          npm pack --pack-destination out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gpress-npm
+          path: crates/gpress-wasm/js/out/
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    if: github.event_name != 'pull_request'
+    needs: [build, npm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: files
+          merge-multiple: true
+      # A draft: nobody but the repository's writers sees it until the owner publishes it.
+      - working-directory: files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          sha256sum -- * > ../SHA256SUMS
+          mv ../SHA256SUMS .
+          cat SHA256SUMS
+          gh release create "$TAG" --draft --verify-tag --title "gpress $TAG" --generate-notes -- *

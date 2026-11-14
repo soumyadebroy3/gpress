@@ -90,6 +90,20 @@ and benchmarks; the comments at the top of
 
 </details>
 
+## Try it in a browser
+
+[`web/`](web/) is a page that runs the web module in your browser: choose PDFs, pick a level or a target size,
+download the results. Nothing is uploaded, and the page makes no request once it has loaded. It is not hosted
+anywhere yet, so serve it from a clone (the build needs `rustup target add wasm32-unknown-unknown`):
+
+```sh
+(cd crates/gpress-wasm/js && npm ci && npm run build)   # the package: the wrapper and the two modules
+node web/build.mjs                                      # copies the wrapper and the web module into web/dist/
+python3 -m http.server --directory web 8000             # then open http://localhost:8000
+```
+
+[web/README.md](web/README.md) says how the page works and how to put the module into a page of your own.
+
 ## Install
 
 You need a recent stable Rust ([rustup](https://rustup.rs)); CI uses the latest stable release.
