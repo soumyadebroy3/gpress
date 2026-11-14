@@ -85,23 +85,23 @@
         ]
       },
       "tool": {
-        "raw": 1670352,
-        "gzip": 745929
+        "raw": 1553400,
+        "gzip": 696074
       },
       "c_shared": {
-        "raw": 1541232,
-        "gzip": 688201
+        "raw": 1423024,
+        "gzip": 637717
       },
       "c_static": {
-        "raw": 10128664,
-        "gzip": 2163092
+        "raw": 10389864,
+        "gzip": 2230235
       },
       "wasm": {
-        "raw": 802182,
-        "gzip": 303276
+        "raw": 738099,
+        "gzip": 281617
       },
-      "wasm_opt": "wasm-opt version 108",
-      "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+      "wasm_opt": "wasm-opt version 120 (version_120)",
+      "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
       "date": "2026-11-14"
     },
     "default,existing": {

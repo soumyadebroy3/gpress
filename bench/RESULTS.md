@@ -487,7 +487,10 @@ to each build: 3,961 bytes to the module and 6,498 to the tool. The web module i
 smaller than the whole one, 115,366 bytes (30.1%) of gzip; the next section says where the bytes go.
 
 The target for the web module is 400 KB gzip (400,000 bytes): at 267,937 bytes it is 132,063 bytes (33%) under
-it, and the whole module is 16,697 bytes under it. Built at opt-level "s", before the choice below, the web
+it, and the whole module is 16,697 bytes under it. The web set was recorded again on 2026-11-14 with Rust 1.100.0 and
+wasm-opt 120 (CI's versions), after the image work (#41) and the Flate settings (#45): the module is 738,099
+bytes, 281,617 of gzip (+5.1% over this table's record), 118,383 bytes under the target; `bench/sizes.json`
+holds that record. Built at opt-level "s", before the choice below, the web
 module was 185,288 bytes of gzip (on f34ba33, before main's later changes): opt-level 3 added 24% there.
 Lepton adds 135,910 bytes of gzip to the module with every part. The static library carries Rust's standard
 library whole, so it is far larger than what a program linked with it gets. The module grows with main: the

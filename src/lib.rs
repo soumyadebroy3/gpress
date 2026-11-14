@@ -47,3 +47,4 @@ pub use api::{
     VERSION,
 };
 pub use feature::Feature;
+pub use flate::FlateRules;
