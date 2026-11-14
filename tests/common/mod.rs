@@ -267,7 +267,7 @@ pub fn plain_pdf() -> Vec<u8> {
         };
         objs.push((n, body));
     }
-    objs.push((11, b"<< /Title (Mixed test) /Producer (gpress tests) >>".to_vec()));
+    objs.push((10, b"<< /Title (Mixed test) /Producer (gpress tests) >>".to_vec()));
     let mut d = b"%PDF-1.6\n%\xE2\xE3\xCF\xD3\n".to_vec();
     let mut offs = Vec::new();
     for (n, body) in &objs {
@@ -282,7 +282,7 @@ pub fn plain_pdf() -> Vec<u8> {
         d.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
     }
     d.extend_from_slice(
-        format!("trailer\n<< /Size {} /Root 1 0 R /Info 11 0 R >>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes(),
+        format!("trailer\n<< /Size {} /Root 1 0 R /Info 10 0 R >>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes(),
     );
     d
 }
