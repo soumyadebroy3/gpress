@@ -29,13 +29,18 @@ fn stream_of(entries: &str, data: &[u8]) -> Vec<u8> {
 
 /// A one-page PDF whose page draws these objects as image XObjects; they are numbered from 5.
 fn page_of(images: &[Vec<u8>]) -> Vec<u8> {
+    page_with("", images)
+}
+
+/// The same, with more entries in the page's resources.
+fn page_with(resources: &str, images: &[Vec<u8>]) -> Vec<u8> {
     let names: String = (0..images.len()).map(|i| format!("/I{} {} 0 R ", i + 5, i + 5)).collect();
     let draw: String =
         (0..images.len()).map(|i| format!("q 90 0 0 60 {} 20 cm /I{} Do Q\n", 10 + 95 * i, i + 5)).collect();
     let mut objs = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1600 100] /Contents 4 0 R /Resources << /XObject << {names}>> >> >>")
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1600 100] /Contents 4 0 R /Resources << /XObject << {names}>>{resources} >> >>")
             .into_bytes(),
         stream_of("", draw.as_bytes()),
     ];
@@ -322,34 +327,33 @@ fn charts() -> Charts {
     vec![
         (format!("/Width 121 /Height 80 {RGB}"), pixels(121 * 80, &FIVE, 11), 121, 3, Some(4)),
         (format!("/Width 120 /Height 80 {RGB}"), pixels(120 * 80, &many, 12), 120, 3, None),
+        // A reader may round a table's colours another way than an image's samples in an ICCBased or a
+        // calibrated colour space: those images stay as they are.
         (
-            "/Width 50 /Height 90 /ColorSpace [/ICCBased 12 0 R] /BitsPerComponent 8".into(),
+            "/Width 50 /Height 90 /ColorSpace [/ICCBased 14 0 R] /BitsPerComponent 8".into(),
             pixels(50 * 90, &FIVE[..3], 13),
             50,
             3,
-            Some(2),
+            None,
         ),
-        (format!("/Width 99 /Height 70 {GREY}"), pixels(99 * 70, &[[0u8], [255]], 14), 99, 1, Some(1)),
+        // Two colours take 2 bits each as well: a reader may draw a 1-bit image another way.
+        (format!("/Width 99 /Height 70 {GREY}"), pixels(99 * 70, &[[0u8], [255]], 14), 99, 1, Some(2)),
         (format!("/Width 99 /Height 70 {GREY}"), pixels(99 * 70, &seventeen, 15), 99, 1, None),
-        (
-            "/Width 64 /Height 64 /ColorSpace 13 0 R /BitsPerComponent 8".into(),
-            pixels(64 * 64, &many[..256], 16),
-            64,
-            3,
-            Some(8),
-        ),
+        (format!("/Width 64 /Height 64 {RGB}"), pixels(64 * 64, &many[..256], 16), 64, 3, Some(8)),
+        ("/Width 64 /Height 64 /ColorSpace 15 0 R /BitsPerComponent 8".into(), pixels(64 * 64, &FIVE, 18), 64, 3, None),
         (
             "/Width 60 /Height 40 /ColorSpace [/CalGray << /WhitePoint [0.9505 1 1.089] >>] /BitsPerComponent 8".into(),
             pixels(60 * 40, &FOUR_GREYS, 17),
             60,
             1,
-            Some(2),
+            None,
         ),
+        (format!("/Width 60 /Height 40 {GREY}"), pixels(60 * 40, &FOUR_GREYS, 17), 60, 1, Some(2)),
     ]
 }
 
-/// The charts as objects 5 to 11, then an ICC profile of three components (12; the engine reads only its /N)
-/// and a colour space by reference (13).
+/// The charts as objects 5 to 13, then an ICC profile of three components (14; the engine reads only its /N)
+/// and a colour space by reference (15).
 fn charts_pdf() -> Vec<u8> {
     let mut objs: Vec<Vec<u8>> = charts().iter().map(|(entries, px, ..)| image(entries, px)).collect();
     objs.push(stream_of("/N 3", &[0u8; 128]));
@@ -362,7 +366,7 @@ fn few_colours_become_an_indexed_image() {
     let pdf = charts_pdf();
     for effort in [0, 100] {
         let (out, report) = smaller(&pdf, &quick().effort(effort));
-        assert_eq!((report.images_indexed, report.bilevel_to_jbig2), (5, 0), "effort {effort}");
+        assert_eq!((report.images_indexed, report.bilevel_to_jbig2), (4, 0), "effort {effort}");
         for (k, (_, px, w, m, bits)) in charts().into_iter().enumerate() {
             let (before, after) = (stream(&pdf, 5 + k as u32), stream(&out, 5 + k as u32));
             match bits {
@@ -437,6 +441,39 @@ fn masks_and_images_that_say_more_than_colours_keep_their_colour_space() {
             assert!(content(&after) == *px, "image {}", 5 + k);
         }
     }
+}
+
+/// An image that a predictor shrinks more than a colour table can: a walk up through all 256 greys, round and
+/// round in steps of one, stored as RGB. Flate alone gets little from it, the Sub predictor nearly everything, and the Indexed form
+/// would pay 768 bytes of table to save a few: it is compared with the predicted image, not with Flate alone.
+#[test]
+fn an_indexed_image_is_compared_with_the_best_other_encoding() {
+    let mut next = rng(41);
+    let mut v = 128u8;
+    let px: Vec<u8> = (0..64 * 64)
+        .flat_map(|_| {
+            v = if next(4) == 0 { v.wrapping_sub(1) } else { v.wrapping_add(1) };
+            [v; 3]
+        })
+        .collect();
+    let pdf = page_of(&[image(&format!("/Width 64 /Height 64 {RGB}"), &px)]);
+    for effort in [0, 100] {
+        let (on, report) = smaller(&pdf, &quick().effort(effort));
+        assert_eq!(report.images_indexed, 0, "effort {effort}");
+        assert!(on == smaller(&pdf, &quick().effort(effort).palette(false)).0, "effort {effort}");
+    }
+}
+
+/// A default colour space gives DeviceRGB the meaning of another colour space for everything on the page: no
+/// image of such a file becomes Indexed.
+#[test]
+fn a_file_with_a_default_colour_space_keeps_its_images() {
+    let chart = image(&format!("/Width 121 /Height 80 {RGB}"), &pixels(121 * 80, &FIVE, 11));
+    let defaults = "/ColorSpace << /DefaultRGB [/CalRGB << /WhitePoint [0.9505 1 1.089] >>] >>";
+    let (_, report) = smaller(&page_with(defaults, std::slice::from_ref(&chart)), &quick());
+    assert_eq!(report.images_indexed, 0);
+    let (_, report) = smaller(&page_of(&[chart]), &quick());
+    assert_eq!(report.images_indexed, 1);
 }
 
 fn fnv(data: &[u8]) -> u64 {

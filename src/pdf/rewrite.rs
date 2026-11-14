@@ -592,7 +592,7 @@ fn reencode(
     let form = rest.is_empty()
         && !opt.deadline.passed()
         && (opt.jbig2 && crate::fax::pdf::one_bit(&s.dict).is_ok()
-            || opt.palette && indexed::plain_image(&s.dict, resolve).is_some());
+            || opt.palette && indexed::plain_image(&s.dict).is_some());
     // The content as `content_of` decodes it: the general filters gave these same bytes (it decodes with a
     // limit no lower), and only the last of them can have a predictor (checked above). Kept when decoding
     // it again would cost something: when the filters decompress (Flate, LZW).
@@ -607,7 +607,8 @@ fn reencode(
         None
     };
     if let Some(px) = samples.as_deref().filter(|_| form) {
-        let other = (best_len, best.as_ref().map_or(&s.dict, |b| &b.0));
+        // (`best_len` is not the size of a `best` the predictor search gave.)
+        let other = best.as_ref().map_or((s.data.len(), &s.dict), |b| (b.1.len(), &b.0));
         if let Some((d, z, c)) = exact_form(s, px, opt, resolve, other) {
             best = Some((d, z));
             change = c;
@@ -636,7 +637,7 @@ fn exact_form(
         if let Some((d, z)) = opt.jbig2.then(|| crate::fax::pdf::bilevel_candidate(s, px, other.0)).flatten() {
             (d, z, Change { bilevel_to_jbig2: true, ..Change::default() })
         } else {
-            let (dict, data) = opt.palette.then(|| indexed::convert(&s.dict, px, resolve)).flatten()?;
+            let (dict, data) = opt.palette.then(|| indexed::convert(&s.dict, px)).flatten()?;
             let raw = Stream { dict, data };
             // Neither form is tried again on the Indexed image.
             let plain = Options { jbig2: false, palette: false, ..opt.clone() };
@@ -1245,26 +1246,31 @@ fn job_refs<'a>(d: &'a Dict, objs: &'a BTreeMap<u32, (u16, Obj)>) -> Vec<(u32, L
 }
 
 /// The objects some dictionary names as its /SMask or /Mask: the images that are masks of others. Only looked
-/// up, never walked.
-fn mask_targets(objs: &BTreeMap<u32, (u16, Obj)>) -> HashSet<u32> {
+/// up, never walked. None when a dictionary names a default colour space (/DefaultGray or /DefaultRGB, which
+/// give DeviceGray and DeviceRGB the meaning of another colour space): then no image of the file may become
+/// an Indexed one (see `indexed`).
+fn mask_targets(objs: &BTreeMap<u32, (u16, Obj)>) -> Option<HashSet<u32>> {
     let mut masks = HashSet::new();
+    let mut defaults = false;
     for (_, o) in objs.values() {
         walk(o, &mut |x| {
+            let Some(d) = x.as_dict() else { return };
+            defaults |= d.has(b"DefaultGray") || d.has(b"DefaultRGB");
             for k in [&b"SMask"[..], b"Mask"] {
-                if let Some(Obj::Ref(n, _)) = x.as_dict().and_then(|d| d.get(k)) {
+                if let Some(Obj::Ref(n, _)) = d.get(k) {
                     masks.insert(*n);
                 }
             }
         });
     }
-    masks
+    (!defaults).then_some(masks)
 }
 
 /// For each stream, by the index of the first stream identical to it (`same`, see `identical_streams`):
 /// whether the object table lets it be written as an Indexed image (`indexed::allowed`). Identical streams are
 /// encoded once, so one that may not holds the others back.
 fn may_index(streams: &[(u32, &Stream)], same: &[usize], objs: &BTreeMap<u32, (u16, Obj)>) -> Vec<bool> {
-    let masks = mask_targets(objs);
+    let Some(masks) = mask_targets(objs) else { return vec![false; streams.len()] };
     let mut may = vec![true; streams.len()];
     for (&(n, s), &first) in streams.iter().zip(same) {
         if !indexed::allowed(n, &s.dict, objs, &masks) {
@@ -1854,22 +1860,18 @@ fn self_check(
         }
         match (o, o2) {
             (Obj::Stream(s1), Obj::Stream(s2)) => {
-                let resolve = |o: &Obj| match o {
-                    Obj::Ref(r, _) => objs.get(r).map(|x| x.1.clone()),
-                    x => Some(x.clone()),
-                };
                 if !same_except_encoding(&s1.dict, &s2.dict) {
                     // One other change is fine: an image that may be an Indexed one, written as Indexed over
                     // its own colour space with the same colour for every pixel (see `indexed`).
                     let differs = || Err(format!("self-check: dictionary of stream {n} differs"));
-                    if !indexed::allowed(*n, &s1.dict, objs, masks.get_or_init(|| mask_targets(objs))) {
+                    let masks: &Option<HashSet<u32>> = masks.get_or_init(|| mask_targets(objs));
+                    if !masks.as_ref().is_some_and(|m| indexed::allowed(*n, &s1.dict, objs, m)) {
                         return Some(differs());
                     }
                     let (c1, c2) = (content_in(&s1.dict, &s1.data, limit), content_in(&s2.dict, &s2.data, limit));
                     let (Some(c1), Some(c2)) = (c1, c2) else { return (limit == CHECK_LIMIT).then(differs) };
-                    let same = c1.1.is_empty()
-                        && c2.1.is_empty()
-                        && indexed::same_image(&s1.dict, &c1.0, &s2.dict, &c2.0, &resolve);
+                    let same =
+                        c1.1.is_empty() && c2.1.is_empty() && indexed::same_image(&s1.dict, &c1.0, &s2.dict, &c2.0);
                     return Some(if same { Ok(false) } else { differs() });
                 }
                 if s1.data == s2.data
@@ -1892,6 +1894,10 @@ fn self_check(
                 // Different bytes are fine for a JPEG with other Huffman tables (the same coded symbols), for
                 // a CCITT image written as JBIG2 and for a 1-bit image under general filters written as JBIG2
                 // (the same pixels).
+                let resolve = |o: &Obj| match o {
+                    Obj::Ref(r, _) => objs.get(r).map(|x| x.1.clone()),
+                    x => Some(x.clone()),
+                };
                 if c1 != c2
                     && !same_jpeg(&c1, &c2)
                     && !crate::fax::pdf::same_image(s1, s2, &resolve)
