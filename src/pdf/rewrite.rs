@@ -388,10 +388,10 @@ fn nested(o: &Obj, levels: usize) -> bool {
 /// `%` to the line end). Poppler rebuilds a damaged file's cross-reference data from headers. It takes, among
 /// others, one with two spaces, a tab or a line feed between its parts, with its generation spelt "00", or with
 /// a NUL right after the number's digits and a comment before the line end. The search asks less of a header
-/// than Poppler does, to stay simple: the generation's value is not compared, no NUL is needed before a
-/// comment, a NUL alone counts as white space, any `%` of a line may start its comment, and no white space needs
-/// to stand before `obj`. The number is every number of up to ten digits that the digits before the gap end
-/// with ("112 0 obj" holds 12, and "012 0 obj" too).
+/// than Poppler does, to stay simple. Among others: the generation's value is not compared, no NUL is needed
+/// before a comment, a NUL alone counts as white space, any `%` of a line may start its comment, a gap may hold
+/// any number of lines, and no white space needs to stand before `obj`. The number is every number of up to ten
+/// digits that the digits before the gap end with ("112 0 obj" holds 12, and "012 0 obj" too).
 fn holds_header(data: &[u8], nums: &HashSet<u32>) -> bool {
     if nums.is_empty() {
         return false;
