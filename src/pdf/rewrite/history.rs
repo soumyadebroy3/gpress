@@ -568,9 +568,10 @@ pub(super) fn keep(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), Stri
         if out.len() >= input.len() {
             return Err("no saving possible".into());
         }
-        // qpdf reads no object numbered above a third of a file's length, and can't open a file whose
-        // cross-reference stream has such a number. The new numbers lie above every revision's, so a short early
-        // revision under a long later one could have one: the output cut at each revision's end stays below.
+        // qpdf 12 reads an object only when its number is below a third of the file's length (rounded down), and
+        // can't open a file whose cross-reference stream has a higher one. The new numbers lie above every
+        // revision's, so a short early revision under a long later one could have one: the output cut at each
+        // revision's end stays below.
         if (xn as u64 + 1) * 3 > out.len() as u64 {
             return Err(TOO_HIGH.into());
         }

@@ -566,9 +566,8 @@ impl Crypt {
         let rev = rev.to_le_bytes();
         let rev: &[u8] = if rev == [0; 4] { &[] } else { &rev };
         let h = sha256(&[&self.key, &num.to_le_bytes(), &gen.to_le_bytes(), &counter.to_le_bytes(), b"iv", rev]);
-        let mut iv = [0u8; 16];
-        iv.copy_from_slice(&h[..16]);
-        iv
+        // The first 16 bytes of the hash, built from it alone: no constant is ever the vector.
+        std::array::from_fn(|i| h[i])
     }
 
     /// A non-stream object with its strings encrypted for object `num gen`.
