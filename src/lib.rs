@@ -46,3 +46,4 @@ pub use api::{
     compress, expand, is_archive, optimize, Compressed, Effort, Error, Optimized, Options, Outcome, Report, VERSION,
 };
 pub use feature::Feature;
+pub use flate::FlateRules;
