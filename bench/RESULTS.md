@@ -412,9 +412,9 @@ main 369f1b8 merged in), on a 4-core cloud machine. Sizes only: nothing here was
 | 0 | lossless | 115,335,908 (88.40%) | 20,900,294 (92.01%) |
 | 20 | lossless | 113,692,951 (87.14%) | 20,585,289 (90.62%) |
 | 40 | lossless | 113,347,672 (86.88%) | 20,510,774 (90.29%) |
-| 60 | lossy | 111,788,415 (85.68%) | 18,255,139 (80.36%) |
-| 80 | lossy | 111,270,471 (85.28%) | 17,737,195 (78.08%) |
-| 100 | lossy | 111,237,201 (85.26%) | 17,703,925 (77.94%) |
+| 60 | lossy | 111,788,415 (85.68%) | 16,452,936 (72.43%) |
+| 80 | lossy | 111,270,471 (85.28%) | 15,934,992 (70.15%) |
+| 100 | lossy | 111,237,201 (85.26%) | 15,795,015 (69.53%) |
 
 - The 907 files are `bench/sets/all.txt`; `bench/results/effort-levels/files.tsv` has a row per file. 171 are
   untouched at every effort and no run failed. The lossy efforts change 4 files:
@@ -444,18 +444,18 @@ per inch pages.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | pdfjs/issue19971.pdf | 1,729,186 | 1,670,373 | 1,647,711 | 1,641,084 | 1,272,661 (48.5) | 754,717 (40.2) | 721,447 (40.2) |
 | pdfjs/issue14200.pdf | 679,384 | 430,425 | 410,605 | 409,826 | 409,826 (same) | 409,826 (same) | 409,826 (same) |
-| photos/astronaut-150-flate.pdf | 628,726 | 446,170 | 433,482 | 423,852 | 423,852 (same) | 423,852 (same) | 423,852 (same) |
-| photos/astronaut-150-jpeg.pdf | 68,853 | 67,167 | 67,164 | 67,164 | 67,164 (same) | 67,164 (same) | 67,164 (same) |
-| photos/astronaut-300-flate.pdf | 628,726 | 446,172 | 433,484 | 423,854 | 423,854 (same) | 423,854 (same) | 423,854 (same) |
-| photos/astronaut-300-jpeg.pdf | 68,853 | 67,167 | 67,164 | 67,164 | 67,164 (same) | 67,164 (same) | 67,164 (same) |
-| photos/astronaut-600-flate.pdf | 628,724 | 446,167 | 433,480 | 423,851 | 112,278 (63.5) | 112,278 (63.5) | 112,278 (63.5) |
-| photos/astronaut-600-jpeg.pdf | 68,851 | 67,165 | 67,162 | 67,162 | 67,162 (same) | 67,162 (same) | 67,162 (same) |
-| photos/coffee-150-flate.pdf | 614,597 | 456,803 | 447,558 | 441,778 | 441,778 (same) | 441,778 (same) | 441,778 (same) |
-| photos/coffee-150-jpeg.pdf | 73,122 | 72,000 | 71,998 | 71,998 | 71,998 (same) | 71,998 (same) | 71,998 (same) |
-| photos/coffee-300-flate.pdf | 614,597 | 456,801 | 447,556 | 441,776 | 441,776 (same) | 441,776 (same) | 441,776 (same) |
-| photos/coffee-300-jpeg.pdf | 73,122 | 72,000 | 71,998 | 71,998 | 71,998 (same) | 71,998 (same) | 71,998 (same) |
-| photos/coffee-600-flate.pdf | 614,597 | 456,801 | 447,556 | 441,776 | 113,043 (65.7) | 113,043 (65.7) | 113,043 (65.7) |
-| photos/coffee-600-jpeg.pdf | 73,122 | 72,000 | 71,998 | 71,998 | 71,998 (same) | 71,998 (same) | 71,998 (same) |
+| photos/astronaut-150-flate.pdf | 628,726 | 446,170 | 433,482 | 423,852 | 53,559 (47.1) | 53,559 (47.1) | 40,277 (45.5) |
+| photos/astronaut-150-jpeg.pdf | 68,853 | 67,167 | 67,164 | 67,164 | 67,164 (same) | 67,164 (same) | 38,786 (47.6) |
+| photos/astronaut-300-flate.pdf | 628,726 | 446,172 | 433,484 | 423,854 | 53,561 (55.1) | 53,561 (55.1) | 40,279 (53.5) |
+| photos/astronaut-300-jpeg.pdf | 68,853 | 67,167 | 67,164 | 67,164 | 67,164 (same) | 67,164 (same) | 38,786 (55.7) |
+| photos/astronaut-600-flate.pdf | 628,724 | 446,167 | 433,480 | 423,851 | 18,651 (57.2) | 18,651 (57.2) | 14,530 (55.9) |
+| photos/astronaut-600-jpeg.pdf | 68,851 | 67,165 | 67,162 | 67,162 | 18,712 (58.2) | 18,712 (58.2) | 14,558 (56.7) |
+| photos/coffee-150-flate.pdf | 614,597 | 456,803 | 447,558 | 441,778 | 56,853 (46.0) | 56,853 (46.0) | 56,853 (46.0) |
+| photos/coffee-150-jpeg.pdf | 73,122 | 72,000 | 71,998 | 71,998 | 71,998 (same) | 71,998 (same) | 64,442 (51.1) |
+| photos/coffee-300-flate.pdf | 614,597 | 456,801 | 447,556 | 441,776 | 56,851 (54.9) | 56,851 (54.9) | 56,851 (54.9) |
+| photos/coffee-300-jpeg.pdf | 73,122 | 72,000 | 71,998 | 71,998 | 71,998 (same) | 71,998 (same) | 64,442 (60.3) |
+| photos/coffee-600-flate.pdf | 614,597 | 456,801 | 447,556 | 441,776 | 17,642 (58.3) | 17,642 (58.3) | 17,642 (58.3) |
+| photos/coffee-600-jpeg.pdf | 73,122 | 72,000 | 71,998 | 71,998 | 17,709 (59.3) | 17,709 (59.3) | 17,709 (59.3) |
 | photos/hubble-150-flate.pdf | 1,688,584 | 1,681,371 | 1,645,372 | 1,644,599 | 1,644,599 (same) | 1,644,599 (same) | 1,644,599 (same) |
 | photos/hubble-150-jpeg.pdf | 528,746 | 517,549 | 517,302 | 517,197 | 517,197 (same) | 517,197 (same) | 517,197 (same) |
 | photos/hubble-300-flate.pdf | 1,688,584 | 1,681,371 | 1,645,372 | 1,644,599 | 1,644,599 (same) | 1,644,599 (same) | 1,644,599 (same) |
@@ -466,15 +466,22 @@ per inch pages.
 | photos/scan-300-jpeg.pdf | 694,517 | 641,655 | 641,064 | 641,033 | 641,033 (same) | 641,033 (same) | 641,033 (same) |
 | photos/scan-300-flate.pdf | 2,952,387 | 2,582,538 | 2,485,158 | 2,466,943 | 2,466,943 (same) | 2,466,943 (same) | 2,466,943 (same) |
 
-What the lossy efforts did not do on this set (`PDFE_DEBUG=1` prints the step's reason for each image):
+What the lossy efforts did with this set's pictures (`PDFE_DEBUG=1` prints the step's reason for each image):
 
-- None of the three scikit-image photographs was taken for a photo, at any resolution: "line art at or near
-  its floor" for the pages of samples at 150 and 300 pixels per inch, "line art resampled" at 600 (512 by 512
-  down to 256 by 256 for astronaut, still samples behind Flate), and "a JPEG that looks like line art" for
-  every JPEG page. So none became a JPEG. Counting the three rules of `is_photo` (src/pdf/lossy.rs) on the
-  pictures outside gpress: the hard-edge rule (at most 1/128, 0.78%, of the samples 64 levels from a
-  neighbour) fails for all three, at 2.16% for astronaut, 1.99% for coffee and 0.93% for hubble; astronaut is
-  also 7.8% flat (limit 6.25%), and hubble's 8 most frequent levels hold 52.6% (limit 50%).
+- None of the three scikit-image photographs passes for a photo: 2.16% of astronaut's samples, 1.99% of
+  coffee's and 0.93% of hubble's are hard edges (64 levels or more from a neighbour), where a photo has at most
+  1/128, 0.78% (`look` in src/pdf/lossy.rs, rules `lossy_hard_step` and `lossy_photo_hard`). Astronaut and
+  coffee are sharp photos, which keep the line-art floor (`lossy_sharp_floor`): at every lossy level their
+  pages of samples become JPEGs ("photo to JPEG"; at 600 pixels per inch resampled first, 512 by 512 to 256 by
+  256 for astronaut) and their JPEG pages at 600 are resampled ("JPEG resampled"); at 80 the JPEG page at 300
+  is left alone ("a JPEG at or near its floor") where a photo would go down to 150; at 100 the JPEG pages at
+  150 and 300 are written again at quality 75 ("JPEG again"). Hubble stays line art, as its 8 most frequent
+  levels hold 52.6% of the samples (a sharp photo may have 25%, `lossy_sharp_ground`): "line art at or near
+  its floor" at 150 and 300, "line art resampled" at 600 (still samples behind Flate), and its JPEG pages are
+  left alone.
+- Measured on f91bdd9 (the three-way photo test), which writes the 907 test files exactly as the commit before
+  it at efforts 0, 60, 80 and 100; the rows of astronaut and coffee and the photo set's totals at 60, 80 and
+  100 are its own, the rest as above.
 - `room` is left alone at every level: "not a sequential scan". It is a baseline JPEG whose scan header gives
   0 as its last coefficient where the standard says 63, and gpress's JPEG parser (src/jpeg/parse.rs, as on
   main) takes the standard's values only. A progressive JPEG is left alone too ("progressive"): checked on

@@ -177,9 +177,9 @@ strongest setting. The output is the same for any thread count.
 | 0 (`--quick`) | lossless | 115,335,908 (88.4%) | 20,900,294 (92.0%) | The fast path: our fast Flate encoder and the cheap steps. |
 | 20 | lossless | 113,692,951 (87.1%) | 20,585,289 (90.6%) | The strong encoder's first step. |
 | 40 (default) | lossless | 113,347,672 (86.9%) | 20,510,774 (90.3%) | The smallest lossless output: everything the engine knows how to do. |
-| 60 | lossy | 111,788,415 (85.7%) | 18,255,139 (80.4%) | The work of 40, after the lossy image step: an image shown at 375 pixels per inch or more is resampled down to 300, and a photo that was resampled, or is not a JPEG, is written as a JPEG at quality 85 (line art stays samples behind Flate). |
-| 80 | lossy | 111,270,471 (85.3%) | 17,737,195 (78.1%) | As 60, with photos down to 150 pixels per inch (those shown at 187.5 or more). |
-| 100 | lossy | 111,237,201 (85.3%) | 17,703,925 (77.9%) | As 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
+| 60 | lossy | 111,788,415 (85.7%) | 16,452,936 (72.4%) | The work of 40, after the lossy image step: an image shown at 375 pixels per inch or more is resampled down to 300, and a photo that was resampled, or is not a JPEG, is written as a JPEG at quality 85 (line art stays samples behind Flate). |
+| 80 | lossy | 111,270,471 (85.3%) | 15,934,992 (70.2%) | As 60, with photos down to 150 pixels per inch (those shown at 187.5 or more; a sharp photo stays at 300). |
+| 100 | lossy | 111,237,201 (85.3%) | 15,795,015 (69.5%) | As 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
 
 The two size columns are the bytes of all the outputs together and their share of the input, one thread
 (`bench/effort_table.py`; bench/RESULTS.md, "Sizes at the six efforts", has a row per file of the photo set and
@@ -221,10 +221,11 @@ itself (a photographed note).
 
 What the photo set shows. An image in doubt counts as line art. Of the three scikit-image photographs, the
 astronaut and the coffee cup are sharp photos (edges as hard as text's, see `lossy_flat_run` and the rules
-after it), which become JPEGs at the line-art floor of 300 pixels per inch, and the Hubble deep field, mostly
-black sky, stays line art: only its copy stored as samples and shown at 600 pixels per inch is resampled (to
-300). A progressive JPEG is left alone at every level; so is the set's camera photograph, a JPEG whose scan
-header is not as the standard writes it.
+after it), which keep the line-art floor of 300 pixels per inch: their pages of samples become JPEGs (resampled
+to 300 first when shown at 600), their JPEG pages shown at 600 are resampled to 300, and at effort 100 their
+other JPEG pages are written again. The Hubble deep field, mostly black sky, stays line art: only its copy
+stored as samples and shown at 600 pixels per inch is resampled (to 300). A progressive JPEG is left alone at
+every level; so is the set's camera photograph, a JPEG whose scan header is not as the standard writes it.
 
 ## Engine levels
 

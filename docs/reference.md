@@ -87,7 +87,7 @@ effort (40 and above all mean its strongest setting) and nothing else.
 | 20 | lossless | 20 | The strong encoder's first step. |
 | 40 (default) | lossless | 100 | The smallest lossless output: everything the engine knows how to do. |
 | 60 | lossy | 100 | The work of 40, after the lossy image step at `Lossy::level(1)`: an image shown at 375 pixels per inch or more is resampled down to 300 (an area average), and a photo that was resampled, or is not a JPEG, is written as a baseline JPEG at quality 85 (line art stays samples behind Flate). |
-| 80 | lossy | 100 | `Lossy::level(2)`: as 60, with photos down to 150 pixels per inch (those shown at 187.5 or more). |
+| 80 | lossy | 100 | `Lossy::level(2)`: as 60, with photos down to 150 pixels per inch (those shown at 187.5 or more; a sharp photo stays at 300). |
 | 100 | lossy | 100 | `Lossy::level(3)`: as 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
 
 What holds at every lossy level. The numbers are defaults: each is a rule with a name and a range, and a
@@ -116,8 +116,8 @@ setting can move it within that range ([Rules](#rules), below):
 What the six efforts make of the 907 test files and of a set of photographs is in the README's table
 ("Effort levels") and, with a row per file of the photo set, in bench/RESULTS.md ("Sizes at the six efforts").
 What decides that an image is a photo is cautious: an image in doubt counts as line art. On that set two of the
-three scikit-image photographs, the astronaut and the coffee cup, are sharp photos, which become JPEGs at the
-line-art floor, and the Hubble deep field stays line art. A progressive JPEG is left alone at every level.
+three scikit-image photographs, the astronaut and the coffee cup, are sharp photos, which become JPEGs but are
+resampled no lower than the line-art floor, and the Hubble deep field stays line art. A progressive JPEG is left alone at every level.
 
 ## Rules
 
