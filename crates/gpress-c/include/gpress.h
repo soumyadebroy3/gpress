@@ -58,25 +58,6 @@ enum {
                                   archive stores the input as it is) */
 };
 
-/* The rules of the lossy image step: the indexes of gpress_options.lossy_rules. Each rule is a whole number
- * with a default and a range; docs/reference.md ("The rules of the lossy step") says what each decides. */
-#define GPRESS_RULE_MIN_PIXELS 0 /* default 65536; 10000 and up */
-#define GPRESS_RULE_PHOTO_FLOOR 1 /* default 150; 72 .. 65535 */
-#define GPRESS_RULE_ART_FLOOR 2 /* default 300; 150 .. 65535 */
-#define GPRESS_RULE_RESAMPLE_MARGIN 3 /* default 125; 100 .. 1000 */
-#define GPRESS_RULE_MIN_SAVING 4 /* default 10; 10 .. 99 */
-#define GPRESS_RULE_QUALITY_MIN 5 /* default 50; 1 .. 100 */
-#define GPRESS_RULE_QUALITY_MAX 6 /* default 95; 1 .. 100 */
-#define GPRESS_RULE_QUALITY_STEP 7 /* default 10; 1 .. 99 */
-#define GPRESS_RULE_QUALITY_TRIES 8 /* default 3; 1 .. 10 */
-#define GPRESS_RULE_MIN_PSNR 9 /* default 35; 1 .. 99 */
-#define GPRESS_RULE_MIN_BLOCK_PSNR 10 /* default 26; 1 .. 99 */
-#define GPRESS_RULE_PSNR_BLOCK 11 /* default 16; 8 .. 64 */
-#define GPRESS_RULE_SCAN_COVER 12 /* default 70; 1 .. 100 */
-#define GPRESS_RULE_WALK_OPERATORS 13 /* default 20000000; 1 .. 2000000000 */
-#define GPRESS_RULE_WALK_DRAWS 14 /* default 1000000; 1 .. 10000000 */
-#define GPRESS_RULES 15
-
 /* The options, the same as the library's. Fill with gpress_options_default and change what you need: a
  * zeroed struct is not the defaults (it means effort 0 and every switch off), though a size left at 0
  * means its default. */
@@ -114,15 +95,19 @@ typedef struct gpress_options {
                                      and nothing is lossy */
   uint16_t photo_ppi;             /* lossy overrides, each 0 = what the effort says: photos shown at more
                                      than this many pixels per inch are resampled down to it (never below
-                                     the rule GPRESS_RULE_PHOTO_FLOOR, 150 unless it is set), */
-  uint16_t art_ppi;               /* line art and scans likewise (never below GPRESS_RULE_ART_FLOOR, 300), */
-  uint8_t jpeg_quality;           /* and the JPEG quality, kept within GPRESS_RULE_QUALITY_MIN and
-                                     GPRESS_RULE_QUALITY_MAX (50 and 95), for a photo that is
+                                     the rule lossy_photo_floor, 150 unless it is set), */
+  uint16_t art_ppi;               /* line art and scans likewise (never below lossy_art_floor, 300), */
+  uint8_t jpeg_quality;           /* and the JPEG quality, kept within the rules lossy_quality_min and
+                                     lossy_quality_max (50 and 95), for a photo that is
                                      resampled or stored without JPEG. Any of the three set makes the
                                      output lossy at any effort */
-  uint32_t lossy_rules[GPRESS_RULES]; /* the rules of the lossy step, by the GPRESS_RULE_* indexes above.
-                                     Each 0 = the default; a value outside its rule's range counts as the
-                                     nearest one inside. They change nothing at a lossless effort */
+  const char *rules;              /* rules by name: the engine's tuning values, as text of the form
+                                     "name=value,name=value", such as "lossy_min_saving=20". NULL or "" for
+                                     none: every rule then has its default. docs/reference.md ("Rules")
+                                     lists the names with their defaults and ranges. A name that is no
+                                     rule, or a value outside the rule's range, fails the call with
+                                     GPRESS_ERR_BAD_ARGUMENT and a message that says which values the rule
+                                     takes. The text is read during the call only */
 } gpress_options;
 
 typedef struct gpress_buffer {

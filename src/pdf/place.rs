@@ -61,7 +61,7 @@ pub fn shown(
         objs,
         max_stream,
         deadline,
-        left: rules.walk_operators as u64,
+        left: rules.walk_operators,
         dos: rules.walk_draws as usize,
         draws: rules.walk_draws as usize,
         scan_cover: rules.scan_cover,
@@ -291,7 +291,7 @@ struct Walk<'a> {
     /// `walk_draws` itself: the most one content may hold.
     draws: usize,
     /// The percent of its page an image covers to be a scan (`scan_cover`).
-    scan_cover: u32,
+    scan_cover: u64,
     /// The page-tree nodes met.
     nodes: BTreeSet<u32>,
     /// The references followed to resources and to /XObject dictionaries, by address: the object each names,

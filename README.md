@@ -190,20 +190,20 @@ at 150, 300 and 600 pixels per inch as samples and as a JPEG, a camera photograp
 scanned page at 300.
 
 What holds at every lossy level. The numbers are defaults: each is a rule with a name and a range, and a
-setting can move it within that range ([the rules of the lossy step](docs/reference.md#the-rules-of-the-lossy-step)):
+setting can move it within that range ([Rules](docs/reference.md#rules) in the reference):
 
-- photos are never taken below 150 pixels per inch at their displayed size (`photo_floor`, which can go down
-  to 72), and line art (screenshots, charts, diagrams) and scans (an image that covers 70% of a page or more,
-  `scan_cover`) never below 300 (`art_floor`, down to 150); an image is resampled only when it is shown at 5/4
-  of its floor or more (`resample_margin`), and line art never becomes a JPEG;
-- the step works only on 8-bit grey and RGB images of more than 65,536 pixels (`min_pixels`) whose every use on
-  a page it could measure: 1-bit, indexed, CMYK and 16-bit images, image masks, images with a colour-key mask,
-  a `/Decode` array or a soft mask with `/Matte`, and small images (logos, icons) are never touched, and
-  neither is a JPEG that looks like line art;
-- a lossy result is kept only when it is at most nine tenths of the image's lossless size (`min_saving`, which
-  a setting can raise but not lower) and, for a JPEG, only when it decodes close to the samples it was made
-  from (`min_psnr`, `min_block_psnr`; one that does not is first coded again at a higher quality); otherwise
-  the image goes through the lossless path as before;
+- photos are never taken below 150 pixels per inch at their displayed size (`lossy_photo_floor`, which can go
+  down to 72), and line art (screenshots, charts, diagrams) and scans (an image that covers 70% of a page or
+  more, `lossy_scan_cover`) never below 300 (`lossy_art_floor`, down to 150); an image is resampled only when
+  it is shown at 5/4 of its floor or more (`lossy_resample_margin`), and line art never becomes a JPEG;
+- the step works only on 8-bit grey and RGB images of more than 65,536 pixels (`lossy_min_pixels`) whose every
+  use on a page it could measure: 1-bit, indexed, CMYK and 16-bit images, image masks, images with a
+  colour-key mask, a `/Decode` array or a soft mask with `/Matte`, and small images (logos, icons) are never
+  touched, and neither is a JPEG that looks like line art;
+- a lossy result is kept only when it is at most nine tenths of the image's lossless size (`lossy_min_saving`,
+  which a setting can raise but not lower) and, for a JPEG, only when it decodes close to the samples it was
+  made from (`lossy_min_psnr`, `lossy_min_block_psnr`; one that does not is first coded again at a higher
+  quality); otherwise the image goes through the lossless path as before;
 - a file the safety gate leaves untouched (signed, PDF/A, PDF/X, needing a password...) stays untouched, and an
   encrypted file keeps its encryption. No setting changes this.
 
@@ -397,7 +397,7 @@ ones most callers need:
 | --- | --- | --- | --- |
 | `effort` | `--effort N`, `--quick` | 40 | 0 to 100 in steps of 20: 0, 20 and 40 lossless (fastest to smallest), 60, 80 and 100 lossy. See [Effort levels](#effort-levels). |
 | `lossy` | `--lossy N`, `--photo-ppi N`, `--art-ppi N`, `--jpeg-quality N` | none | Normal PDF: the lossy image step, in place of what the effort means. `--lossy N` (0 to 3) sets exactly the settings of that level whatever the effort (1, 2 and 3 are what efforts 60, 80 and 100 mean; 0 keeps any effort lossless); the other three change one setting each, and any of them set makes the output lossy at any effort. |
-| `lossy_rules` | `--photo-floor N`, `--min-saving N` and 13 more | each rule's own | Normal PDF: the values the lossy image step works by at every lossy effort, each a named rule with a default and a range: the least resolutions, the smallest image it touches, how much smaller a result must be, the quality checks. 0 is the default, and a value outside the range counts as the nearest one inside it. The table is in [docs/reference.md](docs/reference.md#the-rules-of-the-lossy-step). |
+| rules (`set_rule`, `set_rules`) | `--rule NAME=VALUE` | each rule's own | The engine's tuning values by name, each with a default and a range, such as `lossy_min_saving=20` (keep a lossy result only when it is 20% smaller) or `lossy_photo_floor=100`. A rule that is not set has its default; a name that is no rule or a value outside the range is an error. [Rules](docs/reference.md#rules) in the reference lists them. |
 | `optimize_to_size` (a call, not a field) | `--target-size V` | none | Normal PDF: the lowest of the six efforts whose output is at most V (bytes, with `k` or `m` for KiB or MiB, or `N%` of the input), so up to six runs of the engine; the output line then ends with `effort=E target=reached` or `missed`. Efforts 60 and above are lossy, so a target can turn a lossless run into a lossy one. A target no effort reaches within the floors is missed rather than forced: the smallest of the six comes back, marked as missed. |
 | `threads` | `--threads N` | 0 | 0: every core the machine offers, at most 8; at most 64. The output is the same for any count. |
 | `time_budget` | `--time-budget MS` | none | Give up after this much wall time: an error and no output, the input unchanged. |

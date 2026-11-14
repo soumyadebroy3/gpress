@@ -67,7 +67,7 @@ pub const MAX_STORE_BUDGET: usize = crate::flate::deflate::MAX_STORE_BUDGET;
 /// JPEG, becomes a JPEG at quality 85 (line art stays lossless Flate). 80 is the same with photos down to 150
 /// pixels per inch. 100 is as 80 at JPEG quality 75, and an existing JPEG photo is written again at that
 /// quality when that is at least a tenth smaller. What holds at every lossy level (the numbers are the
-/// defaults of [`LossyRules`], which `Options::lossy_rules` can move within each rule's range): a photo is never
+/// defaults of [`LossyRules`], which `Options::set_rule` can move within each rule's range): a photo is never
 /// taken below 150 pixels per inch at its displayed size, and line art (screenshots, charts, diagrams) and
 /// scans never below 300; 1-bit images and small images (at most 65,536 pixels) are never touched; a lossy
 /// result is kept only when it is clearly smaller than what the lossless path makes of the image and a
@@ -176,8 +176,9 @@ pub struct Options {
     pub lossy: Option<Lossy>,
     /// Normal PDF: the rules the lossy image step works by, the same at every lossy effort and with a target
     /// size: the least resolutions, the smallest image it touches, how much smaller a result must be, the
-    /// quality checks and so on. Each has a name, a default and a range ([`LossyRules`]); change one with
-    /// `lossy_rules.set("photo_floor", 100)`. They decide nothing while the step is off.
+    /// quality checks and so on. Each has a name, a default and a range ([`LossyRules`]); they are the group
+    /// `lossy_` of [`Options::set_rule`], as in `set_rule("lossy_photo_floor", 100)`. They decide nothing
+    /// while the step is off.
     pub lossy_rules: LossyRules,
     /// Archive: store the streams of a file the empty user password opens decrypted (so they can be rebuilt
     /// and modelled) and encrypt them again on expand. Off, encrypted streams are stored as they are.

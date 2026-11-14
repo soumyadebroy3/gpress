@@ -36,8 +36,8 @@ the encoding time its answers saved, roughly), and the segments written from an 
 | `jpeg_tables` | on | Normal PDF: JPEGs get optimal Huffman tables (the same coefficients). |
 | `jbig2` | on | Normal PDF: CCITT fax images become JBIG2 when that is at least 5% smaller (the same pixels). |
 | `rewrite_encrypted` | on | Normal PDF: files the empty user password opens are rewritten with their encryption kept exactly. Off, every encrypted file is left untouched. |
-| `lossy` | none | Normal PDF: the lossy image step. `None`: what the effort means (efforts 60, 80 and 100 turn it on). `Some`: exactly these settings whatever the effort, and `Some(Lossy::OFF)` keeps any effort lossless. The settings are `photo_ppi` and `art_ppi` (photos, and line art and scans, shown at more pixels per inch than this are resampled down to it; never below the rules `photo_floor` and `art_floor`, 150 and 300 unless they are set; 0: never resampled), `jpeg_quality` (kept within the rules `quality_min` and `quality_max`, 50 to 95, for a photo that is resampled or stored without JPEG; 0: no image becomes a JPEG) and `rejpeg` (an existing JPEG photo is written again at that quality when that is at least a tenth smaller); `Lossy::level(1)`, `(2)` and `(3)` are what efforts 60, 80 and 100 mean. Command line: `--lossy N` (0 to 3) sets exactly that level, and `--photo-ppi N`, `--art-ppi N` and `--jpeg-quality N` change one setting each, over the level's or the effort's (0: as it is); a run that changed an image adds `resampled=`, `to_jpeg=` and `rejpeg=` to its output line. `Report` counts the same (`images_resampled`, `images_to_jpeg`, `jpegs_rewritten`). A build without the `jpeg` feature resamples line art only. C (`photo_ppi`, `art_ppi`, `jpeg_quality`) and TypeScript (`photoPpi`, `artPpi`, `jpegQuality`) have those three overrides, where 0 or absent means what the effort says, and any of them set makes the output lossy at any effort. |
-| `lossy_rules` | each rule's own | Normal PDF: the values the lossy image step works by at every lossy effort (the least resolutions, the smallest image it touches, how much smaller a result must be, the quality checks), each a named rule with a default and a range. `lossy_rules.set("photo_floor", 100)` sets one: 0 gives the default, and a value outside the range counts as the nearest one inside it. See [the rules of the lossy step](#the-rules-of-the-lossy-step) for the table and for the command line, C and TypeScript. |
+| `lossy` | none | Normal PDF: the lossy image step. `None`: what the effort means (efforts 60, 80 and 100 turn it on). `Some`: exactly these settings whatever the effort, and `Some(Lossy::OFF)` keeps any effort lossless. The settings are `photo_ppi` and `art_ppi` (photos, and line art and scans, shown at more pixels per inch than this are resampled down to it; never below the rules `lossy_photo_floor` and `lossy_art_floor`, 150 and 300 unless they are set; 0: never resampled), `jpeg_quality` (kept within the rules `lossy_quality_min` and `lossy_quality_max`, 50 to 95, for a photo that is resampled or stored without JPEG; 0: no image becomes a JPEG) and `rejpeg` (an existing JPEG photo is written again at that quality when that is at least a tenth smaller); `Lossy::level(1)`, `(2)` and `(3)` are what efforts 60, 80 and 100 mean. Command line: `--lossy N` (0 to 3) sets exactly that level, and `--photo-ppi N`, `--art-ppi N` and `--jpeg-quality N` change one setting each, over the level's or the effort's (0: as it is); a run that changed an image adds `resampled=`, `to_jpeg=` and `rejpeg=` to its output line. `Report` counts the same (`images_resampled`, `images_to_jpeg`, `jpegs_rewritten`). A build without the `jpeg` feature resamples line art only. C (`photo_ppi`, `art_ppi`, `jpeg_quality`) and TypeScript (`photoPpi`, `artPpi`, `jpegQuality`) have those three overrides, where 0 or absent means what the effort says, and any of them set makes the output lossy at any effort. |
+| rules (`set_rule`, `set_rules`, `rule`, `Options::rules()`; the field `lossy_rules` holds the lossy step's) | each rule's own | The engine's tuning values by name, each with a default, a lowest and a highest value: `set_rule("lossy_photo_floor", 100)`. A rule that is not set has its default; a name that is no rule or a value outside the range is an error. See [Rules](#rules) for the tables and for the command line, C and TypeScript. |
 | `decrypt` | on | Archive: the streams of such files are stored decrypted (so they get the zlib rebuild, Lepton and the model) and encrypted again on expand. |
 | `use_existing_libraries` | on | Use Lepton for JPEG streams in the archive when the build has it (`--features existing`). An archive with parts Lepton made expands only with such a build (the error says so). |
 | `time_budget` | none | Give up after this much wall time: `Error::TimeBudget` and no output, the input unchanged. Checked between streams, Flate segments and archive parts (every 64 KiB of model work) in all three operations, so it can be overshot by a little (on expand by one part's zlib re-creation). A call that finishes in time gives the same bytes as one without a budget. |
@@ -85,20 +85,20 @@ effort (40 and above all mean its strongest setting) and nothing else.
 | 100 | lossy | 100 | `Lossy::level(3)`: as 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
 
 What holds at every lossy level. The numbers are defaults: each is a rule with a name and a range, and a
-setting can move it within that range ([the rules of the lossy step](#the-rules-of-the-lossy-step), below):
+setting can move it within that range ([Rules](#rules), below):
 
-- photos are never taken below 150 pixels per inch at their displayed size (`photo_floor`, which can go down
-  to 72), and line art (screenshots, charts, diagrams) and scans (an image that covers 70% of a page or more,
-  `scan_cover`) never below 300 (`art_floor`, down to 150); an image is resampled only when it is shown at 5/4
-  of its floor or more (`resample_margin`), and line art never becomes a JPEG;
-- the step works only on 8-bit grey and RGB images of more than 65,536 pixels (`min_pixels`) whose every use on
-  a page it could measure: 1-bit, indexed, CMYK and 16-bit images, image masks, images with a colour-key mask,
-  a `/Decode` array or a soft mask with `/Matte`, and small images (logos, icons) are never touched, and
-  neither is a JPEG that looks like line art;
-- a lossy result is kept only when it is at most nine tenths of the image's lossless size (`min_saving`, which
-  a setting can raise but not lower) and, for a JPEG, only when it decodes close to the samples it was made
-  from (`min_psnr`, `min_block_psnr`; one that does not is first coded again at a higher quality); otherwise
-  the image goes through the lossless path as before;
+- photos are never taken below 150 pixels per inch at their displayed size (`lossy_photo_floor`, which can go
+  down to 72), and line art (screenshots, charts, diagrams) and scans (an image that covers 70% of a page or
+  more, `lossy_scan_cover`) never below 300 (`lossy_art_floor`, down to 150); an image is resampled only when
+  it is shown at 5/4 of its floor or more (`lossy_resample_margin`), and line art never becomes a JPEG;
+- the step works only on 8-bit grey and RGB images of more than 65,536 pixels (`lossy_min_pixels`) whose every
+  use on a page it could measure: 1-bit, indexed, CMYK and 16-bit images, image masks, images with a
+  colour-key mask, a `/Decode` array or a soft mask with `/Matte`, and small images (logos, icons) are never
+  touched, and neither is a JPEG that looks like line art;
+- a lossy result is kept only when it is at most nine tenths of the image's lossless size (`lossy_min_saving`,
+  which a setting can raise but not lower) and, for a JPEG, only when it decodes close to the samples it was
+  made from (`lossy_min_psnr`, `lossy_min_block_psnr`; one that does not is first coded again at a higher
+  quality); otherwise the image goes through the lossless path as before;
 - a file the safety gate leaves untouched (signed, PDF/A, PDF/X, needing a password...) stays untouched, and an
   encrypted file keeps its encryption. No setting changes this.
 
@@ -107,51 +107,61 @@ What the six efforts make of the 907 test files and of a set of photographs is i
 What decides that an image is a photo is cautious: an image in doubt counts as line art, and on that set none
 of the three scikit-image photographs was taken for a photo. A progressive JPEG is left alone at every level.
 
-## The rules of the lossy step
+## Rules
 
-The lossy image step works by fifteen values that are the same at every lossy effort. Each is a setting: a
-whole number with a name, a default (the value that was fixed in the code before) and a range. With every rule
-at its default the output is byte for byte what it was before the rules were settings.
+A rule is one of the engine's tuning values as a setting: a whole number with a name, a default (the value
+that was fixed in the code before), a lowest and a highest value. A rule that is not set has its default, and
+with no rule set every output is byte for byte what it was before the rules were settings. The rules come in
+groups, one for each part of the engine; a rule's full name is its group's prefix and its own name.
 
-| Rule | Default | Range | What it decides |
-| --- | ---: | --- | --- |
-| `min_pixels` | 65,536 | 10,000 and up | An image of at most this many pixels is never touched (logos, icons). Under 10,000 an image has too few samples to tell a photo from line art. |
-| `photo_floor` | 150 | 72 to 65,535 | The least `photo_ppi` can be, in pixels per inch at the displayed size: a lower one is raised to it. The efforts ask for 300 or 150, so a lower floor changes nothing until `photo_ppi` asks for less. |
-| `art_floor` | 300 | 150 to 65,535 | The same for `art_ppi`: line art and scans. |
-| `resample_margin` | 125 | 100 to 1,000 | An image is resampled only when it is shown at this percent of its floor or more (125: at 5/4 of it). An image is never given its own size back. |
-| `min_saving` | 10 | 10 to 99 | A lossy result is kept only when it is this percent smaller than the image's lossless size or more (10: at most nine tenths of it); the same for a JPEG written again. |
-| `quality_min` | 50 | 1 to 100 | The least `jpeg_quality` can be. |
-| `quality_max` | 95 | 1 to 100 | The most it can be, and where the steps of `quality_step` stop. When it is under `quality_min`, it wins. |
-| `quality_step` | 10 | 1 to 99 | A new JPEG that fails the two checks below is coded again this much higher. |
-| `quality_tries` | 3 | 1 to 10 | How many qualities are tried, the first one counted (1: only the first). Each is a full encode and decode of the image. |
-| `min_psnr` | 35 | 1 to 99 | The least peak signal-to-noise ratio, in dB, of a new JPEG's luma against the samples it was made from, over the whole image. |
-| `min_block_psnr` | 26 | 1 to 99 | The same in the image's worst block. |
-| `psnr_block` | 16 | 8 to 64 | The side of those blocks, in pixels. |
-| `scan_cover` | 70 | 1 to 100 | An image drawn over this percent of its page or more is a scan: it gets the line-art floor whatever it looks like. |
-| `walk_operators` | 20,000,000 | 1 to 2,000,000,000 | Content operators the step may read in one file to measure where images are shown (decoding is charged to it too). Over it no image of the file is changed. |
-| `walk_draws` | 1,000,000 | 1 to 10,000,000 | Image and form draws it may follow in one file, a form's counted every time the form is drawn. Over it no image of the file is changed. |
-
-On every surface 0 means the rule's default, and a value outside the range counts as the nearest one inside
-it, so no value gives a panic, unbounded work or an error. The names are the same everywhere:
-
-| Where | How a rule is set |
+| Where | How rules are set |
 | --- | --- |
-| Rust | `options.lossy_rules.set("photo_floor", 100)` (false for a name that is no rule); `get` reads one, `LossyRules::NAMES` lists them |
-| Command line | one flag for each rule, its name with dashes: `--photo-floor 100` |
-| C | `options.lossy_rules[GPRESS_RULE_PHOTO_FLOOR] = 100;` (`gpress_options_default` sets them all to 0) |
-| TypeScript | `{ lossyRules: { photo_floor: 100 } }` (`LOSSY_RULES` lists the names) |
+| Rust | `options.set_rule("lossy_photo_floor", 100)?`, or several from text with `options.set_rules("lossy_photo_floor=100,lossy_min_saving=20")?`; `options.rule(name)` reads one, and `Options::rules()` lists every rule with its default, lowest and highest value |
+| Command line | `--rule lossy_photo_floor=100`, with commas between for more, or the flag again |
+| C | `options.rules = "lossy_photo_floor=100,lossy_min_saving=20";` (`NULL` for none) |
+| TypeScript | `{ rules: { lossy_photo_floor: 100, lossy_min_saving: 20 } }` |
 
-The rules change nothing at a lossless effort, and `optimize_to_size` takes them. Three things to know:
+A name that is no rule, or a value outside the rule's range, is an error everywhere (`InvalidOptions`, code 5;
+the command line exits with 5), with a message that says which values the rule takes. Nothing is moved to the
+nearest allowed value silently. `optimize_to_size` takes rules too.
 
-- The two floors are a guard against images that can no longer be read, so they are the defaults, and their
-  ranges end at 72 and 150 pixels per inch: lower than that no setting goes.
-- `min_saving` cannot go under its default. The lossless size a result is compared with is a quick encode; the
-  strongest lossless encode of the photographs in the photo set is up to 5% smaller, so with a saving under
-  that a lossy output could be larger than the lossless one.
-- Loose values cost time, not safety: `walk_operators` and `walk_draws` bound what a hostile file can make the
-  step do, and `time_budget` still ends a run that takes too long.
+### `lossy_`: the lossy image step
 
-What is not a setting: the test that tells a photo from line art (its values were measured together and are
+These are the same at every lossy effort, and they change nothing at a lossless one.
+
+| Rule | Default | Lowest | Highest | What it decides |
+| --- | ---: | ---: | ---: | --- |
+| `lossy_min_pixels` | 65,536 | 10,000 | 4,294,967,295 | An image of at most this many pixels is never touched (logos, icons). |
+| `lossy_photo_floor` | 150 | 72 | 65,535 | The least `photo_ppi` can be, in pixels per inch at the displayed size: a lower one is raised to it. The efforts ask for 300 or 150, so a lower floor changes nothing until `photo_ppi` asks for less. |
+| `lossy_art_floor` | 300 | 150 | 65,535 | The same for `art_ppi`: line art and scans. |
+| `lossy_resample_margin` | 125 | 100 | 1,000 | An image is resampled only when it is shown at this percent of its floor or more (125: at 5/4 of it). An image is never given its own size back. |
+| `lossy_min_saving` | 10 | 10 | 99 | A lossy result is kept only when it is this percent smaller than the image's lossless size or more (10: at most nine tenths of it); the same for a JPEG written again. |
+| `lossy_quality_min` | 50 | 1 | 100 | The least `jpeg_quality` can be. |
+| `lossy_quality_max` | 95 | 1 | 100 | The most it can be, and where the steps of `lossy_quality_step` stop. When it is under `lossy_quality_min`, it wins. |
+| `lossy_quality_step` | 10 | 1 | 99 | A new JPEG that fails the two checks below is coded again this much higher. |
+| `lossy_quality_tries` | 3 | 1 | 10 | How many qualities are tried, the first one counted (1: only the first). Each is a full encode and decode of the image. |
+| `lossy_min_psnr` | 35 | 1 | 99 | The least peak signal-to-noise ratio, in dB, of a new JPEG's luma against the samples it was made from, over the whole image. |
+| `lossy_min_block_psnr` | 26 | 1 | 99 | The same in the image's worst block. |
+| `lossy_psnr_block` | 16 | 8 | 64 | The side of those blocks, in pixels. |
+| `lossy_scan_cover` | 70 | 1 | 100 | An image drawn over this percent of its page or more is a scan: it gets the line-art floor whatever it looks like. |
+| `lossy_walk_operators` | 20,000,000 | 1 | 2,000,000,000 | Content operators the step may read in one file to measure where images are shown (decoding is charged to it too). Over it no image of the file is changed. |
+| `lossy_walk_draws` | 1,000,000 | 1 | 10,000,000 | Image and form draws it may follow in one file, a form's counted every time the form is drawn. Over it no image of the file is changed. |
+
+Why the ranges end where they do:
+
+- `lossy_photo_floor` and `lossy_art_floor` are a guard against images that can no longer be read, so they are
+  the defaults, and no setting goes under 72 and 150 pixels per inch.
+- `lossy_min_saving` cannot go under its default. The lossless size a result is compared with is a quick
+  encode; the strongest lossless encode of the photographs in the photo set is up to 5% smaller, so with a
+  saving under that a lossy output could be larger than the lossless one.
+- `lossy_min_pixels` cannot go under 10,000: a smaller image has too few samples to tell a photo from line
+  art, and a few bytes decide whether its file grows.
+- `lossy_walk_operators` and `lossy_walk_draws` bound what a hostile file can make the step do. Their highest
+  values cost time, not safety, and `time_budget` still ends a run that takes too long.
+- The other lowest and highest values are where the number stops meaning anything (a percent, a JPEG quality,
+  a block that is smaller than a JPEG's own or larger than a small image).
+
+What is not a rule: the test that tells a photo from line art (its values were measured together and are
 being measured again), which images the step can read at all (8-bit grey and RGB, sides up to 65,535), the
 limits of its content reader, which are those other readers have, and what the JPEG format fixes (the standard's
 tables, colour at half resolution, baseline coding).

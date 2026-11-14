@@ -35,6 +35,7 @@ mod off;
 pub mod pack;
 pub mod par;
 pub mod pdf;
+mod rules;
 
 // Without a feature, what the rest of the engine calls in its place (see `off`).
 #[cfg(not(feature = "fax"))]
