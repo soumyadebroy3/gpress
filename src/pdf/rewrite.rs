@@ -545,13 +545,8 @@ fn reencode(
         set_chain(&mut d, &with_flate);
         let z = flate::deflate_zlib(jpeg.as_deref().unwrap_or(&data), &opt.flate);
         flate_len = jpeg.is_none().then_some(z.len());
-        // Whether `new` is smaller than `old` by the percentage of a rule.
-        let gain = |new: usize, old: usize, by: R| new as u64 * 100 <= old as u64 * (100 - opt.rules.at(by));
         let again = opt.effort as u64 >= opt.rules.at(R::full_from)
-            && jpeg.as_ref().is_some_and(|j| {
-                gain(z.len(), j.len(), R::jpeg_second_pass_flate_gain)
-                    && gain(j.len(), data.len(), R::jpeg_second_pass_table_gain)
-            });
+            && jpeg.as_ref().is_some_and(|j| second_pass(z.len(), j.len(), data.len(), &opt.rules));
         // The first candidate is Flate over the JPEG with its new tables (when there is one), the second
         // over the original bytes.
         for (z, retabled) in
@@ -612,6 +607,14 @@ fn reencode(
         *content = samples.map(|d| (d, rest.to_vec()));
     }
     best
+}
+
+/// Whether a JPEG's original bytes (`original` of them) get a Flate pass of their own: when Flate took the
+/// percentage of the rule `jpeg_second_pass_flate_gain` (a tenth) off the JPEG with its new tables (`flate`
+/// bytes from `retabled`), and the new tables took that of `jpeg_second_pass_table_gain` off the original.
+fn second_pass(flate: usize, retabled: usize, original: usize, rules: &RewriteRules) -> bool {
+    let gain = |new: usize, old: usize, by: R| new as u64 * 100 <= old as u64 * (100 - rules.at(by));
+    gain(flate, retabled, R::jpeg_second_pass_flate_gain) && gain(retabled, original, R::jpeg_second_pass_table_gain)
 }
 
 /// An encrypted XMP metadata stream (no tool reads it from the file without decrypting it): our Flate when
@@ -2130,6 +2133,48 @@ mod effort_tests {
             quick_budget(0, 1000, &rules) >= (4 << 20) as f64
                 && quick_budget(10, 1 << 20, &rules) == 2.0 * quick_budget(0, 1 << 20, &rules)
         );
+    }
+
+    #[test]
+    fn the_rules_at_their_defaults_give_the_values_that_were_fixed() {
+        // The tables and formulas as they stood before they read the rules.
+        const IMAGE_LEVEL: [u8; 20] = [7, 7, 7, 9, 9, 9, 10, 10, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12];
+        let rules = RewriteRules::default();
+        for e in 0..=100u8 {
+            let level = IMAGE_LEVEL[e.min(19) as usize];
+            assert_eq!(image_level(e, &rules), level, "effort {e}");
+            let big = match level {
+                l if l < 10 => 9,
+                l if l < 12 => 10,
+                _ => flate::fast::LEVELS,
+            };
+            assert_eq!(big_level(e, &rules), big, "effort {e}");
+            assert_eq!(predictor_budget(e, &rules), (64usize << 10) << (e.min(99) as usize / 20), "effort {e}");
+            assert_eq!(work_budget(e, &rules), 2f64.powf((e.max(1) - 1) as f64 / 10.0), "effort {e}");
+            let cost = match e {
+                0..=19 => 1.0,
+                20..=39 => 1.7,
+                40..=59 => 2.0,
+                60..=79 => 3.1,
+                _ => 3.9,
+            };
+            assert_eq!(work_per_byte(e, &rules), cost, "effort {e}");
+            for n in [0usize, 1, 999, 123_457, 5 << 20, 1 << 30] {
+                let quick = (n as f64 * 16.0 * 2f64.powf(e as f64 / 10.0)).max((4u64 << 20) as f64);
+                assert_eq!(quick_budget(e, n, &rules), quick, "effort {e}, {n} bytes");
+                let bridge = if (10..20).contains(&e) { n as f64 * (1u64 << (e - 10)) as f64 / 16.0 } else { 0.0 };
+                assert_eq!(bridge_budget(e, n, &rules), bridge, "effort {e}, {n} bytes");
+            }
+        }
+        // The JPEG's second pass: a tenth off by Flate and a tenth off by the tables, or what the rules say.
+        assert!(second_pass(90, 100, 112, &rules));
+        assert!(!second_pass(91, 100, 112, &rules) && !second_pass(90, 100, 111, &rules));
+        let mut any_flate = RewriteRules::default();
+        assert!(any_flate.set("jpeg_second_pass_flate_gain", 0));
+        assert!(second_pass(100, 100, 112, &any_flate) && !second_pass(101, 100, 112, &any_flate));
+        let mut any_tables = RewriteRules::default();
+        assert!(any_tables.set("jpeg_second_pass_table_gain", 0));
+        assert!(second_pass(90, 100, 100, &any_tables) && !second_pass(90, 100, 99, &any_tables));
     }
 
     #[test]

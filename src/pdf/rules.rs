@@ -100,9 +100,9 @@ rules! {
     object_stream_order = 0, 0, 1;
     // The cross-reference stream: 0 the smaller of plain and Up-predicted, 1 always plain, 2 always Up.
     xref_predictor = 0, 0, 2;
-    // A string is written: 0 in the shorter of its two forms (literal on a tie), 1 as a literal, 2 in
-    // hexadecimal.
-    string_form = 0, 0, 2;
+    // A string is written: 0 in the shorter of its two forms (a literal on a tie, and a literal is never the
+    // longer one), 1 in hexadecimal.
+    string_form = 0, 0, 1;
 
     // The effort. From this effort on there are no budgets: every stream gets the effort's full settings and
     // predictors are ranked on the whole image (101: never).
