@@ -217,9 +217,17 @@ fn gate(doc: &Doc, objs: &BTreeMap<u32, (u16, Obj)>, conformance: bool) -> Resul
     if doc.trailing > 1024 {
         return Err("data after the end of the file".into());
     }
-    // An object numbered at or beyond the trailer's /Size is read like any other, as PDFium, Poppler, pdf.js,
-    // MuPDF and qpdf read it (a wrong /Size is a common slip of writers); the file written has a /Size of its own.
+    // Only objects the document uses count (an xref stream numbered at /Size is harmless), and the encryption
+    // dictionary's.
     let crypt = doc.crypt.as_ref().and_then(|c| c.as_ref().ok());
+    let enc = crypt_objects(crypt);
+    let max_used = objs.keys().copied().chain(enc.iter().map(|o| o.0)).max().unwrap_or(0);
+    // Objects numbered at or beyond /Size: readers disagree on whether they exist.
+    if let Some(size) = doc.trailer.get(b"Size").and_then(|x| x.as_int()) {
+        if max_used as i64 >= size {
+            return Err("object numbers beyond /Size".into());
+        }
+    }
     // The cross-reference stream written has a row for every number up to the highest one the document
     // uses, so a file whose numbers go beyond what its size allows for rows (the reader's bound on the rows
     // a file may have) would cost rows out of all proportion to its size. Such a file is left untouched.
@@ -1424,7 +1432,8 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     packable.sort_by(|a, b| kind_key(a.1).cmp(&kind_key(b.1)).then(a.0.cmp(&b.0)));
     // New objects are numbered after the highest number the document uses (the encryption dictionary's
     // objects keep their numbers; a dangling reference keeps its number free), never after the old /Size:
-    // that is a claim of the file, not something it holds, and objects may be numbered beyond it.
+    // that is a claim of the file, not something it holds, and the gate has already checked that no object
+    // is numbered at or beyond it.
     let mut next_num = highest_number(&doc, &objs, crypt) + 1;
     let mut in_stm: HashMap<u32, (u32, u32)> = HashMap::new();
     let chunks: Vec<&[(u32, &Obj)]> = packable.chunks(opt.objstm_size.max(1)).collect();
@@ -1572,10 +1581,10 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     out.extend_from_slice(b"\nendstream\nendobj\n");
     out.extend_from_slice(format!("startxref\n{xref_off}\n%%EOF\n").as_bytes());
 
-    // qpdf 12 reads no object numbered above a third of the file's length, this cross-reference stream
-    // included, and objects keep their numbers: a file whose numbers are too high for its new length stays
-    // as it is.
-    if xn as usize > out.len() / 3 {
+    // qpdf 12 reads an object only when its number is below a third of the file's length, this cross-reference
+    // stream included, and objects keep their numbers: a file whose numbers are too high for its new length
+    // stays as it is.
+    if xn as usize >= out.len() / 3 {
         return Err("object numbers far apart".into());
     }
     // Read our own output back and compare everything reachable.

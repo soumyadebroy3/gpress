@@ -178,22 +178,9 @@ fn the_trailer_size_sizes_nothing() {
         assert_eq!(out.trailer.get(b"Size"), Some(&Obj::Int(7)), "/Size {size}");
         packs_and_restores(&pdf);
     }
-    // An object at or beyond /Size is read like any other (PDFium, Poppler, pdf.js, MuPDF and qpdf read it), and
-    // the output's /Size covers it: the content stream numbered at /Size, then well beyond it.
-    for (n, size) in [(4, "4"), (9, "4")] {
-        let mut objs = page_objects();
-        objs[3].0 = n;
-        objs[2].1 = format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents {n} 0 R >>").into_bytes();
-        let pdf = classic(&objs, size);
-        let r = quick(&pdf, &Options::effort(100));
-        smaller(&r, &pdf);
-        let out = xref::open(&r.data).unwrap();
-        assert_eq!(out.trailer.get(b"Size"), Some(&Obj::Int(n as i64 + 3)), "object {n}, /Size {size}");
-        let Ok((_, Obj::Stream(content))) = out.load(n as u32) else { panic!("object {n}: no content stream") };
-        let text = xref::decode_fully(&content.dict, &content.data, 1 << 20).unwrap();
-        assert_eq!(text, b"BT /F1 12 Tf 10 10 Td (hi) Tj ET\n".repeat(50), "object {n}, /Size {size}");
-        packs_and_restores(&pdf);
-    }
+    // Objects at or beyond /Size are still refused (readers disagree on whether they exist).
+    let pdf = classic(&page_objects(), "4");
+    assert_eq!(untouched(&quick(&pdf, &Options::effort(100)), &pdf), "object numbers beyond /Size");
 }
 
 /// The page's objects behind a cross-reference stream whose offsets take 5 bytes, object 4's moved `far` on.
@@ -376,20 +363,54 @@ fn numbering_far_apart_is_left_untouched() {
     }
     // Numbers apart are what some writers leave behind (pdf.js's reduced test files keep a few objects with
     // their original numbers): still made smaller, with the rows that takes, while the highest number written
-    // (the cross-reference stream's, n + 2) is at most a third of the output's length. qpdf 12 reads no object
-    // numbered above that, so beyond it the file is left as it is.
+    // (the cross-reference stream's, n + 2) is below a third of the output's length. qpdf 12 reads an object
+    // only when its number is below that, so from there on the file is left as it is.
     for n in [40u64, 100] {
         let pdf = page_with_content_at(n);
         let r = optimize(&pdf, &Options::effort(100));
         smaller(&r, &pdf);
         assert_eq!(xref::open(&r.data).unwrap().trailer.get(b"Size"), Some(&Obj::Int(n as i64 + 3)), "{n}");
-        assert!(n as usize + 2 <= r.data.len() / 3, "{n}: {} bytes", r.data.len());
+        assert!(n as usize + 2 < r.data.len() / 3, "{n}: {} bytes", r.data.len());
     }
     for n in [4000u64, 60_000] {
         let pdf = page_with_content_at(n);
         assert_eq!(untouched(&optimize(&pdf, &Options::effort(100)), &pdf), "object numbers far apart", "{n}");
         packs_and_restores(&pdf);
     }
+}
+
+#[test]
+fn the_highest_number_written_is_below_a_third_of_the_length() {
+    // The page with its content stream numbered 300, so that the cross-reference stream written is object 302,
+    // and a stream of k bytes that don't compress: each byte makes the output a byte or two longer, across the
+    // lengths of which 302 is a third. A file is written only with 302 below a third of its length (rounded
+    // down, as qpdf 12 counts), the shortest one written has it just below, and the shorter ones stay as they
+    // are.
+    let (mut left, mut above) = (0, Vec::new());
+    let (mut x, mut noise) = (0x2545_f491_u32, Vec::new());
+    for k in 0..500 {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        noise.push(x as u8);
+        let mut objs = page_objects();
+        objs[0].1 = b"<< /Type /Catalog /Pages 2 0 R /Pad 5 0 R >>".to_vec();
+        objs[2].1 = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 300 0 R >>".to_vec();
+        objs[3].0 = 300;
+        objs.push((5, stream("", &noise)));
+        let pdf = classic(&objs, "301");
+        let r = optimize(&pdf, &Options::effort(0));
+        if r.data == pdf {
+            assert_eq!(untouched(&r, &pdf), "object numbers far apart", "{k}");
+            left += 1;
+        } else {
+            smaller(&r, &pdf);
+            assert!(r.data.len() / 3 > 302, "{k}: {} bytes", r.data.len());
+            above.push(r.data.len() / 3 - 302);
+        }
+    }
+    assert!(left > 0);
+    assert_eq!(above.iter().min(), Some(&1));
 }
 
 /// The page with a cross-reference stream of `rows` rows (the page's objects, then free rows): a few bytes
