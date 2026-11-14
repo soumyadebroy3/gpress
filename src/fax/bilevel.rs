@@ -315,8 +315,13 @@ impl Bilevel {
                 let base2 = vert * knots;
                 let pb = ((self.apm2[base2 + lo] as i32 * (64 - fr) + self.apm2[base2 + (lo + 1).min(top)] as i32 * fr)
                     >> 6) as u32;
-                // By default a quarter each of the mixers' result and the first map's, and half of the second's.
-                let p = ((bm * pm + b1 * pa + b2 * pb + 8) >> 4).clamp(1, 65535);
+                // By default a quarter each of the mixers' result and the first map's, and half of the second's:
+                // the same sum without the multiplications, as in the general model.
+                let p = match [bm, b1, b2] {
+                    [4, 4, 8] => (pm + pa + 2 * pb + 2) >> 2,
+                    _ => (bm * pm + b1 * pa + b2 * pb + 8) >> 4,
+                };
+                let p = p.clamp(1, 65535);
                 bit = c.code16(px_in, p);
                 // Learn.
                 for i in 0..N {

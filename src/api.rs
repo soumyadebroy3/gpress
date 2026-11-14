@@ -396,7 +396,7 @@ impl std::fmt::Display for Error {
                 write!(
                     f,
                     "gpress archive version {v} is not one this build reads (it reads versions {ARCHIVE_VERSION} and {})",
-                    ARCHIVE_VERSION + 1
+                    pack::VERSION_PROFILE
                 )
             }
             Error::Internal(why) => write!(f, "internal error: {why}"),

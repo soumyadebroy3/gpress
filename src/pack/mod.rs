@@ -40,6 +40,8 @@ pub const VERSION: u8 = 9;
 /// the changed values, the profile, between the decoded total and the hash, and the rest is the same. Written
 /// only then, so that an archive made with the defaults is still one every build since version 9 reads.
 pub const VERSION_PROFILE: u8 = 10;
+/// The bytes of the SHA-256 in the header of versions 0, 2 and 9 (in version 10, the rule `hash_bytes`).
+const HASH_LEN: usize = 16;
 
 /// A typical PDF fragment both sides feed to the model first, so small files don't pay for a cold start.
 const PRIME_SYNTAX: &[u8] = include_bytes!("prime.txt");
@@ -143,7 +145,7 @@ fn plainly(x: &[u8], allowed: bool, r: &ArchiveRules) -> bool {
 /// stored and fallback forms, which have no such parts), the hash. They are what every version but 10 has,
 /// with the hash 16 bytes long: see `header_with`.
 fn header(version: u8, input: &[u8], claimed: u64) -> Vec<u8> {
-    header_with(version, input, claimed, &[], 16)
+    header_with(version, input, claimed, &[], HASH_LEN)
 }
 
 /// `header` with a profile (version 10 only: the shared rules that are not at their defaults, see
@@ -1026,11 +1028,9 @@ pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
 }
 
 #[cfg(feature = "existing")]
-fn lepton_features(partitions: u64) -> lepton_jpeg::EnabledFeatures {
+fn lepton_features() -> lepton_jpeg::EnabledFeatures {
     let mut f = lepton_jpeg::EnabledFeatures::compat_lepton_vector_write();
     f.max_processor_threads = 1;
-    // Only the encoder reads this (the rule `lepton_partitions`); a decoder takes the count from the data.
-    f.max_partitions = partitions as u32;
     f
 }
 
@@ -1052,13 +1052,14 @@ fn lepton_bytes(raw: &[u8], r: &ArchiveRules) -> Option<Vec<u8>> {
     let pool = lepton_jpeg::SingleThreadPool {};
     let mut out = std::io::Cursor::new(Vec::new());
     let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let f = lepton_features(r.lepton_partitions());
+        // Only the encoder reads the partition count (the rule `lepton_partitions`); a decoder takes it from the
+        // data.
+        let f = lepton_jpeg::EnabledFeatures { max_partitions: r.lepton_partitions() as u32, ..lepton_features() };
         lepton_jpeg::encode_lepton(&mut std::io::Cursor::new(raw), &mut out, &f, &pool).ok()
     }));
     done.ok()??;
     let data = out.into_inner();
-    let gain = (raw.len() as u64).saturating_sub(data.len() as u64);
-    if data.len() > raw.len() || gain < r.lepton_min_gain() || unlepton(&data)? != raw {
+    if data.len() as u64 + r.lepton_min_gain() > raw.len() as u64 || unlepton(&data)? != raw {
         return None;
     }
     Some(data)
@@ -1069,7 +1070,7 @@ fn unlepton(data: &[u8]) -> Option<Vec<u8>> {
     let pool = lepton_jpeg::SingleThreadPool {};
     let mut out = Vec::new();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        lepton_jpeg::decode_lepton(&mut std::io::Cursor::new(data), &mut out, &lepton_features(8), &pool).ok()
+        lepton_jpeg::decode_lepton(&mut std::io::Cursor::new(data), &mut out, &lepton_features(), &pool).ok()
     }));
     r.ok()??;
     Some(out)
@@ -1962,7 +1963,9 @@ fn pack_pass(input: &[u8], opt: &PackOptions) -> (Vec<u8>, PackStats) {
     let profile = opt.rules.profile();
     let version = if profile.is_empty() { VERSION } else { VERSION_PROFILE };
     let head = || header_with(version, input, claimed, &profile, opt.rules.hash_bytes() as usize);
-    let back = PackOptions { rules: opt.rules.shared(), ..PackOptions::default() };
+    // The restore check reads its rules from the profile as expand does: the defaults, and the changed ones.
+    let rules = ArchiveRules::read_profile(&profile, 0, ArchiveRules::default()).map_or_else(Default::default, |r| r.0);
+    let back = PackOptions { rules, ..PackOptions::default() };
     // Never hand over something we can't restore exactly. With a second thread the restore runs while the
     // encoder writes (the same `run`, on the same bytes, as `unpack`); with one, or when the system refuses
     // the thread, it follows.
@@ -2479,7 +2482,7 @@ mod tests {
         let (len, i) = read_varint(&packed, 5).unwrap();
         let (claimed, i) = read_varint(&packed, i).unwrap();
         let mut st = PackStats::default();
-        run(Decoder::new(&packed[i + 16..]), None, None, len as usize, &PackOptions::default(), &mut st, claimed);
+        run(Decoder::new(&packed[i + HASH_LEN..]), None, None, len as usize, &PackOptions::default(), &mut st, claimed);
         assert!(st.damaged && st.decoded_bytes == 0 && st.rebuilt == 0, "{st:?}");
     }
 

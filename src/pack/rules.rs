@@ -258,14 +258,6 @@ impl ArchiveRules {
 
 #[cfg(feature = "archive")]
 impl ArchiveRules {
-    /// The rules a decoder of an archive made with these has: the shared values, and the defaults for the
-    /// rest (what `read_profile` gives for `profile`).
-    pub(super) fn shared(&self) -> ArchiveRules {
-        let mut r = ArchiveRules::default();
-        r.v[..SHARED].copy_from_slice(&self.v[..SHARED]);
-        r
-    }
-
     /// These rules with every shared one back at its default: what a decoder starts from, since the shared
     /// values are the archive's, never its caller's.
     pub(super) fn local(&self) -> ArchiveRules {
@@ -335,7 +327,10 @@ mod tests {
             let (back, end) = ArchiveRules::read_profile(&a, 3, r.local()).unwrap();
             assert_eq!(back, r);
             assert_eq!(a[end], 9);
-            assert_eq!(ArchiveRules::read_profile(&a, 3, ArchiveRules::default()).unwrap().0, r.shared());
+            // From the defaults: the shared values, and the defaults for the rest.
+            let mut shared = ArchiveRules::default();
+            shared.v[..SHARED].copy_from_slice(&r.v[..SHARED]);
+            assert_eq!(ArchiveRules::read_profile(&a, 3, ArchiveRules::default()).unwrap().0, shared);
         }
     }
 }

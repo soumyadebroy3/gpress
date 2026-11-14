@@ -47,6 +47,25 @@ fn every_rule_has_a_sound_range_and_its_default_is_unset() {
     assert!(ArchiveRules::SHARED < 256 && ArchiveRules::SHARED < ArchiveRules::RULES.len());
 }
 
+/// A profile names a rule by its row, so the shared rows are part of the format: a new shared rule goes after
+/// the last one, and none is ever moved or removed.
+#[test]
+fn the_shared_rows_keep_their_order() {
+    let shared: Vec<&str> = ArchiveRules::RULES[..ArchiveRules::SHARED].iter().map(|r| r.0).collect();
+    #[rustfmt::skip]
+    let want = [
+        "mixer_rate", "mixer_shift", "mixer_start", "mixer_bias", "apm_bits", "apm_round", "apm1_rate", "apm2_rate",
+        "blend_apm1", "blend_apm2", "state_count", "state_discount", "state_limit", "match_min", "match_check",
+        "match_bits", "match_cap", "match_long", "match_limit", "repeat_min", "repeat_limit", "expect_cap",
+        "expect_limit", "table_bits_min", "table_bits_max", "table_shift", "prime_rounds", "hash_bytes",
+        "font_window", "fax_bits_min", "fax_bits_max", "fax_bits_add", "fax_small_limit", "fax_mixer_shift",
+        "fax_mixer_start", "fax_apm_bits", "fax_apm_shift", "fax_limit", "fax_hashed_limit", "fax_blend_apm1",
+        "fax_blend_apm2", "image_step_1", "image_step_2", "image_step_3", "image_step_4", "image_step_5",
+        "image_step_6", "image_step_7", "word_bytes", "expect_text", "fax_white_shortcut",
+    ];
+    assert_eq!(shared, want);
+}
+
 /// Every rule at its lowest and at its highest value, alone, on the mixed document (a page, a Type 1 font, a
 /// JPEG, a fax image, a zlib content stream; the decryption rules on it encrypted) at effort 40, below
 /// `plain_below`, so that the plain-coding rules decide something too.
