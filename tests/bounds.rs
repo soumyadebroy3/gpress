@@ -178,9 +178,22 @@ fn the_trailer_size_sizes_nothing() {
         assert_eq!(out.trailer.get(b"Size"), Some(&Obj::Int(7)), "/Size {size}");
         packs_and_restores(&pdf);
     }
-    // Objects at or beyond /Size are still refused (readers disagree on whether they exist).
-    let pdf = classic(&page_objects(), "4");
-    assert_eq!(untouched(&quick(&pdf, &Options::effort(100)), &pdf), "object numbers beyond /Size");
+    // An object at or beyond /Size is read like any other (PDFium, Poppler, pdf.js, MuPDF and qpdf read it), and
+    // the output's /Size covers it: the content stream numbered at /Size, then well beyond it.
+    for (n, size) in [(4, "4"), (9, "4")] {
+        let mut objs = page_objects();
+        objs[3].0 = n;
+        objs[2].1 = format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents {n} 0 R >>").into_bytes();
+        let pdf = classic(&objs, size);
+        let r = quick(&pdf, &Options::effort(100));
+        smaller(&r, &pdf);
+        let out = xref::open(&r.data).unwrap();
+        assert_eq!(out.trailer.get(b"Size"), Some(&Obj::Int(n as i64 + 3)), "object {n}, /Size {size}");
+        let Ok((_, Obj::Stream(content))) = out.load(n as u32) else { panic!("object {n}: no content stream") };
+        let text = xref::decode_fully(&content.dict, &content.data, 1 << 20).unwrap();
+        assert_eq!(text, b"BT /F1 12 Tf 10 10 Td (hi) Tj ET\n".repeat(50), "object {n}, /Size {size}");
+        packs_and_restores(&pdf);
+    }
 }
 
 /// The page's objects behind a cross-reference stream whose offsets take 5 bytes, object 4's moved `far` on.
