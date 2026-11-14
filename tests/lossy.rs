@@ -286,6 +286,28 @@ fn line_art_is_resampled_to_300_ppi_and_never_a_jpeg() {
 }
 
 #[test]
+fn a_photo_with_small_print_on_it_is_line_art() {
+    // Two labels on the photo, 96 by 24 samples of strokes two samples wide: one sample in 221 is a hard edge,
+    // too few for the count over the whole picture, but the tiles the labels stand in are full of them.
+    let mut px = photo(600, 600, 3);
+    for (x0, y0) in [(100, 100), (350, 400)] {
+        for y in y0..y0 + 24 {
+            for x in (x0..x0 + 96).filter(|x| x % 6 < 2) {
+                px[(y * 600 + x) * 3..][..3].fill(0);
+            }
+        }
+    }
+    // Shown at 600 pixels an inch: 300 at every level, and never a JPEG.
+    let pdf = page(image(600, 600, "DeviceRGB", 8, "", &px), 72, "", "", &[]);
+    for level in 1..=3 {
+        let (out, did) = optimize(&pdf, Some(Lossy::level(level)));
+        assert_eq!(did, (1, 0, 0), "level {level}");
+        let (w, h, jpeg, _) = image_of(&out);
+        assert_eq!((w, h, jpeg), (300, 300, false), "level {level}");
+    }
+}
+
+#[test]
 fn protected_images_are_what_the_lossless_path_gives() {
     let rgb = photo(600, 600, 3);
     let grey = photo(600, 600, 1);
@@ -314,6 +336,13 @@ fn protected_images_are_what_the_lossless_path_gives() {
     untouched_by_every_level(&pdf, "colour-key mask");
     let pdf = page(image(600, 600, "DeviceRGB", 8, "/Decode [1 0 1 0 1 0]", &rgb), 72, "", "", &[]);
     untouched_by_every_level(&pdf, "/Decode");
+    let palette: String = (0..=255u8).map(|v| format!("{v:02X}")).collect();
+    let dict = format!(
+        "/Type /XObject /Subtype /Image /Width 600 /Height 600 /BitsPerComponent 8 /Filter /FlateDecode \
+         /ColorSpace [/Indexed /DeviceGray 255 <{palette}>]"
+    );
+    let z = gpress::flate::deflate_zlib(&grey, &gpress::flate::Options::quick());
+    untouched_by_every_level(&page(stream(&dict, &z), 72, "", "", &[]), "indexed colours");
     // The short key of an inline image beside the full one: a reader may go by either.
     let pdf = page(image(600, 600, "DeviceRGB", 8, "/W 600", &rgb), 72, "", "", &[]);
     untouched_by_every_level(&pdf, "/W beside /Width");

@@ -95,15 +95,18 @@ typedef struct gpress_options {
                                      expand) */
   uint8_t use_existing_libraries; /* 1: use the optional existing library (Lepton) when built in */
   uint8_t effort_is_engine_level; /* 1: for measuring: effort is the engine's own lossless level, 0..100,
-                                     and nothing is lossy */
-  uint16_t photo_ppi;             /* lossy overrides, each 0 = what the effort says: photos shown at more
-                                     than this many pixels per inch are resampled down to it (never below
-                                     the rule lossy_photo_floor, 150 unless it is set), */
-  uint16_t art_ppi;               /* line art and scans likewise (never below lossy_art_floor, 300), */
+                                     and nothing is lossy unless an override below is set */
+  uint16_t photo_ppi;             /* lossy overrides, each 0 = what the effort says: photos shown at 5/4 of
+                                     this many pixels per inch or more (the rule lossy_resample_margin) are
+                                     resampled down to it (never below the rule lossy_photo_floor, 150
+                                     unless it is set) on their way to a JPEG, */
+  uint16_t art_ppi;               /* line art and scans likewise, without the JPEG (never below
+                                     lossy_art_floor, 300), */
   uint8_t jpeg_quality;           /* and the JPEG quality, kept within the rules lossy_quality_min and
-                                     lossy_quality_max (50 and 95), for a photo that is
-                                     resampled or stored without JPEG. Any of the three set makes the
-                                     output lossy at any effort */
+                                     lossy_quality_max (50 and 95), for a photo that is resampled or stored
+                                     without JPEG. art_ppi or jpeg_quality set makes the output lossy at any
+                                     effort; photo_ppi alone changes nothing below effort 60, where no JPEG
+                                     quality is set */
   char rules[GPRESS_RULES_TEXT];  /* rules by name: the engine's tuning values, as text of the form
                                      "name=value,name=value" with its closing NUL, such as
                                      "lossy_min_saving=20" (strcpy or snprintf it in; every rule at once

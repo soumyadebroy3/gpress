@@ -181,9 +181,41 @@ fn spend(left: &mut u64, n: u64) -> bool {
     *left > 0
 }
 
+/// One operand of a content, at the lexer's place in `data`. An array or a dictionary is read through and
+/// not kept (null stands for it: no operator the walk follows takes one), so that a long one costs no memory
+/// and a dictionary no search for a key written twice. Refused is what `parse_obj` refuses, but for a key
+/// written twice (nothing in a dictionary operand changes what a content draws).
+fn operand(data: &[u8], lx: &mut Lexer, depth: usize) -> Option<Obj> {
+    if depth > 256 {
+        return None;
+    }
+    let close: &[u8] = match data.get(lx.pos..)? {
+        [b'<', b'<', ..] => b">>",
+        [b'[', ..] => b"]",
+        _ => return lx.parse_obj().ok(),
+    };
+    lx.pos += close.len();
+    let mut inside = 0usize;
+    loop {
+        lx.skip_ws();
+        let rest = data.get(lx.pos..)?;
+        // A dictionary is names and values in turn.
+        let key = close == b">>" && inside.is_multiple_of(2);
+        if rest.starts_with(close) {
+            lx.pos += close.len();
+            return (close == b"]" || key).then_some(Obj::Null);
+        }
+        if key && rest.first() != Some(&b'/') {
+            return None;
+        }
+        operand(data, lx, depth + 1)?;
+        inside += 1;
+    }
+}
+
 /// The `Do` operators of a content, or None when it is not measured. Each operator read is taken from `left`,
 /// and 16 more for each `Do` kept; a content holds at most `draws` of them (`walk_draws`), which bounds what
-/// the walk holds in memory.
+/// the walk holds in memory. The time is a pass over the bytes (their decoding is paid for in `Walk::decoded`).
 fn read(data: &[u8], left: &mut u64, draws: usize) -> Option<Dos> {
     let mut lx = Lexer::new(data, 0);
     let (mut ctm, mut saved, mut args, mut dos) = (ID, Vec::new(), Vec::new(), Vec::new());
@@ -197,7 +229,7 @@ fn read(data: &[u8], left: &mut u64, draws: usize) -> Option<Dos> {
             if args.len() == 64 {
                 return None;
             }
-            let arg = lx.parse_obj().ok()?;
+            let arg = operand(data, &mut lx, 0)?;
             // A name a reader could cut short: PDFium ends a token at byte 128 or 255.
             if matches!(&arg, Obj::Name(n) if !n.iter().all(|c| (0x21..=0x7e).contains(c))) {
                 return None;
@@ -328,9 +360,11 @@ impl<'a> Walk<'a> {
     }
 
     /// Takes the search of a dictionary from the budget: nothing for one of ordinary size, so only a file made
-    /// to be slow, with a huge dictionary searched over and over, runs out. None when nothing is left.
+    /// to be slow, with a huge dictionary searched over and over, runs out; a search that costs also looks at
+    /// the clock. None when nothing is left or the deadline has passed.
     fn searched(&mut self, d: &Dict) -> Option<()> {
-        spend(&mut self.left, d.0.len() as u64 / 64).then_some(())
+        let cost = d.0.len() as u64 / 64;
+        (spend(&mut self.left, cost) && !(cost > 0 && self.deadline.passed())).then_some(())
     }
 
     /// Whether a /Resources value leads to an /XObject dictionary.
@@ -538,8 +572,14 @@ impl<'a> Walk<'a> {
     /// Notes that image `n` is drawn under matrix `m`.
     fn place(&mut self, n: u32, m: &M) -> Option<()> {
         let (area, unit) = self.page;
-        let width = (m[0] * m[0] + m[1] * m[1]).sqrt() / 72.0 * unit;
-        let height = (m[2] * m[2] + m[3] * m[3]).sqrt() / 72.0 * unit;
+        let (across, up) = (m[0] * m[0] + m[1] * m[1], m[2] * m[2] + m[3] * m[3]);
+        // Sides not at a right angle (a shear): the image is stretched most along neither side. With c the
+        // cosine of the angle between them, no direction is stretched more than sqrt(1 + c) times what the
+        // sides say, so both count as that much longer.
+        let lean = m[0] * m[2] + m[1] * m[3];
+        let stretch = if lean == 0.0 { 1.0 } else { (1.0 + abs(lean) / (across * up).sqrt()).sqrt() };
+        let width = across.sqrt() * stretch / 72.0 * unit;
+        let height = up.sqrt() * stretch / 72.0 * unit;
         let covers = abs(m[0] * m[3] - m[1] * m[2]);
         if !(width.is_finite() && height.is_finite() && covers.is_finite()) {
             return None;
@@ -620,7 +660,14 @@ impl<'a> Walk<'a> {
             Some(dos) => dos.iter().map(|d| d.1.as_slice()).collect(),
             None => drawn(&data)?,
         };
-        let own = resources.and_then(|r| self.dict(r)?.get(b"XObject")).and_then(|x| self.dict(x));
+        let own = match resources.and_then(|r| self.dict(r)) {
+            // Searched once for every content that comes with these resources (each glyph of a font).
+            Some(r) => {
+                self.searched(r)?;
+                r.get(b"XObject").and_then(|x| self.dict(x))
+            }
+            None => None,
+        };
         for name in names {
             // The search of the dictionary is paid for, an operator an entry. An entry that is no stream
             // (null, a reference to nothing) is no entry to a reader that then looks further.
@@ -633,14 +680,15 @@ impl<'a> Walk<'a> {
     }
 
     /// `stray` for the stream `o` is, or for the streams in it when it is a dictionary, `depth` dictionaries
-    /// deep. With `font`, the resources are that dictionary's; without, each stream's own.
-    fn strays(&mut self, o: &'a Obj, depth: u8, font: Option<&'a Dict>) -> Option<()> {
+    /// deep. With `shared`, the resources are those (a font's, found once for all its glyphs); without, each
+    /// stream's own (the search of a stream's own dictionary is paid for in `decoded`).
+    fn strays(&mut self, o: &'a Obj, depth: u8, shared: Option<Option<&'a Obj>>) -> Option<()> {
         if !spend(&mut self.left, 1) {
             return None;
         }
         match self.value(o) {
-            Some(Obj::Stream(s)) => self.stray(s, font.unwrap_or(&s.dict).get(b"Resources")),
-            Some(Obj::Dict(d)) if depth > 0 => d.0.iter().try_for_each(|(_, v)| self.strays(v, depth - 1, font)),
+            Some(Obj::Stream(s)) => self.stray(s, shared.unwrap_or_else(|| s.dict.get(b"Resources"))),
+            Some(Obj::Dict(d)) if depth > 0 => d.0.iter().try_for_each(|(_, v)| self.strays(v, depth - 1, shared)),
             _ => Some(()),
         }
     }
@@ -657,13 +705,17 @@ impl<'a> Walk<'a> {
             _ => return Some(()),
         };
         if let Some(glyphs) = d.get(b"CharProcs") {
-            self.strays(glyphs, 1, Some(d))?;
+            self.strays(glyphs, 1, Some(d.get(b"Resources")))?;
         }
         if let Some(appearances) = d.get(b"AP").and_then(|ap| self.dict(ap)) {
             appearances.0.iter().try_for_each(|(_, v)| self.strays(v, 1, None))?;
         }
-        if let Some(group) = d.get(b"SMask").and_then(|m| self.dict(m)?.get(b"G")) {
-            self.strays(group, 0, None)?;
+        if let Some(mask) = d.get(b"SMask").and_then(|m| self.dict(m)) {
+            // One dictionary may be the soft mask of every other object of the file.
+            self.searched(mask)?;
+            if let Some(group) = mask.get(b"G") {
+                self.strays(group, 0, None)?;
+            }
         }
         d.0.iter().try_for_each(|(_, v)| self.unread(v))
     }
@@ -825,6 +877,10 @@ mod tests {
         assert_eq!(page(LETTER, text, &im), one(2.0, 1.0, false));
         // A quarter turn.
         assert_eq!(page(LETTER, "0 144 -72 0 300 300 cm /Im1 Do", &im), one(2.0, 1.0, false));
+        // A shear: along one diagonal this image is stretched over 1.618 inches, more than either side.
+        let sheared = page(LETTER, "72 0 72 72 0 0 cm /Im1 Do", &im)[&10];
+        assert!(sheared.width > 1.306 && sheared.width < 1.307, "{sheared:?}");
+        assert!(sheared.height > 1.847 && sheared.height < 1.848, "{sheared:?}");
         // Twice: each dimension keeps its largest value.
         let twice = "q 144 0 0 36 0 0 cm /Im1 Do Q q 72 0 0 216 0 0 cm /Im1 Do Q";
         assert_eq!(page(LETTER, twice, &im), one(2.0, 3.0, false));
@@ -1224,6 +1280,54 @@ mod tests {
         };
         assert_eq!(many(10), [11, 12]);
         assert!(many(1000).is_empty());
+    }
+
+    #[test]
+    fn arrays_and_dictionaries_are_read_through() {
+        let dos = |content: &str| read(content.as_bytes(), &mut 1000, 1_000_000).map(|d| d.len());
+        // Whatever is in them, nested or not.
+        let marked = "/P <</MCID 0/K[1 [2 (]) <</a<4142>>>]]>> BDC [(a) -1 (b)] TJ EMC /Im1 Do";
+        assert_eq!(dos(marked), Some(1));
+        // A key written twice changes nothing that is drawn.
+        assert_eq!(dos("/P <</a 1/a 2>> DP /Im1 Do"), Some(1));
+        // What the parser refuses is refused: a key without a value, a key that is no name, a dictionary or
+        // an array that does not end, a word or an end that belongs to nothing.
+        for bad in ["<</a>> DP", "<<1 2>> DP", "<</a 1> DP", "<</a 1", "[1 foo] TJ", "[(a] TJ", "[1 2", "[>>] TJ"] {
+            assert_eq!(dos(&format!("{bad} /Im1 Do")), None, "{bad}");
+        }
+        // As deep as the parser goes, and no deeper.
+        let deep = |n: usize| dos(&format!("{}{} TJ /Im1 Do", "[".repeat(n), "]".repeat(n)));
+        assert_eq!((deep(257), deep(258)), (Some(1), None));
+        // A long one is as cheap as its bytes: 100,000 keys, then 100,000 numbers.
+        let keys: String = (0..100_000).map(|i| format!("/K{i} 0")).collect();
+        assert_eq!(dos(&format!("/P <<{keys}>> DP [{}] TJ /Im1 Do", "0 ".repeat(100_000))), Some(1));
+    }
+
+    #[test]
+    fn searching_a_huge_dictionary_again_and_again_ends_the_walk() {
+        // Object 9 has 6,400 entries: a search of it costs 100 operators, and this walk has 2,000.
+        let huge = format!("<<{}>>", (0..6400).map(|i| format!("/K{i} 0")).collect::<String>());
+        let page = format!("<</Type/Page/Parent 2 0 R/Contents 4 0 R{LETTER}>>");
+        let walk = |more: &[(u32, &str)]| {
+            let mut objects = vec![CATALOG, PAGES, (3, page.as_str()), (4, "<<>> stream /Im1 Do"), (9, huge.as_str())];
+            objects.push((10, IMAGE));
+            objects.extend_from_slice(more);
+            keys(&shown(
+                &file(&objects),
+                &trailer(),
+                1 << 20,
+                Deadline::NONE,
+                &LossyRules { walk_operators: 2000, ..LossyRules::default() },
+            ))
+        };
+        // As the resources of a font of 30 glyphs it is searched for each glyph. As anything else, never.
+        let glyphs: String = (0..30).map(|i| format!("/g{i} 8 0 R")).collect();
+        let glyph = (8, "<<>> stream 1000 0 d0");
+        assert!(walk(&[glyph, (7, &format!("<</CharProcs<<{glyphs}>>/Resources 9 0 R>>"))]).is_empty());
+        assert_eq!(walk(&[glyph, (7, &format!("<</CharProcs<<{glyphs}>>/Other 9 0 R>>"))]), [10]);
+        // As the soft mask of 30 dictionaries.
+        assert!(walk(&[(7, &format!("[{}]", "<</SMask 9 0 R>>".repeat(30)))]).is_empty());
+        assert_eq!(walk(&[(7, &format!("[{}]", "<</Other 9 0 R>>".repeat(30)))]), [10]);
     }
 
     #[test]

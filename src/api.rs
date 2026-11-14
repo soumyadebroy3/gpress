@@ -63,7 +63,7 @@ pub const MAX_STORE_BUDGET: usize = crate::flate::deflate::MAX_STORE_BUDGET;
 /// step, and 40 (the default) the smallest lossless output: everything the engine knows how to do.
 ///
 /// 60, 80 and 100 are lossy: the work of 40, after a step that changes images only. At 60 an image shown at
-/// more than 300 pixels per inch is resampled down to 300, and a photo that is resampled, or stored without
+/// 375 pixels per inch or more (5/4 of 300) is resampled down to 300, and a photo that is resampled, or stored without
 /// JPEG, becomes a JPEG at quality 85 (line art stays lossless Flate). 80 is the same with photos down to 150
 /// pixels per inch. 100 is as 80 at JPEG quality 75, and an existing JPEG photo is written again at that
 /// quality when that is at least a tenth smaller. What holds at every lossy level (the numbers are the

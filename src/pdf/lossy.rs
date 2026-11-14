@@ -5,10 +5,11 @@
 /// What the lossy image step may do to a normal PDF's images. `Lossy::OFF` changes nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Lossy {
-    /// A photo shown at more than this many pixels per inch is resampled down to it (never below the rule
-    /// `lossy_photo_floor`, 150 unless it is set); 0: photos are never resampled.
+    /// A photo shown at 5/4 of this many pixels per inch or more (the rule `lossy_resample_margin`) is resampled
+    /// down to it (never below the rule `lossy_photo_floor`, 150 unless it is set) on its way to a JPEG, so not
+    /// while `jpeg_quality` is 0; 0: photos are never resampled.
     pub photo_ppi: u16,
-    /// Line art (screenshots, charts, diagrams) and scans shown at more than this are resampled down to it
+    /// Line art (screenshots, charts, diagrams) and scans shown at 5/4 of this or more are resampled down to it
     /// (never below the rule `lossy_art_floor`, 300 unless it is set); 0: never.
     pub art_ppi: u16,
     /// JPEG quality on libjpeg's scale (kept within the rules `lossy_quality_min` and `lossy_quality_max`, 50
@@ -384,9 +385,11 @@ fn worth(new: usize, old: usize, saving: u64) -> bool {
     new as u64 * 100 <= old as u64 * (100 - saving.min(100))
 }
 
-/// The image's dictionary for new data: every entry kept but the size, the filter entries and the length.
+/// The image's dictionary for new data: every entry kept but the size, the filter entries, the length and
+/// /DL (a hint of how many bytes the data decodes to, which is no longer true).
 fn new_dict(d: &Dict, w: usize, h: usize, filter: &[u8], parms: Option<Dict>, len: usize) -> Dict {
     let mut d = d.clone();
+    d.remove(b"DL");
     d.set(b"Width", Obj::Int(w as i64));
     d.set(b"Height", Obj::Int(h as i64));
     d.set(b"Filter", Obj::Name(filter.to_vec()));
@@ -431,6 +434,12 @@ fn luma(px: &[u8], channels: usize) -> Cow<'_, [u8]> {
 const RUN: u16 = 32;
 /// A step of this many levels between neighbouring samples is a hard edge.
 const EDGE: u8 = 64;
+/// A step of this many levels, and less than `EDGE`, is a soft edge.
+const SOFT: u8 = 32;
+/// The side of the tiles small print is looked for in. At 32, each of four drawings of labels on a photograph
+/// (6 and 8 point at 504 samples an inch: black, white, outlined) has 8 or more tiles of small print; at 64
+/// none has more than one.
+const TILE: usize = 32;
 
 /// Whether `luma` (`w` by `h`) is a clear continuous-tone picture: a photo. Everything else, and everything in
 /// doubt, is line art, which has the safer floor and never becomes a JPEG. Decided from three counts, in whole
@@ -442,12 +451,23 @@ const EDGE: u8 = 64;
 /// - hard edges, samples at least `EDGE` levels from their left or upper neighbour, are at most 1/128 of all:
 ///   text and line work are hard edges, while a camera's picture is soft from one sample to the next;
 /// - its 8 most frequent levels hold at most half of the samples: a few levels that hold most of a picture
-///   are a ground and its inks.
+///   are a ground and its inks;
+/// - no whole tile of `TILE` by `TILE` samples has hard edges on more than 1/8 of it that outnumber its soft
+///   edges (samples `SOFT` levels or more from a neighbour, and less than `EDGE`): small print. A few labels,
+///   a caption or a subtitle on a photograph are too few hard edges for the count over the whole picture,
+///   but where they stand the edges are dense and sudden, and a photo's floor would blur them. Among the
+///   photographs the three counts above take, measured as stored and as JPEGs of three qualities, one tile
+///   is like that: the glinting corner of a picture frame.
+///
+/// Not found: a word or two (a tile may hold too little of them), and print that is soft itself (a
+/// photographed or scanned note), which no count of edges tells from a photograph.
 fn is_photo(luma: &[u8], w: usize, h: usize) -> bool {
     if w < 2 || h < 2 || luma.len() < w * h {
         return false;
     }
     let (mut flat, mut hard) = (0u64, 0u64);
+    // The hard and the soft edges of each whole tile in the band of rows being read.
+    let mut tiles = vec![(0u32, 0u32); w / TILE];
     let mut levels = [0u64; 256];
     // The length of the run of equal samples that ends at each column of the row before, capped at `RUN`.
     let mut down = vec![0u16; w];
@@ -462,7 +482,18 @@ fn is_photo(luma: &[u8], w: usize, h: usize) -> bool {
             along = if x > 0 && v == left { (along + 1).min(RUN) } else { 0 };
             down[x] = if y > 0 && v == above[x] { (down[x] + 1).min(RUN) } else { 0 };
             flat += (along + 1 >= RUN || down[x] + 1 >= RUN) as u64;
-            hard += (v.abs_diff(left) >= EDGE || v.abs_diff(above[x]) >= EDGE) as u64;
+            let step = v.abs_diff(left).max(v.abs_diff(above[x]));
+            hard += (step >= EDGE) as u64;
+            if let Some(tile) = tiles.get_mut(x / TILE) {
+                tile.0 += (step >= EDGE) as u32;
+                tile.1 += (SOFT..EDGE).contains(&step) as u32;
+            }
+        }
+        if y % TILE == TILE - 1 {
+            if tiles.iter().any(|&(hard, soft)| hard as usize * 8 > TILE * TILE && hard > soft) {
+                return false;
+            }
+            tiles.fill((0, 0));
         }
     }
     let all = (w * h) as u64;
@@ -763,6 +794,20 @@ mod tests {
         let mut banded = photo(w, h);
         banded[..w * h / 10].fill(255);
         assert!(!is_photo(&banded, w, h));
+        // One label on a photo, 48 by 16 samples of strokes two samples wide: one sample in 274 is a hard
+        // edge, too few for the count over the whole picture, but a tile the label stands in is full of them.
+        let label = |ink: fn(u8) -> u8| {
+            let mut px = photo(w, h);
+            for y in 100..116 {
+                for x in (96..144).filter(|x| x % 6 < 2) {
+                    px[y * w + x] = ink(px[y * w + x]);
+                }
+            }
+            px
+        };
+        assert!(!is_photo(&label(|_| 0), w, h), "small print");
+        // The same strokes as a shadow, 40 levels darker: soft edges are a photo's own.
+        assert!(is_photo(&label(|v| v - 40), w, h), "a soft pattern");
         assert!(!is_photo(&[1, 2, 3], 3, 1) && !is_photo(&[], 0, 0));
     }
 

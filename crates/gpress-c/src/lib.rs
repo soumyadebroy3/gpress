@@ -52,12 +52,13 @@ pub struct GpressOptions {
     pub decrypt: u8,
     /// 1 = use the optional existing library (Lepton) when the build has it.
     pub use_existing_libraries: u8,
-    /// 1 = for measuring: `effort` is the engine's own lossless level (0..=100) and nothing is lossy.
+    /// 1 = for measuring: `effort` is the engine's own lossless level (0..=100), and nothing is lossy unless
+    /// an override below is set.
     pub effort_is_engine_level: u8,
-    /// Lossy overrides, each 0 = what the effort says: photos shown at more than this many pixels per inch are
-    /// resampled down to it,
+    /// Lossy overrides, each 0 = what the effort says: photos shown at 5/4 of this many pixels per inch or more
+    /// are resampled down to it on their way to a JPEG (so alone it changes nothing below effort 60),
     pub photo_ppi: u16,
-    /// line art and scans likewise,
+    /// line art and scans likewise, without the JPEG,
     pub art_ppi: u16,
     /// and the JPEG quality for a photo that is resampled or stored without JPEG.
     pub jpeg_quality: u8,

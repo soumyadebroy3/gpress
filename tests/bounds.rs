@@ -301,6 +301,47 @@ fn a_dangling_reference_to_an_object_in_the_file_leaves_it_untouched() {
     }
 }
 
+#[test]
+fn a_trailer_reference_to_an_object_in_the_file_leaves_it_untouched() {
+    let reason = "an object in the file is missing from its cross-reference data";
+    // The catalog is in the file, but the table has no row for it. PDFium and pdf.js find it and show the page;
+    // nothing is reachable from the trailer, so a rewrite would be an empty file.
+    let mut pdf = classic(&page_objects(), "5");
+    let row = pdf.windows(5).position(|w| w == b"\n1 1\n").unwrap() + 1;
+    pdf.drain(row..row + 24);
+    assert!(xref::open(&pdf).unwrap().load(1).is_err(), "object 1 must be missing");
+    assert_eq!(untouched(&optimize(&pdf, &Options::effort(0)), &pdf), reason);
+    // The same for the trailer's other references: /Info names object 9, which only the page's text holds.
+    for (text, found) in [("9 0 obj", true), ("9 1 obj", false)] {
+        let mut objs = page_objects();
+        let content = format!("BT /F1 12 Tf 10 10 Td ({text}) Tj ET\n").repeat(50);
+        objs[3].1 = stream("", content.as_bytes());
+        let pdf = classic(&objs, "10 /Info 9 0 R");
+        let r = optimize(&pdf, &Options::effort(0));
+        if found {
+            assert_eq!(untouched(&r, &pdf), reason);
+        } else {
+            smaller(&r, &pdf);
+        }
+    }
+}
+
+#[test]
+fn a_file_without_its_catalog_is_left_untouched() {
+    // /Root names an object that is nowhere, or one that is no dictionary. What the trailer reaches is then not
+    // the document (in the first file it is nothing), and a rewrite keeps nothing else.
+    let mut objs = page_objects();
+    let mut pdf = classic(&objs[1..], "5");
+    assert_eq!(untouched(&optimize(&pdf, &Options::effort(0)), &pdf), "no document catalog");
+    // A catalog written in the trailer itself counts (pdf.js and qpdf read it): the file is rewritten as before.
+    let at = pdf.windows(11).rposition(|w| w == b"/Root 1 0 R").unwrap();
+    pdf.splice(at..at + 11, *b"/Root << /Type /Catalog /Pages 2 0 R >>");
+    smaller(&optimize(&pdf, &Options::effort(0)), &pdf);
+    objs[0].1 = b"[2 0 R]".to_vec();
+    let pdf = classic(&objs, "5");
+    assert_eq!(untouched(&optimize(&pdf, &Options::effort(0)), &pdf), "no document catalog");
+}
+
 /// The page with its content stream numbered `n` and the trailer /Size just above it.
 fn page_with_content_at(n: u64) -> Vec<u8> {
     let mut objs = page_objects();
@@ -320,15 +361,56 @@ fn numbering_far_apart_is_left_untouched() {
         assert_eq!(untouched(&quick(&pdf, &Options::effort(100)), &pdf), "object numbers far apart", "{n}");
         packs_and_restores(&pdf);
     }
-    // Numbers thousands apart are what some writers leave behind (pdf.js's reduced test files keep a few
-    // objects with their original numbers): still made smaller, with the rows that takes (60,000 rows cost
-    // about a second of Flate at effort 100).
-    for n in [4000u64, 60_000] {
+    // Numbers apart are what some writers leave behind (pdf.js's reduced test files keep a few objects with
+    // their original numbers): still made smaller, with the rows that takes, while the highest number written
+    // (the cross-reference stream's, n + 2) is below a third of the output's length. qpdf 12 reads an object
+    // only when its number is below that, so from there on the file is left as it is.
+    for n in [40u64, 100] {
         let pdf = page_with_content_at(n);
         let r = optimize(&pdf, &Options::effort(100));
         smaller(&r, &pdf);
         assert_eq!(xref::open(&r.data).unwrap().trailer.get(b"Size"), Some(&Obj::Int(n as i64 + 3)), "{n}");
+        assert!(n as usize + 2 < r.data.len() / 3, "{n}: {} bytes", r.data.len());
     }
+    for n in [4000u64, 60_000] {
+        let pdf = page_with_content_at(n);
+        assert_eq!(untouched(&optimize(&pdf, &Options::effort(100)), &pdf), "object numbers far apart", "{n}");
+        packs_and_restores(&pdf);
+    }
+}
+
+#[test]
+fn the_highest_number_written_is_below_a_third_of_the_length() {
+    // The page with its content stream numbered 300, so that the cross-reference stream written is object 302,
+    // and a stream of k bytes that don't compress: each byte makes the output a byte or two longer, across the
+    // lengths of which 302 is a third. A file is written only with 302 below a third of its length (rounded
+    // down, as qpdf 12 counts), the shortest one written has it just below, and the shorter ones stay as they
+    // are.
+    let (mut left, mut above) = (0, Vec::new());
+    let (mut x, mut noise) = (0x2545_f491_u32, Vec::new());
+    for k in 0..500 {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        noise.push(x as u8);
+        let mut objs = page_objects();
+        objs[0].1 = b"<< /Type /Catalog /Pages 2 0 R /Pad 5 0 R >>".to_vec();
+        objs[2].1 = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 300 0 R >>".to_vec();
+        objs[3].0 = 300;
+        objs.push((5, stream("", &noise)));
+        let pdf = classic(&objs, "301");
+        let r = optimize(&pdf, &Options::effort(0));
+        if r.data == pdf {
+            assert_eq!(untouched(&r, &pdf), "object numbers far apart", "{k}");
+            left += 1;
+        } else {
+            smaller(&r, &pdf);
+            assert!(r.data.len() / 3 > 302, "{k}: {} bytes", r.data.len());
+            above.push(r.data.len() / 3 - 302);
+        }
+    }
+    assert!(left > 0);
+    assert_eq!(above.iter().min(), Some(&1));
 }
 
 /// The page with a cross-reference stream of `rows` rows (the page's objects, then free rows): a few bytes

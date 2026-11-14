@@ -201,6 +201,12 @@ test("optimizeToSize picks the lowest effort that reaches the target, or else th
   assert.deepEqual(missed.data, best.data);
   // A target past 4 GiB is as good as any: reached at once.
   assert.equal(g.optimizeToSize(pdf, Number.MAX_SAFE_INTEGER).effort, 0);
+  // So is Infinity, and what is no number is refused, not taken for a target of 0.
+  const any = g.optimizeToSize(pdf, Infinity);
+  assert.deepEqual([any.effort, any.reached], [0, true]);
+  for (const bad of [NaN, undefined, "1000000"]) {
+    assert.throws(() => g.optimizeToSize(pdf, bad), (e) => e instanceof GpressError && e.code === GpressError.INVALID_OPTIONS, String(bad));
+  }
   // The picker sets the effort itself: the engine's level or a lossy override is refused.
   for (const bad of [{ engineEffort: 0 }, { photoPpi: 200 }, { artPpi: 400 }, { jpegQuality: 80 }]) {
     assert.throws(() => g.optimizeToSize(pdf, 1, bad), (e) => e instanceof GpressError && e.code === GpressError.INVALID_OPTIONS, JSON.stringify(bad));
