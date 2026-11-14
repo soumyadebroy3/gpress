@@ -240,12 +240,20 @@ pub fn estimate_choice(
     let per_row = Choice::per_row(rules);
     let bits = candidate_bits(px, row, bpp, bands, per_row);
     let asked = rules.at(Rule::fast_predictor_candidates);
-    let mut best = (if asked & 1 == 1 { bits[0] } else { u64::MAX }, None);
-    for (k, how) in
-        [(1, Choice::Fixed(1)), (2, Choice::Fixed(2)), (3, Choice::Fixed(3)), (4, Choice::Fixed(4)), (5, per_row)]
+    let mut best = (u64::MAX, None);
+    for (k, how) in [
+        None,
+        Some(Choice::Fixed(1)),
+        Some(Choice::Fixed(2)),
+        Some(Choice::Fixed(3)),
+        Some(Choice::Fixed(4)),
+        Some(per_row),
+    ]
+    .into_iter()
+    .enumerate()
     {
         if asked >> k & 1 == 1 && bits[k] < best.0 {
-            best = (bits[k], Some(how));
+            best = (bits[k], how);
         }
     }
     best.1

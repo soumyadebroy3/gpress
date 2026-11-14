@@ -42,7 +42,7 @@ pub fn optimize(d: &[u8]) -> Result<Vec<u8>, Refused> {
 }
 
 /// Every order of code words `encode_scan` knows, as the bits of `optimize_with`'s `orders`.
-pub const ALL_ORDERS: u8 = 7;
+const ALL_ORDERS: u8 = 7;
 
 /// `optimize` by the rewrite's rules: the new JPEG must save at least `min_saving` bytes (1 or more), and of
 /// the orders of code words only those in `orders` are tried (bits: 1 by symbol value, 2 most frequent first,

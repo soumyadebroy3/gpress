@@ -720,7 +720,6 @@ fn repredict_fast(
 /// wins): by default none, a type for each row, Up, Sub and Paeth. Average comes last.
 fn candidates(rules: &RewriteRules) -> Vec<Option<images::Choice>> {
     use images::Choice::{self, Fixed};
-    // The rule's bit for each candidate, and the candidate.
     let all = [
         (0, None),
         (5, Some(Choice::per_row(rules))),
@@ -1424,7 +1423,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
 
     // The rules of the output's layout: how strings are written, and whether small objects go into object
     // streams.
-    let strings = opt.rules.at(R::string_form) as u8;
+    let hex = opt.rules.on(R::string_form);
     let pack = opt.rules.on(R::object_streams);
     // Every stream gets a direct /Length.
     let mut direct: BTreeMap<u32, (u16, Vec<u8>)> = BTreeMap::new(); // serialised indirect objects
@@ -1465,7 +1464,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
                 };
                 dict.set(b"Length", Obj::Int(data.len() as i64));
                 let mut body = Vec::with_capacity(data.len() + 64);
-                Writer { out: &mut body, strings }.dict(&dict);
+                Writer { out: &mut body, hex }.dict(&dict);
                 body.extend_from_slice(b"stream\n");
                 body.extend_from_slice(&data);
                 body.extend_from_slice(b"\nendstream");
@@ -1473,8 +1472,8 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
             }
             _ if *g != 0 || !pack => {
                 let body = match crypt {
-                    Some(c) => to_bytes_as(&c.seal_object(n, *g, o).map_err(|e| format!("object {n}: {e}"))?, strings),
-                    None => to_bytes_as(o, strings),
+                    Some(c) => to_bytes_as(&c.seal_object(n, *g, o).map_err(|e| format!("object {n}: {e}"))?, hex),
+                    None => to_bytes_as(o, hex),
                 };
                 direct.insert(n, (*g, body));
             }
@@ -1504,7 +1503,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
                 body.push(b'\n');
             }
             head.extend_from_slice(format!("{} {} ", n, body.len()).as_bytes());
-            body.extend_from_slice(&to_bytes_as(o, strings));
+            body.extend_from_slice(&to_bytes_as(o, hex));
             in_stm.insert(*n, (sn, i as u32));
         }
         let first = head.len();
@@ -1531,7 +1530,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         };
         d.set(b"Length", Obj::Int(z.len() as i64));
         let mut out = Vec::new();
-        Writer { out: &mut out, strings }.dict(&d);
+        Writer { out: &mut out, hex }.dict(&d);
         out.extend_from_slice(b"stream\n");
         out.extend_from_slice(&z);
         out.extend_from_slice(b"\nendstream");
@@ -1541,10 +1540,10 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     // The encryption dictionary and its objects as they were: never encrypted, never in an object stream.
     if let Some(c) = crypt {
         if let Some((n, g)) = c.obj {
-            direct.insert(n, (g, to_bytes_as(&Obj::Dict(c.dict.clone()), strings)));
+            direct.insert(n, (g, to_bytes_as(&Obj::Dict(c.dict.clone()), hex)));
         }
         for (n, g, o) in &c.parts {
-            direct.insert(*n, (*g, to_bytes_as(o, strings)));
+            direct.insert(*n, (*g, to_bytes_as(o, hex)));
         }
     }
 
@@ -1637,7 +1636,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     };
     xd.set(b"Length", Obj::Int(zx.len() as i64));
     out.extend_from_slice(format!("{xn} 0 obj\n").as_bytes());
-    Writer { out: &mut out, strings }.dict(&xd);
+    Writer { out: &mut out, hex }.dict(&xd);
     out.extend_from_slice(b"stream\n");
     out.extend_from_slice(&zx);
     out.extend_from_slice(b"\nendstream\nendobj\n");

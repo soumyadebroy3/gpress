@@ -80,7 +80,7 @@ the input, returned only when smaller, and the same for any thread count. The ru
 | Rule | Default | Lowest | Highest | What it decides |
 | --- | ---: | ---: | ---: | --- |
 | `rewrite_min_file_saving` | 1 | 1 | 1,099,511,627,776 | The rewritten file is returned only when it is at least this many bytes smaller than the input; else the input comes back untouched. |
-| `rewrite_min_stream_saving` | 1 | 1 | 1,099,511,627,776 | A stream gets a new encoding only when its new data is at least this many bytes smaller than its stored data. |
+| `rewrite_min_stream_saving` | 1 | 1 | 1,099,511,627,776 | A stream gets a new encoding only when its new data is at least this many bytes smaller than its stored data (with the stream's dictionary counted where the fast path chooses an image's predictor). |
 | `rewrite_flate_over_image_min_saving` | 1 | 0 | 100 | Our Flate goes in front of an image codec that had no general filter (a JPEG, say) only when it saves more than this percent (over the JPEG with its new tables, when there is one). |
 | `rewrite_jpeg_min_saving` | 1 | 1 | 1,099,511,627,776 | A JPEG with new Huffman tables is taken only when it is at least this many bytes smaller. |
 | `rewrite_jpeg_code_orders` | 7 | 1 | 7 | Which assignments of code words are tried for each JPEG scan (bits: 1 by symbol value, 2 most frequent first, 4 fewest one bits); the one with the fewest 0xFF bytes is written, the first of equals. |

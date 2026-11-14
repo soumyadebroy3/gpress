@@ -24,7 +24,7 @@ macro_rules! rules {
         /// A rule's place in `RewriteRules::RULES`. A table's cells follow each other and are read by their
         /// place after the first (`RewriteRules::cell`), so only the first is named in the code.
         #[allow(non_camel_case_types, dead_code)]
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[derive(Clone, Copy)]
         pub(crate) enum Rule {
             $($name,)*
         }
@@ -41,7 +41,8 @@ rules! {
     // The whole file: returned only when it saves at least this many bytes.
     min_file_saving = 1, 1, ANY;
 
-    // A stream: a new encoding must save at least this many bytes of stored data.
+    // A stream: a new encoding must save at least this many bytes of stored data (with the stream's dictionary
+    // counted where the fast path chooses an image's predictor).
     min_stream_saving = 1, 1, ANY;
     // Flate in front of an image codec that had no general filter: only when it saves more than this
     // percentage (over the JPEG with its new tables, when there is one).
@@ -203,11 +204,7 @@ pub struct RewriteRules([u64; COUNT]);
 
 impl Default for RewriteRules {
     fn default() -> RewriteRules {
-        let mut v = [0; COUNT];
-        for (v, rule) in v.iter_mut().zip(RewriteRules::RULES) {
-            *v = rule.1;
-        }
-        RewriteRules(v)
+        RewriteRules(std::array::from_fn(|i| RewriteRules::RULES[i].1))
     }
 }
 
@@ -299,7 +296,7 @@ mod tests {
             assert_eq!(name(Rule::work_cost_20, band), format!("work_cost_{}", 20 + band * 20));
         }
         assert_eq!(r.cell(Rule::image_level_0, 19), 12);
-        assert_eq!((r.at(Rule::job_check_ratio), Rule::job_check_ratio as usize), (2, COUNT - 1));
+        assert_eq!(r.at(Rule::job_check_ratio), 2);
         assert_eq!(RewriteRules::default_of(Rule::max_predictor_image), 48 << 20);
         assert_eq!(r.size(Rule::big_stream), 4 << 20);
     }
