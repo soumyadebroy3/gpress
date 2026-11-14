@@ -191,6 +191,10 @@ pub fn decode(d: &[u8], max_samples: usize, deadline: Deadline) -> Result<Pictur
     if total.is_none_or(|t| t > max_samples as u64) {
         return Err(Refused("too large"));
     }
+    // Nothing is allocated for a frame that claims more blocks than a scan's data can hold.
+    for s in &j.scans {
+        Tokens::new(&j, s).map_err(Refused)?;
+    }
     for p in &mut planes {
         p.px = vec![0; p.w * p.h];
     }
