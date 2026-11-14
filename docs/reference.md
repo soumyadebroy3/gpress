@@ -118,7 +118,7 @@ groups, one for each part of the engine; a rule's full name is its group's prefi
 | --- | --- |
 | Rust | `options.set_rule("lossy_photo_floor", 100)?`, or several from text with `options.set_rules("lossy_photo_floor=100,lossy_min_saving=20")?`; `options.rule(name)` reads one, and `Options::rules()` lists every rule with its default, lowest and highest value |
 | Command line | `--rule lossy_photo_floor=100`, with commas between for more, or the flag again |
-| C | `options.rules = "lossy_photo_floor=100,lossy_min_saving=20";` (`NULL` for none) |
+| C | `strcpy(options.rules, "lossy_photo_floor=100,lossy_min_saving=20");` (the text lies in the options themselves, `char rules[GPRESS_RULES_TEXT]`, 16,384 bytes with its closing NUL, which every rule at once fits; empty for none) |
 | TypeScript | `{ rules: { lossy_photo_floor: 100, lossy_min_saving: 20 } }` |
 
 A name that is no rule, or a value outside the rule's range, is an error everywhere (`InvalidOptions`, code 5;

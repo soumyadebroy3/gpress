@@ -58,6 +58,9 @@ enum {
                                   archive stores the input as it is) */
 };
 
+/* The room for the rules text in the options, its closing NUL counted: every rule at once fits. */
+#define GPRESS_RULES_TEXT 16384
+
 /* The options, the same as the library's. Fill with gpress_options_default and change what you need: a
  * zeroed struct is not the defaults (it means effort 0 and every switch off), though a size left at 0
  * means its default. */
@@ -101,13 +104,15 @@ typedef struct gpress_options {
                                      lossy_quality_max (50 and 95), for a photo that is
                                      resampled or stored without JPEG. Any of the three set makes the
                                      output lossy at any effort */
-  const char *rules;              /* rules by name: the engine's tuning values, as text of the form
-                                     "name=value,name=value", such as "lossy_min_saving=20". NULL or "" for
-                                     none: every rule then has its default. docs/reference.md ("Rules")
-                                     lists the names with their defaults and ranges. A name that is no
-                                     rule, or a value outside the rule's range, fails the call with
+  char rules[GPRESS_RULES_TEXT];  /* rules by name: the engine's tuning values, as text of the form
+                                     "name=value,name=value" with its closing NUL, such as
+                                     "lossy_min_saving=20" (strcpy or snprintf it in; every rule at once
+                                     fits). Empty for none, as gpress_options_default leaves it: every rule
+                                     then has its default. docs/reference.md ("Rules") lists the names with
+                                     their defaults and ranges. A name that is no rule, a value outside
+                                     the rule's range, or a text without its NUL fails the call with
                                      GPRESS_ERR_BAD_ARGUMENT and a message that says which values the rule
-                                     takes. The text is read during the call only */
+                                     takes */
 } gpress_options;
 
 typedef struct gpress_buffer {

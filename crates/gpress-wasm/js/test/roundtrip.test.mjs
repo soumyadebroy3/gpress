@@ -270,6 +270,8 @@ test("rules are set by name, and one call's rules do not reach the next", () => 
   assert.ok(plain.length < lossless.length);
   // The picture has 76,800 pixels: with `lossy_min_pixels` at that it is not touched.
   assert.deepEqual(at({ effort: 100, rules: { lossy_min_pixels: 76800 } }), lossless);
+  // The rule's highest value, which fills the low half of the two the module takes a value in.
+  assert.deepEqual(at({ effort: 100, rules: { lossy_min_pixels: 4294967295 } }), lossless);
   // The call after it has the defaults again, and a rule set to its default is the default.
   assert.deepEqual(at({ effort: 100 }), plain);
   assert.deepEqual(at({ effort: 100, rules: { lossy_min_pixels: 65536, lossy_min_saving: 10 } }), plain);
@@ -281,9 +283,11 @@ test("rules are set by name, and one call's rules do not reach the next", () => 
   const least = Math.min(...[0, 20, 40].map((effort) => at({ effort }).length));
   assert.equal(g.optimizeToSize(pdf, least - 1, { rules: { lossy_min_pixels: 76800 } }).reached, false);
   assert.equal(g.optimizeToSize(pdf, least - 1).reached, true);
-  // A name that is no rule, or a value outside the rule's range or not a whole number: an error that names
-  // the rule, from every call, and the call after it has the defaults.
-  for (const rules of [{ nothing: 1 }, { lossy_min_saving: 9 }, { lossy_min_pixels: 70000.5 }, { lossy_min_pixels: -1 }]) {
+  // A name that is no rule, or a value outside the rule's range (one of them by the high half only), not a
+  // whole number, or past what a number holds exactly: an error that names the rule, from every call, and the
+  // call after it has the defaults.
+  const bad = [{ nothing: 1 }, { lossy_min_saving: 9 }, { lossy_min_pixels: 2 ** 32 }, { lossy_min_pixels: 70000.5 }, { lossy_min_pixels: -1 }, { lossy_min_pixels: 2 ** 53 }];
+  for (const rules of bad) {
     const refused = (e) => e instanceof GpressError && e.code === GpressError.INVALID_OPTIONS && e.message.includes(Object.keys(rules)[0]);
     assert.throws(() => g.optimize(pdf, { effort: 100, rules }), refused, JSON.stringify(rules));
     assert.throws(() => g.optimizeToSize(pdf, 1, { rules }), refused, JSON.stringify(rules));

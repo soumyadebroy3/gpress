@@ -169,7 +169,11 @@ interface Exports {
   gpress_free_input(ptr: number, len: number): void;
   gpress_optimize(ptr: number, len: number, effort: number, maxIn: number, maxStream: number, objectsPerStream: number, flags: number, photoPpi: number, artPpi: number, jpegQuality: number): number;
   gpress_optimize_to_size(ptr: number, len: number, target: number, maxIn: number, maxStream: number, objectsPerStream: number, flags: number): number;
-  gpress_rules(ptr: number, len: number): number;
+  gpress_rule_count(): number;
+  gpress_rule_name(index: number): number;
+  gpress_rule_name_len(index: number): number;
+  gpress_rule(index: number, low: number, high: number): number;
+  gpress_rules_reset(): void;
   gpress_compress(ptr: number, len: number, effort: number, maxIn: number, maxStream: number, maxDecoded: number, flags: number): number;
   gpress_expand(ptr: number, len: number, maxIn: number, maxLen: number, maxDecoded: number): number;
   gpress_out_ptr(): number;
@@ -203,7 +207,16 @@ export class Gpress {
   /** Set once the module has trapped: its memory and state can no longer be trusted. */
   private dead: GpressError | null = null;
 
-  private constructor(private readonly ex: Exports) {}
+  /** Every rule's place in the module's list, by name: read from the module, so there is no list to keep here. */
+  private readonly ruleIndex = new Map<string, number>();
+
+  private constructor(private readonly ex: Exports) {
+    const text = new TextDecoder();
+    for (let i = 0; i < ex.gpress_rule_count(); i++) {
+      const name = new Uint8Array(ex.memory.buffer, ex.gpress_rule_name(i), ex.gpress_rule_name_len(i));
+      this.ruleIndex.set(text.decode(name), i);
+    }
+  }
 
   /**
    * Compiles the module without making an instance. Compiling is most of the cost of a first load, so
@@ -274,8 +287,20 @@ export class Gpress {
 
   /** Sets the rules for the call that follows: only those given, so none of an earlier call stays. */
   private rules(rules: Record<string, number> = {}): void {
-    const text = Object.entries(rules).map(([name, value]) => `${name}=${value}`).join(",");
-    this.run(new TextEncoder().encode(text), (ptr, len) => this.ex.gpress_rules(ptr, len));
+    if (this.dead) throw this.dead;
+    this.ex.gpress_rules_reset();
+    for (const [name, value] of Object.entries(rules)) {
+      const index = this.ruleIndex.get(name);
+      if (index === undefined) {
+        throw new GpressError(GpressError.INVALID_OPTIONS, `invalid options: there is no rule called ${name}`);
+      }
+      // A rule's value is a whole number; one a JavaScript number does not hold exactly is refused here.
+      if (!Number.isSafeInteger(value) || value < 0) {
+        throw new GpressError(GpressError.INVALID_OPTIONS, `invalid options: rule ${name} is ${value}: it takes a whole number`);
+      }
+      const code = this.ex.gpress_rule(index, value % 2 ** 32, Math.floor(value / 2 ** 32));
+      if (code !== 0) throw new GpressError(code, this.message() || `gpress error ${code}`);
+    }
   }
 
   /**

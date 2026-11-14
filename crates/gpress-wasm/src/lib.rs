@@ -15,8 +15,10 @@
 //! has as bits, and after a call that returned 10 (a part it leaves out) `gpress_needed_feature` gives that
 //! part's bit; the wrapper turns the pair into a `GpressFeatureError` naming the part.
 //!
-//! Rules (the engine's tuning values by name, `gpress::Options::set_rules`) are not arguments: `gpress_rules`
-//! takes them as text for the calls that follow, and the wrapper calls it before each operation.
+//! Rules (the engine's tuning values, `gpress::Options::set_rule`) are not arguments: `gpress_rule` sets one
+//! for the calls that follow, by its place in the list of all rules (`gpress_rule_count`, `gpress_rule_name`
+//! and `gpress_rule_name_len` give that list), and `gpress_rules_reset` gives every rule its default again.
+//! The wrapper reads the names once and sets a call's rules before each operation.
 //!
 //! Panics: `wasm32-unknown-unknown` builds with `panic = "abort"`, so there is no unwinding and the panic
 //! guards here and in the library catch nothing. A bug in the engine therefore traps the module
@@ -38,7 +40,10 @@ thread_local! {
     static MSG: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static OUTCOME: RefCell<i32> = const { RefCell::new(0) };
     static NEEDED: RefCell<u32> = const { RefCell::new(0) };
-    static RULES: RefCell<String> = const { RefCell::new(String::new()) };
+    /// Every rule's full name, in the order of `gpress::Options::rules()`: a rule's index is its place here.
+    static NAMES: Vec<String> = gpress::Options::rules().into_iter().map(|r| r.0).collect();
+    /// The rules `gpress_rule` set, index and value: only values the library takes.
+    static RULES: RefCell<Vec<(u32, u64)>> = const { RefCell::new(Vec::new()) };
 }
 
 fn set_out(v: Vec<u8>) {
@@ -93,8 +98,10 @@ fn options(effort: u32, max_input_mb: u32, max_stream_mb: u32, objects_per_strea
     o.jbig2 = flags & FLAG_NO_JBIG2 == 0;
     o.rewrite_encrypted = flags & FLAG_KEEP_ENCRYPTED == 0;
     o.decrypt = flags & FLAG_NO_DECRYPT == 0;
-    // `gpress_rules` kept only a text the library takes, so this sets every rule of it.
-    let _ = RULES.with(|r| o.set_rules(&r.borrow()));
+    // `gpress_rule` kept only what the library takes, so every one of these is set.
+    for &(index, value) in RULES.with(|r| r.borrow().clone()).iter() {
+        let _ = NAMES.with(|n| o.set_rule(&n[index as usize], value));
+    }
     o
 }
 
@@ -134,19 +141,48 @@ fn run(f: impl FnOnce() -> Result<(Vec<u8>, i32, String), gpress::Error>) -> i32
     }
 }
 
-/// Sets the rules for every call after it, until it is called again: the text "name=value,name=value"
-/// (`gpress::Options::set_rules`), written into a buffer like an input; an empty one sets none, so every rule
-/// has its default again. Returns 0, or 5 with a message for a name that is no rule or a value outside the
-/// rule's range; no rule is set then.
-///
-/// # Safety
-/// See `input`.
+/// How many rules there are. A rule's index is its place in `gpress::Options::rules()`.
 #[no_mangle]
-pub unsafe extern "C" fn gpress_rules(ptr: *const u8, len: usize) -> i32 {
-    let text = String::from_utf8_lossy(input(ptr, len)).into_owned();
-    let checked = gpress::Options::default().set_rules(&text);
-    RULES.with(|r| *r.borrow_mut() = if checked.is_ok() { text } else { String::new() });
+pub extern "C" fn gpress_rule_count() -> u32 {
+    NAMES.with(|n| n.len() as u32)
+}
+
+/// Where the full name of rule `index` is, in the module's own memory for as long as the module lives
+/// (`gpress_rule_name_len` bytes of UTF-8); null past the last rule.
+#[no_mangle]
+pub extern "C" fn gpress_rule_name(index: u32) -> *const u8 {
+    NAMES.with(|n| n.get(index as usize).map_or(std::ptr::null(), |name| name.as_ptr()))
+}
+
+/// The length of the name of rule `index` in bytes; 0 past the last rule.
+#[no_mangle]
+pub extern "C" fn gpress_rule_name_len(index: u32) -> usize {
+    NAMES.with(|n| n.get(index as usize).map_or(0, |name| name.len()))
+}
+
+/// Sets rule `index` for every call after it, until `gpress_rules_reset`, to the value `low + high * 2^32` (a
+/// value comes in halves because the host's numbers are not 64-bit integers). Returns 0, or 5 with a message
+/// for an index past the last rule or a value outside the rule's range; the rule keeps what it had then.
+#[no_mangle]
+pub extern "C" fn gpress_rule(index: u32, low: u32, high: u32) -> i32 {
+    let value = (high as u64) << 32 | low as u64;
+    let checked = match NAMES.with(|n| n.get(index as usize).cloned()) {
+        Some(name) => gpress::Options::default().set_rule(&name, value),
+        None => Err(gpress::Error::InvalidOptions(format!("there is no rule number {index}"))),
+    };
+    if checked.is_ok() {
+        RULES.with(|r| {
+            r.borrow_mut().retain(|set| set.0 != index);
+            r.borrow_mut().push((index, value));
+        });
+    }
     run(|| checked.map(|()| (Vec::new(), 0, String::new())))
+}
+
+/// Gives every rule its default again.
+#[no_mangle]
+pub extern "C" fn gpress_rules_reset() {
+    RULES.with(|r| r.borrow_mut().clear());
 }
 
 /// Allocates `len` bytes for the host to write the input into. Returns null when the allocation fails.
@@ -428,23 +464,27 @@ mod tests {
         let ts = include_str!("../js/gpress.ts");
         assert!(ts.contains(&format!("options.effort ?? {default},")));
         assert!(ts.contains(&format!("const FLAG_ENGINE_EFFORT = {FLAG_ENGINE_EFFORT};")));
-        // Rules as text reach the options and stay until they are set again; a bad text sets none and gives 5.
-        let (a, b) = (&gpress::Options::rules()[0], &gpress::Options::rules()[1]);
-        let rules = |text: &str| unsafe {
-            let p = gpress_alloc(text.len());
-            std::ptr::copy_nonoverlapping(text.as_ptr(), p, text.len());
-            let code = gpress_rules(p, text.len());
-            gpress_free_input(p, text.len());
-            code
-        };
-        assert_eq!(rules(&format!("{}={},{}={}", a.0, a.3, b.0, b.2)), 0);
+        // The module lists every rule, by the library's names in the library's order.
+        let all = gpress::Options::rules();
+        assert_eq!(gpress_rule_count() as usize, all.len());
+        for (i, r) in all.iter().enumerate() {
+            assert!(!gpress_rule_name(i as u32).is_null() && gpress_rule_name_len(i as u32) == r.0.len(), "{}", r.0);
+        }
+        assert!(gpress_rule_name(all.len() as u32).is_null() && gpress_rule_name_len(all.len() as u32) == 0);
+        // A rule set by its place reaches the options and stays until the reset; what the library refuses
+        // (a value outside the range, here one that needs the high half; an index past the end) gives 5 and
+        // changes nothing.
+        let (a, b) = (&all[0], &all[1]);
+        let set = |index: usize, value: u64| gpress_rule(index as u32, value as u32, (value >> 32) as u32);
+        assert_eq!((set(0, a.2), set(0, a.3), set(1, b.2)), (0, 0, 0));
         let o = options(60, 0, 0, 0, 0);
         assert_eq!((o.rule(&a.0), o.rule(&b.0), options(60, 0, 0, 0, 0) == o), (Some(a.3), Some(b.2), true));
-        assert_eq!(rules("no_such_rule=1"), 5);
-        assert!(gpress_message_len() > 0);
-        assert_eq!(options(default as u32, 0, 0, 0, 0), d);
-        assert_eq!(rules(&format!("{}={}", a.0, a.3)), 0);
-        assert_eq!(rules(""), 0);
+        for (index, value) in [(0, a.3 + (1 << 32)), (1, b.3 + 1), (all.len(), 1)] {
+            assert_eq!(set(index, value), 5);
+            assert!(gpress_message_len() > 0);
+            assert_eq!(options(60, 0, 0, 0, 0), o);
+        }
+        gpress_rules_reset();
         assert_eq!(options(default as u32, 0, 0, 0, 0), d);
         // A size past the module's address space is clamped, never wrapped; a budget is a u64 everywhere.
         assert_eq!(mib(u32::MAX, 0), usize::try_from((u32::MAX as u64) << 20).unwrap_or(usize::MAX));
