@@ -588,10 +588,12 @@ fn reencode(
     }
     let mut change = Change { jpeg_retabled: best_retabled, ..Change::default() };
     // An image without an image codec may have a smaller form that keeps every pixel (`exact_form`): asked only
-    // of an image whose dictionary allows one. Out of time, nothing more is tried (the rewrite is given up).
+    // of an image whose dictionary allows one and whose encoding every reader reads our way (`plain_encoding`).
+    // Out of time, nothing more is tried (the rewrite is given up).
     let form = rest.is_empty()
         && (opt.jbig2 && crate::fax::pdf::one_bit(&s.dict).is_ok()
             || opt.palette && indexed::plain_image(&s.dict).is_some())
+        && plain_encoding(&s.dict)
         && !opt.deadline.passed();
     // The content as `content_of` decodes it: the general filters gave these same bytes (it decodes with a
     // limit no lower), and only the last of them can have a predictor (checked above). Kept when decoding
@@ -618,6 +620,40 @@ fn reencode(
         *content = samples.map(|d| (d.into_owned(), rest.to_vec()));
     }
     best.map(|(d, z)| (d, z, change))
+}
+
+/// Whether an exact form may stand in for the encoding of image `d` (a 1-bit image, or one that may become
+/// Indexed), whose filters are general ones only. A form drops /Filter and /DecodeParms and holds the pixels as
+/// we read them through those, so nothing may hang on the two entries and every reader must read them our way:
+/// no reference in them (the object it names could become unreachable, and a /Predictor that is one is not
+/// followed here), no /DP (Poppler 24.02 reads it as /DecodeParms, PDFium 7999 does not), and a predictor only
+/// as the predictor search takes one (`samples`): a number, with the image's own geometry, a TIFF one at 8 bits
+/// only. PDFium 7999 undoes a TIFF predictor with the image's own components, whatever its /Colors and
+/// /BitsPerComponent say.
+fn plain_encoding(d: &Dict) -> bool {
+    let (colors, bpc) = match indexed::plain_image(d) {
+        Some((m, ..)) => (m as i64, 8),
+        None if crate::fax::pdf::one_bit(d).is_ok() => (1, 1),
+        None => return false,
+    };
+    let mut direct = !d.has(b"DP");
+    for k in [&b"Filter"[..], b"DecodeParms"] {
+        if let Some(v) = d.get(k) {
+            walk(v, &mut |x| direct &= !matches!(x, Obj::Ref(..)));
+        }
+    }
+    let Some(stages) = chain(d).filter(|_| direct) else { return false };
+    let Some(p) = stages.last().and_then(|st| st.parms.as_ref()) else { return true };
+    // An entry that is there must be a number.
+    let int = |k: &[u8], or: i64| p.get(k).map_or(Some(or), |x| x.as_int());
+    match int(b"Predictor", 1) {
+        None => false,
+        Some(..=1) => true,
+        Some(pred) => {
+            let own = (Some(colors), Some(bpc), d.get(b"Width").and_then(|w| w.as_int()));
+            (int(b"Colors", 1), int(b"BitsPerComponent", 8), int(b"Columns", 1)) == own && (pred >= 10 || bpc == 8)
+        }
+    }
 }
 
 /// A smaller form of an image whose filters are general ones only, every pixel kept: a 1-bit image as JBIG2
@@ -1250,6 +1286,10 @@ fn job_refs<'a>(d: &'a Dict, objs: &'a BTreeMap<u32, (u16, Obj)>) -> Vec<(u32, L
 fn image_table(objs: &BTreeMap<u32, (u16, Obj)>) -> indexed::Table {
     let mut table = indexed::Table { masks: HashSet::new(), defaults: false };
     for (_, o) in objs.values() {
+        // An object that is only a reference: a mask may be named through it, so what it names counts as one.
+        if let Obj::Ref(n, _) = o {
+            table.masks.insert(*n);
+        }
         walk(o, &mut |x| {
             let Some(d) = x.as_dict() else { return };
             table.defaults |= d.has(b"DefaultGray") || d.has(b"DefaultRGB");
@@ -1398,8 +1438,10 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         objs.iter().filter_map(|(&n, (_, o))| if let Obj::Stream(s) = o { Some((n, &**s)) } else { None }).collect();
     let (same, unique, shares) = identical_streams(&streams);
     let settings = effort_plan(&streams, &unique, opt, input.len(), pool);
-    // What only the whole table can say about an image that may become an Indexed one.
-    let palette = if opt.palette { may_index(&streams, &same, &objs) } else { vec![false; streams.len()] };
+    // What only the whole table can say about an image that may become an Indexed one. Not in an encrypted
+    // file: its colour table is sealed after the sizes are compared (under AES that adds an IV and padding).
+    let palette =
+        if opt.palette && crypt.is_none() { may_index(&streams, &same, &objs) } else { vec![false; streams.len()] };
     // Each job is given its stream, its settings and the few objects its encoders look up: nothing else of
     // the file.
     let jobs: Vec<Job> = unique
@@ -1865,7 +1907,8 @@ fn self_check(
                 let recoloured = !same_except_encoding(&s1.dict, &s2.dict);
                 let differs = || Err(format!("self-check: dictionary of stream {n} differs"));
                 if recoloured {
-                    if !indexed::allowed(*n, &s1.dict, objs, table.get_or_init(|| image_table(objs))) {
+                    let table = table.get_or_init(|| image_table(objs));
+                    if !plain_encoding(&s1.dict) || !indexed::allowed(*n, &s1.dict, objs, table) {
                         return Some(differs());
                     }
                 } else {
@@ -1902,7 +1945,7 @@ fn self_check(
                 if c1 != c2
                     && !same_jpeg(&c1, &c2)
                     && !crate::fax::pdf::same_image(s1, s2, &resolve)
-                    && !(c1.1.is_empty() && crate::fax::pdf::same_bits(s1, &c1.0, s2))
+                    && !(c1.1.is_empty() && plain_encoding(&s1.dict) && crate::fax::pdf::same_bits(s1, &c1.0, s2))
                 {
                     return Some(Err(format!("self-check: content of stream {n} differs")));
                 }
@@ -3129,7 +3172,9 @@ pub(super) mod check_tests {
         file_of(&[
             b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
             b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /XObject << /A 5 0 R /B 6 0 R >> >> >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R \
+              /Resources << /XObject << /A 5 0 R /B 6 0 R >> >> >>"
+                .to_vec(),
             stream_of("", b"q 400 0 0 300 50 400 cm /A Do Q q 240 0 0 160 50 100 cm /B Do Q\n"),
             stream_of(
                 &format!("{image} /Width {w} /Height {h} /ColorSpace /DeviceGray /BitsPerComponent 1"),
@@ -3656,5 +3701,86 @@ pub(super) mod job_tests {
             );
             assert!(st.peak > budget / 2, "the budget was filled: {st:?}");
         }
+    }
+
+    #[test]
+    fn a_form_is_offered_only_for_an_encoding_every_reader_reads_our_way() {
+        let rgb = "/Subtype /Image /Width 100 /Height 50 /BitsPerComponent 8 /ColorSpace /DeviceRGB";
+        let bit = "/Subtype /Image /Width 100 /Height 50 /BitsPerComponent 1 /ColorSpace /DeviceGray";
+        for (image, encoding, ok) in [
+            (rgb, "", true),
+            (rgb, "/Filter /FlateDecode", true),
+            (
+                rgb,
+                "/Filter [/ASCII85Decode /LZWDecode] /DecodeParms [null << /Predictor 15 /Colors 3 /Columns 100 >>]",
+                true,
+            ),
+            (
+                rgb,
+                "/Filter /FlateDecode /DecodeParms << /Predictor 2 /Colors 3 /BitsPerComponent 8 /Columns 100 >>",
+                true,
+            ),
+            // No predictor: what else the parameters say is not read.
+            (rgb, "/Filter /FlateDecode /DecodeParms << /Predictor 1 /Colors 1 >>", true),
+            // A predictor that is not the image's own.
+            (rgb, "/Filter /FlateDecode /DecodeParms << /Predictor 2 /Colors 1 /Columns 300 >>", false),
+            (rgb, "/Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 3 /Columns 99 >>", false),
+            (
+                rgb,
+                "/Filter /FlateDecode /DecodeParms << /Predictor 12 /Colors 3 /BitsPerComponent 16 /Columns 100 >>",
+                false,
+            ),
+            (rgb, "/Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 3.0 /Columns 100 >>", false),
+            // A predictor that is no number, a reference, the abbreviation some readers take.
+            (rgb, "/Filter /FlateDecode /DecodeParms << /Predictor 15.0 /Colors 3 /Columns 100 >>", false),
+            (rgb, "/Filter /FlateDecode /DecodeParms << /Predictor 6 0 R /Colors 3 /Columns 100 >>", false),
+            (rgb, "/Filter /FlateDecode /DecodeParms << /Predictor 1 /Columns 6 0 R >>", false),
+            (rgb, "/Filter /FlateDecode /DecodeParms 6 0 R", false),
+            (rgb, "/Filter [6 0 R]", false),
+            (rgb, "/Filter /FlateDecode /DP << /Predictor 15 /Colors 3 /Columns 100 >>", false),
+            // A 1-bit image: PNG rows of its own, no TIFF predictor.
+            (bit, "/Filter /FlateDecode", cfg!(feature = "fax")),
+            (
+                bit,
+                "/Filter /FlateDecode /DecodeParms << /Predictor 15 /BitsPerComponent 1 /Columns 100 >>",
+                cfg!(feature = "fax"),
+            ),
+            (bit, "/Filter /FlateDecode /DecodeParms << /Predictor 2 /BitsPerComponent 1 /Columns 100 >>", false),
+            (bit, "/Filter /FlateDecode /DecodeParms << /Predictor 2 /Columns 13 >>", false),
+            // Neither kind of image.
+            ("/Subtype /Image /Width 100 /Height 50 /BitsPerComponent 8 /ColorSpace /DeviceCMYK", "", false),
+        ] {
+            assert_eq!(plain_encoding(&dict(&format!("<< {image} {encoding} >>"))), ok, "{image} {encoding}");
+        }
+    }
+
+    #[test]
+    fn a_mask_named_through_a_reference_to_a_reference_is_a_mask() {
+        let objs: BTreeMap<u32, (u16, Obj)> =
+            [(5, "<< /SMask 7 0 R /Mask 8 0 R >>"), (6, "<< /Kids [9 0 R] >>"), (7, "9 0 R"), (9, "11 0 R")]
+                .into_iter()
+                .map(|(n, text)| (n, (0, parse(text))))
+                .collect();
+        let table = image_table(&objs);
+        let mut masks: Vec<u32> = table.masks.into_iter().collect();
+        masks.sort_unstable();
+        assert!(masks == [7, 8, 9, 11] && !table.defaults, "{masks:?}");
+        let page = [(3, (0, parse("<< /Resources << /ColorSpace << /DefaultGray /DeviceGray >> >> >>")))];
+        assert!(image_table(&page.into_iter().collect()).defaults);
+    }
+
+    #[test]
+    fn an_image_identical_to_a_mask_stays_as_it_is() {
+        let grey = dict("<< /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 >>");
+        let grey = Stream { dict: grey, data: vec![0, 255] };
+        let objs: BTreeMap<u32, (u16, Obj)> = [
+            (5, (0, Obj::Stream(Box::new(grey.clone())))),
+            (6, (0, Obj::Stream(Box::new(grey.clone())))),
+            (7, (0, parse("<< /SMask 6 0 R >>"))),
+        ]
+        .into_iter()
+        .collect();
+        // 6, the soft mask of 7, is encoded as 5 is, once for both: 5 holds it back.
+        assert_eq!(may_index(&[(5, &grey), (6, &grey)], &[0, 0], &objs), [false, true]);
     }
 }

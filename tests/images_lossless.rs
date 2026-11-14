@@ -8,6 +8,10 @@ use gpress::pdf::object::{Dict, Obj, Stream};
 use gpress::pdf::xref;
 use gpress::{optimize, Optimized, Options, Outcome, Report};
 
+// The encrypted test document.
+#[cfg(all(feature = "fax", feature = "encryption"))]
+mod common;
+
 /// Numbers below `k`, the same ones every run.
 fn rng(seed: u64) -> impl FnMut(usize) -> usize {
     let mut r = seed;
@@ -40,8 +44,11 @@ fn page_with(resources: &str, images: &[Vec<u8>]) -> Vec<u8> {
     let mut objs = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1600 100] /Contents 4 0 R /Resources << /XObject << {names}>>{resources} >> >>")
-            .into_bytes(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1600 100] /Contents 4 0 R /Resources << /XObject << \
+             {names}>>{resources} >> >>"
+        )
+        .into_bytes(),
         stream_of("", draw.as_bytes()),
     ];
     objs.extend_from_slice(images);
@@ -480,6 +487,88 @@ fn a_file_with_a_default_colour_space_keeps_its_images() {
     assert_eq!(report.images_indexed, 1);
 }
 
+/// In an encrypted file the colour table is sealed after the sizes are compared, which under AES adds an IV and
+/// padding: no image of such a file becomes Indexed. The same chart does in a plain file (above).
+#[test]
+#[cfg(all(feature = "fax", feature = "encryption"))]
+fn an_encrypted_file_keeps_its_images() {
+    let chart = (5, format!("/Type /XObject /Subtype /Image /Width 121 /Height 80 {RGB} /Filter /FlateDecode"));
+    let mut objects: Vec<(u32, String, Option<Vec<u8>>)> = vec![
+        (1, "/Type /Catalog /Pages 2 0 R".into(), None),
+        (2, "/Type /Pages /Kids [3 0 R] /Count 1".into(), None),
+        (
+            3,
+            "/Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Resources << /XObject << /I5 5 0 R >> >> \
+             /Contents 4 0 R"
+                .into(),
+            None,
+        ),
+        (4, String::new(), Some(b"q 121 0 0 80 0 0 cm /I5 Do Q".to_vec())),
+        (chart.0, chart.1, Some(zlib(&pixels(121 * 80, &FIVE, 11)))),
+    ];
+    // The encrypted document numbers its objects 1 to 9.
+    objects.extend((6..10).map(|n| (n, String::new(), None)));
+    for aes in [false, true] {
+        let pdf = common::encrypted_of(aes, objects.clone());
+        let (on, report) = smaller(&pdf, &quick());
+        assert!(report.images_indexed == 0 && !report.encryption.is_empty(), "aes {aes}");
+        assert!(on == smaller(&pdf, &quick().palette(false)).0, "aes {aes}");
+    }
+}
+
+/// TIFF rows of 8-bit samples of one component: each byte less the byte before it in its row.
+fn tiff_sub(data: &[u8], row: usize) -> Vec<u8> {
+    let sub =
+        |l: &[u8]| (0..l.len()).map(|i| l[i].wrapping_sub(if i == 0 { 0 } else { l[i - 1] })).collect::<Vec<u8>>();
+    data.chunks(row).flat_map(sub).collect()
+}
+
+/// A form holds the pixels as we read them, so an encoding that is read in more than one way keeps its bytes:
+/// a predictor whose parameters are not the image's own (PDFium undoes a TIFF predictor with the image's
+/// components, whatever /Colors says), parameters that name another object, which would go with them, and
+/// parameters under the name /DP, which Poppler reads and PDFium does not. Under parameters of their own the
+/// same pixels become the forms.
+#[test]
+fn an_encoding_read_in_more_than_one_way_keeps_its_bytes() {
+    let (chart, page) = (pixels(120 * 80, &FIVE, 51), scan(600, 400, 52));
+    let flate = "/Type /XObject /Subtype /Image /Filter /FlateDecode";
+    let rgb = format!("/Width 120 /Height 80 {RGB}");
+    let bit = "/Width 600 /Height 400 /ColorSpace /DeviceGray /BitsPerComponent 1";
+    let pdf = page_of(&[
+        // 5: three components, undone as one. 6: bits, undone as bytes.
+        stream_of(
+            &format!("{flate} {rgb} /DecodeParms << /Predictor 2 /Columns 360 >>"),
+            &zlib(&tiff_sub(&chart, 360)),
+        ),
+        stream_of(&format!("{flate} {bit} /DecodeParms << /Predictor 2 /Columns 75 >>"), &zlib(&tiff_sub(&page, 75))),
+        // 7, 8: parameters that say nothing but name object 9.
+        stream_of(&format!("{flate} {rgb} /DecodeParms << /Predictor 1 /Columns 9 0 R >>"), &zlib(&chart)),
+        stream_of(&format!("{flate} {bit} /DecodeParms << /Predictor 1 /Columns 9 0 R >>"), &zlib(&page)),
+        b"15".to_vec(),
+        // 10: a predictor we don't read.
+        stream_of(&format!("{flate} {rgb} /DP << /Predictor 2 /Colors 3 /Columns 120 >>"), &zlib(&chart)),
+    ]);
+    for effort in [0, 100] {
+        let (on, report) = smaller(&pdf, &quick().effort(effort));
+        assert_eq!((report.images_indexed, report.bilevel_to_jbig2), (0, 0), "effort {effort}");
+        assert!(on == smaller(&pdf, &quick().effort(effort).jbig2(false).palette(false)).0, "effort {effort}");
+    }
+    let (_, report) = smaller(&page_of(&[image(&rgb, &chart), image(bit, &page)]), &quick());
+    assert_eq!((report.images_indexed, report.bilevel_to_jbig2), (1, cfg!(feature = "fax") as usize));
+}
+
+/// General filters can store millions of changing elements in a few bytes: 1024 x 1024 alternating pixels in
+/// about a kilobyte. Such an image is not tried as JBIG2, whose coder would hold a list of them many times the
+/// stream; one with as many changing elements as its bytes pay for is (`one_bit_images`).
+#[test]
+#[cfg(feature = "fax")]
+fn a_one_bit_image_of_more_changes_than_its_bytes_pay_for_keeps_its_filter() {
+    let stripes = image("/Width 1024 /Height 1024 /ColorSpace /DeviceGray /BitsPerComponent 1", &[0x55; 128 * 1024]);
+    let (out, report) = smaller(&page_of(&[stripes]), &quick().effort(100));
+    assert_eq!(report.bilevel_to_jbig2, 0);
+    assert!(filters(&stream(&out, 5)) == [b"FlateDecode".to_vec()]);
+}
+
 fn fnv(data: &[u8]) -> u64 {
     data.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
 }
@@ -502,6 +591,32 @@ fn palette_off_gives_the_bytes_of_before() {
     assert_eq!((off.len(), fnv(&off)), CHART_BEFORE);
     let (on, report) = smaller(&pdf, &quick());
     assert!(report.images_indexed == 1 && on.len() < off.len(), "{} against {}", on.len(), off.len());
+}
+
+/// `--no-palette` is the library's `palette(false)`, and the `optimize` line counts the images written in each
+/// form.
+#[test]
+fn the_no_palette_flag_is_the_library_option() {
+    let dir = std::env::temp_dir().join(format!("gpress-palette-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (i, o) = (dir.join("in.pdf"), dir.join("out.pdf"));
+    std::fs::write(&i, chart_pdf()).unwrap();
+    for (flags, opt) in [(&[][..], quick()), (&["--no-palette"][..], quick().palette(false))] {
+        let r = std::process::Command::new(env!("CARGO_BIN_EXE_gpress"))
+            .arg("optimize")
+            .arg(&i)
+            .arg(&o)
+            .args(["--effort", "0", "--threads", "1"])
+            .args(flags)
+            .output()
+            .unwrap();
+        let (data, report) = smaller(&chart_pdf(), &opt);
+        let line = String::from_utf8_lossy(&r.stdout);
+        let counts = format!(" bilevel_to_jbig2=0 images_indexed={}", report.images_indexed);
+        assert!(r.status.success() && line.trim_end().ends_with(&counts), "{flags:?}: {line}");
+        assert!(std::fs::read(&o).unwrap() == data, "{flags:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `chart_pdf()` and main's output for it: (length, FNV-1a).

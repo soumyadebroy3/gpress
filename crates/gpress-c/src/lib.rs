@@ -42,14 +42,15 @@ pub struct GpressOptions {
     /// 1 = write CCITT fax images, and 1-bit images stored without an image codec, as JBIG2 when that is
     /// clearly smaller.
     pub jbig2: u8,
-    /// 1 = write an 8-bit image of few colours as an Indexed image when that is smaller.
-    pub palette: u8,
     /// 1 = rewrite files the empty password opens, keeping their encryption.
     pub rewrite_encrypted: u8,
     /// 1 = archive: store the streams of such files decrypted (encrypted again on expand).
     pub decrypt: u8,
     /// 1 = use the optional existing library (Lepton) when the build has it.
     pub use_existing_libraries: u8,
+    /// 1 = write an 8-bit image of few colours as an Indexed image when that is smaller. (The last byte, which
+    /// was padding: no other field moved when it came.)
+    pub palette: u8,
 }
 
 /// A buffer gpress allocated. Free it with `gpress_free`; never with `free()`.
@@ -188,10 +189,10 @@ pub unsafe extern "C" fn gpress_options_default(out: *mut GpressOptions) {
         flate_over_jpeg: d.flate_over_jpeg as u8,
         jpeg_tables: d.jpeg_tables as u8,
         jbig2: d.jbig2 as u8,
-        palette: d.palette as u8,
         rewrite_encrypted: d.rewrite_encrypted as u8,
         decrypt: d.decrypt as u8,
         use_existing_libraries: d.use_existing_libraries as u8,
+        palette: d.palette as u8,
     };
     // SAFETY: `out` is non-null and the caller owns the struct it points to.
     unsafe { ptr::write(out, o) };
@@ -336,7 +337,10 @@ mod tests {
         let mut o: GpressOptions = unsafe { std::mem::zeroed() };
         unsafe {
             gpress_options_default(&mut o);
-            assert_eq!((o.effort, o.jbig2, o.decrypt, o.max_len, o.max_decoded), (100, 1, 1, 1 << 30, 256 << 20));
+            assert_eq!(
+                (o.effort, o.jbig2, o.palette, o.decrypt, o.max_len, o.max_decoded),
+                (100, 1, 1, 1, 1 << 30, 256 << 20)
+            );
             // Without the archive: compress and expand give GPRESS_ERR_NEEDS_FEATURE, a message that names the
             // feature and no output; optimize works.
             if !cfg!(feature = "archive") {
