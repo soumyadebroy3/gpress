@@ -336,11 +336,10 @@ impl<const N: usize> StateMap<N> {
 
 /// Mixer lanes: inputs and weights come in blocks of 16; the lanes past the inputs stay 0.
 pub const LANES: usize = 16;
-/// The mixer's learning rate and weight shift (fixed by the format). The error times the rate fits in 16
-/// bits, so the weight update is a 16 x 16-bit product per lane.
-const MIXER_RATE: i32 = 6;
-const MIXER_SHIFT: i32 = 12;
-const _: () = assert!(4095 * MIXER_RATE <= i16::MAX as i32);
+/// The mixer's highest learning rate (rule `mixer_rate`): the error times the rate fits in 16 bits, so the
+/// weight update is a 16 x 16-bit product per lane.
+const MIXER_RATE_MAX: i32 = 8;
+const _: () = assert!(4095 * MIXER_RATE_MAX <= i16::MAX as i32);
 
 /// One weight set: a cache line.
 #[derive(Clone, Copy)]
@@ -354,14 +353,29 @@ pub struct Mixer<const N: usize> {
     pub x: [i16; LANES],
     row: usize,
     pr: i32,
+    /// The learning rate (at most `MIXER_RATE_MAX`), the weight shift and half of what it divides by.
+    rate: i32,
+    shift: i32,
+    half: i32,
 }
 
 impl<const N: usize> Mixer<N> {
-    pub fn new(selectors: usize) -> Mixer<N> {
+    /// `start`: the weight every input starts with, in 1/65536. `rate` and `shift`: how strongly a bit changes
+    /// the weights (rules `mixer_start`, `mixer_rate`, `mixer_shift`).
+    pub fn new(selectors: usize, start: i32, rate: i32, shift: i32) -> Mixer<N> {
         const { assert!(N <= LANES) };
         let mut r = [0i32; LANES];
-        r[..N].fill((1 << 16) / 4);
-        Mixer { w: vec![Row(r); selectors], x: [0; LANES], row: 0, pr: 2048 }
+        r[..N].fill(start);
+        let shift = shift.clamp(1, 31);
+        Mixer {
+            w: vec![Row(r); selectors],
+            x: [0; LANES],
+            row: 0,
+            pr: 2048,
+            rate: rate.min(MIXER_RATE_MAX),
+            shift,
+            half: 1 << (shift - 1),
+        }
     }
     #[inline]
     pub fn mix(&mut self, sel: usize) -> i32 {
@@ -378,65 +392,85 @@ impl<const N: usize> Mixer<N> {
     }
     #[inline]
     pub fn update(&mut self, bit: u32) {
-        // At most 4095 x MIXER_RATE either way, so exact in 16 bits; an input times the error fits in 32 bits.
-        let err = ((((bit as i32) << 12) - self.pr) * MIXER_RATE) as i16 as i32;
+        // At most 4095 x MIXER_RATE_MAX either way, so exact in 16 bits; an input times the error fits in 32
+        // bits.
+        let err = ((((bit as i32) << 12) - self.pr) * self.rate) as i16 as i32;
+        let (shift, half) = (self.shift, self.half);
         let w = &mut self.w[self.row].0;
         // All 16 lanes (the unused ones add 0). The weights wrap as 32-bit numbers, as they always did in the
         // release build (a debug build no longer stops there).
         for j in 0..LANES {
-            w[j] = w[j].wrapping_add((self.x[j] as i32 * err + (1 << (MIXER_SHIFT - 1))) >> MIXER_SHIFT);
+            w[j] = w[j].wrapping_add((self.x[j] as i32 * err + half) >> shift);
         }
     }
 }
 
-/// Knots of each map: at stretched values -2048, -1920, ..., 2048 (128 apart, half a unit of ln-odds).
+/// The most knots a map has: at stretched values -2048, -1920, ..., 2048 (128 apart, half a unit of ln-odds).
 const APM_KNOTS: usize = 33;
 
 /// An adaptive probability map (secondary estimation): for each of `N` contexts (a power of two; a context
 /// number is taken modulo `N`), a piecewise-linear map from a stretched probability to a 12-bit probability.
-/// Each map is 33 knots of 16-bit probability (66 bytes), each starting as squash of its place; `p` interpolates
-/// between the two knots around its input, and `update` moves both the same fraction of the way toward the coded
-/// bit, so that each knot learns the probability of the inputs within one spacing of it.
+/// Each map is 33 knots of 16-bit probability by default (66 bytes; with fewer knots the last places stay
+/// unused), each starting as squash of its place; `p` interpolates between the two knots around its input, and
+/// `update` moves both the same fraction of the way toward the coded bit, so that each knot learns the
+/// probability of the inputs within one spacing of it.
 pub struct Apm<const N: usize> {
     t: Box<[[u16; APM_KNOTS]; N]>,
+    /// Two knots are 2^span apart (7 by default); `mask` is 2^span - 1.
+    span: u32,
+    mask: i32,
     /// A step moves a knot by (end - knot) >> shift: 1/2^shift of the way to the bit's end of the scale (16 or
-    /// 65520: 1/4096 or 4095/4096), rounded up from a quarter (`ends` are offset to do it, mirroring each other),
-    /// so a knot gets to within a quarter step of the end (rounding from a half stops it up to half a step short:
-    /// measured, slightly larger archives).
+    /// 65520: 1/4096 or 4095/4096), rounded up from a quarter by default (`ends` are offset to do it, mirroring
+    /// each other), so a knot gets to within a quarter step of the end (rounding from a half stops it up to half
+    /// a step short: measured, slightly larger archives).
     shift: u32,
     ends: [i32; 2],
-    /// Where the last `p` looked: the knot below its input, counted over all the contexts' knots.
-    at: usize,
+    /// Where the last `p` looked: the context, and the knot below its input.
+    at: (usize, usize),
 }
 
 impl<const N: usize> Apm<N> {
     /// `rate`: each step is 1/2^(rate - 1) of the way, as two knots learn from every bit (with the model's rate
     /// of 7, steps of 1/64 gave the smallest archives over the benchmark sample: 1/128 gave larger ones at both
     /// efforts measured, 1/32 smaller ones at the lower effort but larger ones at the higher).
-    pub fn new(rate: i32) -> Apm<N> {
-        const { assert!(N.is_power_of_two()) };
-        let knots = std::array::from_fn(|j| (squash(j as i32 * 128 - 2048) * 16) as u16);
+    /// `bits`: each map has 2^bits + 1 knots (3 to 5; rule `apm_bits`). `round`: a knot moves from this many
+    /// quarters of a step, 1 to 4 (rule `apm_round`; within them a step never passes the bit's end).
+    pub fn new(rate: i32, bits: u32, round: i32) -> Apm<N> {
+        const { assert!(N.is_power_of_two() && (APM_KNOTS - 1).is_power_of_two()) };
+        let span = 12 - bits.clamp(3, 5);
+        let knots = std::array::from_fn(|j| (squash(((j as i32) << span).min(4096) - 2048) * 16) as u16);
         let shift = (rate - 1).clamp(2, 15) as u32;
         let quarter = 1 << (shift - 2);
-        Apm { t: boxed(knots), shift, ends: [16 + quarter - 1, 65520 + 3 * quarter], at: 0 }
+        let round = round.clamp(1, 4);
+        Apm {
+            t: boxed(knots),
+            span,
+            mask: (1 << span) - 1,
+            shift,
+            ends: [16 + round * quarter - 1, 65520 + (4 - round) * quarter],
+            at: (0, 0),
+        }
     }
     /// The knots stay within 16..=65520, so the result is within 1..=4095.
     #[inline]
     pub fn p(&mut self, st: i32, cx: usize) -> i32 {
         let x = st.clamp(-2047, 2047) + 2048;
-        let (at, w) = ((cx & (N - 1)) * APM_KNOTS + (x >> 7) as usize, x & 127);
-        self.at = at;
-        let k = self.t.as_flattened();
-        let p16 = (k[at] as i32 * (128 - w) + k[at + 1] as i32 * w) >> 7;
+        // The knot below the input: at most the last but one (x is below 4096 and a span at least 2^7).
+        let (row, j, w) = (cx & (N - 1), (x >> self.span) as usize & (APM_KNOTS - 2), x & self.mask);
+        self.at = (row, j);
+        let (k0, k1) = (self.t[row][j] as i32, self.t[row][j + 1] as i32);
+        // The two knots weighed by 2^span - w and w: the lower one, plus w parts of the way to the upper.
+        let p16 = k0 + (((k1 - k0) * w) >> self.span);
         (p16 + 8) >> 4
     }
     /// A step never passes the bit's end, so the knots stay within 16..=65520.
     #[inline]
     pub fn update(&mut self, bit: u32) {
         let end = self.ends[bit as usize & 1];
-        let k = &mut self.t.as_flattened_mut()[self.at..self.at + 2];
-        k[0] = (k[0] as i32 + ((end - k[0] as i32) >> self.shift)) as u16;
-        k[1] = (k[1] as i32 + ((end - k[1] as i32) >> self.shift)) as u16;
+        // The same two knots as `p` (the masks only tell the compiler what `p` made sure of).
+        let (k, j) = (&mut self.t[self.at.0 & (N - 1)], self.at.1 & (APM_KNOTS - 2));
+        k[j] = (k[j] as i32 + ((end - k[j] as i32) >> self.shift)) as u16;
+        k[j + 1] = (k[j + 1] as i32 + ((end - k[j + 1] as i32) >> self.shift)) as u16;
     }
 }
 
@@ -553,7 +587,7 @@ mod tests {
 
     #[test]
     fn apm_starts_as_squash() {
-        let mut a = Apm::<4>::new(7);
+        let mut a = Apm::<4>::new(7, 5, 1);
         for st in -2047..=2047 {
             let p = a.p(st, st as usize);
             // Linear between knots half a unit of ln-odds apart: at most 13 away where the curve bends most.
@@ -566,7 +600,7 @@ mod tests {
 
     #[test]
     fn apm_moves_toward_the_bits() {
-        let mut a = Apm::<16>::new(7);
+        let mut a = Apm::<16>::new(7, 5, 1);
         let p0 = a.p(300, 5);
         for _ in 0..50 {
             a.p(300, 5);
@@ -588,7 +622,7 @@ mod tests {
 
     #[test]
     fn apm_stays_in_range() {
-        let mut a = Apm::<64>::new(7);
+        let mut a = Apm::<64>::new(7, 5, 1);
         let mut s = 99u64;
         let sts = [-2047, -2000, -1000, -1, 0, 1, 777, 2000, 2047];
         for round in 0..3u32 {

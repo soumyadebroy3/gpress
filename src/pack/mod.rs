@@ -10,11 +10,13 @@
 //! password opens, encrypted streams are stored decrypted (`sealed`).
 //!
 //! Layout: magic (4) | version (1) | original length (varint) | decoded bytes the parts claim in all (varint) |
-//! first 16 bytes of the SHA-256 of the original | coded data. Every part of the coded data starts with a tag
-//! byte (T_*); the model's settings, the kinds of parts and how each is coded are constants of the format
-//! version, so a pack restores the same anywhere. The two numbers in the header are what a restore costs: a
-//! decoder refuses a file declaring more than its caller allows before it decodes anything, and holds every
-//! part to them (see `UnpackOptions`).
+//! in version 10 only, the profile (see `rules`) | first 16 bytes of the SHA-256 of the original | coded data.
+//! Every part of the coded data starts with a tag byte (T_*); the kinds of parts and how each is coded are
+//! constants of the format version, and the model's settings are either constants of it or the shared rules
+//! (`rules`), whose values are the defaults in version 9 and stand in the header in version 10, so a pack
+//! restores the same anywhere. The two numbers in the header are what a restore costs: a decoder refuses a
+//! file declaring more than its caller allows before it decodes anything, and holds every part to them (see
+//! `UnpackOptions`).
 
 use crate::clock::{self, Deadline};
 use crate::cm::model::{Geom, Kind, Model};
@@ -34,7 +36,10 @@ pub const MAGIC: &[u8; 4] = b"\x89GPZ";
 /// earlier shipped, so earlier versions are refused. The fallback form is coded with this version's model, so a
 /// version-0 file from a build before version 9 is refused as damaged.
 pub const VERSION: u8 = 9;
-const HASH_LEN: usize = 16;
+/// Version 9 made with shared rules that are not all at their defaults (`ArchiveRules`): the header carries
+/// the changed values, the profile, between the decoded total and the hash, and the rest is the same. Written
+/// only then, so that an archive made with the defaults is still one every build since version 9 reads.
+pub const VERSION_PROFILE: u8 = 10;
 
 /// A typical PDF fragment both sides feed to the model first, so small files don't pay for a cold start.
 const PRIME_SYNTAX: &[u8] = include_bytes!("prime.txt");
@@ -47,12 +52,13 @@ impl Coder for Null {
     }
 }
 
-fn primed(bits: u32) -> Model {
-    let mut m = Model::new(bits);
-    // The priming text runs twice to train the full model, so the long-repeat shortcut stays off here.
+fn primed(bits: u32, r: &ArchiveRules) -> Model {
+    let mut m = Model::new(bits, r);
+    // The priming text runs twice (rule `prime_rounds`) to train the full model, so the long-repeat shortcut
+    // stays off here.
     m.bypass_on = false;
     let mut n = Null;
-    for _ in 0..2 {
+    for _ in 0..r.prime_rounds() {
         m.set_kind(Kind::Syntax, Geom::default(), 0);
         for &b in PRIME_SYNTAX {
             m.code_byte(&mut n, Some(b));
@@ -69,16 +75,22 @@ fn primed(bits: u32) -> Model {
 
 /// Data that is already compressed (high byte entropy) may be coded plainly: much faster, but about 1%
 /// larger than the full model even on such data (measured), so only when speed is asked for (see
-/// `PackOptions`). Only the encoder decides; the decision is stored in the file.
-fn looks_compressed(x: &[u8], allowed: bool) -> bool {
-    if !allowed || x.len() < 1024 {
+/// `PackOptions`). Only the encoder decides; the decision is stored in the file. By default from 1024 bytes
+/// and 7.9 bits per byte (rules `plain_min_bytes`, `plain_entropy`).
+fn looks_compressed(x: &[u8], allowed: bool, r: &ArchiveRules) -> bool {
+    if !allowed || (x.len() as u64) < r.plain_min_bytes() {
         return false;
     }
     let mut h = [0u64; 256];
     for &b in x {
         h[b as usize] += 1;
     }
-    entropy(&h) >= 7.9
+    entropy(&h) >= plain_entropy(r)
+}
+
+/// The rule `plain_entropy` in bits per byte (790 hundredths give exactly 7.9).
+fn plain_entropy(r: &ArchiveRules) -> f64 {
+    r.plain_entropy() as f64 / 100.0
 }
 
 /// Bits per symbol of a histogram.
@@ -93,45 +105,58 @@ fn entropy(h: &[u64; 256]) -> f64 {
         .sum()
 }
 
-/// Plain coding below `PLAIN_BELOW` (see `PackOptions`): for data that looks compressed and whose differences
-/// between bytes 1 to 4 apart (neighbouring samples of 1 to 4 bytes) are evenly spread too, as in compressed
-/// data. Image samples, a gradient say, can have evenly spread bytes, but their differences show the structure
-/// the model finds (coded plainly, a 512 x 512 gradient took 400 times the room). Large data is judged on 16
-/// windows of 64 KiB spread over it.
-fn plainly(x: &[u8], allowed: bool) -> bool {
-    if !looks_compressed(x, allowed) {
+/// Plain coding below the rule `plain_below` (see `PackOptions`): for data that looks compressed and whose
+/// differences between bytes 1 to 4 apart (neighbouring samples of 1 to 4 bytes) are evenly spread too, as in
+/// compressed data. Image samples, a gradient say, can have evenly spread bytes, but their differences show
+/// the structure the model finds (coded plainly, a 512 x 512 gradient took 400 times the room). Large data is
+/// judged on 16 windows of 64 KiB spread over it. (The 4, the 16 and the 64 KiB are the defaults of the rules
+/// `plain_distances`, `plain_windows` and `plain_window_bytes`.)
+fn plainly(x: &[u8], allowed: bool, r: &ArchiveRules) -> bool {
+    if !looks_compressed(x, allowed, r) {
         return false;
     }
-    const WINDOW: usize = 1 << 16;
-    const WINDOWS: usize = 16;
-    let mut h = [[0u64; 256]; 4];
+    // Both at least 1 and 2 by their ranges; the window is at most the data when windows are taken.
+    let window = usize::try_from(r.plain_window_bytes()).unwrap_or(usize::MAX).max(1);
+    let windows = (r.plain_windows() as usize).max(2);
+    let far = (r.plain_distances() as usize).min(8);
+    let mut h = [[0u64; 256]; 8];
     let mut add = |w: &[u8]| {
         for (i, &b) in w.iter().enumerate() {
-            for d in 1..=4.min(i) {
+            for d in 1..=far.min(i) {
                 h[d - 1][b.wrapping_sub(w[i - d]) as usize] += 1;
             }
         }
     };
-    if x.len() <= WINDOW * WINDOWS {
+    if x.len() <= window.saturating_mul(windows) {
         add(x);
     } else {
-        for k in 0..WINDOWS {
-            let a = (k as u64 * (x.len() - WINDOW) as u64 / (WINDOWS - 1) as u64) as usize;
-            add(&x[a..a + WINDOW]);
+        for k in 0..windows {
+            let a = (k as u64 * (x.len() - window) as u64 / (windows - 1) as u64) as usize;
+            add(&x[a..a + window]);
         }
     }
-    h.iter().all(|h| entropy(h) >= 7.9)
+    let least = plain_entropy(r);
+    h[..far].iter().all(|h| entropy(h) >= least)
 }
 
 /// The header: magic, version, the original length, the decoded bytes the parts claim in all (0 for the
-/// stored and fallback forms, which have no such parts), the hash.
+/// stored and fallback forms, which have no such parts), the hash. They are what every version but 10 has,
+/// with the hash 16 bytes long: see `header_with`.
 fn header(version: u8, input: &[u8], claimed: u64) -> Vec<u8> {
-    let mut out = Vec::with_capacity(40);
+    header_with(version, input, claimed, &[], 16)
+}
+
+/// `header` with a profile (version 10 only: the shared rules that are not at their defaults, see
+/// `ArchiveRules::profile`) before the hash, which is the first `hash_len` bytes of the SHA-256 (the rule
+/// `hash_bytes`; at most 32).
+fn header_with(version: u8, input: &[u8], claimed: u64, profile: &[u8], hash_len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(40 + profile.len());
     out.extend_from_slice(MAGIC);
     out.push(version);
     push_varint(&mut out, input.len() as u64);
     push_varint(&mut out, claimed);
-    out.extend_from_slice(&sha256(input)[..HASH_LEN]);
+    out.extend_from_slice(profile);
+    out.extend_from_slice(&sha256(input)[..hash_len.min(32)]);
     out
 }
 
@@ -167,6 +192,8 @@ fn read_varint(a: &[u8], mut i: usize) -> Option<(u64, usize)> {
 }
 
 mod pipe;
+pub mod rules;
+pub use rules::ArchiveRules;
 #[cfg(feature = "encryption")]
 mod sealed;
 // Without the `encryption` feature no stream is stored decrypted (see `crate::off`).
@@ -331,7 +358,9 @@ fn int(d: &Dict, k: &[u8]) -> Option<i64> {
     d.get(k).and_then(|x| x.as_int())
 }
 
-fn info(dict: Option<&Dict>, decoded_sample: Option<&[u8]>) -> Info {
+/// `looks`: for a stream with no type, whether its decoded data looks like page content (the encoder found
+/// out by `looks_like_content` and stored it).
+fn info(dict: Option<&Dict>, looks: bool) -> Info {
     let mut inf = Info { kind: Kind::Raw, geom: Geom::default(), img: None, png: None, tiff: None };
     let d = match dict {
         Some(d) => d,
@@ -417,21 +446,20 @@ fn info(dict: Option<&Dict>, decoded_sample: Option<&[u8]>) -> Info {
     } else if typ.is_some() || subtype.is_some() {
         inf.kind = Kind::Data;
     } else {
-        inf.kind = match decoded_sample {
-            Some(s) if looks_like_content(s) => Kind::Content,
-            _ => Kind::Data,
-        };
+        inf.kind = if looks { Kind::Content } else { Kind::Data };
     }
     inf
 }
 
-fn looks_like_content(s: &[u8]) -> bool {
-    let s = &s[..s.len().min(4096)];
+/// Encoder only: of the first 4096 bytes at least 90% are printable (rules `content_sample`,
+/// `content_printable`).
+fn looks_like_content(s: &[u8], r: &ArchiveRules) -> bool {
+    let s = &s[..s.len().min(usize::try_from(r.content_sample()).unwrap_or(usize::MAX))];
     if s.is_empty() {
         return false;
     }
     let printable = s.iter().filter(|&&c| (32..127).contains(&c) || c == b'\n' || c == b'\r' || c == b'\t').count();
-    printable * 10 >= s.len() * 9
+    printable as u64 * 100 >= s.len() as u64 * r.content_printable()
 }
 
 // ---------------------------------------------------------------- PNG predictor rows
@@ -494,6 +522,8 @@ fn refilter(types: &[u8], px: &[u8], row: usize, bpp: usize) -> Vec<u8> {
 
 struct Io<'m, C: Coder> {
     m: &'m mut Model,
+    /// The rules of this pass: the caller's when encoding; when decoding, the archive's shared ones.
+    rules: &'m ArchiveRules,
     c: C,
     /// Set when decoding meets something only a damaged file can contain; decoding stops there.
     damaged: bool,
@@ -508,11 +538,10 @@ struct Io<'m, C: Coder> {
     timed_out: bool,
 }
 
-/// Bytes coded between two looks at the deadline (a few milliseconds of model work).
-const DEADLINE_STEP: usize = 1 << 16;
-/// Bytes coded between two looks for a damaged file (`Coder::exhausted`).
+/// Bytes coded between two looks for a damaged file (`Coder::exhausted`). The deadline is looked at when at
+/// least the rule `deadline_step` of them were coded since the last look (64 KiB by default, a few milliseconds
+/// of model work), so at the next of these steps.
 const CHECK_STEP: usize = 1 << 12;
-const _: () = assert!(DEADLINE_STEP.is_multiple_of(CHECK_STEP));
 
 /// Largest single part a file may declare (decoded stream, Lepton data): 2 GiB.
 const MAX_PART: usize = 1 << 31;
@@ -570,15 +599,19 @@ impl<'m, C: Coder> Io<'m, C> {
     }
     /// Codes `n` bytes (those of `data`, which holds them, when encoding) and hands each to `keep`.
     fn bytes_to(&mut self, data: Option<&[u8]>, n: usize, mut keep: impl FnMut(u8)) {
-        let mut i = 0;
+        let step = usize::try_from(self.rules.deadline_step()).unwrap_or(usize::MAX);
+        let (mut i, mut look) = (0, 0);
         while i < n {
-            // Before every CHECK_STEP bytes a look for a damaged file, and at the deadline every DEADLINE_STEP.
+            // Before every CHECK_STEP bytes a look for a damaged file, and at the deadline every `step`.
             if self.c.exhausted() {
                 self.damaged = true;
                 return;
             }
-            if i % DEADLINE_STEP == 0 && self.out_of_time() {
-                return;
+            if i >= look {
+                if self.out_of_time() {
+                    return;
+                }
+                look = i.saturating_add(step);
             }
             let end = n.min(i + CHECK_STEP);
             self.m.code_bytes(&mut self.c, data.map(|d| &d[i..end]), end - i, &mut keep);
@@ -625,7 +658,7 @@ impl<'m, C: Coder> Io<'m, C> {
 /// that has it, see `existing`).
 #[derive(Clone, Debug)]
 pub struct PackOptions {
-    /// How hard to try, 0 to 100. Below `PLAIN_BELOW`, data that looks compressed already (no structure in
+    /// How hard to try, 0 to 100. Below 50 (the rule `plain_below`), data that looks compressed already (no structure in
     /// its bytes or their differences, see `looks_compressed`) is coded plainly: on 3 MB of random bytes 17
     /// times faster (0.8 s instead of 14 s) and no larger; up to about 1% larger on compressed data the model
     /// still finds a little in. A Type 1 font program is never coded plainly: encrypted it looks random, but
@@ -656,6 +689,9 @@ pub struct PackOptions {
     /// as it is (a valid archive, restored exactly) and `PackStats::timed_out` says so. A pack that finishes
     /// gives the same bytes with or without a deadline.
     pub deadline: Deadline,
+    /// The tuning values (see `rules`). With a shared one changed the archive is version 10 and restores only
+    /// with a build that reads it.
+    pub rules: ArchiveRules,
 }
 
 impl Default for PackOptions {
@@ -668,6 +704,7 @@ impl Default for PackOptions {
             max_decoded: DEFAULT_MAX_DECODED,
             existing: HAVE_EXISTING,
             deadline: Deadline::NONE,
+            rules: ArchiveRules::default(),
         }
     }
 }
@@ -690,16 +727,22 @@ pub struct UnpackOptions {
     /// given up with `PackStats::timed_out` set, never a wrong file. A restore that finishes gives the same
     /// bytes with or without a deadline.
     pub deadline: Deadline,
+    /// Of these the decoder reads `deadline_step` only. The shared rules come from the archive (the defaults
+    /// in version 9, the header's profile in version 10), never from here, and the rest decide nothing in a
+    /// restore.
+    pub rules: ArchiveRules,
 }
 
 impl Default for UnpackOptions {
     fn default() -> Self {
-        UnpackOptions { max_len: MAX_FILE, max_decoded: DEFAULT_MAX_DECODED, deadline: Deadline::NONE }
+        UnpackOptions {
+            max_len: MAX_FILE,
+            max_decoded: DEFAULT_MAX_DECODED,
+            deadline: Deadline::NONE,
+            rules: ArchiveRules::default(),
+        }
     }
 }
-
-/// Below this effort, compressed-looking data is coded plainly.
-const PLAIN_BELOW: u8 = 50;
 
 const T_SYNTAX: u8 = 0;
 const T_RAW: u8 = 1;
@@ -723,10 +766,13 @@ fn left_out(tag: u8) -> Option<Feature> {
     }
 }
 
-fn table_bits(n: usize) -> u32 {
-    // 16-byte buckets: up to 2^20 per context (16 MiB each) for large files.
-    let mut b = 14;
-    while b < 20 && (1usize << (b + 3)) < n {
+fn table_bits(n: usize, r: &ArchiveRules) -> u32 {
+    // 16-byte buckets: by default from 2^14 per context up to 2^20 (16 MiB each) for large files, one bucket
+    // for every 8 bytes of the file between them (rules `table_bits_min`, `table_bits_max`, `table_shift`).
+    // Never above 20, whatever the rules say.
+    let (most, shift) = (r.table_bits_max().min(20) as u32, r.table_shift().min(16) as u32);
+    let mut b = r.table_bits_min().min(20) as u32;
+    while b < most && (1u64 << (b + shift)) < n as u64 {
         b += 1;
     }
     b
@@ -808,7 +854,7 @@ fn plan(d: &[u8], opt: &PackOptions) -> Vec<Plan> {
         Seg::Stream(a, b) if opt.deadline.passed() => Plan::Raw(a, b),
         Seg::Stream(a, b) => match stream_plan(&d[a..b], opt) {
             Some(found) => found.plan(Source::File(a, b)),
-            None => fax(d, a, b, &objects).unwrap_or(Plan::Raw(a, b)),
+            None => fax(d, a, b, &objects, &opt.rules).unwrap_or(Plan::Raw(a, b)),
         },
     });
     if std::env::var_os("PDFE_DEBUG").is_some() {
@@ -840,20 +886,22 @@ impl Found {
 /// stream gets the same choices as a plain one. The decoded data is dropped here: the stream is inflated
 /// again when it is coded.
 fn stream_plan(raw: &[u8], opt: &PackOptions) -> Option<Found> {
-    if let Some((params, data, tail)) = rebuild_params(raw, opt.max_stream) {
-        let lep = if opt.existing { nested_lepton(&data, raw.len()) } else { None };
+    let r = &opt.rules;
+    if let Some((params, data, tail)) = rebuild_params(raw, opt.max_stream, r) {
+        let lep = if opt.existing { nested_lepton(&data, raw.len(), r) } else { None };
         // What the coding decides from all of the data (see `Plan::Rebuilt`). `plainly` is left out for a JPEG
         // inside, which goes to Lepton, and a stream larger than the whole budget, which is stored as it is
         // (`within_budget`). The planner doesn't read the dictionary, so PNG rows, TIFF samples and Type 1 fonts
-        // still work it out though nothing reads it (a pass over the data, below `PLAIN_BELOW` only).
+        // still work it out though nothing reads it (a pass over the data, below `plain_below` only).
         let wanted = lep.is_none() && data.len() as u64 <= opt.max_decoded;
-        let (looks, plain) = (looks_like_content(&data), wanted && plainly(&data, opt.effort < PLAIN_BELOW));
+        let allowed = (opt.effort as u64) < r.plain_below();
+        let (looks, plain) = (looks_like_content(&data, r), wanted && plainly(&data, allowed, r));
         return Some(Found::Rebuilt { params, dlen: data.len(), tail, lep, looks, plain });
     }
     if !opt.existing {
         return None;
     }
-    lepton_bytes(raw).map(Found::Lepton)
+    lepton_bytes(raw, r).map(Found::Lepton)
 }
 
 /// The plans of a file with the encoder's choices in `opt`: `plan`, with the encrypted streams of a file the
@@ -978,33 +1026,39 @@ pub fn expand(d: &[u8]) -> (Vec<u8>, usize) {
 }
 
 #[cfg(feature = "existing")]
-fn lepton_features() -> lepton_jpeg::EnabledFeatures {
+fn lepton_features(partitions: u64) -> lepton_jpeg::EnabledFeatures {
     let mut f = lepton_jpeg::EnabledFeatures::compat_lepton_vector_write();
     f.max_processor_threads = 1;
+    // Only the encoder reads this (the rule `lepton_partitions`); a decoder takes the count from the data.
+    f.max_partitions = partitions as u32;
     f
 }
 
 /// Decoded Flate data that is a JPEG: Lepton, when its output is at least 10% smaller than the Flate bytes
-/// (a JPEG that Flate shrinks a lot is better left to our model).
-fn nested_lepton(data: &[u8], flate_len: usize) -> Option<Vec<u8>> {
-    lepton_bytes(data).filter(|l| l.len() * 10 < flate_len * 9)
+/// (the rule `lepton_min_saving`; a JPEG that Flate shrinks a lot is better left to our model).
+fn nested_lepton(data: &[u8], flate_len: usize, r: &ArchiveRules) -> Option<Vec<u8>> {
+    let keep = 100 - r.lepton_min_saving().min(100);
+    lepton_bytes(data, r).filter(|l| (l.len() as u64) * 100 < flate_len as u64 * keep)
 }
 
-/// A JPEG by its bytes (start of image, then a marker) recompressed with Lepton; kept only if smaller and
-/// restored exactly.
+/// A JPEG by its bytes (start of image, then a marker) of at least 1024 bytes (the rule `lepton_min_bytes`)
+/// recompressed with Lepton; kept only if smaller (by the rule `lepton_min_gain`, 1 byte by default; never
+/// larger) and restored exactly.
 #[cfg(feature = "existing")]
-fn lepton_bytes(raw: &[u8]) -> Option<Vec<u8>> {
-    if raw.len() < 1024 || !raw.starts_with(&[0xFF, 0xD8, 0xFF]) {
+fn lepton_bytes(raw: &[u8], r: &ArchiveRules) -> Option<Vec<u8>> {
+    if (raw.len() as u64) < r.lepton_min_bytes() || !raw.starts_with(&[0xFF, 0xD8, 0xFF]) {
         return None;
     }
     let pool = lepton_jpeg::SingleThreadPool {};
     let mut out = std::io::Cursor::new(Vec::new());
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        lepton_jpeg::encode_lepton(&mut std::io::Cursor::new(raw), &mut out, &lepton_features(), &pool).ok()
+    let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let f = lepton_features(r.lepton_partitions());
+        lepton_jpeg::encode_lepton(&mut std::io::Cursor::new(raw), &mut out, &f, &pool).ok()
     }));
-    r.ok()??;
+    done.ok()??;
     let data = out.into_inner();
-    if data.len() >= raw.len() || unlepton(&data)? != raw {
+    let gain = (raw.len() as u64).saturating_sub(data.len() as u64);
+    if data.len() > raw.len() || gain < r.lepton_min_gain() || unlepton(&data)? != raw {
         return None;
     }
     Some(data)
@@ -1015,14 +1069,14 @@ fn unlepton(data: &[u8]) -> Option<Vec<u8>> {
     let pool = lepton_jpeg::SingleThreadPool {};
     let mut out = Vec::new();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        lepton_jpeg::decode_lepton(&mut std::io::Cursor::new(data), &mut out, &lepton_features(), &pool).ok()
+        lepton_jpeg::decode_lepton(&mut std::io::Cursor::new(data), &mut out, &lepton_features(8), &pool).ok()
     }));
     r.ok()??;
     Some(out)
 }
 
 #[cfg(not(feature = "existing"))]
-fn lepton_bytes(_raw: &[u8]) -> Option<Vec<u8>> {
+fn lepton_bytes(_raw: &[u8], _r: &ArchiveRules) -> Option<Vec<u8>> {
     None
 }
 
@@ -1271,12 +1325,13 @@ fn run<'d, C: Coder>(
     stats: &mut PackStats,
     budget: u64,
 ) -> (Restored<'d>, C) {
-    let mut model = primed(table_bits(total_len));
+    let mut model = primed(table_bits(total_len, &opt.rules), &opt.rules);
     let mut io = Io {
         m: &mut model,
+        rules: &opt.rules,
         c,
         damaged: false,
-        plain: opt.effort < PLAIN_BELOW,
+        plain: (opt.effort as u64) < opt.rules.plain_below(),
         budget,
         deadline: opt.deadline,
         timed_out: false,
@@ -1352,13 +1407,13 @@ fn run<'d, C: Coder>(
                 let n = io.length(src.map(|x| x.len() as u64), left);
                 // A Type 1 font stored without a filter: opened, never coded plainly (encrypted it looks random,
                 // opened it is text; see `PackOptions::effort`). Both sides find it from the restored bytes.
-                let font = if tag == T_RAW { type1::raw_font_dict(out.view()) } else { None };
+                let font = if tag == T_RAW { type1::raw_font_dict(out.view(), io.rules) } else { None };
                 let mut flat = false;
                 if tag == T_SYNTAX {
                     io.m.set_kind(Kind::Syntax, Geom::default(), out.len() as u64);
                     stats.syntax_bytes += n;
                 } else {
-                    flat = io.byte(src.map(|x| (font.is_none() && plainly(x, io.plain)) as u8)) == 1;
+                    flat = io.byte(src.map(|x| (font.is_none() && plainly(x, io.plain, io.rules)) as u8)) == 1;
                     io.m.set_kind(Kind::Raw, Geom::default(), out.len() as u64);
                     stats.streams += 1;
                     stats.raw_stream_bytes += n;
@@ -1497,7 +1552,7 @@ fn run<'d, C: Coder>(
                     Some(Plan::Fax { parsed, .. }) => Some(&**parsed),
                     _ => None,
                 };
-                let fc = fax_coder.get_or_insert_with(|| crate::fax::part::FaxCoder::new(total_len));
+                let fc = fax_coder.get_or_insert_with(|| crate::fax::part::FaxCoder::new(total_len, &opt.rules));
                 match crate::fax::part::code(&mut io.c, fc, src, out.len(), left) {
                     Some(bytes) => {
                         out.keep_all(&bytes);
@@ -1559,11 +1614,11 @@ fn run<'d, C: Coder>(
     (out, c)
 }
 
-/// Lepton's output: usually entropy-coded already, so coded plainly (repeats are still found); our model
-/// when it isn't (an odd JPEG). The encoder decides; the decision is stored. Returns where the data starts
-/// in the model's history, which keeps it.
+/// Lepton's output: usually entropy-coded already, so coded plainly (repeats are still found; at every effort,
+/// unless the rule `lepton_plain` says never); our model when it isn't (an odd JPEG). The encoder decides; the
+/// decision is stored. Returns where the data starts in the model's history, which keeps it.
 fn lepton_part<C: Coder>(io: &mut Io<C>, src: Option<&[u8]>, n: usize, stats: &mut PackStats) -> usize {
-    let flat = io.byte(src.map(|x| looks_compressed(x, true) as u8)) == 1;
+    let flat = io.byte(src.map(|x| looks_compressed(x, io.rules.lepton_plain() != 0, io.rules) as u8)) == 1;
     io.m.set_kind(Kind::Raw, Geom::default(), 0);
     io.m.set_flat(flat);
     let at = io.m.hist_len();
@@ -1612,7 +1667,7 @@ fn payload<C: Coder>(
     }
     let dict = dict_before(out, out.len().saturating_sub(1));
     let looks = io.byte(feed.map(|f| f.looks as u8));
-    let mut inf = info(dict.as_ref(), Some(if looks == 1 { b"q" as &[u8] } else { b"\x00" as &[u8] }));
+    let mut inf = info(dict.as_ref(), looks == 1);
     let mut decoded = Decoded::Bytes(Vec::new());
     let mut used_png = false;
     if let Some((row, bpp)) = inf.png {
@@ -1773,22 +1828,18 @@ fn object_index(d: &[u8]) -> std::collections::HashMap<(u32, u16), usize> {
     out
 }
 
-/// Smallest CCITT stream coded as an image (measured on the test files: below this, plain coding wins).
-#[cfg(feature = "fax")]
-const MIN_FAX: usize = 64;
-
 /// A stream stored as it is in the file whose only filter is CCITTFaxDecode, when our CCITT decoder
 /// understands most of it: the image and the encoder's choices, checked to give the very same bytes back.
 #[cfg(feature = "fax")]
-fn fax(d: &[u8], a: usize, b: usize, objects: &ObjIndex) -> Option<Plan> {
+fn fax(d: &[u8], a: usize, b: usize, objects: &ObjIndex, r: &ArchiveRules) -> Option<Plan> {
     let dict = dict_before(d, a.checked_sub(1)?)?;
-    let parsed = fax_parse(&d[a..b], dict, &file_resolver(d, objects))?;
+    let parsed = fax_parse(&d[a..b], dict, &file_resolver(d, objects), r)?;
     Some(Plan::Fax { parsed: Box::new(parsed), at: a, raw: Some((a, b)) })
 }
 
 /// Without the `fax` feature a fax stream is stored as it is.
 #[cfg(not(feature = "fax"))]
-fn fax(_d: &[u8], _a: usize, _b: usize, _objects: &ObjIndex) -> Option<Plan> {
+fn fax(_d: &[u8], _a: usize, _b: usize, _objects: &ObjIndex, _r: &ArchiveRules) -> Option<Plan> {
     None
 }
 
@@ -1814,15 +1865,18 @@ fn file_resolver<'a>(d: &'a [u8], objects: &'a ObjIndex) -> impl Fn(&Obj) -> Opt
 /// The CCITT data `raw` of a stream with dictionary `dict`, parsed for a fax part (`crate::fax::part`), or
 /// None when it can't be stored that way. Parameters given by reference (/DecodeParms 13 0 R, /K 7 0 R) go
 /// through `resolve`; whatever it finds is only a guess to try, since the result is checked by writing the
-/// stream again. Shared by streams stored as they are and by decrypted ones (`sealed`).
+/// stream again. Shared by streams stored as they are and by decrypted ones (`sealed`). A stream below 64
+/// bytes is not coded as an image (the rule `fax_min_bytes`; measured on the test files: below this, plain
+/// coding wins).
 #[cfg(feature = "fax")]
 pub(super) fn fax_parse(
     raw: &[u8],
     mut dict: Dict,
     resolve: &dyn Fn(&Obj) -> Option<Obj>,
+    r: &ArchiveRules,
 ) -> Option<crate::fax::ccitt::Parsed> {
     use crate::fax::{ccitt::Scheme, part, pdf::FaxParams};
-    if raw.len() < MIN_FAX {
+    if (raw.len() as u64) < r.fax_min_bytes() {
         return None;
     }
     if let Some(p) = dict.get(b"DecodeParms").cloned() {
@@ -1839,7 +1893,7 @@ pub(super) fn fax_parse(
         return None;
     }
     let fp = FaxParams::from(stages[0].parms.as_ref())?;
-    part::prepare(raw, Scheme::from_k(fp.k), fp.columns, fp.byte_align)
+    part::prepare(raw, Scheme::from_k(fp.k), fp.columns, fp.byte_align, r.fax_max_leftover())
 }
 
 /// Keeps the fax streams of a file within the work budget the restore checks (`crate::fax::part::Work`), in
@@ -1861,14 +1915,16 @@ fn fax_budget(mut plans: Vec<Plan>) -> Vec<Plan> {
     plans
 }
 
-/// For a Flate payload that zlib made: (parameters, decoded data, bytes after the zlib stream).
-fn rebuild_params(raw: &[u8], max_stream: usize) -> Option<(zlibexact::Params, Vec<u8>, Vec<u8>)> {
-    if !zlib_header(raw) {
+/// For a Flate payload that zlib made: (parameters, decoded data, bytes after the zlib stream). The rules
+/// `zlib_levels`, `zlib_mem_levels` and `zlib_filtered` say which of zlib's settings are tried (all by default).
+fn rebuild_params(raw: &[u8], max_stream: usize, r: &ArchiveRules) -> Option<(zlibexact::Params, Vec<u8>, Vec<u8>)> {
+    if !zlib_header(raw) || r.zlib_levels() == 0 || r.zlib_mem_levels() == 0 {
         return None;
     }
     let u = zlib::unwrap(raw, max_stream).ok()?;
     let used = raw.len() - u.trailing;
-    let p = zlibexact::find_params(&u.data, &raw[..used])?;
+    let (levels, mems) = (r.zlib_levels() as u16, r.zlib_mem_levels() as u16);
+    let p = zlibexact::find_params_among(&u.data, &raw[..used], levels, mems, r.zlib_filtered() != 0)?;
     Some((p, u.data, raw[used..].to_vec()))
 }
 
@@ -1880,11 +1936,12 @@ pub fn pack(input: &[u8]) -> (Vec<u8>, PackStats) {
 pub fn pack_with(input: &[u8], opt: &PackOptions) -> (Vec<u8>, PackStats) {
     let (out, stats) = pack_pass(input, opt);
     // Storing encrypted streams decrypted costs the file key and each stream's settings. The encrypted bytes
-    // can't be compressed, so a pack well below their size can only win; otherwise the pack without
-    // decryption is made too, and the smaller kept (both are restored and checked).
-    if stats.decrypted > 0 && out.len() as u64 * 50 > stats.decrypted_bytes as u64 * 49 {
+    // can't be compressed, so a pack well below their size can only win; otherwise (above 98% of it, the rule
+    // `decrypt_recheck`) the pack without decryption is made too, and the smaller kept (both are restored and
+    // checked; of two equally long, the one without decryption unless the rule `decrypt_tie` says the other).
+    if stats.decrypted > 0 && out.len() as u64 * 100 > stats.decrypted_bytes as u64 * opt.rules.decrypt_recheck() {
         let (plain, plain_stats) = pack_pass(input, &PackOptions { decrypt: false, ..opt.clone() });
-        if plain.len() <= out.len() {
+        if plain.len() < out.len() || (plain.len() == out.len() && opt.rules.decrypt_tie() == 0) {
             return (plain, plain_stats);
         }
     }
@@ -1900,6 +1957,12 @@ fn pack_pass(input: &[u8], opt: &PackOptions) -> (Vec<u8>, PackStats) {
     let (plans, claimed) = plans(input, opt);
     stats.claimed = claimed;
     let mut plans = Some(plans);
+    // Version 9 while every shared rule is at its default; else version 10, with the changed ones in the
+    // header. Either way a decoder has the rules `back` from the header alone.
+    let profile = opt.rules.profile();
+    let version = if profile.is_empty() { VERSION } else { VERSION_PROFILE };
+    let head = || header_with(version, input, claimed, &profile, opt.rules.hash_bytes() as usize);
+    let back = PackOptions { rules: opt.rules.shared(), ..PackOptions::default() };
     // Never hand over something we can't restore exactly. With a second thread the restore runs while the
     // encoder writes (the same `run`, on the same bytes, as `unpack`); with one, or when the system refuses
     // the thread, it follows.
@@ -1908,21 +1971,13 @@ fn pack_pass(input: &[u8], opt: &PackOptions) -> (Vec<u8>, PackStats) {
         std::thread::scope(|s| {
             let check = par::spawn(s, move || {
                 let mut st = PackStats::default();
-                let (back, _) = run(
-                    pipe::StreamDecoder::new(rx),
-                    None,
-                    None,
-                    input.len(),
-                    &PackOptions::default(),
-                    &mut st,
-                    claimed,
-                );
-                !st.damaged && back.view() == input
+                let (restored, _) = run(pipe::StreamDecoder::new(rx), None, None, input.len(), &back, &mut st, claimed);
+                !st.damaged && restored.view() == input
             })?;
             let (copy, enc) =
                 run(pipe::TeeEncoder::new(tx), Some(input), plans.take(), input.len(), opt, &mut stats, claimed);
             debug_assert!(stats.timed_out || copy.len() == input.len());
-            let mut out = header(VERSION, input, claimed);
+            let mut out = head();
             out.extend_from_slice(&enc.finish());
             Some((out, check.join().unwrap_or(false)))
         })
@@ -1932,7 +1987,7 @@ fn pack_pass(input: &[u8], opt: &PackOptions) -> (Vec<u8>, PackStats) {
         None => {
             let (copy, enc) = run(Encoder::new(), Some(input), plans.take(), input.len(), opt, &mut stats, claimed);
             debug_assert!(stats.timed_out || copy.len() == input.len());
-            let mut out = header(VERSION, input, claimed);
+            let mut out = head();
             out.extend_from_slice(&enc.finish());
             // The check accepts exactly what this pack declares, whatever the caller's budget was.
             let check_opt = UnpackOptions { max_decoded: claimed, ..UnpackOptions::default() };
@@ -1955,8 +2010,9 @@ fn pack_pass(input: &[u8], opt: &PackOptions) -> (Vec<u8>, PackStats) {
         stats.fallback = true;
         fallback(input)
     };
+    // Kept unless larger than the file stored as it is (or not smaller by the rule `min_saving`).
     let stored = stored(input);
-    if out.len() > stored.len() {
+    if out.len() as u64 + opt.rules.min_saving() > stored.len() as u64 {
         stats.stored = true;
         return (stored, stats);
     }
@@ -1975,7 +2031,7 @@ fn stored(input: &[u8]) -> Vec<u8> {
 pub enum UnpackError {
     /// The bytes don't start like a gpress archive.
     NotAnArchive,
-    /// An archive version this build doesn't read (`VERSION`, 0 and 2 are read).
+    /// An archive version this build doesn't read (`VERSION`, `VERSION_PROFILE`, 0 and 2 are read).
     UnknownVersion(u8),
     /// The header declares more than `UnpackOptions::max_len` bytes (nothing was decoded for it).
     TooLong { declared: u64, limit: u64 },
@@ -1998,7 +2054,10 @@ impl std::fmt::Display for UnpackError {
         match self {
             UnpackError::NotAnArchive => write!(f, "not a gpress archive"),
             UnpackError::UnknownVersion(v) => {
-                write!(f, "gpress archive version {v} is not one this build reads (it reads version {VERSION})")
+                write!(
+                    f,
+                    "gpress archive version {v} is not one this build reads (it reads versions {VERSION} and {VERSION_PROFILE})"
+                )
             }
             UnpackError::TooLong { declared, limit } => {
                 write!(f, "the archive restores to {declared} bytes, more than the limit of {limit}")
@@ -2036,7 +2095,7 @@ pub fn unpack_with(a: &[u8], opt: &UnpackOptions) -> Result<Vec<u8>, UnpackError
         return Err(NotAnArchive);
     }
     let ver = a[4];
-    if ver != VERSION && ver != 0 && ver != 2 {
+    if ver != VERSION && ver != VERSION_PROFILE && ver != 0 && ver != 2 {
         return Err(UnknownVersion(ver));
     }
     let (len, i) = read_varint(a, 5).ok_or(Damaged("bad length"))?;
@@ -2051,12 +2110,18 @@ pub fn unpack_with(a: &[u8], opt: &UnpackOptions) -> Result<Vec<u8>, UnpackError
         return Err(TooMuchDecoded { declared: claimed, limit: opt.max_decoded });
     }
     let len = usize::try_from(len).map_err(|_| Damaged("too large for this platform"))?;
-    let want = a.get(i..i + HASH_LEN).ok_or(Damaged("truncated header"))?.to_vec();
-    let body = &a[i + HASH_LEN..];
+    // The shared rules: the defaults, or in version 10 what the header's profile says. Never the caller's.
+    let (rules, i) = match ver {
+        VERSION_PROFILE => ArchiveRules::read_profile(a, i, opt.rules.local()).ok_or(Damaged("bad profile"))?,
+        _ => (opt.rules.local(), i),
+    };
+    let hash_len = rules.hash_bytes() as usize;
+    let want = a.get(i..i + hash_len).ok_or(Damaged("truncated header"))?.to_vec();
+    let body = &a[i + hash_len..];
     let out = match ver {
-        VERSION => {
+        VERSION | VERSION_PROFILE => {
             let mut stats = PackStats::default();
-            let dec_opt = PackOptions { deadline: opt.deadline, ..PackOptions::default() };
+            let dec_opt = PackOptions { deadline: opt.deadline, rules, ..PackOptions::default() };
             let (out, _) = run(Decoder::new(body), None, None, len, &dec_opt, &mut stats, claimed);
             let out = out.into_file();
             if stats.timed_out {
@@ -2076,7 +2141,7 @@ pub fn unpack_with(a: &[u8], opt: &UnpackOptions) -> Result<Vec<u8>, UnpackError
         0 => fallback_decode(body, len).ok_or(Damaged("the data ran out"))?,
         _ => body.to_vec(),
     };
-    if out.len() != len || sha256(&out)[..HASH_LEN] != want[..] {
+    if out.len() != len || sha256(&out)[..hash_len] != want[..] {
         return Err(Damaged("the restored bytes don't match the checksum"));
     }
     Ok(out)
@@ -2084,7 +2149,9 @@ pub fn unpack_with(a: &[u8], opt: &UnpackOptions) -> Result<Vec<u8>, UnpackError
 
 /// Version 0: the whole file as one raw part (always exact).
 fn fallback(input: &[u8]) -> Vec<u8> {
-    let mut model = Model::new(table_bits(input.len()));
+    // Versions 0 and 2 have no profile: this form is always coded with the default rules.
+    let r = ArchiveRules::default();
+    let mut model = Model::new(table_bits(input.len(), &r), &r);
     model.set_kind(Kind::Raw, Geom::default(), 0);
     let mut e = Encoder::new();
     for &b in input {
@@ -2096,7 +2163,8 @@ fn fallback(input: &[u8]) -> Vec<u8> {
 }
 
 fn fallback_decode(body: &[u8], len: usize) -> Option<Vec<u8>> {
-    let mut model = Model::new(table_bits(len));
+    let r = ArchiveRules::default();
+    let mut model = Model::new(table_bits(len, &r), &r);
     model.set_kind(Kind::Raw, Geom::default(), 0);
     let mut dcd = Decoder::new(body);
     let mut out = Vec::with_capacity(reserve(len));
@@ -2129,9 +2197,9 @@ mod tests {
         let text: Vec<u8> = (0..20_000u32)
             .flat_map(|i| format!("BT /F1 {} Tf ({}) Tj ET\n", i % 17, i.wrapping_mul(7919)).into_bytes())
             .collect();
-        assert!(plainly(&random, true));
-        assert!(!plainly(&random, false), "only when allowed");
-        assert!(!plainly(&text, true));
+        assert!(plainly(&random, true, &ArchiveRules::default()));
+        assert!(!plainly(&random, false, &ArchiveRules::default()), "only when allowed");
+        assert!(!plainly(&text, true, &ArchiveRules::default()));
         // Image samples whose byte values are evenly spread, but with neighbours that are alike: an RGB
         // gradient, a ramp, a noisy photo-like picture. Large data is judged on windows.
         let (w, h) = (512usize, 512usize);
@@ -2157,11 +2225,11 @@ mod tests {
         ]
         .concat();
         for (name, x) in [("gradient", &gradient), ("ramp", &ramp), ("photo", &photo)] {
-            assert!(looks_compressed(x, true), "{name}: its bytes alone look compressed");
-            assert!(!plainly(x, true), "{name}");
+            assert!(looks_compressed(x, true, &ArchiveRules::default()), "{name}: its bytes alone look compressed");
+            assert!(!plainly(x, true, &ArchiveRules::default()), "{name}");
         }
-        assert!(big.len() > 16 << 16 && !plainly(&big, true));
-        assert!(plainly(&[random.as_slice(); 12].concat(), true));
+        assert!(big.len() > 16 << 16 && !plainly(&big, true, &ArchiveRules::default()));
+        assert!(plainly(&[random.as_slice(); 12].concat(), true, &ArchiveRules::default()));
     }
 
     /// A small PDF with a content stream zlib wrote (rebuilt exactly) and an image.
@@ -2292,9 +2360,18 @@ mod tests {
     /// bytes are then in the model's history, where the decoder makes the zlib bytes again from (see
     /// `Decoded`). Returns the coder, whether every part read back, and the bytes coded by long repeats.
     fn skip_parts<C: Coder>(c: C, parts: &[(Kind, Geom, bool, &[u8])], encoding: bool) -> (C, bool, u64) {
-        let mut m = primed(16);
-        let mut io =
-            Io { m: &mut m, c, damaged: false, plain: false, budget: 0, deadline: Deadline::NONE, timed_out: false };
+        let rules = ArchiveRules::default();
+        let mut m = primed(16, &rules);
+        let mut io = Io {
+            m: &mut m,
+            c,
+            rules: &rules,
+            damaged: false,
+            plain: false,
+            budget: 0,
+            deadline: Deadline::NONE,
+            timed_out: false,
+        };
         let mut same = true;
         for &(kind, geom, flat, x) in parts {
             io.m.set_kind(kind, geom, 0);
@@ -2358,7 +2435,7 @@ mod tests {
             assert_eq!(unpack(&packed).unwrap(), d);
             // One row less and one row more than the stream holds (whole rows either way).
             for dlen in [data.len() - 5, data.len() + 5] {
-                let looks = looks_like_content(data);
+                let looks = looks_like_content(data, &ArchiveRules::default());
                 let plan = Plan::Rebuilt {
                     params,
                     src: Source::File(a, b),
@@ -2402,7 +2479,7 @@ mod tests {
         let (len, i) = read_varint(&packed, 5).unwrap();
         let (claimed, i) = read_varint(&packed, i).unwrap();
         let mut st = PackStats::default();
-        run(Decoder::new(&packed[i + HASH_LEN..]), None, None, len as usize, &PackOptions::default(), &mut st, claimed);
+        run(Decoder::new(&packed[i + 16..]), None, None, len as usize, &PackOptions::default(), &mut st, claimed);
         assert!(st.damaged && st.decoded_bytes == 0 && st.rebuilt == 0, "{st:?}");
     }
 

@@ -13,3 +13,8 @@ pub const DEFAULT_MAX_DECODED: u64 = 256 << 20;
 #[path = "../pack/sha256.rs"]
 mod sha256;
 pub use sha256::sha256;
+
+// The archive's rules are a field of the options in every build (they decide nothing without the archive).
+#[path = "../pack/rules.rs"]
+pub mod rules;
+pub use rules::ArchiveRules;

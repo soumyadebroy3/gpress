@@ -429,7 +429,7 @@ fn archive_reads_eols_that_end_on_a_byte_boundary() {
     // Read with the alignment the parameters give, an EOL that starts before a byte boundary is not found.
     let aligned = ccitt::parse(&data, Scheme::G31D, 613, true, ccitt::Limits::default()).unwrap();
     assert!(aligned.image.rows() < img.rows());
-    let p = gpress::fax::part::prepare(&data, Scheme::G31D, 613, true).unwrap();
+    let p = gpress::fax::part::prepare(&data, Scheme::G31D, 613, true, 25).unwrap();
     assert_eq!(p.image, img);
     let d = pdf("/Width 613 /Height 401 /BitsPerComponent 1 /ColorSpace /DeviceGray /Filter /CCITTFaxDecode /DecodeParms << /K 0 /Columns 613 /EncodedByteAlign true /EndOfLine true >>", &data);
     let (packed, stats) = pack(&d);
