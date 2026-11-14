@@ -118,7 +118,7 @@ fn every_rule_at_its_ends_restores_and_changes_the_archive() {
     // decide nothing; with it, the JPEG of the document is a stream of its own (not behind Flate) and small
     // enough for one partition, and as Lepton takes it, only the random stream is judged for plain coding, which
     // looks random at any distance (`plain_distances`). `each_packing_choice_can_change_the_archive` gives each
-    // of these but `deadline_step` and the two decryption rules an input where it does.
+    // of these but `deadline_step` and `decrypt_tie` an input where it does.
     #[rustfmt::skip]
     let mut want = vec![
         "deadline_step", "decrypt_recheck", "decrypt_tie", "fax_max_leftover", "font_text_bytes", "font_tries",
@@ -142,10 +142,52 @@ fn one_stream(dict: &str, data: &[u8]) -> Vec<u8> {
     d
 }
 
+/// `data` as the one stream (object 3) of a document encrypted with 128-bit RC4 (/R 3) and the empty user
+/// password, written twice: an incremental update writes object 3 again, so both copies are the same encrypted
+/// bytes.
+#[cfg(all(feature = "fax", feature = "encryption"))]
+fn encrypted_twice(data: &[u8]) -> Vec<u8> {
+    use gpress::pdf::crypt::{key_r4, seal, user_value_r4, Method};
+    let (o, id0, p) = ([0x11u8; 32], [0x42u8; 16], 0xFFFF_FFFCu32);
+    let key = key_r4(3, 16, &o, p, &id0, true);
+    let mut u = user_value_r4(3, &key, &id0);
+    u.resize(32, 0);
+    let sealed = seal(&key, Method::Rc4, 3, 0, &[0; 16], data).unwrap();
+    let stream = |d: &mut Vec<u8>| {
+        d.extend_from_slice(format!("3 0 obj\n<< /Length {} >>\nstream\n", sealed.len()).as_bytes());
+        d.extend_from_slice(&sealed);
+        d.extend_from_slice(b"\nendstream\nendobj\n");
+    };
+    let mut d = b"%PDF-1.4\n".to_vec();
+    let mut at = vec![d.len()];
+    d.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    at.push(d.len());
+    d.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n");
+    at.push(d.len());
+    stream(&mut d);
+    at.push(d.len());
+    let (o, u) = (common::hex(&o), common::hex(&u));
+    d.extend_from_slice(
+        format!("4 0 obj\n<< /Filter /Standard /V 2 /R 3 /Length 128 /P -4 /O <{o}> /U <{u}> >>\nendobj\n").as_bytes(),
+    );
+    let trailer = format!("/Root 1 0 R /Encrypt 4 0 R /ID [<{0}> <{0}>]", common::hex(&id0));
+    let x = d.len();
+    d.extend_from_slice(b"xref\n0 5\n0000000000 65535 f \n");
+    for a in &at {
+        d.extend_from_slice(format!("{a:010} 00000 n \n").as_bytes());
+    }
+    d.extend_from_slice(format!("trailer\n<< /Size 5 {trailer} >>\nstartxref\n{x}\n%%EOF\n").as_bytes());
+    let again = d.len();
+    stream(&mut d);
+    let y = d.len();
+    d.extend_from_slice(format!("xref\n3 1\n{again:010} 00000 n \n").as_bytes());
+    d.extend_from_slice(format!("trailer\n<< /Size 5 /Prev {x} {trailer} >>\nstartxref\n{y}\n%%EOF\n").as_bytes());
+    d
+}
+
 /// The rules of the packing side that the mixed document leaves unchanged, each on an input where one value
-/// changes the archive (and both archives restore). `deadline_step` never changes it; `decrypt_recheck` and
-/// `decrypt_tie` only decide whether a second pack, without decryption, is made and which of two equally long
-/// ones is kept, and no small input was found where that second pack is the one kept.
+/// changes the archive (and both archives restore). `deadline_step` never changes it; `decrypt_tie` decides
+/// only between two packs of exactly the same length, with decryption and without.
 #[cfg(all(feature = "fax", feature = "encryption"))]
 #[test]
 fn each_packing_choice_can_change_the_archive() {
@@ -184,6 +226,19 @@ fn each_packing_choice_can_change_the_archive() {
     // Random bytes, a ramp, random bytes: the ramp lies between the first and the last window.
     let data = [noise(100_000), (0..100_000u32).map(|i| i as u8).collect(), noise(100_000)].concat();
     cases.push(("plain_windows", 2, one_stream("", &data)));
+    // A random walk: its bytes look random, the differences between neighbours do not.
+    let mut b = 0u8;
+    let walk: Vec<u8> = noise(100_000)
+        .iter()
+        .map(|s| {
+            b = b.wrapping_add(s & 15);
+            b
+        })
+        .collect();
+    cases.push(("plain_distances", 0, one_stream("", &walk)));
+    // Random bytes written twice, encrypted: the pack with decryption is far below the encrypted bytes, and the
+    // one without, made only when asked, is smaller.
+    cases.push(("decrypt_recheck", 0, encrypted_twice(&noise(20_000))));
     #[cfg(feature = "existing")]
     {
         // A small JPEG behind Flate, which Lepton shrinks less than 10% below the Flate bytes.

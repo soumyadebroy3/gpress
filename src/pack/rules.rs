@@ -57,8 +57,8 @@ rules! {
     blend_apm1 = 4, 0, 8;
     /// The share of the second correction in the final probability, in sixteenths, as `blend_apm1`.
     blend_apm2 = 8, 0, 8;
-    /// The highest count a context's bit history keeps: from 1 to 7, what a 3-bit count holds (a state holds
-    /// two of them).
+    /// The highest count a context's bit history keeps. Lowest 1: at 0 no bit is counted, and a 0 bit sends a
+    /// context back to state 0, "nothing seen"; highest 7, what a 3-bit count holds (a state holds two of them).
     state_count = 7, 1, 7;
     /// The opposite count is halved when it is above this: 0 (always) to 7 (never).
     state_discount = 2, 0, 7;
@@ -119,8 +119,8 @@ rules! {
     /// ... and at most 2^bits (16 MiB each at 22, the highest: the bound it always had). Lowest 8, as
     /// `fax_bits_min`. When the least is above the most, the least counts.
     fax_bits_max = 22, 8, 22;
-    /// Between the two, 2^bits is the file's length rounded up to a power of two, times 2^this. Lowest 0: the
-    /// length alone; highest 16: then a file of 64 bytes, the least a fax stream is coded from by default
+    /// Between the two, 2^bits is the smallest power of two above the file's length, times 2^this. Lowest 0:
+    /// that power alone; highest 16: then a file of 64 bytes, the least a fax stream is coded from by default
     /// (`fax_min_bytes`), already gets 2^23, more than the most.
     fax_bits_add = 4, 0, 16;
     /// The count cap of the small counters for the original encoder's layout choices, with the range of
