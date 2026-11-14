@@ -8,8 +8,8 @@ use std::ffi::{c_char, c_int, CString};
 use std::ptr;
 use std::time::Duration;
 
-/// Options, laid out for C (the fields of `gpress::Options` but `store_budget`, which stays at its default;
-/// `include/gpress.h` describes each).
+/// Options, laid out for C (the fields of `gpress::Options` but `store_budget` and `flate_rules`, which stay at
+/// their defaults; `include/gpress.h` describes each).
 /// Fill one with `gpress_options_default` and change what you need: a zeroed struct is not the defaults
 /// (it means effort 0 and every switch off), though every size field left at 0 means its default.
 #[repr(C)]
