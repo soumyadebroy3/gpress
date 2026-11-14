@@ -96,6 +96,7 @@ fn every_rule_at_its_ends_restores_and_changes_the_archive() {
                 assert!(a[4] == want || a[4] == 2, "{name} = {v}: version {}", a[4]);
                 assert!(a.len() <= d.len() + 32, "{name} = {v}: {} bytes for {}", a.len(), d.len());
                 assert!(unpack(&a).unwrap() == *d, "{name} = {v}");
+                assert!(pack_by(d, &r, 40, 4) == a, "{name} = {v}: not the same bytes at 4 threads");
                 changed |= a != *b;
             }
         }
@@ -116,7 +117,8 @@ fn every_rule_at_its_ends_restores_and_changes_the_archive() {
     // (`plain_windows`); zlib's "filtered" strategy made no stream (`zlib_filtered`). Without Lepton its rules
     // decide nothing; with it, the JPEG of the document is a stream of its own (not behind Flate) and small
     // enough for one partition, and as Lepton takes it, only the random stream is judged for plain coding, which
-    // looks random at any distance (`plain_distances`).
+    // looks random at any distance (`plain_distances`). `each_packing_choice_can_change_the_archive` gives each
+    // of these but `deadline_step` and the two decryption rules an input where it does.
     #[rustfmt::skip]
     let mut want = vec![
         "deadline_step", "decrypt_recheck", "decrypt_tie", "fax_max_leftover", "font_text_bytes", "font_tries",
@@ -129,6 +131,117 @@ fn every_rule_at_its_ends_restores_and_changes_the_archive() {
     }
     want.sort_unstable();
     assert_eq!(unchanged, want);
+}
+
+/// A one-stream document: `data` as object 1, with `dict` in its dictionary.
+#[cfg(all(feature = "fax", feature = "encryption"))]
+fn one_stream(dict: &str, data: &[u8]) -> Vec<u8> {
+    let mut d = format!("%PDF-1.4\n1 0 obj\n<< {dict} /Length {} >>\nstream\n", data.len()).into_bytes();
+    d.extend_from_slice(data);
+    d.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<< /Size 2 >>\n%%EOF\n");
+    d
+}
+
+/// The rules of the packing side that the mixed document leaves unchanged, each on an input where one value
+/// changes the archive (and both archives restore). `deadline_step` never changes it; `decrypt_recheck` and
+/// `decrypt_tie` only decide whether a second pack, without decryption, is made and which of two equally long
+/// ones is kept, and no small input was found where that second pack is the one kept.
+#[cfg(all(feature = "fax", feature = "encryption"))]
+#[test]
+fn each_packing_choice_can_change_the_archive() {
+    use gpress::flate::zlibexact::{zlib_stream, Params};
+    use gpress::pack::type1::{decrypt, encrypt};
+    let zlib =
+        |data: &[u8], filtered: bool| zlib_stream(data, Params { level: 6, window_bits: 15, mem_level: 8, filtered });
+    let mut seed = 5;
+    let mut noise = |n: usize| -> Vec<u8> { (0..n).map(|_| common::next(&mut seed) as u8).collect() };
+    let mut cases: Vec<(&str, u64, Vec<u8>)> = Vec::new();
+    // A content stream that only zlib's "filtered" strategy makes.
+    let text: Vec<u8> = (0..400)
+        .flat_map(|i| {
+            format!("BT /F{} {} Tf {} {} Td (w{}) Tj ET\n", i % 7, 9 + i % 5, 72 + i % 13, 700 - i, i * 37 % 101)
+                .into_bytes()
+        })
+        .collect();
+    cases.push(("zlib_filtered", 0, one_stream("/Filter /FlateDecode", &zlib(&text, true))));
+    // A font whose /Length1 is 0: found only by looking for "eexec".
+    let (font, _, l2, l3) = common::type1_font(150);
+    cases.push(("font_tries", 0, one_stream(&format!("/Length1 0 /Length2 {l2} /Length3 {l3}"), &font)));
+    // A font whose encrypted part starts with Latin-1 text.
+    let (font, l1, l2, l3) = common::type1_font(150);
+    let mut private = font[l1..l1 + l2].to_vec();
+    decrypt(&mut private, 55665);
+    let mut p = [&private[..4], b"%\xe9t\xe9 \xe0 l\xe0 \xe9t\xe9 \xe0 l\xe0 \xe9t\xe9\n", &private[4..]].concat();
+    encrypt(&mut p, 55665);
+    let font = [&font[..l1], &p, &font[l1 + l2..]].concat();
+    cases.push(("font_text_bytes", 1, one_stream(&format!("/Length1 {l1} /Length2 {} /Length3 {l3}", p.len()), &font)));
+    // A fax stream with a tenth of random bytes after its image.
+    let mut fax = common::fax_data(&common::scan(600, 400));
+    fax.extend(noise(fax.len() / 10));
+    let dict = "/Type /XObject /Subtype /Image /Width 600 /Height 400 /ColorSpace /DeviceGray /BitsPerComponent 1 \
+        /Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns 600 >>";
+    cases.push(("fax_max_leftover", 0, one_stream(dict, &fax)));
+    // Random bytes, a ramp, random bytes: the ramp lies between the first and the last window.
+    let data = [noise(100_000), (0..100_000u32).map(|i| i as u8).collect(), noise(100_000)].concat();
+    cases.push(("plain_windows", 2, one_stream("", &data)));
+    #[cfg(feature = "existing")]
+    {
+        // A small JPEG behind Flate, which Lepton shrinks less than 10% below the Flate bytes.
+        cases.push(("lepton_min_saving", 0, one_stream("/Filter /FlateDecode", &zlib(common::JPEG, false))));
+        // A JPEG with over 125,000 bytes of scan, which Lepton codes in two pieces when it may.
+        let dict = "/Type /XObject /Subtype /Image /Width 75 /Height 4096 /ColorSpace /DeviceRGB /BitsPerComponent 8 \
+            /Filter /DCTDecode";
+        cases.push(("lepton_partitions", 1, one_stream(dict, &tall_jpeg(64))));
+    }
+    for (name, v, doc) in &cases {
+        let base = pack_by(doc, &ArchiveRules::default(), 40, 1);
+        let mut r = ArchiveRules::default();
+        assert!(r.set(name, *v));
+        let a = pack_by(doc, &r, 40, 1);
+        assert!(unpack(&base).unwrap() == *doc && unpack(&a).unwrap() == *doc, "{name}");
+        assert!(a != base, "{name} = {v} changed nothing");
+    }
+}
+
+/// restart5.jpg (75 x 53, a restart marker after each row of 16-pixel blocks) with its four rows of blocks
+/// repeated `copies` times: a JPEG of 75 x 64 * `copies` pixels, about 2.3 KB of scan a copy.
+#[cfg(all(feature = "existing", feature = "fax", feature = "encryption"))]
+fn tall_jpeg(copies: usize) -> Vec<u8> {
+    let j: &[u8] = include_bytes!("data/jpeg/restart5.jpg");
+    let (mut out, mut i) = (j[..2].to_vec(), 2);
+    loop {
+        let (marker, len) = (j[i + 1], u16::from_be_bytes([j[i + 2], j[i + 3]]) as usize);
+        let at = out.len();
+        out.extend_from_slice(&j[i..i + 2 + len]);
+        if marker == 0xC0 {
+            out[at + 5..at + 7].copy_from_slice(&(64 * copies as u16).to_be_bytes());
+        }
+        i += 2 + len;
+        if marker == 0xDA {
+            break;
+        }
+    }
+    // The scan, without its end marker, split at its restart markers.
+    let scan = &j[i..j.len() - 2];
+    let mut rows = Vec::new();
+    let mut start = 0;
+    for k in 0..scan.len() - 1 {
+        if scan[k] == 0xFF && (0xD0..=0xD7).contains(&scan[k + 1]) {
+            rows.push(&scan[start..k]);
+            start = k + 2;
+        }
+    }
+    rows.push(&scan[start..]);
+    assert_eq!(rows.len(), 4);
+    let n = 4 * copies;
+    for r in 0..n {
+        out.extend_from_slice(rows[r % 4]);
+        if r + 1 < n {
+            out.extend_from_slice(&[0xFF, 0xD0 + (r % 8) as u8]);
+        }
+    }
+    out.extend_from_slice(&[0xFF, 0xD9]);
+    out
 }
 
 /// Every shared rule at its lowest at once, and every one at its highest (the largest profile: 160 MiB of
