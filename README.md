@@ -173,12 +173,12 @@ strongest setting. The output is the same for any thread count.
 | Effort | | 907 test files | Photo set | What it does to a normal PDF |
 | ---: | --- | ---: | ---: | --- |
 | the input | | 130,469,001 | 22,715,581 | |
-| 0 (`--quick`) | lossless | 117,623,756 (90.2%) | 20,900,345 (92.0%) | The fast path: our fast Flate encoder and the cheap steps. |
-| 20 | lossless | 116,462,384 (89.3%) | 20,585,352 (90.6%) | The strong encoder's first step. |
-| 40 (default) | lossless | 116,169,014 (89.0%) | 20,510,831 (90.3%) | The smallest lossless output: everything the engine knows how to do. |
-| 60 | lossy | 114,597,320 (87.8%) | 18,255,199 (80.4%) | The work of 40, after the lossy image step: an image shown at 375 pixels per inch or more is resampled down to 300, and a photo that was resampled, or is not a JPEG, is written as a JPEG at quality 85 (line art stays samples behind Flate). |
-| 80 | lossy | 114,079,379 (87.4%) | 17,737,258 (78.1%) | As 60, with photos down to 150 pixels per inch (those shown at 187.5 or more). |
-| 100 | lossy | 114,046,104 (87.4%) | 17,703,983 (77.9%) | As 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
+| 0 (`--quick`) | lossless | 117,571,389 (90.1%) | 20,900,294 (92.0%) | The fast path: our fast Flate encoder and the cheap steps. |
+| 20 | lossless | 116,329,274 (89.2%) | 20,585,289 (90.6%) | The strong encoder's first step. |
+| 40 (default) | lossless | 116,048,544 (88.9%) | 20,510,774 (90.3%) | The smallest lossless output: everything the engine knows how to do. |
+| 60 | lossy | 114,489,287 (87.8%) | 18,255,139 (80.4%) | The work of 40, after the lossy image step: an image shown at 375 pixels per inch or more is resampled down to 300, and a photo that was resampled, or is not a JPEG, is written as a JPEG at quality 85 (line art stays samples behind Flate). |
+| 80 | lossy | 113,971,343 (87.4%) | 17,737,195 (78.1%) | As 60, with photos down to 150 pixels per inch (those shown at 187.5 or more). |
+| 100 | lossy | 113,938,073 (87.3%) | 17,703,925 (77.9%) | As 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
 
 The two size columns are the bytes of all the outputs together and their share of the input, one thread
 (`bench/effort_table.py`; bench/RESULTS.md, "Sizes at the six efforts", has a row per file of the photo set and
@@ -202,7 +202,14 @@ Floors that hold at every lossy level:
   when it decodes close to the samples it was made from (one that does not is first coded again at a higher
   quality); otherwise the image goes through the lossless path as before;
 - a file the safety gate leaves untouched (signed, PDF/A, PDF/X, needing a password...) stays untouched, and an
-  encrypted file keeps its encryption.
+  encrypted file keeps its encryption; a file whose object numbers are too high for the shorter lossy output
+  (qpdf 12 reads an object only when its number is below a third of the file's length) gets the lossless one.
+
+Small print on a picture makes it line art only where the print's edges step 64 levels of brightness or more
+from the picture around it: black 6 and 8 point labels on a dark part of a photograph (a blue sky, dark rock)
+may not be seen, and such a picture can be taken for a photo: written as a JPEG at every lossy effort, and at 80
+and 100 resampled to 150 pixels per inch, its labels blurred. Nor are a word or two, or print that is soft
+itself (a photographed note).
 
 Two limits the photo set shows. An image in doubt counts as line art, and the step took none of the three
 scikit-image photographs for a photo: none became a JPEG, and only the copies stored as samples and shown at

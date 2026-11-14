@@ -97,8 +97,10 @@ fn line_art(w: usize, h: usize) -> Vec<u8> {
     px
 }
 
+/// The lossy step alone: without the Indexed images of the lossless path, whose indexes would hide the samples
+/// these tests read.
 fn options(lossy: Option<Lossy>, threads: usize) -> Options {
-    Options::default().effort(0).threads(threads).lossy(lossy)
+    Options::default().effort(0).threads(threads).lossy(lossy).palette(false)
 }
 
 /// The optimised file (the input itself when nothing got smaller) and what the lossy step did to its images,
@@ -437,4 +439,57 @@ fn the_lossy_efforts_are_the_three_levels() {
     let p = gpress::optimize_to_size(&pdf, least - 1, &base()).unwrap();
     assert_eq!((p.effort.level(), p.reached), (60, true));
     assert!(p.result.data == at(base().effort(60)));
+}
+
+/// qpdf 12 reads an object only when its number is below a third of the file's length, and the lossy step makes
+/// the file shorter: when only the lossy output is too short for the file's highest object number, a lossy
+/// effort writes the lossless output.
+#[cfg(feature = "jpeg")]
+#[test]
+fn a_lossy_output_too_short_for_its_object_numbers_is_the_lossless_one() {
+    // The page of the other tests, with one more object, numbered `n` and reachable from the catalog.
+    let pdf = |n: u32| {
+        let objs = [
+            (1, format!("<< /Type /Catalog /Pages 2 0 R /Extra {n} 0 R >>").into_bytes()),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (
+                3,
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R \
+                  /Resources << /XObject << /Im0 4 0 R >> >> >>"
+                    .to_vec(),
+            ),
+            (4, image(600, 600, "DeviceRGB", 8, "", &photo(600, 600, 3))),
+            (5, stream("", b"q 72 0 0 72 20 20 cm /Im0 Do Q")),
+            (n, b"(far)".to_vec()),
+        ];
+        let mut d = b"%PDF-1.4\n".to_vec();
+        let mut xref = String::from("xref\n0 1\n0000000000 65535 f \n");
+        for (k, o) in &objs {
+            xref += &format!("{k} 1\n{:010} 00000 n \n", d.len());
+            d.extend_from_slice(format!("{k} 0 obj\n").as_bytes());
+            d.extend_from_slice(o);
+            d.extend_from_slice(b"\nendobj\n");
+        }
+        let at = d.len();
+        d.extend_from_slice(
+            format!("{xref}trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{at}\n%%EOF\n", n + 1).as_bytes(),
+        );
+        d
+    };
+    let run = |pdf: &[u8], effort: u8| gpress::optimize(pdf, &Options::default().threads(1).effort(effort)).unwrap();
+    let jpegs = |r: &gpress::Optimized| match &r.outcome {
+        Outcome::Smaller(s) => s.images_to_jpeg,
+        Outcome::Untouched(why) => panic!("untouched: {why}"),
+    };
+    // With the extra object numbered 6, effort 60 writes the photo as a JPEG, in a file under a quarter of
+    // effort 40's.
+    let (lossless, lossy) = (run(&pdf(6), 40), run(&pdf(6), 60));
+    assert_eq!((jpegs(&lossless), jpegs(&lossy)), (0, 1));
+    let (long, short) = (lossless.data.len() as u32, lossy.data.len() as u32);
+    assert!(short < long / 4, "{short} of {long}");
+    // Numbered half way between a third of each length (the rows up to it cost the files a few kilobytes).
+    let n = (long + short) / 6;
+    let (lossless, lossy) = (run(&pdf(n), 40), run(&pdf(n), 60));
+    assert_eq!((jpegs(&lossless), jpegs(&lossy)), (0, 0));
+    assert!(lossy.data == lossless.data);
 }

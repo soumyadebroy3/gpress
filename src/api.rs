@@ -71,7 +71,8 @@ pub const MAX_STORE_BUDGET: usize = crate::flate::deflate::MAX_STORE_BUDGET;
 /// scans never below 300; 1-bit images and small images (at most 65,536 pixels) are never touched; a lossy
 /// result is kept only when it is clearly smaller than what the lossless path makes of the image and a
 /// per-image quality check passes; a file the safety gate leaves untouched (signed, PDF/A, PDF/X, needing a
-/// password) stays untouched, and an encrypted file keeps its encryption.
+/// password) stays untouched, and an encrypted file keeps its encryption; a file whose object numbers are too
+/// high for the shorter lossy output (qpdf 12's bound, see the safety gate) gets the lossless one.
 ///
 /// The archive ([`compress`]) is always lossless: there 40 and above all mean its strongest setting.
 ///

@@ -97,7 +97,8 @@ Floors that hold at every lossy level:
   when it decodes close to the samples it was made from (one that does not is first coded again at a higher
   quality); otherwise the image goes through the lossless path as before;
 - a file the safety gate leaves untouched (signed, PDF/A, PDF/X, needing a password...) stays untouched, and an
-  encrypted file keeps its encryption.
+  encrypted file keeps its encryption; a file whose object numbers are too high for the shorter lossy output
+  (qpdf 12 reads an object only when its number is below a third of the file's length) gets the lossless one.
 
 What the six efforts make of the 907 test files and of a set of photographs is in the README's table
 ("Effort levels") and, with a row per file of the photo set, in bench/RESULTS.md ("Sizes at the six efforts").
@@ -131,8 +132,8 @@ with 10 (`pack` and `unpack` without `archive`, or a measuring command of a part
 only a build with the part can tell the two apart, as with Lepton's parts and `NeedsExistingLibrary`. Neither
 ever gives a wrong file.
 
-The npm package has two modules: `dist/gpress.wasm` with every part (432,454 bytes of gzip), and
-`dist/gpress-web.wasm`, the `web` set (315,675 bytes of gzip, 27% less). Both have the same wrapper; in the web
+The npm package has two modules: `dist/gpress.wasm` with every part (440,568 bytes of gzip), and
+`dist/gpress-web.wasm`, the `web` set (324,252 bytes of gzip, 26% less). Both have the same wrapper; in the web
 module `compress` and `expand` throw a `GpressFeatureError` whose `feature` is `"archive"`, and `g.features`
 lists the parts a module has.
 

@@ -104,6 +104,9 @@ impl Options {
 
 /// The reason `rewrite` gives up when its deadline passes (see `Outcome::TimedOut`).
 const TIMED_OUT: &str = "out of time";
+/// What `rewrite` gives when only the lossy step made the file too short for its object numbers (qpdf 12's
+/// bound, below): `optimize` then writes the lossless output, which is longer. Never a reason a caller sees.
+const LOSSY_TOO_SHORT: &str = "object numbers far apart for the lossy output";
 
 #[derive(Debug, Default, Clone)]
 pub struct Stats {
@@ -162,7 +165,11 @@ pub struct Optimized {
 }
 
 pub fn optimize(input: &[u8], opt: &Options) -> Optimized {
-    match rewrite(input, opt) {
+    let mut r = rewrite(input, opt);
+    if matches!(&r, Err(why) if why == LOSSY_TOO_SHORT) {
+        r = rewrite(input, &Options { lossy: super::lossy::Lossy::OFF, ..opt.clone() });
+    }
+    match r {
         Ok((out, stats)) => {
             if out.len() < input.len() {
                 Optimized { data: out, outcome: Outcome::Smaller(stats) }
@@ -1803,9 +1810,10 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
 
     // qpdf 12 reads an object only when its number is below a third of the file's length, this cross-reference
     // stream included, and objects keep their numbers: a file whose numbers are too high for its new length
-    // stays as it is.
+    // stays as it is, or, when the lossy step changed images, gets the lossless output.
     if xn as usize >= out.len() / 3 {
-        return Err("object numbers far apart".into());
+        let lossy = stats.images_resampled + stats.images_to_jpeg + stats.jpegs_rewritten > 0;
+        return Err(if lossy { LOSSY_TOO_SHORT } else { "object numbers far apart" }.into());
     }
     // Read our own output back and compare everything reachable.
     let taken = self_check(&objs, &out, &doc.trailer, crypt, &proven, pool)?;

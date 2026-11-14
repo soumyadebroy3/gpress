@@ -372,7 +372,7 @@ const EDGE: u8 = 64;
 const SOFT: u8 = 32;
 /// The side of the tiles small print is looked for in. At 32, each of four drawings of labels on a photograph
 /// (6 and 8 point at 504 samples an inch: black, white, outlined) has 8 or more tiles of small print; at 64
-/// none has more than one.
+/// none has more than one. (Black labels on the photograph's dark parts may have none: see below.)
 const TILE: usize = 32;
 
 /// Whether `luma` (`w` by `h`) is a clear continuous-tone picture: a photo. Everything else, and everything in
@@ -393,8 +393,11 @@ const TILE: usize = 32;
 ///   photographs the three counts above take, measured as stored and as JPEGs of three qualities, one tile
 ///   is like that: the glinting corner of a picture frame.
 ///
-/// Not found: a word or two (a tile may hold too little of them), and print that is soft itself (a
-/// photographed or scanned note), which no count of edges tells from a photograph.
+/// Not found: a word or two (a tile may hold too little of them); print whose edges step less than `EDGE` from
+/// the picture around it (black 6 and 8 point labels on a dark sky or dark rock may make no such tile: then the
+/// picture is a photo, a JPEG at every level and at 150 pixels per inch at levels 2 and 3, the labels
+/// blurred); and print that is soft itself (a photographed or scanned note), which no count of edges tells
+/// from a photograph.
 fn is_photo(luma: &[u8], w: usize, h: usize) -> bool {
     if w < 2 || h < 2 || luma.len() < w * h {
         return false;

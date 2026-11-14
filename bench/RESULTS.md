@@ -403,24 +403,25 @@ the engine rewrites.
 
 The README's effort table. `python3 -I bench/effort_table.py NAME --set SET` runs `gpress optimize --effort E
 --threads 1` on every file of a set at each effort and adds up the outputs; a file gpress leaves untouched
-counts with its own size. Measured on 2026-11-14 on 1838c2a (the effort scheme joined with the lossy image
-step), on a 4-core cloud machine. Sizes only: nothing here was timed.
+counts with its own size. Measured on 2026-11-14 on 98e60cf (the effort scheme and the lossy image step, with
+main's JBIG2 and Indexed images merged in; the commit after it changes no output of either set), on a 4-core
+cloud machine. Sizes only: nothing here was timed.
 
 | Effort | | 907 test files | Photo set, 23 files |
 | ---: | --- | ---: | ---: |
 | the input | | 130,469,001 | 22,715,581 |
-| 0 | lossless | 117,623,756 (90.15%) | 20,900,345 (92.01%) |
-| 20 | lossless | 116,462,384 (89.26%) | 20,585,352 (90.62%) |
-| 40 | lossless | 116,169,014 (89.04%) | 20,510,831 (90.29%) |
-| 60 | lossy | 114,597,320 (87.83%) | 18,255,199 (80.36%) |
-| 80 | lossy | 114,079,379 (87.44%) | 17,737,258 (78.08%) |
-| 100 | lossy | 114,046,104 (87.41%) | 17,703,983 (77.94%) |
+| 0 | lossless | 117,571,389 (90.11%) | 20,900,294 (92.01%) |
+| 20 | lossless | 116,329,274 (89.16%) | 20,585,289 (90.62%) |
+| 40 | lossless | 116,048,544 (88.95%) | 20,510,774 (90.29%) |
+| 60 | lossy | 114,489,287 (87.75%) | 18,255,139 (80.36%) |
+| 80 | lossy | 113,971,343 (87.36%) | 17,737,195 (78.08%) |
+| 100 | lossy | 113,938,073 (87.33%) | 17,703,925 (77.94%) |
 
 - The 907 files are `bench/sets/all.txt`; `bench/results/effort-levels/files.tsv` has a row per file. 206 are
   untouched at every effort and no run failed. The lossy efforts change 4 files:
-  ocrmypdf/tests__resources__2400dpi.pdf (119,591 bytes at effort 40, 25,086 at 60, 80 and 100),
-  pdfjs/bug1815476.pdf (103,311, then 75,033), pdfjs/issue19971.pdf (1,641,141, then 1,272,721, 754,780 and
-  721,505) and pypdf-samples/009-pdflatex-geotopo__GeoTopo.pdf (4,195,073, then 3,114,582). No output at 60, 80
+  ocrmypdf/tests__resources__2400dpi.pdf (107,144 bytes at effort 40, 25,086 at 60, 80 and 100),
+  pdfjs/bug1815476.pdf (103,311, then 75,033), pdfjs/issue19971.pdf (1,641,084, then 1,272,661, 754,717 and
+  721,447) and pypdf-samples/009-pdflatex-geotopo__GeoTopo.pdf (4,167,654, then 3,087,156). No output at 60, 80
   or 100 is larger than the same file's at the effort below.
 - The photo set is `bench/sets/photos.txt`: `python3 -I bench/photo_set.py` makes its pages under
   `bench/corpus/photos/`, and nothing of it is in the repository. It is two files of the corpus as they are
@@ -442,7 +443,7 @@ per inch pages.
 
 | File | Input | 0 | 20 | 40 | 60 | 80 | 100 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| pdfjs/issue19971.pdf | 1,729,186 | 1,670,424 | 1,647,774 | 1,641,141 | 1,272,721 (48.5) | 754,780 (40.2) | 721,505 (40.2) |
+| pdfjs/issue19971.pdf | 1,729,186 | 1,670,373 | 1,647,711 | 1,641,084 | 1,272,661 (48.5) | 754,717 (40.2) | 721,447 (40.2) |
 | pdfjs/issue14200.pdf | 679,384 | 430,425 | 410,605 | 409,826 | 409,826 (same) | 409,826 (same) | 409,826 (same) |
 | photos/astronaut-150-flate.pdf | 628,726 | 446,170 | 433,482 | 423,852 | 423,852 (same) | 423,852 (same) | 423,852 (same) |
 | photos/astronaut-150-jpeg.pdf | 68,853 | 67,167 | 67,164 | 67,164 | 67,164 (same) | 67,164 (same) | 67,164 (same) |
@@ -575,26 +576,30 @@ smaller than the whole one, 115,366 bytes (30.1%) of gzip; the next section says
 
 Recorded again on 2026-11-14 for the lossy image step (efforts 60, 80 and 100), which brings a JPEG decoder
 and encoder into the `jpeg` part, with rustc 1.100.0 and wasm-opt 108. "Before" is the record above (rustc
-1.99.1, 2026-10-22). The other two sets were not measured again.
+1.99.1, 2026-10-22). The other two sets were not measured again. The web and default rows were measured once
+more with main's JBIG2 and Indexed images merged in: before that merge (7f35f7c) the web module was 830,342
+bytes, 315,675 of gzip, and the whole one 1,163,155 and 432,454, so the merge adds 8,577 and 8,114 bytes of gzip
+(2.7% and 1.9%). CI now builds with wasm-opt 120: on 7f35f7c its web module was 90 bytes of gzip larger than
+wasm-opt 108's.
 
 | Build | Feature set | Raw bytes | Gzip bytes | Before: raw, gzip | Gzip change |
 | --- | --- | ---: | ---: | ---: | ---: |
-| WebAssembly module | web | 830,342 | 315,675 | 710,751, 267,937 | +17.8% |
-| WebAssembly module | default | 1,163,155 | 432,454 | 1,038,544, 383,303 | +12.8% |
-| Native tool `gpress` | web | 1,696,944 | 760,231 | 1,508,088, 675,533 | +12.5% |
-| Native tool `gpress` | default | 2,308,304 | 1,022,368 | 2,112,816, 936,953 | +9.1% |
-| C library, shared (`libgpress_c.so`) | web | 1,564,264 | 702,555 | 1,379,032, 617,707 | +13.7% |
-| C library, shared (`libgpress_c.so`) | default | 2,119,296 | 936,870 | 1,927,608, 853,947 | +9.7% |
-| C library, static (`libgpress_c.a`) | web | 10,615,900 | 2,301,509 | 9,846,120, 2,095,285 | +9.8% |
-| C library, static (`libgpress_c.a`) | default | 11,542,220 | 2,573,346 | 10,769,696, 2,367,811 | +8.7% |
+| WebAssembly module | web | 848,188 | 324,252 | 710,751, 267,937 | +21.0% |
+| WebAssembly module | default | 1,181,391 | 440,568 | 1,038,544, 383,303 | +14.9% |
+| Native tool `gpress` | web | 1,727,240 | 775,503 | 1,508,088, 675,533 | +14.8% |
+| Native tool `gpress` | default | 2,339,600 | 1,036,283 | 2,112,816, 936,953 | +10.6% |
+| C library, shared (`libgpress_c.so`) | web | 1,595,224 | 718,355 | 1,379,032, 617,707 | +16.3% |
+| C library, shared (`libgpress_c.so`) | default | 2,151,184 | 952,884 | 1,927,608, 853,947 | +11.6% |
+| C library, static (`libgpress_c.a`) | web | 10,668,740 | 2,317,886 | 9,846,120, 2,095,285 | +10.6% |
+| C library, static (`libgpress_c.a`) | default | 11,596,220 | 2,589,427 | 10,769,696, 2,367,811 | +9.4% |
 
 Main at 2bca97c, the code this step was added to, built the same day with the same tools: the web module is
 714,485 bytes, 270,187 of gzip, and the whole module 1,046,990, 385,927 of gzip. So the step costs the web
 module 45,488 bytes of gzip (16.8%) and the whole module 46,527 (12.1%).
 
-The target for the web module is 400 KB gzip (400,000 bytes): at 315,675 bytes it is 84,325 bytes (21%) under
-it (267,937 bytes and 132,063 under before the lossy image step). The whole module has no budget; at 432,454
-bytes it is 32,454 over that number (383,303 before the step). Built at opt-level "s", before the choice below, the web
+The target for the web module is 400 KB gzip (400,000 bytes): at 324,252 bytes it is 75,748 bytes (19%) under
+it (267,937 bytes and 132,063 under before the lossy image step). The whole module has no budget; at 440,568
+bytes it is 40,568 over that number (383,303 before the step). Built at opt-level "s", before the choice below, the web
 module was 185,288 bytes of gzip (on f34ba33, before main's later changes): opt-level 3 added 24% there.
 Lepton adds 135,910 bytes of gzip to the module with every part. The static library carries Rust's standard
 library whole, so it is far larger than what a program linked with it gets. The module grows with main: the
