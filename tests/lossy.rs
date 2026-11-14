@@ -314,6 +314,9 @@ fn protected_images_are_what_the_lossless_path_gives() {
     untouched_by_every_level(&pdf, "colour-key mask");
     let pdf = page(image(600, 600, "DeviceRGB", 8, "/Decode [1 0 1 0 1 0]", &rgb), 72, "", "", &[]);
     untouched_by_every_level(&pdf, "/Decode");
+    // The short key of an inline image beside the full one: a reader may go by either.
+    let pdf = page(image(600, 600, "DeviceRGB", 8, "/W 600", &rgb), 72, "", "", &[]);
+    untouched_by_every_level(&pdf, "/W beside /Width");
     let undrawn = image(600, 600, "DeviceRGB", 8, "", &rgb);
     let pdf = page(image(200, 200, "DeviceGray", 8, "", &photo(200, 200, 1)), 72, "/Im1 6 0 R", "", &[undrawn]);
     untouched_by_every_level(&pdf, "never drawn");

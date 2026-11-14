@@ -97,9 +97,12 @@ pub fn reduce(objs: &mut BTreeMap<u32, (u16, Obj)>, trailer: &Dict, opt: &Option
             _ => None,
         })
         .collect();
-    // The biggest first, as the stream jobs are started.
-    let mut order: Vec<usize> = (0..images.len()).collect();
-    order.sort_by_key(|&k| (std::cmp::Reverse(images[k].1.s.data.len()), k));
+    // The biggest first, as the stream jobs are started. Sorted as pairs of plain numbers, a sort the engine
+    // already has: a sort by a key of its own is several KB more in the WebAssembly module.
+    let size = |i: &(u32, Image)| u32::MAX - u32::try_from(i.1.s.data.len()).unwrap_or(u32::MAX);
+    let mut order: Vec<(u32, usize)> = images.iter().enumerate().map(|(k, i)| (size(i), k)).collect();
+    order.sort_unstable();
+    let order: Vec<usize> = order.into_iter().map(|o| o.1).collect();
     let made = par::map(pool, images.len(), Some(&order), |k| {
         let (n, img) = &images[k];
         // Out of time: nothing more is made (the whole rewrite is given up after the step).
@@ -178,16 +181,19 @@ fn channels(cs: &Obj, objs: &BTreeMap<u32, (u16, Obj)>) -> Option<usize> {
 
 /// Whether the step may work on image `s`, from its dictionary: an image XObject with 8 bits per component in
 /// a grey or RGB colour space (`channels`), more than `SMALL` pixels, at most 65,535 each way, decoding within
-/// `max_stream`; without /ImageMask, /Decode, /Alternates, /OPI or an external file; with no colour-key /Mask
-/// (those name sample values) and no soft mask that carries /Matte (its colours are blended with this image's);
-/// stored with general filters only, or with one JPEG without parameters after them. A mask or soft mask image
-/// is its own object and keeps its own size.
+/// `max_stream`; without /ImageMask, /Decode, /Alternates, /OPI or an external file, and without the short
+/// keys of an inline image (/W, /H and so on: a reader that takes one for the full key would go on reading
+/// the old value); with no colour-key /Mask (those name sample values) and no soft mask that carries /Matte
+/// (its colours are blended with this image's); stored with general filters only, or with one JPEG without
+/// parameters after them. A mask or soft mask image is its own object and keeps its own size.
 fn eligible<'a>(s: &'a Stream, shown: Shown, objs: &BTreeMap<u32, (u16, Obj)>, opt: &Options) -> Option<Image<'a>> {
     let d = &s.dict;
     if d.name(b"Subtype") != Some(b"Image") || d.get(b"BitsPerComponent") != Some(&Obj::Int(8)) {
         return None;
     }
-    if [&b"ImageMask"[..], b"Decode", b"Alternates", b"OPI", b"F"].iter().any(|k| d.has(k)) {
+    let refused: [&[u8]; 12] =
+        [b"ImageMask", b"Decode", b"Alternates", b"OPI", b"F", b"W", b"H", b"BPC", b"CS", b"D", b"DP", b"IM"];
+    if refused.iter().any(|k| d.has(k)) {
         return None;
     }
     if !matches!(d.get(b"Mask").map(|m| resolve(m, objs)), None | Some(Some(Obj::Stream(_)))) {
@@ -390,8 +396,12 @@ fn is_photo(luma: &[u8], w: usize, h: usize) -> bool {
         }
     }
     let all = (w * h) as u64;
-    levels.sort_unstable_by(|a, b| b.cmp(a));
-    let top: u64 = levels[..8].iter().sum();
+    // The 8 most frequent levels, picked one at a time: so few need no sort.
+    let mut top = 0;
+    for _ in 0..8 {
+        let most = (0..256).max_by_key(|&k| levels[k]).unwrap_or(0);
+        top += std::mem::take(&mut levels[most]);
+    }
     flat * 16 <= all && hard * 128 <= all && top * 2 <= all
 }
 
@@ -745,13 +755,13 @@ mod tests {
         let opt = Options::default();
         let at = |q: u8| jpeg::encode(std::slice::from_ref(&y), q, Deadline::NONE).unwrap();
         assert!(close(&at(75), &y, &opt).is_err() && close(&at(95), &y, &opt).is_ok());
-        let (coded, size) = photo_jpeg(vec![y.clone()], None, 75, usize::MAX, || usize::MAX, &opt).unwrap();
+        let (coded, size) = photo_jpeg(vec![y.clone()], None, 75, 1 << 30, || 1 << 30, &opt).unwrap();
         assert_eq!(size, (w, h));
         assert_eq!(close(&coded, &y, &opt), Ok(()));
         // Two steps up from 50 are not enough: the photo is left alone. So is one that is not worth it.
-        let low = photo_jpeg(vec![y.clone()], None, 50, usize::MAX, || usize::MAX, &opt);
+        let low = photo_jpeg(vec![y.clone()], None, 50, 1 << 30, || 1 << 30, &opt);
         assert!(low.unwrap_err().starts_with("quality"));
-        let big = photo_jpeg(vec![y.clone()], None, 75, usize::MAX, || 10, &opt);
+        let big = photo_jpeg(vec![y.clone()], None, 75, 1 << 30, || 10, &opt);
         assert_eq!(big.unwrap_err(), "not a tenth smaller as a JPEG");
     }
 

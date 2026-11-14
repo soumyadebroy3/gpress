@@ -12,6 +12,11 @@
 //! image is reported only when every one of them is an entry of an /XObject dictionary the walk read cleanly,
 //! reached only through objects for which the same holds.
 //!
+//! Content the walk does not read may also draw by a name its own resources do not hold, and a reader then
+//! looks in the page's: a glyph of a Type 3 font, a tiling pattern, a form that something unwalked refers to
+//! (an annotation's appearance). One such `Do`, or such a content the walk cannot decode, gives no images at
+//! all (`Walk::stray`).
+//!
 //! Any doubt about the walk as a whole gives no images at all: a limit or the deadline passed, a malformed
 //! page tree, a form that draws itself, a size that is not finite. The limits: 20,000,000 operators and
 //! 1,000,000 `Do` operators drawn, a page tree 64 deep, forms 16 deep.
@@ -19,7 +24,7 @@
 //! The sizes are the same on every machine: f64 with + - * / and square roots only, numbers read by hand.
 
 use super::filters;
-use super::object::{Dict, Obj, Stream};
+use super::object::{is_regular, is_white, Dict, Obj, Stream, Writer};
 use super::parse::Lexer;
 use crate::clock::Deadline;
 use std::borrow::Cow;
@@ -121,8 +126,12 @@ fn num(o: &Obj) -> Option<f64> {
 
 /// A real as written: sign, digits, point, digits. Read by hand, as the library's reader is a large routine:
 /// the first 18 digits make an integer, which is divided by the power of ten of the fraction digits among
-/// them (exact up to there). Later fraction digits are dropped; more than 18 integer digits is not a number.
+/// them (exact up to there). Later fraction digits are dropped; more than 18 integer digits is not a number,
+/// nor is a token over 64 bytes (an inherited one is read again for every page).
 fn real(t: &[u8]) -> Option<f64> {
+    if t.len() > 64 {
+        return None;
+    }
     let (negative, digits) = match t {
         [b'-', rest @ ..] => (true, rest),
         [b'+', rest @ ..] => (false, rest),
@@ -195,7 +204,8 @@ fn read(data: &[u8], left: &mut u64) -> Option<Dos> {
             b"Q" => ctm = saved.pop()?,
             b"cm" => ctm = mul(&matrix(&args)?, &ctm),
             b"Do" => match args.as_slice() {
-                [Obj::Name(name)] => {
+                // A name as long as a PDF may have: each is kept, and compared at every draw.
+                [Obj::Name(name)] if name.len() <= 127 => {
                     // More than the whole walk may draw: nothing is left.
                     if dos.len() == DOS {
                         *left = 0;
@@ -210,6 +220,39 @@ fn read(data: &[u8], left: &mut u64) -> Option<Dos> {
         }
         args.clear();
     }
+}
+
+/// The names the `Do` operators of a content draw, found without parsing it, so that the data of an inline
+/// image does not end the search: each `Do` that stands alone, with the name written before it. None when one
+/// has no name before it, or a name longer than `read` takes.
+fn drawn(data: &[u8]) -> Option<Vec<&[u8]>> {
+    let mut names = Vec::new();
+    for i in 0..data.len().saturating_sub(1) {
+        let alone = (i == 0 || !is_regular(data[i - 1])) && data.get(i + 2).is_none_or(|&c| !is_regular(c));
+        if &data[i..i + 2] == b"Do" && alone {
+            let end = data[..i].iter().rposition(|&c| !is_white(c))? + 1;
+            let start = data[..end].iter().rposition(|&c| !is_regular(c))?;
+            if data[start] != b'/' || end - start > 128 {
+                return None;
+            }
+            names.push(&data[start + 1..end]);
+        }
+    }
+    Some(names)
+}
+
+/// Every dictionary inside `o` with a /CharProcs entry: a Type 3 font.
+fn type3<'a>(o: &'a Obj, out: &mut Vec<&'a Dict>) {
+    let d = match o {
+        Obj::Array(a) => return a.iter().for_each(|o| type3(o, out)),
+        Obj::Dict(d) => d,
+        Obj::Stream(s) => &s.dict,
+        _ => return,
+    };
+    if d.has(b"CharProcs") {
+        out.push(d);
+    }
+    d.0.iter().for_each(|(_, v)| type3(v, out));
 }
 
 /// An address as a key: an object inside `objs` stays where it is while `objs` is borrowed.
@@ -313,9 +356,12 @@ impl<'a> Walk<'a> {
     /// A stream's data through its filters, or None when the walk does not decode it. The work is taken from
     /// the operator budget, an operator for 64 bytes, a stage that fails as one that decoded to the limit: or
     /// a small file with one large content on every page would keep a walk without a deadline busy for hours.
+    /// The dictionary counts by its written size, as the filter chain is built from all of it each time.
     fn decoded(&mut self, s: &'a Stream) -> Option<Cow<'a, [u8]>> {
+        let mut written = Vec::new();
+        Writer { out: &mut written }.dict(&s.dict);
         // Two lengths of vectors: the sum cannot overflow.
-        if !spend(&mut self.left, (s.data.len() + s.dict.0.len()) as u64 / 64 + 1) {
+        if !spend(&mut self.left, (s.data.len() + written.len()) as u64 / 64 + 1) {
             return None;
         }
         let mut data = Cow::Borrowed(s.data.as_slice());
@@ -491,8 +537,8 @@ impl<'a> Walk<'a> {
             own => self.xobjects(own, Some(n)),
         };
         // Taken out while the form is drawn (it cannot be drawn inside itself), and put back after.
-        let read = match self.forms.remove(&n) {
-            Some(read) => read,
+        let read = match self.forms.get_mut(&n) {
+            Some(read) => read.take(),
             None => self.read_form(s),
         };
         if self.left == 0 {
@@ -529,6 +575,32 @@ impl<'a> Walk<'a> {
         Some((m, read(&data, &mut self.left)?))
     }
 
+    /// A content the walk did not read, with the /Resources that go with it: fine when each name it draws is
+    /// in the /XObject dictionary of those resources (what the name stands for then has a reference the walk
+    /// did not follow, and is left out by the reference rule). None, which ends the walk, when a name is not
+    /// there: a reader looks for it in the resources of the page, and draws an image at a size not measured.
+    /// None also for a content the walk cannot decode.
+    fn stray(&mut self, s: &'a Stream, resources: Option<&'a Obj>) -> Option<()> {
+        if self.deadline.passed() {
+            return None;
+        }
+        let data = self.decoded(s)?;
+        // Parsed when it can be, so that a `Do` inside a string is not taken for one.
+        let parsed = read(&data, &mut self.left);
+        let names = match &parsed {
+            Some(dos) => dos.iter().map(|d| d.1.as_slice()).collect(),
+            None => drawn(&data)?,
+        };
+        let own = resources.and_then(|r| self.dict(r)?.get(b"XObject")).and_then(|x| self.dict(x));
+        for name in names {
+            // The search of the dictionary is paid for, an operator an entry.
+            if !spend(&mut self.left, own?.0.len() as u64 + 1) || !own?.has(name) {
+                return None;
+            }
+        }
+        (self.left > 0).then_some(())
+    }
+
     /// The whole walk, then the reference rule: which images had every reference to them followed.
     fn run(mut self, trailer: &Dict) -> Option<BTreeMap<u32, Shown>> {
         let Obj::Ref(root, _) = trailer.get(b"Root")? else { return None };
@@ -547,8 +619,8 @@ impl<'a> Walk<'a> {
         // The followed references, in groups reached the same way: the objects they name, and the objects
         // they were reached through. The entries of a clean /XObject dictionary are one group.
         let mut groups: Vec<(Vec<u32>, BTreeSet<u32>)> =
-            self.followed.into_values().map(|(n, via)| (vec![n], via)).collect();
-        for x in self.xdicts.into_values() {
+            std::mem::take(&mut self.followed).into_values().map(|(n, via)| (vec![n], via)).collect();
+        for x in std::mem::take(&mut self.xdicts).into_values() {
             if !x.poisoned {
                 let named = x.names.values().filter_map(|v| match v {
                     Obj::Ref(n, _) => Some(*n),
@@ -567,9 +639,36 @@ impl<'a> Walk<'a> {
             let accounted = |n: &u32| count.get(n).is_some_and(|c| total.get(n) == Some(c));
             let before = groups.len();
             groups.retain(|g| g.1.iter().all(accounted));
-            if groups.len() == before {
-                return Some(self.placed.into_iter().filter(|(n, _)| accounted(n)).collect());
+            if groups.len() != before {
+                continue;
             }
+            // Content the walk did not read: tiling patterns, forms with a reference the walk did not follow,
+            // and the glyphs of Type 3 fonts (see `stray`).
+            let (objs, mut fonts) = (self.objs, Vec::new());
+            for (n, (_, o)) in objs {
+                type3(o, &mut fonts);
+                let Obj::Stream(s) = o else { continue };
+                let form = s.dict.get(b"Subtype").and_then(|t| self.value(t)?.as_name()) == Some(b"Form");
+                if s.dict.has(b"PatternType") || form && !accounted(n) {
+                    self.stray(s, s.dict.get(b"Resources"))?;
+                }
+            }
+            for font in fonts {
+                let Some(glyphs) = font.get(b"CharProcs").and_then(|p| self.dict(p)) else { continue };
+                self.searched(glyphs)?;
+                for (_, glyph) in &glyphs.0 {
+                    if let Some(Obj::Stream(s)) = self.value(glyph) {
+                        self.stray(s, font.get(b"Resources"))?;
+                    }
+                }
+            }
+            let mut shown = BTreeMap::new();
+            for (n, s) in &self.placed {
+                if accounted(n) {
+                    shown.insert(*n, *s);
+                }
+            }
+            return Some(shown);
         }
         None
     }
@@ -866,6 +965,57 @@ mod tests {
         assert_eq!(keys(&page(&format!("{entries}/Annots[30 0 R]"), draw, &form)), [11]);
     }
 
+    #[test]
+    fn unread_content_that_draws_by_a_name_it_does_not_hold_gives_nothing() {
+        let im = (10, IMAGE);
+        // A glyph of a Type 3 font without resources draws Im1: a reader takes the page's Im1 for it.
+        let font = (7, "<</Type/Font/Subtype/Type3/CharProcs<</a 8 0 R>>>>");
+        let glyph = (8, "<<>> stream 1000 0 d0 /Im1 Do");
+        assert!(page(LETTER, DRAW, &[im, font, glyph]).is_empty());
+        // The font as a direct entry of the page's resources, and its glyphs by reference.
+        let direct = "/MediaBox[0 0 612 792]/Resources<</XObject<</Im1 10 0 R>>/Font<</F<</CharProcs 9 0 R>>>>>>";
+        assert!(page(direct, DRAW, &[im, (9, "<</a 8 0 R>>"), glyph]).is_empty());
+        // With the name in the font's own resources, what it stands for there is left out and the page's stays.
+        let own = (7, "<</Subtype/Type3/Resources<</XObject<</Im1 11 0 R>>>>/CharProcs<</a 8 0 R>>>>");
+        assert_eq!(keys(&page(LETTER, DRAW, &[im, (11, IMAGE), own, glyph])), [10]);
+        // A glyph that draws nothing by name is fine, also one the walk cannot parse (an inline image).
+        let plain = (8, "<<>> stream 1000 0 d0 BI /W 1 /H 1 /IM true ID x EI");
+        assert_eq!(keys(&page(LETTER, DRAW, &[im, font, plain])), [10]);
+        // After an inline image the name is still found.
+        let both = (8, "<<>> stream BI /W 1 /H 1 /IM true ID x EI /Im1 Do");
+        assert!(page(LETTER, DRAW, &[im, font, both]).is_empty());
+        // A tiling pattern.
+        assert!(page(LETTER, DRAW, &[im, (9, "<</PatternType 1>> stream /Im1 Do")]).is_empty());
+        assert_eq!(keys(&page(LETTER, DRAW, &[im, (9, "<</PatternType 1>> stream 0 0 1 1 re f")])), [10]);
+        // An annotation's appearance: by a name it does not hold, with text that only reads like one, and
+        // with a content the walk does not decode.
+        let entries = format!("{LETTER}/Annots[30 0 R]");
+        let annot = (30, "<</Type/Annot/AP<</N 31 0 R>>>>");
+        let appearance = |form: &str| keys(&page(&entries, DRAW, &[im, annot, (31, form)]));
+        assert!(appearance("<</Subtype/Form>> stream /Im1 Do").is_empty());
+        assert!(appearance("<</Subtype/Form/Resources<</XObject<</A 10 0 R>>>>>> stream /Im1 Do").is_empty());
+        assert_eq!(appearance("<</Subtype/Form>> stream BT /F1 9 Tf (Do not fold) Tj ET"), [10]);
+        assert!(appearance("<</Subtype/Form/Filter/DCTDecode>> stream x").is_empty());
+        // A form only the page's own dictionary names needs no resources: the page's are the ones it uses.
+        let bare = "/MediaBox[0 0 612 792]/Resources<</XObject<</Fm1 20 0 R/Im1 10 0 R>>>>";
+        assert_eq!(keys(&page(bare, "/Fm1 Do", &[im, (20, "<</Subtype/Form>> stream /Im1 Do")])), [10]);
+    }
+
+    #[test]
+    fn names_are_found_in_content_that_is_not_parsed() {
+        assert_eq!(drawn(b"/A Do q /B#31\n\tDo[/Dot Do"), Some(vec![&b"A"[..], b"B#31", b"Dot"]));
+        assert_eq!(drawn(b"Dow xDo /A Dot D"), Some(vec![]));
+        for bad in ["Do", "1 Do", "(a) Do", "(Do)", "/A % x\nDo", "/A 1 Do"] {
+            assert_eq!(drawn(bad.as_bytes()), None, "{bad}");
+        }
+        // A name of 127 bytes is the longest taken, here and where a content is parsed.
+        let long = |n: usize| format!("/{} Do", "n".repeat(n));
+        assert_eq!(drawn(long(127).as_bytes()).map(|names| names[0].len()), Some(127));
+        assert_eq!(drawn(long(128).as_bytes()), None);
+        assert_eq!(read(long(127).as_bytes(), &mut 9).map(|dos| dos.len()), Some(1));
+        assert_eq!(read(long(128).as_bytes(), &mut 9), None);
+    }
+
     /// A page drawing a chain of `k` forms, objects 20 on, each inside the one before; the last draws image 10.
     fn nested(k: u32) -> BTreeMap<u32, Shown> {
         let page = (3, "<</Type/Page/Contents 4 0 R/Resources<</XObject<</F 20 0 R>>>>>>");
@@ -950,6 +1100,9 @@ mod tests {
         // Fraction digits after the 18th digit are dropped.
         assert_eq!(real(b"0.5000000000000000000000001"), Some(0.5));
         assert_eq!(real(b"123456789012345678.75"), Some(123456789012345678u64 as f64));
+        // 64 bytes are read, one more is not.
+        assert_eq!(real(format!("0.{}", "0".repeat(62)).as_bytes()), Some(0.0));
+        assert_eq!(real(format!("0.{}", "0".repeat(63)).as_bytes()), None);
         for bad in ["", "-", ".", "1.2.3", "1e5", "--1"] {
             assert_eq!(real(bad.as_bytes()), None, "{bad}");
         }
