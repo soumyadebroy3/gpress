@@ -414,7 +414,7 @@ mod tests {
                     format!("BT /F{} 12 Tf {} {} Td (line {}) Tj ET\n", x % 3, x % 600, x % 97 * 8, x % 50).as_bytes(),
                 ),
                 1 | 6 => out.extend_from_slice(format!("{:05} {:05} n \n", x % 1000 * 7, x % 13).as_bytes()),
-                2 => out.extend_from_slice(&[if x % 300 == 0 { 255 } else { 0 }; 40]),
+                2 => out.extend_from_slice(&[if x.is_multiple_of(300) { 255 } else { 0 }; 40]),
                 3 => out.extend_from_slice(&x.to_le_bytes()),
                 4 => {
                     let from = x as usize % out.len();
