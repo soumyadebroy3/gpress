@@ -10,9 +10,9 @@
 //! --max-stream BYTES (normal PDF), --max-stream-archive BYTES, --max-decoded BYTES (the archive's decoded-bytes
 //! budget, for pack and unpack), --max-len BYTES (unpack: a file declaring more is refused),
 //! --objects-per-stream N, --time-budget MS (give up after that long), --ignore-conformance,
-//! --no-flate-over-jpeg, --no-jpeg-tables, --no-jbig2, --no-palette, --keep-encrypted, --store-budget BYTES (normal PDF),
-//! --no-decrypt (archive), --no-existing. The output never depends on the thread count or the time budget: a
-//! budget that runs out gives an error and no file.
+//! --no-flate-over-jpeg, --no-jpeg-tables, --no-jbig2, --no-palette, --keep-encrypted, --store-budget BYTES
+//! (normal PDF), --no-decrypt (archive), --no-existing. The output never depends on the thread count or the
+//! time budget: a budget that runs out gives an error and no file.
 //!
 //! Measuring tools (the engine's own modules, for the benchmarks): deflate, inflate, batch, pdf-batch,
 //! repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info, fax-decode, fax-encode, fax-scan,

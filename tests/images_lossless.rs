@@ -424,10 +424,13 @@ fn guarded() -> Vec<(String, Vec<u8>, bool)> {
     ]
 }
 
+fn guarded_pdf() -> Vec<u8> {
+    page_of(&guarded().iter().map(|(entries, px, _)| image(entries, px)).collect::<Vec<_>>())
+}
+
 #[test]
 fn masks_and_images_that_say_more_than_colours_keep_their_colour_space() {
-    let images = guarded();
-    let pdf = page_of(&images.iter().map(|(entries, px, _)| image(entries, px)).collect::<Vec<_>>());
+    let (images, pdf) = (guarded(), guarded_pdf());
     let (out, report) = smaller(&pdf, &quick().jbig2(false));
     assert_eq!(report.images_indexed, 3);
     for (k, (entries_, px, indexed)) in images.iter().enumerate() {
@@ -444,8 +447,9 @@ fn masks_and_images_that_say_more_than_colours_keep_their_colour_space() {
 }
 
 /// An image that a predictor shrinks more than a colour table can: a walk up through all 256 greys, round and
-/// round in steps of one, stored as RGB. Flate alone gets little from it, the Sub predictor nearly everything, and the Indexed form
-/// would pay 768 bytes of table to save a few: it is compared with the predicted image, not with Flate alone.
+/// round in steps of one, stored as RGB. Flate alone gets little from it, the Sub predictor nearly everything,
+/// and the Indexed form would pay 768 bytes of table to save a few: it is compared with the predicted image, not
+/// with Flate alone.
 #[test]
 fn an_indexed_image_is_compared_with_the_best_other_encoding() {
     let mut next = rng(41);
@@ -506,8 +510,7 @@ const CHART_BEFORE: (usize, u64) = (4923, 0xaeff_2c19_76aa_fac0);
 
 #[test]
 fn one_and_four_threads_give_the_same_bytes() {
-    let guarded: Vec<Vec<u8>> = guarded().iter().map(|(entries, px, _)| image(entries, px)).collect();
-    for pdf in [one_bit_pdf(), charts_pdf(), page_of(&guarded)] {
+    for pdf in [one_bit_pdf(), charts_pdf(), guarded_pdf()] {
         for effort in [0, 100] {
             let one = smaller(&pdf, &quick().effort(effort));
             let four = smaller(&pdf, &quick().effort(effort).threads(4));

@@ -590,9 +590,9 @@ fn reencode(
     // An image without an image codec may have a smaller form that keeps every pixel (`exact_form`): asked only
     // of an image whose dictionary allows one. Out of time, nothing more is tried (the rewrite is given up).
     let form = rest.is_empty()
-        && !opt.deadline.passed()
         && (opt.jbig2 && crate::fax::pdf::one_bit(&s.dict).is_ok()
-            || opt.palette && indexed::plain_image(&s.dict).is_some());
+            || opt.palette && indexed::plain_image(&s.dict).is_some())
+        && !opt.deadline.passed();
     // The content as `content_of` decodes it: the general filters gave these same bytes (it decodes with a
     // limit no lower), and only the last of them can have a predictor (checked above). Kept when decoding
     // it again would cost something: when the filters decompress (Flate, LZW).
@@ -1245,35 +1245,36 @@ fn job_refs<'a>(d: &'a Dict, objs: &'a BTreeMap<u32, (u16, Obj)>) -> Vec<(u32, L
     refs
 }
 
-/// The objects some dictionary names as its /SMask or /Mask: the images that are masks of others. Only looked
-/// up, never walked. None when a dictionary names a default colour space (/DefaultGray or /DefaultRGB, which
-/// give DeviceGray and DeviceRGB the meaning of another colour space): then no image of the file may become
-/// an Indexed one (see `indexed`).
-fn mask_targets(objs: &BTreeMap<u32, (u16, Obj)>) -> Option<HashSet<u32>> {
-    let mut masks = HashSet::new();
-    let mut defaults = false;
+/// What the object table says about images that may become Indexed ones (see `indexed::Table`), from one walk
+/// over every object.
+fn image_table(objs: &BTreeMap<u32, (u16, Obj)>) -> indexed::Table {
+    let mut table = indexed::Table { masks: HashSet::new(), defaults: false };
     for (_, o) in objs.values() {
         walk(o, &mut |x| {
             let Some(d) = x.as_dict() else { return };
-            defaults |= d.has(b"DefaultGray") || d.has(b"DefaultRGB");
+            table.defaults |= d.has(b"DefaultGray") || d.has(b"DefaultRGB");
             for k in [&b"SMask"[..], b"Mask"] {
                 if let Some(Obj::Ref(n, _)) = d.get(k) {
-                    masks.insert(*n);
+                    table.masks.insert(*n);
                 }
             }
         });
     }
-    (!defaults).then_some(masks)
+    table
 }
 
 /// For each stream, by the index of the first stream identical to it (`same`, see `identical_streams`):
 /// whether the object table lets it be written as an Indexed image (`indexed::allowed`). Identical streams are
 /// encoded once, so one that may not holds the others back.
 fn may_index(streams: &[(u32, &Stream)], same: &[usize], objs: &BTreeMap<u32, (u16, Obj)>) -> Vec<bool> {
-    let Some(masks) = mask_targets(objs) else { return vec![false; streams.len()] };
+    // A file without an image that could become one has nothing to ask of the table.
+    if !streams.iter().any(|(_, s)| indexed::plain_image(&s.dict).is_some()) {
+        return vec![false; streams.len()];
+    }
+    let table = image_table(objs);
     let mut may = vec![true; streams.len()];
     for (&(n, s), &first) in streams.iter().zip(same) {
-        if !indexed::allowed(n, &s.dict, objs, &masks) {
+        if !indexed::allowed(n, &s.dict, objs, &table) {
             may[first] = false;
         }
     }
@@ -1298,13 +1299,10 @@ fn run_job(
     let resolve = |o: &Obj| job.resolve(o);
     let t = clock::now();
     let mut content = None;
-    let palette = job.palette;
-    #[cfg(test)]
-    let palette = check_tests::planner_fault(n, palette);
     let r = job.settings.as_ref().and_then(|o| {
         let o = Options {
             flate: flate::Options { shared: Some(store.clone()), ..o.flate.clone() },
-            palette: o.palette && palette,
+            palette: o.palette && job.palette,
             ..o.clone()
         };
         if job.xmp {
@@ -1401,7 +1399,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     let (same, unique, shares) = identical_streams(&streams);
     let settings = effort_plan(&streams, &unique, opt, input.len(), pool);
     // What only the whole table can say about an image that may become an Indexed one.
-    let palette = if opt.palette { may_index(&streams, &same, &objs) } else { Vec::new() };
+    let palette = if opt.palette { may_index(&streams, &same, &objs) } else { vec![false; streams.len()] };
     // Each job is given its stream, its settings and the few objects its encoders look up: nothing else of
     // the file.
     let jobs: Vec<Job> = unique
@@ -1414,7 +1412,9 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
             // (Whether it is depends on the dictionary alone, so identical streams agree.)
             let xmp = s.dict.name(b"Type") == Some(b"Metadata")
                 && crypt.is_some_and(|c| c.stream_method(n, &s.dict).is_ok_and(|m| m != Method::Identity));
-            let palette = palette.get(i).copied().unwrap_or(false);
+            let palette = palette[i];
+            #[cfg(test)]
+            let palette = check_tests::planner_fault(n, palette);
             Job { n, s, settings, xmp, shares, palette, refs: job_refs(&s.dict, &objs) }
         })
         .collect();
@@ -1848,8 +1848,8 @@ fn self_check(
     let all: Vec<(&u32, &(u16, Obj))> = objs.iter().collect();
     let mut order: Vec<usize> = (0..all.len()).collect();
     order.sort_by_key(|&k| (std::cmp::Reverse(if let Obj::Stream(s) = &all[k].1 .1 { s.data.len() } else { 0 }), k));
-    // The images that are masks of others, found when the first image written as an Indexed one asks.
-    let masks = std::sync::OnceLock::new();
+    // What the object table says about images, found when the first image written as an Indexed one asks.
+    let table = std::sync::OnceLock::new();
     // None: the stream needs more than `limit` decoded bytes (or doesn't decode within it). Ok(true): taken on
     // its job's check, without decoding.
     let check = |k: usize, limit: usize| -> Option<Result<bool, String>> {
@@ -1860,29 +1860,25 @@ fn self_check(
         }
         match (o, o2) {
             (Obj::Stream(s1), Obj::Stream(s2)) => {
-                if !same_except_encoding(&s1.dict, &s2.dict) {
-                    // One other change is fine: an image that may be an Indexed one, written as Indexed over
-                    // its own colour space with the same colour for every pixel (see `indexed`).
-                    let differs = || Err(format!("self-check: dictionary of stream {n} differs"));
-                    let masks: &Option<HashSet<u32>> = masks.get_or_init(|| mask_targets(objs));
-                    if !masks.as_ref().is_some_and(|m| indexed::allowed(*n, &s1.dict, objs, m)) {
+                // One other change of the dictionary is fine: an image that may be an Indexed one, written as
+                // Indexed over its own colour space with the same colour for every pixel (see `indexed`).
+                let recoloured = !same_except_encoding(&s1.dict, &s2.dict);
+                let differs = || Err(format!("self-check: dictionary of stream {n} differs"));
+                if recoloured {
+                    if !indexed::allowed(*n, &s1.dict, objs, table.get_or_init(|| image_table(objs))) {
                         return Some(differs());
                     }
-                    let (c1, c2) = (content_in(&s1.dict, &s1.data, limit), content_in(&s2.dict, &s2.data, limit));
-                    let (Some(c1), Some(c2)) = (c1, c2) else { return (limit == CHECK_LIMIT).then(differs) };
-                    let same =
-                        c1.1.is_empty() && c2.1.is_empty() && indexed::same_image(&s1.dict, &c1.0, &s2.dict, &c2.0);
-                    return Some(if same { Ok(false) } else { differs() });
-                }
-                if s1.data == s2.data
-                    && s1.dict.get(b"Filter") == s2.dict.get(b"Filter")
-                    && s1.dict.get(b"DecodeParms") == s2.dict.get(b"DecodeParms")
-                {
-                    return Some(Ok(false));
-                }
-                let proof = proven.binary_search_by_key(n, |&(m, _)| m).ok().and_then(|i| proven.get(i));
-                if proof.is_some_and(|(_, p)| p.holds(*n, s1, s2, objs)) {
-                    return Some(Ok(true));
+                } else {
+                    if s1.data == s2.data
+                        && s1.dict.get(b"Filter") == s2.dict.get(b"Filter")
+                        && s1.dict.get(b"DecodeParms") == s2.dict.get(b"DecodeParms")
+                    {
+                        return Some(Ok(false));
+                    }
+                    let proof = proven.binary_search_by_key(n, |&(m, _)| m).ok().and_then(|i| proven.get(i));
+                    if proof.is_some_and(|(_, p)| p.holds(*n, s1, s2, objs)) {
+                        return Some(Ok(true));
+                    }
                 }
                 let full = limit == CHECK_LIMIT;
                 let Some(c1) = content_in(&s1.dict, &s1.data, limit) else {
@@ -1891,6 +1887,11 @@ fn self_check(
                 let Some(c2) = content_in(&s2.dict, &s2.data, limit) else {
                     return full.then(|| Err(format!("self-check: stream {n} undecodable in output")));
                 };
+                if recoloured {
+                    let same =
+                        c1.1.is_empty() && c2.1.is_empty() && indexed::same_image(&s1.dict, &c1.0, &s2.dict, &c2.0);
+                    return Some(if same { Ok(false) } else { differs() });
+                }
                 // Different bytes are fine for a JPEG with other Huffman tables (the same coded symbols), for
                 // a CCITT image written as JBIG2 and for a 1-bit image under general filters written as JBIG2
                 // (the same pixels).
@@ -2796,7 +2797,7 @@ mod effort_tests {
 }
 
 /// The self-check against wrong streams planted on purpose: new data changed before its stream job checks it
-/// (an encoder fault), or after (a writer fault).
+/// (an encoder fault), or after (a writer fault), or a stream planned as what it may not be (a planner fault).
 #[cfg(test)]
 pub(super) mod check_tests {
     use super::*;
@@ -2837,6 +2838,8 @@ pub(super) mod check_tests {
         z[i] ^= 0x10;
     }
 
+    /// What the planner found for stream `n` (it may become Indexed, as far as the object table says), or
+    /// yes whatever it found when that fault is asked for.
     pub(super) fn planner_fault(n: u32, palette: bool) -> bool {
         palette || FAULT.get() == Some((Fault::Mask, n))
     }
@@ -3154,19 +3157,22 @@ pub(super) mod check_tests {
         let (four, _) = rewrite_with(&pdf, 4, None);
         assert!(four.data == clean.data);
         let mut faults = vec![
-            (Fault::Palette, 6, "dictionary"),
-            (Fault::EncoderContent, 6, "dictionary"),
-            (Fault::Writer, 6, "dictionary"),
-            (Fault::Filter, 6, "dictionary"),
+            (Fault::Palette, 6, "dictionary of stream 6 differs"),
+            (Fault::EncoderContent, 6, "dictionary of stream 6 differs"),
+            (Fault::Writer, 6, "stream 6 undecodable in output"),
+            (Fault::Filter, 6, "dictionary of stream 6 differs"),
             // The soft mask written as Indexed: the pixels are right, but it may not be.
-            (Fault::Mask, 7, "dictionary"),
+            (Fault::Mask, 7, "dictionary of stream 7 differs"),
         ];
         if cfg!(feature = "fax") {
-            faults.extend([(Fault::Pixel, 5, "content"), (Fault::Writer, 5, "content")]);
+            faults.extend([
+                (Fault::Pixel, 5, "content of stream 5 differs"),
+                (Fault::Writer, 5, "content of stream 5 differs"),
+            ]);
         }
         for (fault, n, what) in faults {
             let (r, _) = rewrite_with(&pdf, 1, Some((fault, n)));
-            let why = format!("self-check: {what} of stream {n} differs");
+            let why = format!("self-check: {what}");
             assert!(
                 matches!(&r.outcome, Outcome::Untouched(w) if *w == why),
                 "{fault:?} in stream {n}: {:?}",

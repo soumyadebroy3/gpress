@@ -5,8 +5,7 @@
 //! space /DeviceGray or /DeviceRGB, named in the image itself; general filters only (the caller's business);
 //! direct /Width and /Height that the samples fill exactly; no /Decode, colour-key /Mask, /ImageMask,
 //! /Interpolate or /Alternates; not the mask of another image (a soft mask must stay DeviceGray) and no soft
-//! mask with a /Matte colour, which is given in the image's colour space (`allowed`, which needs the object
-//! table); and few enough colours for an index to take fewer bits than the samples of a pixel: at most 256
+//! mask with a /Matte colour, which is given in the image's colour space; and few enough colours for an index to take fewer bits than the samples of a pixel: at most 256
 //! colours of DeviceRGB, 16 of DeviceGray. The indexes take 8, 4 or 2 bits for at most 256, 16 or 4 colours,
 //! rows padded to a byte (never 1 bit: PDFium 5.13 draws a 1-bit image that it scales another way than the
 //! 8-bit image it was made of). The table holds the colours in ascending order of their bytes, so it does not
@@ -16,7 +15,8 @@
 //! colours through such a colour space by different routes that round differently (Poppler 24.02 draws an
 //! Indexed image over an ICCBased space up to 9 levels of 255 away from the image it was made of, PDFium 5.13
 //! one over CalRGB). For the same reason no image of a file that names a default colour space (/DefaultGray,
-//! /DefaultRGB) is written this way (the caller's business too).
+//! /DefaultRGB), which gives DeviceGray and DeviceRGB the meaning of another colour space, is written this way.
+//! What only the object table can say (masks, default colour spaces) is `allowed`'s to answer, from a `Table`.
 
 use super::object::{Dict, Obj};
 use std::collections::{BTreeMap, HashSet};
@@ -57,23 +57,26 @@ pub fn plain_image(d: &Dict) -> Option<(usize, usize, usize)> {
     Some((m, size(b"Width")?, size(b"Height")?))
 }
 
-/// What only the object table can say about image `n` with dictionary `d`: it is not named as the /SMask or
-/// /Mask of another object (`masks`: every object that is), its /Mask, if any, is a stream (a stencil mask, not
-/// a colour key), and its /SMask, if any, is a stream without a /Matte colour.
-pub fn allowed(n: u32, d: &Dict, objs: &BTreeMap<u32, (u16, Obj)>, masks: &HashSet<u32>) -> bool {
-    // None: not there. Some(None): there, and not a reference to a stream.
-    let stream = |k: &[u8]| {
-        d.get(k).map(|v| match v {
-            Obj::Ref(r, _) => match objs.get(r) {
-                Some((_, Obj::Stream(s))) => Some(&s.dict),
-                _ => None,
-            },
-            _ => None,
-        })
+/// What the object table says that an image's own dictionary can't.
+pub struct Table {
+    /// The objects some dictionary names as its /SMask or /Mask: the images that are masks of others. Only
+    /// looked up, never listed, so its order reaches no output.
+    pub masks: HashSet<u32>,
+    /// Some dictionary names a default colour space (/DefaultGray or /DefaultRGB).
+    pub defaults: bool,
+}
+
+/// What only the object table can say about image `n` with dictionary `d`: the file names no default colour
+/// space, the image is not the /SMask or /Mask of another object, its /Mask, if any, is a stream (a stencil
+/// mask, not a colour key), and its /SMask, if any, is a stream without a /Matte colour.
+pub fn allowed(n: u32, d: &Dict, objs: &BTreeMap<u32, (u16, Obj)>, table: &Table) -> bool {
+    // Entry `k` is not there, or is a reference to a stream whose dictionary is `good`.
+    let stream = |k: &[u8], good: fn(&Dict) -> bool| match d.get(k) {
+        None => true,
+        Some(Obj::Ref(r, _)) => matches!(objs.get(r), Some((_, Obj::Stream(s))) if good(&s.dict)),
+        Some(_) => false,
     };
-    !masks.contains(&n)
-        && stream(b"Mask").is_none_or(|m| m.is_some())
-        && stream(b"SMask").is_none_or(|m| m.is_some_and(|m| !m.has(b"Matte")))
+    !table.defaults && !table.masks.contains(&n) && stream(b"Mask", |_| true) && stream(b"SMask", |m| !m.has(b"Matte"))
 }
 
 /// The image of dictionary `d` and samples `px` (its general filters decoded, a predictor undone) as an Indexed
@@ -85,10 +88,12 @@ pub fn convert(d: &Dict, px: &[u8]) -> Option<(Dict, Vec<u8>)> {
         return None;
     }
     let most = if m == 1 { 16 } else { 256 };
-    // The colours in ascending order. A run of one colour is looked up once.
-    let mut colours: Vec<&[u8]> = Vec::new();
-    let mut last: &[u8] = &[];
-    for c in px.chunks_exact(m) {
+    // A colour as a number, which sorts as its bytes do.
+    let key = |c: &[u8]| c.iter().fold(0u32, |k, &b| k << 8 | b as u32);
+    // The colours in ascending order. A run of one colour is looked up once (no colour is u32::MAX).
+    let mut colours: Vec<u32> = Vec::new();
+    let mut last = u32::MAX;
+    for c in px.chunks_exact(m).map(key) {
         if c == last {
             continue;
         }
@@ -103,10 +108,9 @@ pub fn convert(d: &Dict, px: &[u8]) -> Option<(Dict, Vec<u8>)> {
     let bits = index_bits(colours.len());
     let row = (w * bits).div_ceil(8);
     let mut out = vec![0u8; row * h];
-    let mut last: &[u8] = &[];
-    let mut index = 0u8;
+    let (mut last, mut index) = (u32::MAX, 0u8);
     for (line, packed) in px.chunks_exact(w * m).zip(out.chunks_exact_mut(row)) {
-        for (x, c) in line.chunks_exact(m).enumerate() {
+        for (x, c) in line.chunks_exact(m).map(key).enumerate() {
             if c != last {
                 last = c;
                 index = colours.binary_search(&c).ok()? as u8;
@@ -114,12 +118,12 @@ pub fn convert(d: &Dict, px: &[u8]) -> Option<(Dict, Vec<u8>)> {
             packed[x * bits / 8] |= index << (8 - bits - x * bits % 8);
         }
     }
+    let table: Vec<u8> = colours.iter().flat_map(|c| c.to_be_bytes().into_iter().skip(4 - m)).collect();
     let mut d2 = d.clone();
     d2.remove(b"Filter");
     d2.remove(b"DecodeParms");
     let base = d.get(b"ColorSpace")?.clone();
-    let space =
-        vec![Obj::Name(b"Indexed".to_vec()), base, Obj::Int(colours.len() as i64 - 1), Obj::Str(colours.concat())];
+    let space = vec![Obj::Name(b"Indexed".to_vec()), base, Obj::Int(colours.len() as i64 - 1), Obj::Str(table)];
     d2.set(b"ColorSpace", Obj::Array(space));
     d2.set(b"BitsPerComponent", Obj::Int(bits as i64));
     Some((d2, out))
@@ -277,7 +281,7 @@ mod tests {
         .into_iter()
         .map(|(n, o)| (n, (0, o)))
         .collect();
-        let masks: HashSet<u32> = [4].into();
+        let table = Table { masks: [4].into(), defaults: false };
         for (extra, n, ok) in [
             ("", 3, true),
             ("", 4, false), // the mask of another image
@@ -288,8 +292,11 @@ mod tests {
             ("/SMask 9 0 R", 3, false),
             ("/SMask /None", 3, false),
         ] {
-            assert_eq!(allowed(n, &image(extra, 10, 10), &objs, &masks), ok, "{extra} as object {n}");
+            assert_eq!(allowed(n, &image(extra, 10, 10), &objs, &table), ok, "{extra} as object {n}");
         }
+        // A default colour space somewhere in the file: no image at all.
+        let table = Table { defaults: true, ..table };
+        assert!(!allowed(3, &image("", 10, 10), &objs, &table));
     }
 
     #[test]
