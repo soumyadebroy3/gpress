@@ -19,7 +19,7 @@ _As on `main` at [ff930b8](https://github.com/soumyadebroy3/gpress/commit/ff930b
 | 80 | lossy | 111,270,471 (85.3%) | 17,737,195 (78.1%) | As 60, with photos down to 150 pixels per inch (those shown at 187.5 or more). |
 | 100 | lossy | 111,237,201 (85.3%) | 17,703,925 (77.9%) | As 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
 
-The sizes are all outputs together in bytes and their share of the input, one thread (`bench/effort_table.py`). A file gpress leaves untouched counts with its own size: 171 of the 907 test files. The lossy efforts change 4 of the 907. The sizes were measured before [#51](https://github.com/soumyadebroy3/gpress/pull/51), which changes the outputs of files that keep earlier saves (35 of the 907 at effort 0). The photo set is 23 files that `bench/photo_set.py` puts together to show the lossy step; bench/RESULTS.md, "Sizes at the six efforts", has a row per file of the photo set.
+The sizes are all outputs together in bytes and their share of the input, one thread (`bench/effort_table.py`). A file gpress leaves untouched counts with its own size: 171 of the 907 test files. The lossy efforts change 4 of the 907. The sizes and the 171 were measured before [#51](https://github.com/soumyadebroy3/gpress/pull/51), which writes a file that keeps earlier saves as its newest save alone. At effort 0 that makes the total about 7.5 MB (about 5.8 points of the input) smaller: 29 files shrink from 11,098,675 to 3,542,487 bytes, and 6 small ones are now left untouched (177 in all). The other efforts have not been measured again yet. The photo set is 23 files that `bench/photo_set.py` puts together to show the lossy step; bench/RESULTS.md, "Sizes at the six efforts", has a row per file of the photo set.
 
 ### Floors that hold at every lossy level
 
@@ -72,7 +72,7 @@ For measuring there is also `engine_effort` (`--engine-effort N`): the engine's 
 
 ## Settings: every tuning value by name
 
-The project's aim is no hard-coded tuning values: each value that decides whether or how a file is changed is becoming a setting (a "rule"), with today's value as its default and a lowest and a highest value. A rule's value out of range is refused, never clamped. Format facts, safety bounds on hostile input, limits that mirror what other PDF readers accept, and choices that exist in one variant only (listed in each group's pull request) stay fixed.
+The project's aim is no hard-coded tuning values: each value that decides whether or how a file is changed is becoming a setting (a "rule"), with today's value as its default and a lowest and a highest value. A rule's value out of range is refused, never clamped. Format facts, safety bounds on hostile input (except `lossy_walk_operators` and `lossy_walk_draws`, which can be lowered but not raised), limits that mirror what other PDF readers accept, and choices that exist in one variant only (listed in each group's pull request) stay fixed.
 
 | Group | Part of the engine | Rules | State |
 | --- | --- | ---: | --- |
