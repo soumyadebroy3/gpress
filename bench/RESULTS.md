@@ -660,7 +660,7 @@ some code is there only with two parts: the archive's fax parts and its decrypte
   the other two are left untouched in every build (one needs a password, one has a handler the engine doesn't
   take). On this sample it costs far more than it saves. It stays in the default and in `web`: without it an
   encrypted file the engine can rewrite is left untouched, so the web compressor would give a different
-  answer from the native tool for those files, and the web module is 33% under its budget with it.
+  answer from the native tool for those files, and the web module is 73% under its budget with it.
 - `archive` is most of the difference between the two modules (115,366 bytes of gzip), and Lepton (`existing`,
   135,910 bytes) would cost more than the three normal-PDF parts together (94,407); neither is in `web`.
 
