@@ -4,6 +4,10 @@ Every pull request merged into `main` (or into a branch that reached it), newest
 
 | Pull request | Change |
 | --- | --- |
+| [#49](https://github.com/soumyadebroy3/gpress/pull/49) | Rules by name: the lossy step's values, and one mechanism for every group |
+| [#51](https://github.com/soumyadebroy3/gpress/pull/51) | Drop earlier saves always: a file with incremental updates is written as its newest save |
+| [#50](https://github.com/soumyadebroy3/gpress/pull/50) | Read the AES vectors and the revision 6 hash straight from their bytes (3 CodeQL alerts) |
+| [#53](https://github.com/soumyadebroy3/gpress/pull/53) | Wiki: the pages in docs/wiki/, copied to the GitHub wiki on each push to main |
 | [#47](https://github.com/soumyadebroy3/gpress/pull/47) | Raise the web module's size target to 1 MB gzip |
 | [#43](https://github.com/soumyadebroy3/gpress/pull/43) | Effort levels: 0, 20 and 40 lossless, 60, 80 and 100 lossy, and a target size |
 | [#46](https://github.com/soumyadebroy3/gpress/pull/46) | Archive rules: every tuning value of the archive as a setting |

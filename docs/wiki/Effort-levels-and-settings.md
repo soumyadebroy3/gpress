@@ -1,4 +1,4 @@
-_As on `main` at [b404ec4](https://github.com/soumyadebroy3/gpress/commit/b404ec4) (2026-11-15). The README's [Effort levels](https://github.com/soumyadebroy3/gpress#effort-levels) and [Options](https://github.com/soumyadebroy3/gpress#options), and the [reference](https://github.com/soumyadebroy3/gpress/blob/main/docs/reference.md#options), have every detail._
+_As on `main` at [ff930b8](https://github.com/soumyadebroy3/gpress/commit/ff930b8) (2026-11-15). The README's [Effort levels](https://github.com/soumyadebroy3/gpress#effort-levels) and [Options](https://github.com/soumyadebroy3/gpress#options), and the [reference](https://github.com/soumyadebroy3/gpress/blob/main/docs/reference.md#options), have every detail._
 
 ## Effort levels
 
@@ -19,7 +19,7 @@ _As on `main` at [b404ec4](https://github.com/soumyadebroy3/gpress/commit/b404ec
 | 80 | lossy | 111,270,471 (85.3%) | 17,737,195 (78.1%) | As 60, with photos down to 150 pixels per inch (those shown at 187.5 or more). |
 | 100 | lossy | 111,237,201 (85.3%) | 17,703,925 (77.9%) | As 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
 
-The sizes are all outputs together in bytes and their share of the input, one thread (`bench/effort_table.py`). A file gpress leaves untouched counts with its own size: 171 of the 907 test files. The lossy efforts change 4 of the 907. The photo set is 23 files that `bench/photo_set.py` puts together to show the lossy step; bench/RESULTS.md, "Sizes at the six efforts", has a row per file of the photo set.
+The sizes are all outputs together in bytes and their share of the input, one thread (`bench/effort_table.py`). A file gpress leaves untouched counts with its own size: 171 of the 907 test files. The lossy efforts change 4 of the 907. The sizes and the 171 were measured before [#51](https://github.com/soumyadebroy3/gpress/pull/51), which writes a file that keeps earlier saves as its newest save alone. At effort 0 that makes the total about 7.5 MB (about 5.8 points of the input) smaller: 29 files shrink from 11,098,675 to 3,542,487 bytes, and 6 small ones are now left untouched (177 in all). The other efforts have not been measured again yet. The photo set is 23 files that `bench/photo_set.py` puts together to show the lossy step; bench/RESULTS.md, "Sizes at the six efforts", has a row per file of the photo set.
 
 ### Floors that hold at every lossy level
 
@@ -27,7 +27,7 @@ The sizes are all outputs together in bytes and their share of the input, one th
 - Only 8-bit grey and RGB images of more than 65,536 pixels are touched. 1-bit, indexed, CMYK and 16-bit images, image masks, small images (logos, icons) and a few other kinds are never changed.
 - A lossy result is kept only when it is at most nine tenths of the image's lossless size and, for a JPEG, only when it decodes close to the samples it was made from. Otherwise the image goes through the lossless path.
 - A file the safety gate leaves untouched (signed, certified, PDF/A, PDF/X, needing a password...) stays untouched, and an encrypted file keeps its encryption.
-- A file that keeps earlier saves keeps them all, written losslessly (with `--drop-history` the step works on the newest save, which then goes on alone).
+- A file that keeps earlier saves (incremental updates) is written as its newest save alone, which the step works on ([#51](https://github.com/soumyadebroy3/gpress/pull/51)).
 - A file whose object numbers are too high for the shorter lossy output (qpdf 12 reads an object only when its number is below a third of the file's length) gets that of the strongest lossy level below that is long enough (so 80 and 100 can give a lower level's output), or else the lossless one (at once when `--photo-ppi`, `--art-ppi` or `--jpeg-quality` make the lossy settings none of the levels').
 
 The floors, the 5/4, the 65,536 pixels and the nine tenths above are defaults: the rules `lossy_photo_floor` (down to 72), `lossy_art_floor` (down to 150), `lossy_resample_margin`, `lossy_min_pixels` and `lossy_min_saving` move them (see [Settings](#settings-every-tuning-value-by-name) below).
@@ -66,14 +66,13 @@ The library takes all of them at once as `lossy` (`Lossy::level(1)`, `(2)` and `
 | `max_len` | `--max-len BYTES` | 1 GiB | Expand: an archive declaring a larger original is refused before anything is decoded. |
 | `max_decoded` | `--max-decoded BYTES` | 256 MiB | Archive: the most decoded bytes the parts of one archive may claim, both ways. |
 | `respect_conformance` | `--ignore-conformance` | on | Normal PDF: leave PDF/A, PDF/X, signed, certified and usage-rights files untouched. |
-| `drop_history` | `--drop-history` | off | Normal PDF: write only the newest save of a file that keeps earlier ones. Off, every save is kept. Planned: only the newest save, always, and no option (see [Status and roadmap](Status-and-roadmap)). |
 | `jpeg_tables`, `jbig2`, `palette`, `flate_over_jpeg` | `--no-jpeg-tables`, `--no-jbig2`, `--no-palette`, `--no-flate-over-jpeg` | on | Normal PDF: turn single steps off. |
 
 For measuring there is also `engine_effort` (`--engine-effort N`): the engine's own lossless level, 0 to 100. Efforts 0 and 20 are its levels 0 and 20, and 40 and above its level 100.
 
 ## Settings: every tuning value by name
 
-The project's aim is no hard-coded tuning values: each value that decides whether or how a file is changed is becoming a setting (a "rule"), with today's value as its default and a lowest and a highest value. A rule's value out of range is refused, never clamped. Format facts, safety bounds on hostile input, limits that mirror what other PDF readers accept, and choices that exist in one variant only (listed in each group's pull request) stay fixed.
+The project's aim is no hard-coded tuning values: each value that decides whether or how a file is changed is becoming a setting (a "rule"), with today's value as its default and a lowest and a highest value. A rule's value out of range is refused, never clamped. Format facts, safety bounds on hostile input (except `lossy_walk_operators` and `lossy_walk_draws`, which can be lowered but not raised), limits that mirror what other PDF readers accept, and choices that exist in one variant only (listed in each group's pull request) stay fixed.
 
 | Group | Part of the engine | Rules | State |
 | --- | --- | ---: | --- |
