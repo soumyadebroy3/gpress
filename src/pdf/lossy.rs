@@ -816,4 +816,26 @@ mod tests {
     fn worth_is_a_tenth() {
         assert!(worth(90, 100) && !worth(91, 100) && worth(0, 0) && !worth(1, 1));
     }
+
+    /// The quick Flate follows the caller's `flate_` rules; unset, it gives the bytes of `flate::Options::effort(0)`
+    /// at the image level, as before the rules reached it.
+    #[test]
+    fn quick_flate_follows_the_flate_rules() {
+        let (w, h) = (320, 240);
+        let px = photo(w, h);
+        let opt = Options::default();
+        let (parms, z) = quick_flate(&px, w, 1, &opt);
+        let bands = predictor_sample(h, w, 0, &opt.rules).unwrap_or_else(|| vec![(0, h)]);
+        let data = match images::estimate_choice(&px, w, 1, 8, &bands, &opt.rules) {
+            Some(how) => images::png_filter(&px, w, 1, how),
+            None => px.clone(),
+        };
+        let before = flate::Options { fast: image_level(0, &opt.rules), ..flate::Options::effort(0) };
+        assert!(z == flate::deflate_zlib(&data, &before), "unset: other bytes");
+        // Level 7, the image level at 0, taking the longest match at once instead of looking two ahead.
+        let mut set = opt.clone();
+        assert!(set.flate.rules.set("level7_mode", 0));
+        let (parms_set, z_set) = quick_flate(&px, w, 1, &set);
+        assert!(parms_set == parms && z_set != z, "a flate_ rule set: the same bytes");
+    }
 }
