@@ -595,9 +595,9 @@ Main at 2bca97c, the code this step was added to, built the same day with the sa
 714,485 bytes, 270,187 of gzip, and the whole module 1,046,990, 385,927 of gzip. So the step costs the web
 module 45,488 bytes of gzip (16.8%) and the whole module 46,527 (12.1%).
 
-The target for the web module is 400 KB gzip (400,000 bytes): at 359,089 bytes it is 40,911 bytes (10%) under
-it (267,937 bytes and 132,063 under in the record above). The whole module has no budget; at 482,899 bytes it
-is 82,899 over that number (383,303 in the record above). Built at opt-level "s", before the choice below, the web
+The target for the web module is 1 MB gzip (1,000,000 bytes; 400,000 until 2026-11-15): at 359,089 bytes it is
+640,911 bytes (64%) under it (267,937 bytes and 732,063 under in the record above). The whole module has no
+budget (482,899 bytes; 383,303 in the record above). Built at opt-level "s", before the choice below, the web
 module was 185,288 bytes of gzip (on f34ba33, before main's later changes): opt-level 3 added 24% there.
 Lepton adds 135,910 bytes of gzip to the module with every part. The static library carries Rust's standard
 library whole, so it is far larger than what a program linked with it gets. The module grows with main: the
@@ -607,7 +607,7 @@ with main's normal-PDF code the same way: it was 229,312 bytes of gzip on main a
 
 The budget: CI's WebAssembly job runs `python3 -I bench/sizes.py check`, which builds the web module as the
 package does and fails when its gzip size is more than 5% over the recorded one (377,043 bytes today) or over
-400,000 bytes. A growth that is wanted is recorded with `measure --features web`. When the module is more than
+1,000,000 bytes. A growth that is wanted is recorded with `measure --features web`. When the module is more than
 5% under the record (under 341,134 bytes today), the check passes with a warning to record the new size, since
 the 5% is counted from the record and would otherwise allow more. The whole module (`dist/gpress.wasm`) has no
 budget of its own; `measure --features default` records it with the other sets.
@@ -660,7 +660,7 @@ some code is there only with two parts: the archive's fax parts and its decrypte
   the other two are left untouched in every build (one needs a password, one has a handler the engine doesn't
   take). On this sample it costs far more than it saves. It stays in the default and in `web`: without it an
   encrypted file the engine can rewrite is left untouched, so the web compressor would give a different
-  answer from the native tool for those files, and the web module is 33% under its budget with it.
+  answer from the native tool for those files, and the web module is 73% under its budget with it.
 - `archive` is most of the difference between the two modules (115,366 bytes of gzip), and Lepton (`existing`,
   135,910 bytes) would cost more than the three normal-PDF parts together (94,407); neither is in `web`.
 
