@@ -508,7 +508,7 @@ cargo deny check                                  # and python3 -I bench/check_d
 cargo build --profile wasm -p gpress-wasm --target wasm32-unknown-unknown   # needs: rustup target add wasm32-unknown-unknown
 (cd crates/gpress-wasm/js && npm ci && npm run build && npm test)      # the npm package into js/dist/ (with wasm-opt if on PATH)
 (cd crates/gpress-wasm/js && npm run test:web)    # the same tests on the web module
-python3 -I bench/sizes.py check                   # fails if the web module's gzip size is over 400 KB or more than 5% over bench/sizes.json; needs wasm-opt
+python3 -I bench/sizes.py check                   # fails if the web module's gzip size is over 1 MB or more than 5% over bench/sizes.json; needs wasm-opt
 (cd fuzz && cargo +nightly fuzz run expand -- -max_total_time=600)    # needs cargo-fuzz; also inflate, pdf_optimize
 ```
 
