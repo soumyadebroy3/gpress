@@ -142,14 +142,13 @@ fn settled_doc() -> Vec<u8> {
 
 /// One page that draws a grey image of 8 bits a sample (object 5).
 fn image_doc(width: usize, px: &[u8]) -> Vec<u8> {
-    image_doc_as(width, px.len() / width, "/Filter /FlateDecode", &flate(px, 1))
+    image_doc_as(width, px.len() / width, "/BitsPerComponent 8 /Filter /FlateDecode", &flate(px, 1))
 }
 
-/// `image_doc` with the image's data and filter given.
-fn image_doc_as(width: usize, height: usize, filter: &str, data: &[u8]) -> Vec<u8> {
-    let image = format!(
-        "/Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /DeviceGray /BitsPerComponent 8 {filter}"
-    );
+/// `image_doc` with the image's data and the rest of its dictionary (`rest`) given.
+fn image_doc_as(width: usize, height: usize, rest: &str, data: &[u8]) -> Vec<u8> {
+    let image =
+        format!("/Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /DeviceGray {rest}");
     pdf(&[
         PAGES[0].to_vec(),
         PAGES[1].to_vec(),
@@ -569,14 +568,50 @@ fn every_rule_a_caller_can_see_has_a_value_that_changes_the_output() {
     }
 }
 
+/// A page of "text" in 1 bit a pixel, 8 to a byte: rows of letter-sized black blobs on white, as
+/// `common::scan` draws them.
+#[cfg(feature = "fax")]
+fn scan_bits(w: usize, h: usize) -> Vec<u8> {
+    let mut next = rng(7);
+    let row = w.div_ceil(8);
+    let mut bits = vec![0xff; row * h];
+    for y in (10..h - 14).step_by(18) {
+        for x in (8..w - 9).step_by(9) {
+            if next().is_multiple_of(6) {
+                continue;
+            }
+            let (bw, bh) = (3 + next() as usize % 5, 6 + next() as usize % 6);
+            for yy in y..y + bh {
+                for xx in x..x + bw {
+                    if !next().is_multiple_of(9) {
+                        bits[yy * row + xx / 8] &= !(0x80 >> (xx % 8));
+                    }
+                }
+            }
+        }
+    }
+    bits
+}
+
 /// `min_stream_saving` holds for the forms of an image too: a grey image of two values as Indexed (stored
-/// without a filter, so that the form is smaller even when no new encoding is allowed), and a fax image as JBIG2.
+/// without a filter, so that the form is smaller even when no new encoding is allowed), a 1-bit image without a
+/// filter and a fax image as JBIG2. It holds where the dictionaries are counted too: with a 20,000-byte
+/// /DecodeParms on the Indexed image, and on one the fast path gives a predictor, neither is given at the rule's
+/// highest value.
 #[test]
 fn no_form_of_an_image_saves_less_than_min_stream_saving() {
     let mut next = rng(5);
     let two: Vec<u8> = (0..200 * 100).map(|_| if next() & 1 == 0 { 40 } else { 200 }).collect();
+    let smooth: Vec<u8> = (0..200 * 100).map(|k| (k % 200 / 2 + k / 200) as u8).collect();
+    let junk = format!("/BitsPerComponent 8 /Filter /FlateDecode /DecodeParms << /Junk ({}) >>", "x".repeat(20_000));
     #[allow(unused_mut)]
-    let mut docs = vec![(image_doc_as(200, 100, "", &two), &b"/Indexed"[..])];
+    let mut docs = vec![
+        (image_doc_as(200, 100, "/BitsPerComponent 8", &two), &b"/Indexed"[..]),
+        (image_doc_as(200, 100, &junk, &flate(&two, 1)), b"/Indexed"),
+        (image_doc_as(200, 100, &junk, &flate(&smooth, 1)), b"/Predictor"),
+    ];
+    #[cfg(feature = "fax")]
+    docs.push((image_doc_as(600, 400, "/BitsPerComponent 1", &scan_bits(600, 400)), b"/JBIG2Decode"));
     #[cfg(all(feature = "fax", feature = "encryption"))]
     docs.push((fax_doc(), b"/JBIG2Decode"));
     for (doc, form) in docs {

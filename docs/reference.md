@@ -530,7 +530,7 @@ fast path does at engine level 0, so `rewrite_image_level_0` and the rules of th
 | Rule | Default | Lowest | Highest | What it decides |
 | --- | ---: | ---: | ---: | --- |
 | `rewrite_min_file_saving` | 1 | 1 | 1,099,511,627,776 | The rewritten file is returned only when it is at least this many bytes smaller than the input; else the input comes back untouched. |
-| `rewrite_min_stream_saving` | 1 | 1 | 1,099,511,627,776 | A stream gets a new encoding only when its new data is at least this many bytes smaller than its stored data (with the stream's dictionary counted where the fast path chooses an image's predictor, and for the JBIG2 and Indexed forms of an image). |
+| `rewrite_min_stream_saving` | 1 | 1 | 1,099,511,627,776 | A stream gets a new encoding only when one saves at least this many bytes of its stored data, or of the whole stream (the dictionaries counted) where the fast path chooses an image's predictor and where an image stored without an image codec becomes JBIG2 or Indexed; an encoding found after that one replaces it only when smaller. |
 | `rewrite_flate_over_image_min_saving` | 1 | 0 | 100 | Our Flate goes in front of an image codec that had no general filter (a JPEG, say) only when it saves more than this percent (over the JPEG with its new tables, when there is one). |
 | `rewrite_jpeg_min_saving` | 1 | 1 | 1,099,511,627,776 | A JPEG with new Huffman tables is taken only when it is at least this many bytes smaller. |
 | `rewrite_jpeg_code_orders` | 7 | 1 | 7 | Which assignments of code words are tried for each JPEG scan (bits: 1 by symbol value, 2 most frequent first, 4 fewest one bits); the one with the fewest 0xFF bytes is written, the first of equals. |
@@ -643,8 +643,8 @@ Why the ranges end where they do:
 - `rewrite_bridge_growth` is at least 100%, so the bridge's budget does not shrink as the level grows, and
   `rewrite_work_cost_` at least 100%, so no step of 20 costs less than the quick settings. Larger budgets cost
   time, not safety: every stream is still held to `max_stream`, and on a native build `time_budget` ends a run
-  that takes too long (the WebAssembly module reads no clock: its host bounds the time, by running it in a
-  worker).
+  that takes too long (the WebAssembly module reads no clock: bounding its time is left to the host, for
+  example by running it in a Web Worker it can end).
 - `rewrite_full_from`, `rewrite_trial_predictors_from` and `rewrite_bridge_from` are engine levels; 101 and 20
   mean "never". `rewrite_bridge_from` is at least 1: the quick settings that engine levels 20 and above give a
   stream count as level 0, and must stay off the bridge. Engine level 20 itself (the fast encoder below it) and the bands of 20 stay fixed: the tables

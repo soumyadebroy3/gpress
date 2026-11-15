@@ -41,8 +41,9 @@ rules! {
     // The whole file: returned only when it saves at least this many bytes.
     min_file_saving = 1, 1, ANY;
 
-    // A stream: a new encoding must save at least this many bytes of stored data (with the stream's dictionary
-    // counted where the fast path chooses an image's predictor, and for the JBIG2 and Indexed forms of an image).
+    // A stream: a new encoding is written only when one saves at least this many bytes of its stored data, or of the
+    // whole stream (the dictionaries counted) where the fast path chooses an image's predictor and where an image
+    // stored without an image codec becomes JBIG2 or Indexed; one found after that replaces it only when smaller.
     min_stream_saving = 1, 1, ANY;
     // Flate in front of an image codec that had no general filter: only when it saves more than this
     // percentage (over the JPEG with its new tables, when there is one).

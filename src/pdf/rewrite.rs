@@ -526,8 +526,10 @@ fn reencode(
     if s.dict.name(b"Type") == Some(b"Metadata") || s.dict.has(b"F") {
         return None; // XMP stays readable by other tools; external file streams are left alone
     }
-    // Every new encoding must be smaller than this: it saves `min_stream_saving` bytes.
-    let need = s.data.len().saturating_sub(opt.rewrite_rules.size(R::min_stream_saving) - 1);
+    // A new encoding is taken only when one saves `min_stream_saving` bytes (its data under `need`, or where the
+    // dictionaries are counted, its whole stream under the stored one's less `cut`); a later one only when smaller.
+    let cut = opt.rewrite_rules.size(R::min_stream_saving) - 1;
+    let need = s.data.len().saturating_sub(cut);
     // A scanned black-and-white image: JBIG2 instead of CCITT fax when that is clearly smaller (same pixels).
     if opt.jbig2 {
         if let Some((d, z)) = crate::fax::pdf::jbig2_candidate(s, resolve, opt.rewrite_rules.at(R::jbig2_min_saving))
@@ -678,8 +680,10 @@ fn reencode(
     // general filters, our Flate over `data` was made above.)
     let searched = rest.is_empty() && data.len() <= opt.rewrite_rules.size(R::max_predictor_image);
     if searched && opt.flate.fast > 0 && (opt.effort as u64) < opt.rewrite_rules.at(R::trial_predictors_from) {
-        let dict = best.as_ref().map_or(&s.dict, |b| &b.0);
-        let plain = best_len + to_bytes(&Obj::Dict(dict.clone())).len();
+        let plain = match &best {
+            Some(b) => best_len + to_bytes(&Obj::Dict(b.0.clone())).len(),
+            None => (s.data.len() + to_bytes(&Obj::Dict(s.dict.clone())).len()).saturating_sub(cut),
+        };
         if let Some((d, z)) = repredict_fast(s, &data, carried.as_ref(), opt, resolve, plain) {
             best = Some((d, z));
             best_retabled = false;
@@ -722,8 +726,8 @@ fn reencode(
     };
     if let Some(px) = samples.as_deref().filter(|_| form) {
         // (`best_len` is not the size of a `best` the predictor search gave.)
-        let other = best.as_ref().map_or((need, &s.dict), |b| (b.1.len(), &b.0));
-        if let Some((d, z, c)) = exact_form(s, px, opt, resolve, other) {
+        let (other, cut) = best.as_ref().map_or(((s.data.len(), &s.dict), cut), |b| ((b.1.len(), &b.0), 0));
+        if let Some((d, z, c)) = exact_form(s, px, opt, resolve, other, cut) {
             best = Some((d, z));
             change = c;
         }
@@ -772,15 +776,16 @@ fn plain_encoding(d: &Dict) -> bool {
 /// when that is at least 5% (the rule `jbig2_min_saving`) smaller than the best other candidate (`fax::pdf::bilevel_candidate`), or an 8-bit
 /// image of few colours as an Indexed image (`indexed::convert`), which then gets the Flate and predictor
 /// search of any other image. `px`: the stream's content (its filters decoded, a predictor undone); `other`:
-/// the data size and the dictionary of the best candidate so far (with none, the stored stream's, less what
-/// `min_stream_saving` asks it to save). A form is given only when it is smaller with its dictionary counted
-/// (an Indexed image's holds its colour table).
+/// the data size and the dictionary of the best candidate so far, or of the stored stream. A form is given
+/// only when it is smaller with its dictionary counted (an Indexed image's holds its colour table), by more
+/// than `cut` bytes (what `min_stream_saving` asks beyond smaller, when `other` is the stored stream).
 fn exact_form(
     s: &Stream,
     px: &[u8],
     opt: &Options,
     resolve: &dyn Fn(&Obj) -> Option<Obj>,
     other: (usize, &Dict),
+    cut: usize,
 ) -> Option<Reencoded> {
     let min_saving = opt.rewrite_rules.at(R::jbig2_min_saving);
     let (d, z, change) = if let Some((d, z)) =
@@ -799,7 +804,7 @@ fn exact_form(
         (d, z, Change { indexed: true, ..Change::default() })
     };
     let whole = |len: usize, d: &Dict| len + to_bytes(&Obj::Dict(d.clone())).len();
-    (whole(z.len(), &d) < whole(other.0, other.1)).then_some((d, z, change))
+    (whole(z.len(), &d) < whole(other.0, other.1).saturating_sub(cut)).then_some((d, z, change))
 }
 
 /// Whether a JPEG's original bytes (`original` of them) get a Flate pass of their own: when Flate took the
