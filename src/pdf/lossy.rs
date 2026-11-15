@@ -111,7 +111,8 @@ use super::filters::{self, chain, decode_stage, is_general, Stage};
 use super::images;
 use super::object::{Dict, Obj, Stream};
 use super::place::{self, Shown};
-use super::rewrite::{image_level, png_parms, predictor_sample, Options};
+use super::rewrite::{image_level, png_parms, sample_bands, Options};
+use super::rules::Rule as R;
 use crate::clock::Deadline;
 use crate::flate;
 use crate::par;
@@ -388,20 +389,21 @@ fn new_dict(d: &Dict, w: usize, h: usize, filter: &[u8], parms: Option<Dict>, le
 }
 
 /// Samples (rows of `w` pixels of `ch` bytes) as the fast path stores an image: Flate at effort 0's level for
-/// images, with the PNG predictor an estimate prefers (as `rewrite::repredict_fast` chooses it). Gives the
-/// /DecodeParms, when there is a predictor, and the data.
+/// images, with the PNG predictor an estimate prefers (as `rewrite::repredict_fast` chooses it, by the same
+/// rules). Gives the /DecodeParms, when there is a predictor, and the data.
 fn quick_flate(px: &[u8], w: usize, ch: usize, opt: &Options) -> (Option<Dict>, Vec<u8>) {
     let g = images::Geometry { colors: ch, bpc: 8, columns: w };
     let (row, bpp) = (g.row(), g.bpp());
     let rows = px.len() / row;
-    let bands = predictor_sample(rows, row, 0, &opt.rewrite_rules).unwrap_or_else(|| vec![(0, rows)]);
+    let rules = &*opt.rewrite_rules;
+    let bands = sample_bands(rows, row, rules.size(R::fast_predictor_sample), rules).unwrap_or_else(|| vec![(0, rows)]);
     let settings = flate::Options {
-        fast: image_level(0, &opt.rewrite_rules),
+        fast: image_level(0, rules),
         shared: opt.flate.shared.clone(),
         deadline: opt.deadline,
         ..flate::Options::effort_with(0, &opt.flate.rules)
     };
-    match images::estimate_choice(px, row, bpp, 8, &bands, &opt.rewrite_rules) {
+    match images::estimate_choice(px, row, bpp, 8, &bands, rules) {
         Some(how) => (Some(png_parms(&g)), flate::deflate_zlib(&images::png_filter(px, row, bpp, how), &settings)),
         None => (None, flate::deflate_zlib(px, &settings)),
     }
@@ -959,12 +961,13 @@ mod tests {
         let px = photo(w, h);
         let opt = Options::default();
         let (parms, z) = quick_flate(&px, w, 1, &opt);
-        let bands = predictor_sample(h, w, 0, &opt.rewrite_rules).unwrap_or_else(|| vec![(0, h)]);
-        let data = match images::estimate_choice(&px, w, 1, 8, &bands, &opt.rewrite_rules) {
+        let rules = &*opt.rewrite_rules;
+        let bands = sample_bands(h, w, rules.size(R::fast_predictor_sample), rules).unwrap_or_else(|| vec![(0, h)]);
+        let data = match images::estimate_choice(&px, w, 1, 8, &bands, rules) {
             Some(how) => images::png_filter(&px, w, 1, how),
             None => px.clone(),
         };
-        let before = flate::Options { fast: image_level(0, &opt.rewrite_rules), ..flate::Options::effort(0) };
+        let before = flate::Options { fast: image_level(0, rules), ..flate::Options::effort(0) };
         assert!(z == flate::deflate_zlib(&data, &before), "unset: other bytes");
         // Level 7, the image level at 0, taking the longest match at once instead of looking two ahead.
         let mut set = opt.clone();

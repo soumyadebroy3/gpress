@@ -42,7 +42,7 @@ rules! {
     min_file_saving = 1, 1, ANY;
 
     // A stream: a new encoding must save at least this many bytes of stored data (with the stream's dictionary
-    // counted where the fast path chooses an image's predictor).
+    // counted where the fast path chooses an image's predictor, and for the JBIG2 and Indexed forms of an image).
     min_stream_saving = 1, 1, ANY;
     // Flate in front of an image codec that had no general filter: only when it saves more than this
     // percentage (over the JPEG with its new tables, when there is one).
@@ -57,7 +57,8 @@ rules! {
     jpeg_second_pass_flate_gain = 10, 0, 100;
     // and the new tables took this percentage off the original.
     jpeg_second_pass_table_gain = 10, 0, 100;
-    // A fax image becomes JBIG2 only when that saves at least this percentage (and at least a byte).
+    // A fax image, or a 1-bit image stored without an image codec, becomes JBIG2 only when that saves at least
+    // this percentage (and at least a byte) over its best other encoding.
     jbig2_min_saving = 5, 0, 100;
 
     // Image predictors. An image that decodes to more than this gets no predictor search. The search holds
@@ -81,7 +82,8 @@ rules! {
     // Bytes of an image the estimate of the fast path looks at.
     fast_predictor_sample = 64 << 10, 0, ANY;
     // Bytes of an image the candidates are ranked on, for the efforts 0 to 19, 20 to 39, 40 to 59, 60 to 79
-    // and 80 to 99.
+    // and 80 to 99. The quick settings that the efforts from 20 give a stream over their budget carry effort 0,
+    // so they rank on `predictor_sample_0`.
     predictor_sample_0 = 64 << 10, 0, ANY;
     predictor_sample_20 = 128 << 10, 0, ANY;
     predictor_sample_40 = 256 << 10, 0, ANY;
@@ -112,8 +114,9 @@ rules! {
     // an estimate.
     trial_predictors_from = 10, 0, 20;
     // From this effort on, below 20, the streams that take the most room get the strong encoder's quick
-    // settings within a budget (20: never).
-    bridge_from = 10, 0, 20;
+    // settings within a budget (20: never). At least 1: the quick settings the efforts from 20 give carry
+    // effort 0, and must stay off the bridge.
+    bridge_from = 10, 1, 20;
     // That budget at `bridge_from`, in 256ths of the file's size,
     bridge_start = 16, 0, 1 << 20;
     // and what it is multiplied by for each point of effort above, in percent.

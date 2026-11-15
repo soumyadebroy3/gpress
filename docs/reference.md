@@ -483,18 +483,23 @@ is safe: the output is still read back and compared with the input, returned onl
 for any thread count. The rewrite works at an engine level, which the effort decides (0, 20 and 100 for
 efforts 0, 20 and 40 and up, see [Effort levels](#effort-levels)); the levels in between are reached only with
 `engine_effort`. The rules of a table (`rewrite_image_level_`, `rewrite_big_level_`,
-`rewrite_predictor_sample_`, `rewrite_work_cost_`) are one rule per engine level or band of 20 levels.
+`rewrite_predictor_sample_`, `rewrite_work_cost_`) are one rule per engine level or band of 20 levels. From
+engine level 20 on, a stream over the level's budget gets the quick settings, which count as engine level 0
+(`rewrite_predictor_sample_0`, for one). The lossy step (efforts 60 to 100) stores an image it changes as the
+fast path does at engine level 0, so `rewrite_image_level_0` and the rules of the fast path's estimate
+(`rewrite_fast_predictor_sample`, `rewrite_predictor_sample_bands`, `rewrite_fast_predictor_candidates`,
+`rewrite_fast_predictor_min_bits`, `rewrite_row_predictor_rule`) decide that too.
 
 | Rule | Default | Lowest | Highest | What it decides |
 | --- | ---: | ---: | ---: | --- |
 | `rewrite_min_file_saving` | 1 | 1 | 1,099,511,627,776 | The rewritten file is returned only when it is at least this many bytes smaller than the input; else the input comes back untouched. |
-| `rewrite_min_stream_saving` | 1 | 1 | 1,099,511,627,776 | A stream gets a new encoding only when its new data is at least this many bytes smaller than its stored data (with the stream's dictionary counted where the fast path chooses an image's predictor). |
+| `rewrite_min_stream_saving` | 1 | 1 | 1,099,511,627,776 | A stream gets a new encoding only when its new data is at least this many bytes smaller than its stored data (with the stream's dictionary counted where the fast path chooses an image's predictor, and for the JBIG2 and Indexed forms of an image). |
 | `rewrite_flate_over_image_min_saving` | 1 | 0 | 100 | Our Flate goes in front of an image codec that had no general filter (a JPEG, say) only when it saves more than this percent (over the JPEG with its new tables, when there is one). |
 | `rewrite_jpeg_min_saving` | 1 | 1 | 1,099,511,627,776 | A JPEG with new Huffman tables is taken only when it is at least this many bytes smaller. |
 | `rewrite_jpeg_code_orders` | 7 | 1 | 7 | Which assignments of code words are tried for each JPEG scan (bits: 1 by symbol value, 2 most frequent first, 4 fewest one bits); the one with the fewest 0xFF bytes is written, the first of equals. |
 | `rewrite_jpeg_second_pass_flate_gain` | 10 | 0 | 100 | From `rewrite_full_from`, a JPEG's original bytes get a Flate pass of their own only when Flate took this percent off the JPEG with its new tables, |
 | `rewrite_jpeg_second_pass_table_gain` | 10 | 0 | 100 | and the new tables took this percent off the original. |
-| `rewrite_jbig2_min_saving` | 5 | 0 | 100 | A fax (CCITT) image becomes JBIG2 only when that is at least this percent smaller, and at least a byte. |
+| `rewrite_jbig2_min_saving` | 5 | 0 | 100 | A fax (CCITT) image, or a 1-bit image stored without an image codec, becomes JBIG2 only when that is at least this percent smaller than its best other encoding, and at least a byte. |
 | `rewrite_max_predictor_image` | 50,331,648 | 0 | 50,331,648 | An image that decodes to more gets no predictor search. |
 | `rewrite_min_predictor_image` | 1,024 | 0 | 1,099,511,627,776 | An image with fewer bytes of samples gets no predictor search. |
 | `rewrite_predictor_candidates` | 55 | 0 | 63 | The predictors ranked by encoding them (bits: 1 none, 2 Sub, 4 Up, 8 Average, 16 Paeth, 32 a type for each row), ranked in the order none, each row, Up, Sub, Paeth, Average; the first of equals wins. 55 is all but Average. |
@@ -503,7 +508,7 @@ efforts 0, 20 and 40 and up, see [Effort levels](#effort-levels)); the levels in
 | `rewrite_row_predictor_rule` | 0 | 0 | 1 | How the type of each row is chosen: 0 the smallest sum of absolute residuals (libpng's way), 1 the fewest bits by an order-0 estimate of the row's residuals. |
 | `rewrite_predictor_sample_bands` | 8 | 1 | 1,024 | The rows the predictors are ranked on are taken as this many bands spread over the image. |
 | `rewrite_fast_predictor_sample` | 65,536 | 0 | 1,099,511,627,776 | Bytes of an image the fast path's estimate looks at. |
-| `rewrite_predictor_sample_0` | 65,536 | 0 | 1,099,511,627,776 | Bytes of an image the predictors are ranked on, when they are ranked by encoding them, at engine levels 0 to 19. The whole image when it is smaller, and from `rewrite_full_from` on. |
+| `rewrite_predictor_sample_0` | 65,536 | 0 | 1,099,511,627,776 | Bytes of an image the predictors are ranked on, when they are ranked by encoding them, at engine levels 0 to 19 (and with the quick settings that higher levels give a stream). The whole image when it is smaller, and from `rewrite_full_from` on. |
 | `rewrite_predictor_sample_20` | 131,072 | 0 | 1,099,511,627,776 | The same at engine levels 20 to 39. |
 | `rewrite_predictor_sample_40` | 262,144 | 0 | 1,099,511,627,776 | The same at engine levels 40 to 59. |
 | `rewrite_predictor_sample_60` | 524,288 | 0 | 1,099,511,627,776 | The same at engine levels 60 to 79. |
@@ -516,7 +521,7 @@ efforts 0, 20 and 40 and up, see [Effort levels](#effort-levels)); the levels in
 | `rewrite_string_form` | 0 | 0 | 1 | A string is written in the shorter of its two forms (0; a literal on a tie) or in hexadecimal (1). |
 | `rewrite_full_from` | 100 | 0 | 101 | From this engine level on there are no budgets: every stream gets the level's full settings and predictors are ranked on the whole image (101: never). |
 | `rewrite_trial_predictors_from` | 10 | 0 | 20 | On the fast path, from this engine level on predictors are chosen by encoding the candidates, below it from an estimate. |
-| `rewrite_bridge_from` | 10 | 0 | 20 | From this engine level on, below 20, the streams that take the most room get the strong encoder's quick settings within a budget (20: never). |
+| `rewrite_bridge_from` | 10 | 1 | 20 | From this engine level on, below 20, the streams that take the most room get the strong encoder's quick settings within a budget (20: never). |
 | `rewrite_bridge_start` | 16 | 0 | 1,048,576 | That budget at `rewrite_bridge_from`, in 256ths of the file's size, |
 | `rewrite_bridge_growth` | 200 | 100 | 1,000 | and what it is multiplied by for each engine level above, in percent. |
 | `rewrite_bridge_test` | 1 | 0 | 1 | On that bridge, a Flate stream (not an image) that engine level 0's settings cannot shrink is kept as it is (1), or gets the strong encoder all the same (0). |
@@ -589,15 +594,23 @@ Why the ranges end where they do:
   defaults: a setting can lower them but not raise them.
 - `rewrite_jpeg_code_orders` keeps at least one order, and `rewrite_predictor_sample_bands` at least one band.
   `rewrite_quick_budget_doubling`, `rewrite_work_budget_doubling` and `rewrite_job_check_ratio` divide, so they
-  are at least 1.
+  are at least 1. The two doublings end at 100, the span of the engine levels: there a budget grows less than
+  twofold from level 0 to 99.
+- Other ranges need an end and have no natural one, so it is set far past any use: 1,024 bands for
+  `rewrite_predictor_sample_bands`, ten times a level for `rewrite_bridge_growth`, a thousand times the quick
+  settings' cost for `rewrite_work_cost_` (the defaults, measured, are 1.7 to 3.9 times), and 1,048,576 for
+  `rewrite_bridge_start` (4,096 times the file's size), `rewrite_quick_budget_factor` (about a million decoded
+  bytes a byte of the file) and `rewrite_work_budget_start`.
 - `rewrite_fast_predictor_min_bits` runs over the bit depths an image can have (1 to 16), and the levels over
   the fast encoder's (1 to 12; `rewrite_predictor_rank_level` 0 is the strong encoder's quick settings).
 - `rewrite_bridge_growth` is at least 100%, so the bridge's budget does not shrink as the level grows, and
   `rewrite_work_cost_` at least 100%, so no step of 20 costs less than the quick settings. Larger budgets cost
-  time, not safety: every stream is still held to `max_stream`, and `time_budget` ends a run that takes too
-  long.
+  time, not safety: every stream is still held to `max_stream`, and on a native build `time_budget` ends a run
+  that takes too long (the WebAssembly module reads no clock: its host bounds the time, by running it in a
+  worker).
 - `rewrite_full_from`, `rewrite_trial_predictors_from` and `rewrite_bridge_from` are engine levels; 101 and 20
-  mean "never". Engine level 20 itself (the fast encoder below it) and the bands of 20 stay fixed: the tables
+  mean "never". `rewrite_bridge_from` is at least 1: the quick settings that engine levels 20 and above give a
+  stream count as level 0, and must stay off the bridge. Engine level 20 itself (the fast encoder below it) and the bands of 20 stay fixed: the tables
   here and the Flate encoder's are laid out on them.
 
 ## Building only what a product needs

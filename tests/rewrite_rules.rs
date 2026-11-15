@@ -142,16 +142,20 @@ fn settled_doc() -> Vec<u8> {
 
 /// One page that draws a grey image of 8 bits a sample (object 5).
 fn image_doc(width: usize, px: &[u8]) -> Vec<u8> {
+    image_doc_as(width, px.len() / width, "/Filter /FlateDecode", &flate(px, 1))
+}
+
+/// `image_doc` with the image's data and filter given.
+fn image_doc_as(width: usize, height: usize, filter: &str, data: &[u8]) -> Vec<u8> {
     let image = format!(
-        "/Type /XObject /Subtype /Image /Width {width} /Height {} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode",
-        px.len() / width
+        "/Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /DeviceGray /BitsPerComponent 8 {filter}"
     );
     pdf(&[
         PAGES[0].to_vec(),
         PAGES[1].to_vec(),
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 240] /Resources << /XObject << /Im1 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
         stream("", b"q 600 0 0 240 0 0 cm /Im1 Do Q\n"),
-        stream(&image, &flate(px, 1)),
+        stream(&image, data),
     ])
 }
 
@@ -525,7 +529,7 @@ fn every_rule_a_caller_can_see_has_a_value_that_changes_the_output() {
         case("work_cost_60", 100_000, 60, FourLetters, &[]),
         case("work_cost_80", 100_000, 80, FourLetters, &[]),
         case("step_down", 0, 60, FourLetters, &[("work_cost_60", 100_000)]),
-        // A file with an earlier save: both saves are kept unless a rule leaves the file as it is.
+        // A file with an earlier save: it is written as its newest save alone, unless a rule leaves it as it is.
         case("most_saves", 1, 0, TwoSaves, &[]),
         case("saves_length_factor", 1, 0, TwoSaves, &[]),
     ];
@@ -562,6 +566,26 @@ fn every_rule_a_caller_can_see_has_a_value_that_changes_the_output() {
         let seen = cases.iter().any(|c| c.rule == name) as usize;
         let listed = NEVER_SEEN.contains(&name) as usize + TESTED_APART.contains(&name) as usize;
         assert_eq!(seen + listed, 1, "{name}: a value that changes the output, or a line in one of the lists");
+    }
+}
+
+/// `min_stream_saving` holds for the forms of an image too: a grey image of two values as Indexed (stored
+/// without a filter, so that the form is smaller even when no new encoding is allowed), and a fax image as JBIG2.
+#[test]
+fn no_form_of_an_image_saves_less_than_min_stream_saving() {
+    let mut next = rng(5);
+    let two: Vec<u8> = (0..200 * 100).map(|_| if next() & 1 == 0 { 40 } else { 200 }).collect();
+    #[allow(unused_mut)]
+    let mut docs = vec![(image_doc_as(200, 100, "", &two), &b"/Indexed"[..])];
+    #[cfg(all(feature = "fax", feature = "encryption"))]
+    docs.push((fax_doc(), b"/JBIG2Decode"));
+    for (doc, form) in docs {
+        // (Not `checked`: an Indexed image's samples are the indices of its colours.)
+        let has = |value: u64| {
+            let out = optimize(&doc, &with_rules(0, &[("min_stream_saving", value)])).unwrap().data;
+            out.windows(form.len()).any(|w| w == form)
+        };
+        assert!(has(1) && !has(1 << 40), "{}", String::from_utf8_lossy(form));
     }
 }
 

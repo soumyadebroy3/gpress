@@ -326,6 +326,23 @@ test("a size in MiB rounds a fraction up, and the store budget is the caller's",
   assert.throws(() => g.optimizeToSize(pdf, 1, { storeBudgetMiB: 1025 }), (e) => e instanceof GpressError && e.code === GpressError.INVALID_OPTIONS);
 });
 
+archiveTest("the archive's stream limit is maxStreamArchiveMiB, or maxStreamMiB when that is not given", () => {
+  // A stream that decodes to 1,620,000 bytes: under a limit of 1 MiB the archive keeps it as it is stored.
+  const enc = new TextEncoder();
+  const z = zlibSync(enc.encode("BT (gpress) Tj ET\n".repeat(90_000)), { level: 1 });
+  const head = enc.encode(`%PDF-1.4\n1 0 obj\n<< /Filter /FlateDecode /Length ${z.length} >>\nstream\n`);
+  const tail = enc.encode("\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
+  const pdf = new Uint8Array(head.length + z.length + tail.length);
+  pdf.set(head, 0); pdf.set(z, head.length); pdf.set(tail, head.length + z.length);
+  const at = (options) => g.compress(pdf, options).data;
+  const whole = at({});
+  const limited = at({ maxStreamArchiveMiB: 1 });
+  assert.notDeepEqual(limited, whole);
+  assert.deepEqual(at({ maxStreamMiB: 1 }), limited);
+  assert.deepEqual(at({ maxStreamMiB: 1, maxStreamArchiveMiB: 2 }), whole);
+  assert.deepEqual(g.expand(limited), pdf);
+});
+
 test("optimize returns untouched with a reason for non-PDF input", () => {
   const r = g.optimize(new TextEncoder().encode("hello"), { jbig2: false, jpegTables: false, objectsPerStream: 50 });
   assert.equal(r.outcome, "untouched");

@@ -84,19 +84,21 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
+        // The library's defaults, written once (`crate::Options`).
+        let d = crate::Options::default();
         Options {
             flate: flate::Options::max(),
-            objstm_size: 200,
-            max_stream: 64 << 20,
+            objstm_size: d.objects_per_stream,
+            max_stream: d.max_stream,
             effort: 100,
-            threads: 0,
-            store_budget: 2 << 20,
-            respect_conformance: true,
-            flate_over_jpeg: true,
-            jbig2: true,
-            palette: true,
-            jpeg_tables: true,
-            rewrite_encrypted: true,
+            threads: d.threads,
+            store_budget: d.store_budget,
+            respect_conformance: d.respect_conformance,
+            flate_over_jpeg: d.flate_over_jpeg,
+            jbig2: d.jbig2,
+            palette: d.palette,
+            jpeg_tables: d.jpeg_tables,
+            rewrite_encrypted: d.rewrite_encrypted,
             lossy: super::lossy::Lossy::OFF,
             rules: Default::default(),
             deadline: Deadline::NONE,
@@ -524,9 +526,13 @@ fn reencode(
     if s.dict.name(b"Type") == Some(b"Metadata") || s.dict.has(b"F") {
         return None; // XMP stays readable by other tools; external file streams are left alone
     }
+    // Every new encoding must be smaller than this: it saves `min_stream_saving` bytes.
+    let need = s.data.len().saturating_sub(opt.rewrite_rules.size(R::min_stream_saving) - 1);
     // A scanned black-and-white image: JBIG2 instead of CCITT fax when that is clearly smaller (same pixels).
     if opt.jbig2 {
-        if let Some((d, z)) = crate::fax::pdf::jbig2_candidate(s, resolve, opt.rewrite_rules.at(R::jbig2_min_saving)) {
+        if let Some((d, z)) = crate::fax::pdf::jbig2_candidate(s, resolve, opt.rewrite_rules.at(R::jbig2_min_saving))
+            .filter(|(_, z)| z.len() < need)
+        {
             return Some((d, z, Change { fax_to_jbig2: true, ..Change::default() }));
         }
     }
@@ -569,7 +575,8 @@ fn reencode(
     // strong encoder (`on_bridge`), other than an image and already compressed by Flate, whose re-encode at effort 0's
     // settings is not smaller is kept as it is, and the strong encoder is not spent on it. Decided from sizes
     // alone. (An image goes on: a predictor may still make it smaller.) The quick settings the plans of 20 and
-    // above give carry effort 0, so the range test keeps them exactly as they were.
+    // above give carry effort 0, which the bridge never reaches (`bridge_from` is at least 1), so they are kept
+    // exactly as they were.
     if opt.flate.fast == 0
         && on_bridge(&opt.rewrite_rules, opt.effort)
         && opt.rewrite_rules.on(R::bridge_test)
@@ -591,7 +598,7 @@ fn reencode(
     }
     let mut best: Option<(Dict, Vec<u8>)> = None;
     // The first candidate kept must save `min_stream_saving` bytes; a later one must be smaller than it.
-    let mut best_len = s.data.len().saturating_sub(opt.rewrite_rules.size(R::min_stream_saving) - 1);
+    let mut best_len = need;
     // Whether `best` holds the JPEG with its new tables (alone, or behind Flate).
     let mut best_retabled = false;
     // A JPEG with optimal Huffman tables: the same coefficients in fewer bytes, read back and compared before
@@ -715,7 +722,7 @@ fn reencode(
     };
     if let Some(px) = samples.as_deref().filter(|_| form) {
         // (`best_len` is not the size of a `best` the predictor search gave.)
-        let other = best.as_ref().map_or((s.data.len(), &s.dict), |b| (b.1.len(), &b.0));
+        let other = best.as_ref().map_or((need, &s.dict), |b| (b.1.len(), &b.0));
         if let Some((d, z, c)) = exact_form(s, px, opt, resolve, other) {
             best = Some((d, z));
             change = c;
@@ -765,8 +772,9 @@ fn plain_encoding(d: &Dict) -> bool {
 /// when that is at least 5% (the rule `jbig2_min_saving`) smaller than the best other candidate (`fax::pdf::bilevel_candidate`), or an 8-bit
 /// image of few colours as an Indexed image (`indexed::convert`), which then gets the Flate and predictor
 /// search of any other image. `px`: the stream's content (its filters decoded, a predictor undone); `other`:
-/// the data size and the dictionary of the best candidate so far. A form is given only when it is smaller with
-/// its dictionary counted (an Indexed image's holds its colour table).
+/// the data size and the dictionary of the best candidate so far (with none, the stored stream's, less what
+/// `min_stream_saving` asks it to save). A form is given only when it is smaller with its dictionary counted
+/// (an Indexed image's holds its colour table).
 fn exact_form(
     s: &Stream,
     px: &[u8],
@@ -1028,7 +1036,12 @@ pub(super) fn predictor_sample(
 /// At most `budget` bytes of an image's rows, as bands of whole rows spread over the image (neighbouring rows
 /// keep what predictors and matches see): 8 bands (the rule `predictor_sample_bands`), each of at least one
 /// row. None: the whole image is within the budget.
-fn sample_bands(nrows: usize, row: usize, budget: usize, rules: &RewriteRules) -> Option<Vec<(usize, usize)>> {
+pub(super) fn sample_bands(
+    nrows: usize,
+    row: usize,
+    budget: usize,
+    rules: &RewriteRules,
+) -> Option<Vec<(usize, usize)>> {
     if row == 0 || nrows.saturating_mul(row) <= budget {
         return None;
     }
