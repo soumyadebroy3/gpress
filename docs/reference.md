@@ -87,7 +87,7 @@ effort (40 and above all mean its strongest setting) and nothing else.
 | 20 | lossless | 20 | The strong encoder's first step. |
 | 40 (default) | lossless | 100 | The smallest lossless output: everything the engine knows how to do. |
 | 60 | lossy | 100 | The work of 40, after the lossy image step at `Lossy::level(1)`: an image shown at 375 pixels per inch or more is resampled down to 300 (an area average), and a photo that was resampled, or is not a JPEG, is written as a baseline JPEG at quality 85 (line art stays samples behind Flate). |
-| 80 | lossy | 100 | `Lossy::level(2)`: as 60, with photos down to 150 pixels per inch (those shown at 187.5 or more). |
+| 80 | lossy | 100 | `Lossy::level(2)`: as 60, with photos down to 150 pixels per inch (those shown at 187.5 or more; a sharp photo stays at 300). |
 | 100 | lossy | 100 | `Lossy::level(3)`: as 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
 
 What holds at every lossy level. The numbers are defaults: each is a rule with a name and a range, and a
@@ -115,8 +115,9 @@ setting can move it within that range ([Rules](#rules), below):
 
 What the six efforts make of the 907 test files and of a set of photographs is in the README's table
 ("Effort levels") and, with a row per file of the photo set, in bench/RESULTS.md ("Sizes at the six efforts").
-What decides that an image is a photo is cautious: an image in doubt counts as line art, and on that set none
-of the three scikit-image photographs was taken for a photo. A progressive JPEG is left alone at every level.
+What decides that an image is a photo is cautious: an image in doubt counts as line art. On that set two of the
+three scikit-image photographs, the astronaut and the coffee cup, are sharp photos, which become JPEGs but are
+resampled no lower than the line-art floor, and the Hubble deep field stays line art. A progressive JPEG is left alone at every level.
 
 ## Rules
 
@@ -156,6 +157,20 @@ These are the same at every lossy effort, and they change nothing at a lossless 
 | `lossy_scan_cover` | 70 | 1 | 100 | An image drawn over this percent of its page or more is a scan: it gets the line-art floor whatever it looks like. |
 | `lossy_walk_operators` | 20,000,000 | 1 | 20,000,000 | Content operators the step may read in one file to measure where images are shown (decoding is charged to it too). Over it no image of the file is changed. |
 | `lossy_walk_draws` | 1,000,000 | 1 | 1,000,000 | Image and form draws it may follow in one file, a form's counted every time the form is drawn. Over it no image of the file is changed. |
+| `lossy_flat_run` | 32 | 8 | 256 | The test that tells a photo from line art, this rule and the thirteen below. A sample that ends a run of at least this many equal samples, along its row or down its column, is flat: screenshots, charts and diagrams have large areas of one value. |
+| `lossy_hard_step` | 64 | 2 | 255 | A step of this many levels (of 256) or more between a sample and its left or upper neighbour is a hard edge. |
+| `lossy_soft_step` | 32 | 1 | 254 | A step of at least this many levels and fewer than `lossy_hard_step` is a soft edge. |
+| `lossy_ground_levels` | 8 | 1 | 64 | This many of an image's most frequent levels are its ground: a scanned page's paper is one. |
+| `lossy_photo_flat` | 16 | 1 | 65,536 | A photo has at most one flat sample in this many (16: at most 6.25% of it is flat). |
+| `lossy_photo_hard` | 128 | 1 | 65,536 | A photo has at most one hard edge in this many samples. |
+| `lossy_photo_ground` | 50 | 1 | 100 | A photo has at most this percent of its samples in its ground. |
+| `lossy_sharp_flat` | 8 | 1 | 65,536 | A sharp photo (more hard edges than a photo may have) has at most one flat sample in this many. |
+| `lossy_sharp_ground` | 25 | 1 | 100 | A sharp photo has at most this percent of its samples in its ground. |
+| `lossy_sharp_edges` | 100 | 1 | 1,000 | A sharp photo has at most this percent as many hard edges as soft ones (100: no more hard than soft). |
+| `lossy_sharp_floor` | 0 | 0 | 1 | The floor of a sharp photo: 0 the line-art floor, 1 the photo floor. |
+| `lossy_print_tile` | 32 | 8 | 1,024 | Small print is looked for in square tiles of this many samples a side; an image with small print is line art. |
+| `lossy_print_share` | 8 | 1 | 65,536 | A tile is small print when more than one sample in this many is a hard edge (1: no tile is) |
+| `lossy_print_edges` | 150 | 1 | 1,000 | and its hard edges are more than this percent of its soft ones. |
 
 Why the ranges end where they do:
 
@@ -171,12 +186,34 @@ Why the ranges end where they do:
   are their defaults: a setting can lower them but not raise them.
 - `lossy_resample_margin` ends at 1,000 (an image shown at ten times its floor) and `lossy_quality_tries` at
   10 (each try is a full encode and decode of the image): both are choices, not limits of the number.
+- The photo test's rules cost one pass over an image's samples whatever their values. `lossy_flat_run` and
+  `lossy_print_tile` start at 8, the side of a JPEG's block. `lossy_print_tile` ends at 1,024, longer than most
+  images' sides, so that no tile is looked at; `lossy_flat_run` ends at 256: at the default `lossy_min_pixels` an
+  image the step changes has more than 65,536 = 256 by 256 pixels, so a run of 256 fits along its longer side.
+  `lossy_hard_step` is 2 to 255 levels and `lossy_soft_step` 1 to 254, so that a soft step can be below a hard
+  one. `lossy_ground_levels` ends at 64, a quarter of the 256 levels, a choice: a ground is a few levels. A
+  share is one sample in 1 to 65,536, and `lossy_sharp_edges` and `lossy_print_edges` end at 1,000 percent, a
+  choice: ten times as many hard edges as soft, over five times the least that rendered text has.
 - The other lowest and highest values are where the number stops meaning anything (a percent, a JPEG quality,
   a block that is smaller than a JPEG's own or larger than a small image).
 
-What is not a rule: the test that tells a photo from line art (its values were measured together and are
-being measured again), which images the step can read at all (8-bit grey and RGB, sides up to 65,535), the
-limits of its content reader, which are those other readers have, and what the JPEG format fixes (the standard's
+The test that tells a photo from line art is the fourteen rules from `lossy_flat_run` on, and their defaults were
+measured together on photographs, scans, rendered pages and labels drawn on photographs. It sorts an image's
+samples into three kinds. A photo is a clear continuous-tone picture: few flat samples, few hard edges, no ground.
+A sharp photo has more hard edges than a photo may have, as many as text has (grass, gravel, a picture made
+smaller), but no ground and no more hard edges than soft ones, where rendered text has at least 1.9 times as many.
+Everything else, and everything in doubt, is line art, and so is an image with small print in it: a tile dense
+with hard edges that outnumber its soft ones half as much again, as labels, a caption or a subtitle on a
+photograph are. A page scanned in uneven light, a map on shaded relief or a halftone can pass for a sharp photo,
+so a sharp photo keeps the line-art floor, and the two quality checks guard its JPEG. What the test does not
+find: a word or two of print, print that is soft itself (a photographed or scanned note), print whose tiles have
+at most 1.5 times as many hard edges as soft ones (`lossy_print_edges`; 100 finds more of it, and gives real
+photographs such tiles too), and print close in brightness to the photograph around it (black labels on a dark
+sky or rock, white ones on pale rock: their edges are under 64 levels); such a photo still becomes a JPEG at the
+photo floor.
+
+What is not a rule: which images the step can read at all (8-bit grey and RGB, sides up to 65,535), the limits
+of its content reader, which are those other readers have, and what the JPEG format fixes (the standard's
 tables, colour at half resolution, baseline coding).
 
 ### `flate_`: the Flate encoders
