@@ -411,7 +411,7 @@ fn main() {
             let bpp: usize = pos.get(4).and_then(|x| x.parse().ok()).unwrap_or(1);
             let exact = pos.get(5).map(|s| s.as_str()) == Some("exact");
             let t = Instant::now();
-            let mut m = Model::new(18);
+            let mut m = Model::new(18, &Default::default());
             m.set_kind(kind, Geom { stride, bpp, exact }, 0);
             let mut e = gpress::cm::Encoder::new();
             for &b in &data {
@@ -558,25 +558,26 @@ fn main() {
             // gpress fax-model RAW K COLUMNS ALIGN(0|1): size of a raw fax stream as an archive fax part, with
             // the time to code it and to restore it (checked).
             use gpress::fax::{ccitt, part};
+            let rules = gpress::ArchiveRules::default();
             let raw =
                 std::fs::read(pos.get(1).unwrap_or_else(|| die("need RAW"))).unwrap_or_else(|e| die(&e.to_string()));
             let k: i64 = pos.get(2).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need K"));
             let cols: usize = pos.get(3).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need COLUMNS"));
             let align = pos.get(4).map(|s| s.as_str()) == Some("1");
             // Prepared as pack prepares it (the stream's byte alignment, or the other one if that reads more).
-            let p = part::prepare(&raw, ccitt::Scheme::from_k(k), cols, align)
+            let p = part::prepare(&raw, ccitt::Scheme::from_k(k), cols, align, rules.fax_max_leftover())
                 .unwrap_or_else(|| die("not stored as a fax part"));
             // The work budget as if the stream started a file (where it is smallest); the size is measured anyway.
             let within = part::Work::default().admit(&p, 0);
             let at = if within { 0 } else { usize::MAX / 4 };
             let t = Instant::now();
             let mut e = gpress::cm::Encoder::new();
-            let back = part::code(&mut e, &mut part::FaxCoder::new(raw.len()), Some(&p), at, raw.len());
+            let back = part::code(&mut e, &mut part::FaxCoder::new(raw.len(), &rules), Some(&p), at, raw.len());
             let z = e.finish();
             let t1 = t.elapsed().as_secs_f64();
             let t = Instant::now();
             let mut d = gpress::cm::Decoder::new(&z);
-            let restored = part::code(&mut d, &mut part::FaxCoder::new(raw.len()), None, at, raw.len());
+            let restored = part::code(&mut d, &mut part::FaxCoder::new(raw.len(), &rules), None, at, raw.len());
             let t2 = t.elapsed().as_secs_f64();
             println!(
                 "{} -> {} bytes ({} rows, {} trailing), coded in {t1:.2}s, restored in {t2:.2}s, exact: {}, within the work budget at the start of a file: {within}",
