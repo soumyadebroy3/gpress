@@ -261,8 +261,8 @@ fn a_jpeg_photo_is_resampled_or_written_again() {
     assert!(again.len() * 10 <= file.len() * 9, "{} of {}", again.len(), file.len());
 }
 
-/// A sharp picture, grey: a ramp of four soft steps and a hard step back, over and over, on a slow ramp with
-/// a little noise. Three soft edges for each hard one, no flat run and no level that holds much of it.
+/// A sharp picture, grey: a ramp of four levels, three soft steps and a hard step back, over and over, on a
+/// slow ramp with a little noise. Three soft edges for each hard one, no flat run and no level that holds much of it.
 #[cfg(feature = "jpeg")]
 fn sharp_photo(w: usize, h: usize) -> Vec<u8> {
     let mut s = 0x2545_f491_4f6c_dd1du64;
@@ -291,6 +291,14 @@ fn a_sharp_photo_becomes_a_jpeg_at_the_line_art_floor() {
     opt.set_rule("lossy_sharp_floor", 1).expect("a rule");
     let (w, h, jpeg, _) = image_of(&gpress::optimize(&at(72), &opt).expect("optimize").data);
     assert_eq!((w, h, jpeg), (150, 150, true));
+    // When its JPEG is not kept (a floor of 99 dB no JPEG meets), it is resampled as line art: 300, samples
+    // behind Flate.
+    for level in 1..=3 {
+        let mut opt = options(Some(Lossy::level(level)), 1);
+        opt.set_rule("lossy_min_psnr", 99).expect("a rule");
+        let (w, h, jpeg, _) = image_of(&gpress::optimize(&at(72), &opt).expect("optimize").data);
+        assert_eq!((w, h, jpeg), (300, 300, false), "level {level}");
+    }
     // Without a JPEG quality it is line art: resampled to 300, samples behind Flate.
     let (out, did) = optimize(&at(72), Some(Lossy { jpeg_quality: 0, ..Lossy::level(2) }));
     assert_eq!(did, (1, 0, 0));
@@ -327,6 +335,11 @@ fn a_sharp_photo_becomes_a_jpeg_at_the_line_art_floor() {
         let (w, h, jpeg, _) = image_of(&out);
         assert_eq!((w, h, jpeg), (300, 300, true), "level {level}");
     }
+    // A photo floor of 600, above the line-art floor, changes nothing: it keeps a sharp photo's floor.
+    let (out, did) = optimize(&pdf, Some(Lossy { photo_ppi: 600, art_ppi: 300, ..Lossy::level(1) }));
+    assert_eq!(did, (1, 0, 0));
+    let (w, h, jpeg, _) = image_of(&out);
+    assert_eq!((w, h, jpeg), (300, 300, true));
 }
 
 #[test]

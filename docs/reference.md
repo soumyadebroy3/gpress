@@ -157,7 +157,7 @@ These are the same at every lossy effort, and they change nothing at a lossless 
 | `lossy_scan_cover` | 70 | 1 | 100 | An image drawn over this percent of its page or more is a scan: it gets the line-art floor whatever it looks like. |
 | `lossy_walk_operators` | 20,000,000 | 1 | 20,000,000 | Content operators the step may read in one file to measure where images are shown (decoding is charged to it too). Over it no image of the file is changed. |
 | `lossy_walk_draws` | 1,000,000 | 1 | 1,000,000 | Image and form draws it may follow in one file, a form's counted every time the form is drawn. Over it no image of the file is changed. |
-| `lossy_flat_run` | 32 | 8 | 256 | The test that tells a photo from line art, this rule and the thirteen below. A run of this many equal samples, along a row or down a column, is flat: screenshots, charts and diagrams have large areas of one value. |
+| `lossy_flat_run` | 32 | 8 | 256 | The test that tells a photo from line art, this rule and the thirteen below. A sample that ends a run of at least this many equal samples, along its row or down its column, is flat: screenshots, charts and diagrams have large areas of one value. |
 | `lossy_hard_step` | 64 | 2 | 255 | A step of this many levels (of 256) or more between a sample and its left or upper neighbour is a hard edge. |
 | `lossy_soft_step` | 32 | 1 | 254 | A step of at least this many levels and fewer than `lossy_hard_step` is a soft edge. |
 | `lossy_ground_levels` | 8 | 1 | 64 | This many of an image's most frequent levels are its ground: a scanned page's paper is one. |
@@ -187,24 +187,30 @@ Why the ranges end where they do:
 - `lossy_resample_margin` ends at 1,000 (an image shown at ten times its floor) and `lossy_quality_tries` at
   10 (each try is a full encode and decode of the image): both are choices, not limits of the number.
 - The photo test's rules cost one pass over an image's samples whatever their values. `lossy_flat_run` and
-  `lossy_print_tile` start at 8, the side of a JPEG's block, and end where a run or a tile is longer than most
-  images' sides (256 and 1,024), so that the test finds none. A step is 1 to 255 levels; a share is one sample
-  in 1 to 65,536.
+  `lossy_print_tile` start at 8, the side of a JPEG's block. `lossy_print_tile` ends at 1,024, longer than most
+  images' sides, so that no tile is looked at; `lossy_flat_run` ends at 256, the longest run that fits along a
+  side of every image the step changes at the default `lossy_min_pixels` (more than 65,536 pixels).
+  `lossy_hard_step` is 2 to 255 levels and `lossy_soft_step` 1 to 254, so that a soft step can be below a hard
+  one. `lossy_ground_levels` ends at 64, a quarter of the 256 levels, a choice: a ground is a few levels. A
+  share is one sample in 1 to 65,536, and `lossy_sharp_edges` and `lossy_print_edges` end at 1,000 percent, a
+  choice: ten times as many hard edges as soft, over five times the least that rendered text has.
 - The other lowest and highest values are where the number stops meaning anything (a percent, a JPEG quality,
   a block that is smaller than a JPEG's own or larger than a small image).
 
-The test that tells a photo from line art is the fourteen rules from `lossy_flat_run` on, and their defaults
-were measured together on photographs, scans, rendered pages and labels drawn on photographs. It sorts an
-image's samples into three kinds. A photo is a clear continuous-tone picture: few flat samples, few hard edges,
-no ground. A sharp photo has as many hard edges as text has (grass, gravel, a picture made smaller), but no
-ground and no more hard edges than soft ones, where rendered text has at least twice as many. Everything else,
-and everything in doubt, is line art, and so is an image with small print in it: a tile dense with hard edges
-that outnumber its soft ones half as much again, as labels, a caption or a subtitle on a photograph are. A page
-scanned in uneven light, a map on shaded relief or a halftone can pass for a sharp photo, so a sharp photo is
-treated as line art that may become a JPEG: it keeps the line-art floor, and the two quality checks guard the
-JPEG. What the test does not find: a word or two of print, print that is soft itself (a photographed or
-scanned note), and print close in brightness to the photograph around it (black labels on a dark sky or rock,
-white ones on pale rock: their edges are under 64 levels); such a photo still becomes a JPEG at the photo floor.
+The test that tells a photo from line art is the fourteen rules from `lossy_flat_run` on, and their defaults were
+measured together on photographs, scans, rendered pages and labels drawn on photographs. It sorts an image's
+samples into three kinds. A photo is a clear continuous-tone picture: few flat samples, few hard edges, no ground.
+A sharp photo has more hard edges than a photo may have, as many as text has (grass, gravel, a picture made
+smaller), but no ground and no more hard edges than soft ones, where rendered text has at least 1.9 times as many.
+Everything else, and everything in doubt, is line art, and so is an image with small print in it: a tile dense
+with hard edges that outnumber its soft ones half as much again, as labels, a caption or a subtitle on a
+photograph are. A page scanned in uneven light, a map on shaded relief or a halftone can pass for a sharp photo,
+so a sharp photo keeps the line-art floor, and the two quality checks guard its JPEG. What the test does not
+find: a word or two of print, print that is soft itself (a photographed or scanned note), print whose tiles have
+at most 1.5 times as many hard edges as soft ones (`lossy_print_edges`; 100 finds more of it, and gives real
+photographs such tiles too), and print close in brightness to the photograph around it (black labels on a dark
+sky or rock, white ones on pale rock: their edges are under 64 levels); such a photo still becomes a JPEG at the
+photo floor.
 
 What is not a rule: which images the step can read at all (8-bit grey and RGB, sides up to 65,535), the limits
 of its content reader, which are those other readers have, and what the JPEG format fixes (the standard's

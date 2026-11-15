@@ -472,16 +472,18 @@ What the lossy efforts did with this set's pictures (`PDFE_DEBUG=1` prints the s
   coffee's and 0.93% of hubble's are hard edges (64 levels or more from a neighbour), where a photo has at most
   1/128, 0.78% (`look` in src/pdf/lossy.rs, rules `lossy_hard_step` and `lossy_photo_hard`). Astronaut and
   coffee are sharp photos, which keep the line-art floor (`lossy_sharp_floor`): at every lossy level their
-  pages of samples become JPEGs ("photo to JPEG"; at 600 pixels per inch resampled first, 512 by 512 to 256 by
-  256 for astronaut) and their JPEG pages at 600 are resampled ("JPEG resampled"); at 80 the JPEG page at 300
-  is left alone ("a JPEG at or near its floor") where a photo would go down to 150; at 100 the JPEG pages at
-  150 and 300 are written again at quality 75 ("JPEG again"). Hubble stays line art, as its 8 most frequent
+  pages of samples become JPEGs ("photo to JPEG"; at 600 pixels per inch "photo resampled, to JPEG", 512 by
+  512 to 256 by 256 for astronaut) and their JPEG pages at 600 are resampled ("JPEG resampled"); at 80 the
+  JPEG page at 300 is left alone ("a JPEG at or near its floor") where a photo would go down to 150; at 100
+  the JPEG pages at 150 and 300 are written again ("JPEG again"), astronaut's at quality 75 and coffee's at
+  85: at 75 coffee does not pass the quality check, so it is coded 10 higher (`lossy_quality_step`), and its
+  pages of samples are the same JPEGs as at 60 and 80. Hubble stays line art, as its 8 most frequent
   levels hold 52.6% of the samples (a sharp photo may have 25%, `lossy_sharp_ground`): "line art at or near
   its floor" at 150 and 300, "line art resampled" at 600 (still samples behind Flate), and its JPEG pages are
   left alone.
-- Measured on f91bdd9 (the three-way photo test), which writes the 907 test files exactly as the commit before
-  it at efforts 0, 60, 80 and 100; the rows of astronaut and coffee and the photo set's totals at 60, 80 and
-  100 are its own, the rest as above.
+- The rows of astronaut and coffee and the photo set's totals at 60, 80 and 100 were measured with the
+  three-way photo test (#52), which writes the 907 test files exactly as the commit before it at efforts 0, 60,
+  80 and 100; the rest as above.
 - `room` is left alone at every level: "not a sequential scan". It is a baseline JPEG whose scan header gives
   0 as its last coefficient where the standard says 63, and gpress's JPEG parser (src/jpeg/parse.rs, as on
   main) takes the standard's values only. A progressive JPEG is left alone too ("progressive"): checked on

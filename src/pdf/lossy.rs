@@ -82,8 +82,8 @@ crate::rules::rule_group! {
         /// Image and form draws the walk may make in one file, a form's counted every time the form is drawn;
         /// over it no image of the file is reduced. Like `walk_operators`, it can be lowered but not raised.
         walk_draws = 1_000_000, 1, 1_000_000;
-        /// What tells a photo from line art (`look`), this rule and the thirteen below: a run of this many equal
-        /// samples, along a row or down a column, is flat.
+        /// What tells a photo from line art (`look`), this rule and the thirteen below: a sample that ends a run
+        /// of at least this many equal samples, along its row or down its column, is flat.
         flat_run = 32, 8, 256;
         /// A step of this many levels or more between a sample and its left or upper neighbour is a hard edge.
         hard_step = 64, 2, 255;
@@ -381,10 +381,12 @@ fn candidate(img: &Image, opt: &Options) -> Result<Candidate, &'static str> {
     }
     // Fewer samples than the size needs: readers differ on such an image.
     let px = data.get(..w * h * img.channels).ok_or("fewer samples than its size")?;
-    match (look(&luma(px, img.channels), w, h, &rules), quality) {
+    // Bound first, so that the grey copy of an RGB image is freed before a JPEG is made.
+    let looks = look(&luma(px, img.channels), w, h, &rules);
+    match (looks, quality) {
         (Look::Photo, None) => return Err("a photo, and no JPEG in these settings"),
         (Look::Photo, Some(quality)) => return from_photo(img, px, size(photo_floor), quality, opt),
-        // A sharp photo is line art that may become a JPEG: one that does not is resampled as line art below.
+        // A sharp photo keeps the line-art floor and may become a JPEG: one that does not is resampled below.
         (Look::Sharp, Some(quality)) => match from_photo(img, px, size(sharp_floor), quality, opt) {
             Ok(made) => return Ok(made),
             // At or near the line-art floor there is nothing else to try: the JPEG's reason stands.
@@ -469,7 +471,7 @@ enum Look {
 
 /// What `luma` (`w` by `h`) looks like. Decided from counts in whole numbers, so that every machine decides the
 /// same; each limit is a rule (`LossyRules`), named here with its default:
-/// - flat samples, the ones that go on a run of at least `flat_run` (32) equal samples along their row or
+/// - flat samples, the ones that end a run of at least `flat_run` (32) equal samples along their row or
 ///   down their column: screenshots, charts, diagrams and renders on a plain ground have large areas of one
 ///   value (a run that long is more than the 8 by 8 blocks a JPEG photo decodes to in smooth places);
 /// - hard and soft edges: each sample counted once, by the larger of its steps from its left and its upper
@@ -494,19 +496,20 @@ enum Look {
 /// photograph that was not sharpened has fewer hard edges than soft ones, rendered text at least 1.9 times as
 /// many. A scanned page's edges are ramps too, so only its paper keeps it out, and a page in uneven light, a
 /// map on shaded relief or a halftone can pass both tests. That is why a sharp photo keeps the line-art
-/// floor: it is line art that may become a JPEG, which the quality floor guards (`close`).
+/// floor, and the quality floor guards its JPEG (`close`).
 ///
-/// Small print, measured on labels drawn on a real photograph (5 to 12 point: black, white, outlined, grey)
-/// and on drawn pictures: each one with more than a word or two, 64 levels or more from the photograph around
-/// it, that the counts over the whole picture take for a photo has a tile of it, and so have most of them made
-/// half as large, which are sharp photos (all but an outlined subtitle). Of 13 photographs (scikit-image's
-/// samples and two of the corpus; as stored, as JPEGs of quality 60 and 90, and halved) one has such a tile at
-/// 150 percent, an astronaut's mission patch halved; at 100 percent five have, the patch's lettering at every
-/// size among them. Not found: a word or two (a tile may hold too little of them), print that is soft itself
-/// (a photographed or scanned note), and print close in brightness to the photograph around it (black labels
-/// on a dark sky or rock, white ones on pale rock: edges under 64 levels). No count of edges tried tells those
-/// from a photograph: lower steps, steps over two samples, or edges at black ink each gave real photographs
-/// a tile, or missed the labels stored as a JPEG.
+/// Small print, measured on labels drawn on a real photograph (5 to 12 point: black, white, outlined, grey) and on
+/// drawn pictures: each one with more than a word or two, 64 levels or more from the photograph around it, that the
+/// counts over the whole picture take for a photo has a tile of it, and so have most of them made half as large,
+/// which are sharp photos (all but an outlined subtitle). Of 13 photographs (scikit-image's samples and two of the
+/// corpus; as stored, as JPEGs of quality 60 and 90, and halved) one has such a tile at 150 percent, an astronaut's
+/// mission patch halved; at 100 percent five have, the patch's lettering at every size among them. Not found: a word
+/// or two (a tile may hold too little of them), print that is soft itself (a photographed or scanned note), print
+/// whose tiles have at most 1.5 times as many hard edges as soft ones (at 100 percent real photographs have such
+/// tiles too), and print close in brightness to the photograph around it (black labels on a dark sky or rock, white
+/// ones on pale rock: edges under 64 levels). No count of edges tried tells those from a photograph: lower steps,
+/// steps over two samples, or edges at black ink each gave real photographs a tile, or missed the labels stored as a
+/// JPEG.
 ///
 /// Everything else, and everything in doubt, is line art.
 fn look(luma: &[u8], w: usize, h: usize, rules: &LossyRules) -> Look {
@@ -568,7 +571,8 @@ fn look(luma: &[u8], w: usize, h: usize, rules: &LossyRules) -> Look {
     let percent = |count: u64, p: u64| count * 100 <= all * p;
     if one_in(flat, rules.photo_flat) && one_in(hard, rules.photo_hard) && percent(ground, rules.photo_ground) {
         Look::Photo
-    } else if one_in(flat, rules.sharp_flat)
+    } else if !one_in(hard, rules.photo_hard)
+        && one_in(flat, rules.sharp_flat)
         && percent(ground, rules.sharp_ground)
         && hard * 100 <= soft * rules.sharp_edges
     {
@@ -902,11 +906,12 @@ mod tests {
         assert_eq!(looks(&banded, &[]), Look::Art, "flat areas");
         assert_eq!(looks(&banded, &[("photo_flat", 12)]), Look::Art);
         assert_eq!(looks(&banded, &[("photo_flat", 11)]), Look::Photo);
-        // Runs of 16 equal samples along every row: flat only where a flat run is that short.
+        // Runs of 16 equal samples along every row: flat only where a flat run is that short. Then it is no
+        // photo, and with no hard edges no sharp photo either.
         let soft = photo(w, h);
         let stepped: Vec<u8> = (0..w * h).map(|i| soft[i - (i % w) % 16]).collect();
         assert_eq!(looks(&stepped, &[("flat_run", 17)]), Look::Photo);
-        assert_eq!(looks(&stepped, &[("flat_run", 16)]), Look::Sharp);
+        assert_eq!(looks(&stepped, &[("flat_run", 16)]), Look::Art);
         let rules = LossyRules::default();
         assert!(look(&[1, 2, 3], 3, 1, &rules) == Look::Art && look(&[], 0, 0, &rules) == Look::Art);
     }
