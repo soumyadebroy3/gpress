@@ -4,6 +4,9 @@ Every pull request merged into `main` (or into a branch that reached it), newest
 
 | Pull request | Change |
 | --- | --- |
+| [#55](https://github.com/soumyadebroy3/gpress/pull/55) | Rewrite rules: the lossless rewrite's 88 tuning values as the group rewrite_ |
+| [#52](https://github.com/soumyadebroy3/gpress/pull/52) | Lossy image step: sharp photographs become JPEGs, and the photo test is fourteen rules |
+| [#54](https://github.com/soumyadebroy3/gpress/pull/54) | Wiki: #49, #51, #50 and #53 done; the earlier-saves and drop_history lines follow #51 |
 | [#49](https://github.com/soumyadebroy3/gpress/pull/49) | Rules by name: the lossy step's values, and one mechanism for every group |
 | [#51](https://github.com/soumyadebroy3/gpress/pull/51) | Drop earlier saves always: a file with incremental updates is written as its newest save |
 | [#50](https://github.com/soumyadebroy3/gpress/pull/50) | Read the AES vectors and the revision 6 hash straight from their bytes (3 CodeQL alerts) |
