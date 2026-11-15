@@ -85,20 +85,22 @@ fn main() {
             _ => pdfs.push((f[1].clone(), vec![f])),
         }
     }
+    let rules = gpress::ArchiveRules::default();
     let (mut all_in, mut all_as_is, mut all_opened, mut all_fonts, mut all_open) = (0, 0, 0, 0, 0);
     let mut all_bits = [0f64; 4];
     let mut all_n = [0usize; 4];
     println!("pdf\tfonts\topened\tbytes\tas_is\topened_coded");
     for (pdf, fonts) in &pdfs {
-        let (mut m1, mut e1) = (Model::new(18), Encoder::new());
-        let (mut m2, mut e2) = (Model::new(18), Costed { e: Encoder::new(), class: 0, bits: [0.0; 4], n: [0; 4] });
+        let (mut m1, mut e1) = (Model::new(18, &rules), Encoder::new());
+        let (mut m2, mut e2) =
+            (Model::new(18, &rules), Costed { e: Encoder::new(), class: 0, bits: [0.0; 4], n: [0; 4] });
         let (mut bytes, mut opened_n) = (0, 0);
         for f in fonts {
             let data = std::fs::read(dir.join(&f[0])).unwrap();
             let (l1, l2) = (f[3].parse().unwrap_or(0), f[4].parse().unwrap_or(0));
             bytes += data.len();
             code_plain(&mut m1, &mut e1, Kind::Font, &data);
-            let opened = type1::find(&data, l1, l2).and_then(|l| {
+            let opened = type1::find(&data, l1, l2, &rules).and_then(|l| {
                 let t = type1::open(&data, &l)?;
                 (type1::close(&t, &l)? == data).then_some((l, t))
             });

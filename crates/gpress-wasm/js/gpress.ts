@@ -213,7 +213,10 @@ export class Gpress {
     return `${Math.floor(n / 1_000_000)}.${Math.floor(n / 1000) % 1000}.${n % 1000}`;
   }
 
-  /** The archive format version the module writes and reads, 0 for a module without the archive. */
+  /**
+   * The archive format version the module writes and reads (it reads the next one too, which carries changed
+   * archive rules), 0 for a module without the archive.
+   */
   get archiveVersion(): number {
     return this.ex.gpress_archive_version();
   }

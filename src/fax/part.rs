@@ -13,6 +13,7 @@ use super::ccitt::{
     encode, parse, row_work, Gap, Image, Layout, Limits, Parsed, RowEncoder, Rule, Scheme, Stop, Writer, MAX_COLUMNS,
 };
 use crate::cm::{Coder, Counter};
+use crate::pack::rules::ArchiveRules;
 
 /// Largest image the format takes (rows times columns).
 const MAX_PIXELS: u64 = 1 << 32;
@@ -52,7 +53,8 @@ pub fn fits(p: &Parsed) -> bool {
 /// (or with it): many encoders write EncodedByteAlign data with the fill before each EOL, so that the EOL
 /// ends on a byte boundary, which reads as plain fill bits and EOLs. The less data left over wins. Every
 /// choice is recorded either way, and writing the stream again must give `raw`.
-pub fn prepare(raw: &[u8], scheme: Scheme, columns: usize, byte_align: bool) -> Option<Parsed> {
+/// `max_leftover`: the most of `raw` that may be left undecoded, in percent (rule `fax_max_leftover`).
+pub fn prepare(raw: &[u8], scheme: Scheme, columns: usize, byte_align: bool, max_leftover: u64) -> Option<Parsed> {
     let mut parsed = parse(raw, scheme, columns, byte_align, Limits::default())?;
     if !matches!(parsed.stop, Stop::EndCodes | Stop::EndOfData) {
         if let Some(other) = parse(raw, scheme, columns, !byte_align, Limits::default()) {
@@ -61,7 +63,8 @@ pub fn prepare(raw: &[u8], scheme: Scheme, columns: usize, byte_align: bool) -> 
             }
         }
     }
-    if parsed.image.rows() == 0 || parsed.layout.trailing.len() * 4 > raw.len() || !fits(&parsed) {
+    let leftover = parsed.layout.trailing.len() as u64 * 100 > raw.len() as u64 * max_leftover;
+    if parsed.image.rows() == 0 || leftover || !fits(&parsed) {
         return None;
     }
     if encode(&parsed.image, &parsed.layout) != raw {
@@ -125,6 +128,8 @@ impl Work {
 pub struct FaxCoder {
     model: Bilevel,
     small: Vec<Counter>,
+    /// The count cap of `small` (rule `fax_small_limit`).
+    small_limit: u32,
     work: Work,
 }
 
@@ -147,16 +152,22 @@ const N_TRAILING: usize = 4;
 
 impl FaxCoder {
     /// `file_len`: the length of the whole file being packed (the decoder knows it too); small files get
-    /// small hashed tables (quick to set up, and they have few contexts anyway).
-    pub fn new(file_len: usize) -> FaxCoder {
-        let bits = (usize::BITS - file_len.leading_zeros()) + 4;
-        FaxCoder { model: Bilevel::new(bits), small: vec![Counter::new(); S_END], work: Work::default() }
+    /// small hashed tables (quick to set up, and they have few contexts anyway). `r`: the fax model's rules;
+    /// both sides of an archive must give the same.
+    pub fn new(file_len: usize, r: &ArchiveRules) -> FaxCoder {
+        let bits = (usize::BITS - file_len.leading_zeros()) + r.fax_bits_add().min(16) as u32;
+        FaxCoder {
+            model: Bilevel::new(bits, r),
+            small: vec![Counter::new(); S_END],
+            small_limit: r.fax_small_limit() as u32,
+            work: Work::default(),
+        }
     }
 
     fn bit<C: Coder>(&mut self, c: &mut C, slot: usize, bit: Option<u32>) -> u32 {
         let ct = &mut self.small[slot];
         let b = c.code(bit, ct.p12());
-        ct.update(b, 255);
+        ct.update(b, self.small_limit);
         b
     }
 
@@ -404,7 +415,7 @@ mod tests {
     fn pack_one(bytes: &[u8], scheme: Scheme, w: usize, align: bool) -> Vec<u8> {
         let p = parse(bytes, scheme, w, align, Limits::default()).unwrap();
         assert!(fits(&p));
-        let mut fc = FaxCoder::new(bytes.len());
+        let mut fc = FaxCoder::new(bytes.len(), &ArchiveRules::default());
         let mut e = Encoder::new();
         let back = code(&mut e, &mut fc, Some(&p), 0, bytes.len()).unwrap();
         assert_eq!(back, bytes);
@@ -412,7 +423,7 @@ mod tests {
     }
 
     fn unpack_one(data: &[u8], max: usize) -> Option<Vec<u8>> {
-        let mut fc = FaxCoder::new(max);
+        let mut fc = FaxCoder::new(max, &ArchiveRules::default());
         let mut d = Decoder::new(data);
         code(&mut d, &mut fc, None, 0, max)
     }
@@ -522,9 +533,14 @@ mod tests {
         // The restore makes the same checks, at the place in the file it has really restored up to (not a
         // length the file claims).
         let mut e = Encoder::new();
-        assert_eq!(code(&mut e, &mut FaxCoder::new(far), Some(&p), far, bytes.len()).as_deref(), Some(&bytes[..]));
+        assert_eq!(
+            code(&mut e, &mut FaxCoder::new(far, &ArchiveRules::default()), Some(&p), far, bytes.len()).as_deref(),
+            Some(&bytes[..])
+        );
         let packed = e.finish();
-        let restore = |at: usize| code(&mut Decoder::new(&packed), &mut FaxCoder::new(far), None, at, bytes.len());
+        let restore = |at: usize| {
+            code(&mut Decoder::new(&packed), &mut FaxCoder::new(far, &ArchiveRules::default()), None, at, bytes.len())
+        };
         assert_eq!(restore(far).as_deref(), Some(&bytes[..]));
         assert_eq!(restore(near), None);
         assert_eq!(restore(0), None);

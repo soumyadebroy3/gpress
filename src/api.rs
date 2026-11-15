@@ -48,8 +48,11 @@ use crate::Feature;
 /// Library version, from Cargo.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The archive format version this build writes and reads.
+/// The archive format version this build writes and reads. With a shared rule of [`ArchiveRules`] changed it
+/// writes the next version, which it reads too (version 10: version 9 with the changed values in its header).
 pub const ARCHIVE_VERSION: u8 = pack::VERSION;
+
+pub use pack::ArchiveRules;
 
 /// Most worker threads a caller may ask for (a thread pool never runs more).
 pub const MAX_THREADS: usize = crate::par::MAX_THREADS;
@@ -168,6 +171,12 @@ pub struct Options {
     /// (on expand by one part's zlib re-creation). `None` = no limit. On a platform without a clock
     /// (WebAssembly without a host clock) there is no budget.
     pub time_budget: Option<Duration>,
+    /// Archive: the tuning values compress works by, each with a name, a default and a range
+    /// ([`ArchiveRules`]); change one with `archive_rules.set("plain_below", 0)`. Most are choices of compress
+    /// alone. The model's own values must be the same when the archive is expanded: with any of those changed,
+    /// the archive carries them in its header and is version 10, which a build that reads only version 9
+    /// refuses. Expand takes them from the archive, never from here (it reads `deadline_step` only).
+    pub archive_rules: ArchiveRules,
     /// The values the two Flate encoders work by: how hard each effort searches, where blocks end, and so on.
     /// Each has a name, a default and a range ([`FlateRules`]); change one with
     /// `flate_rules.set("e40_depth", 4096)`. With none set the output is what it always was; any value in a
@@ -197,6 +206,7 @@ impl Default for Options {
             decrypt: true,
             use_existing_libraries: true,
             time_budget: None,
+            archive_rules: ArchiveRules::default(),
             flate_rules: FlateRules::default(),
         }
     }
@@ -358,13 +368,19 @@ impl Options {
             max_decoded: self.max_decoded,
             existing: self.use_existing_libraries && Options::has_existing_libraries(),
             deadline: self.deadline(),
+            rules: self.archive_rules.clone(),
         }
     }
 
     /// The expand settings these options mean.
     #[cfg(feature = "archive")]
     pub fn unpack(&self) -> pack::UnpackOptions {
-        pack::UnpackOptions { max_len: self.max_len, max_decoded: self.max_decoded, deadline: self.deadline() }
+        pack::UnpackOptions {
+            max_len: self.max_len,
+            max_decoded: self.max_decoded,
+            deadline: self.deadline(),
+            rules: self.archive_rules.clone(),
+        }
     }
 }
 
@@ -406,7 +422,11 @@ impl std::fmt::Display for Error {
             Error::TooLarge { size, limit } => write!(f, "input is {size} bytes, over the limit of {limit}"),
             Error::Damaged(why) => write!(f, "{why}"),
             Error::UnsupportedVersion(v) => {
-                write!(f, "gpress archive version {v} is not one this build reads (it reads version {ARCHIVE_VERSION})")
+                write!(
+                    f,
+                    "gpress archive version {v} is not one this build reads (it reads versions {ARCHIVE_VERSION} and {})",
+                    pack::VERSION_PROFILE
+                )
             }
             Error::Internal(why) => write!(f, "internal error: {why}"),
             Error::InvalidOptions(why) => write!(f, "invalid options: {why}"),

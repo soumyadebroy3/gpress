@@ -749,6 +749,18 @@ fn compress_block(w: &mut BitWriter, t: &Tally, lc: &[u16], ll: &[u16], dc: &[u1
 /// Finds zlib parameters that reproduce `raw` (a whole zlib stream) from `data`, if any. Tries the
 /// likeliest settings first, guided by the zlib header.
 pub fn find_params(data: &[u8], raw: &[u8]) -> Option<Params> {
+    find_params_among(data, raw, 0x1FF, 0x1FF, true)
+}
+
+/// `find_params` among the levels and memory levels whose bit is set (bit 0 is 1, bit 8 is 9), with the
+/// "filtered" strategy tried too only when `filtered_too`.
+pub fn find_params_among(
+    data: &[u8],
+    raw: &[u8],
+    levels_tried: u16,
+    mems_tried: u16,
+    filtered_too: bool,
+) -> Option<Params> {
     if raw.len() < 6 || raw[0] & 0x0f != 8 || raw[1] & 0x20 != 0 {
         return None;
     }
@@ -770,12 +782,15 @@ pub fn find_params(data: &[u8], raw: &[u8]) -> Option<Params> {
     // One that can't be read leaves them all.
     let first = first_block_symbols(body, (1 << 15) - 1).ok().flatten();
     for &mem in &[8u8, 9, 7, 6, 5, 4, 3, 2, 1] {
-        if first.is_some_and(|n| n != (1 << (mem + 6)) - 1) {
+        if mems_tried >> (mem - 1) & 1 == 0 || first.is_some_and(|n| n != (1 << (mem + 6)) - 1) {
             continue;
         }
         for &level in levels {
+            if levels_tried >> (level - 1) & 1 == 0 {
+                continue;
+            }
             for filtered in [false, true] {
-                if filtered && level < 4 {
+                if filtered && (level < 4 || !filtered_too) {
                     continue;
                 }
                 let p = Params { level, window_bits: wb, mem_level: mem, filtered };
