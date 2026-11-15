@@ -135,8 +135,8 @@ with 10 (`pack` and `unpack` without `archive`, or a measuring command of a part
 only a build with the part can tell the two apart, as with Lepton's parts and `NeedsExistingLibrary`. Neither
 ever gives a wrong file.
 
-The npm package has two modules: `dist/gpress.wasm` with every part (440,568 bytes of gzip), and
-`dist/gpress-web.wasm`, the `web` set (324,252 bytes of gzip, 26% less). Both have the same wrapper; in the web
+The npm package has two modules: `dist/gpress.wasm` with every part (474,284 bytes of gzip), and
+`dist/gpress-web.wasm`, the `web` set (357,709 bytes of gzip, 25% less). Both have the same wrapper; in the web
 module `compress` and `expand` throw a `GpressFeatureError` whose `feature` is `"archive"`, and `g.features`
 lists the parts a module has.
 
