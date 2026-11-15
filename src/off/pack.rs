@@ -7,9 +7,16 @@
 pub const MAGIC: &[u8; 4] = b"\x89GPZ";
 /// The archive format version a build with the archive writes and reads.
 pub const VERSION: u8 = 9;
+/// The version it writes with shared archive rules changed, and reads too.
+pub const VERSION_PROFILE: u8 = 10;
 /// The default budget of decoded bytes for the parts of one archive.
 pub const DEFAULT_MAX_DECODED: u64 = 256 << 20;
 
 #[path = "../pack/sha256.rs"]
 mod sha256;
 pub use sha256::sha256;
+
+// The archive's rules are a field of the options in every build (they decide nothing without the archive).
+#[path = "../pack/rules.rs"]
+pub mod rules;
+pub use rules::ArchiveRules;

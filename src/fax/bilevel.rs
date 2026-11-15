@@ -9,11 +9,13 @@
 //! costs one decision (typical prediction), and a pixel whose whole 28-pixel neighbourhood is white is coded
 //! with one small counter instead of the full model (most pixels of a page; much faster).
 //!
-//! Everything is integer arithmetic, so encoder and decoder agree on every platform. The settings are
-//! constants of the format.
+//! Everything is integer arithmetic, so encoder and decoder agree on every platform. The settings are part of
+//! the format; the numbers among them are rules (`ArchiveRules`, the `fax_` ones), which an archive made with
+//! other values than the defaults carries in its header.
 
 use super::ccitt::{expand_row, row_changes};
 use crate::cm::{Coder, Counter};
+use crate::pack::rules::ArchiveRules;
 use std::sync::OnceLock;
 
 // ---------------------------------------------------------------- logistic functions, 16-bit precision
@@ -78,20 +80,25 @@ const INPUTS: usize = N + 1;
 const TABLE_BITS: [u32; N] = [16, 12, 0, 16, 13, 13, 0];
 /// Pixels of white margin around each row buffer.
 const M: usize = 16;
-/// Learning rate of the mixer (a shift; larger is slower).
-const MIX_SHIFT: i32 = 15;
 /// Mixer weights stay within +-256.0 (far beyond useful values), so no sum can overflow, whatever the data.
 const W_MAX: i32 = 1 << 24;
-/// Rate of the adaptive probability map (a shift).
-const APM_SHIFT: i32 = 6;
-const LIMIT: u32 = 1023;
-const LIMIT_HASHED: u32 = 1023;
-/// Bits of the hashed tables of the large templates, at most (smaller for small files, see `new`).
+/// Bits of the hashed tables of the large templates, at most, whatever the rules say (16 MiB each).
 const BIG_BITS: u32 = 22;
 
 pub struct Bilevel {
     l: &'static Logistic,
     big_bits: u32,
+    /// The rules `fax_mixer_shift` and `fax_apm_shift` (learning rates as shifts; larger is slower),
+    /// `fax_limit` and `fax_hashed_limit` (count caps), `fax_blend_apm1` and `fax_blend_apm2` (with the mixers'
+    /// share first, in sixteenths), `fax_apm_bits` (each map has 2^bits + 1 knots per context) and
+    /// `fax_white_shortcut`.
+    mix_shift: u32,
+    apm_shift: u32,
+    limit: u32,
+    limit_hashed: u32,
+    blend: [u32; 3],
+    apm_bits: u32,
+    shortcut: bool,
     tables: Vec<Vec<Counter>>,
     fast: [Counter; 8],
     same_row: [Counter; 2],
@@ -109,26 +116,34 @@ pub struct Bilevel {
 }
 
 impl Bilevel {
-    /// `big_bits`: size of the hashed tables (both sides must use the same; see `part`).
-    pub fn new(big_bits: u32) -> Bilevel {
-        let big_bits = big_bits.clamp(12, BIG_BITS);
+    /// `big_bits`: size of the hashed tables, held within the rules `fax_bits_min` and `fax_bits_max` (12 and
+    /// 22 by default). `r`: the model's rules. Both sides must use the same (see `part`).
+    pub fn new(big_bits: u32, r: &ArchiveRules) -> Bilevel {
+        let big_bits = big_bits.min(r.fax_bits_max() as u32).max(r.fax_bits_min() as u32).min(BIG_BITS);
         let l = logistic();
-        let mut apm = vec![0u16; (1 << 16) * 33];
-        for c in 0..(1 << 16) {
-            for j in 0..33 {
-                apm[c * 33 + j] = squash(l, (j as i32 - 16) * SMAX / 16) as u16;
-            }
-        }
-        let apm2 = apm[..(1 << 13) * 33].to_vec();
+        let apm_bits = (r.fax_apm_bits() as u32).clamp(3, 6);
+        let (knots, half) = ((1usize << apm_bits) + 1, 1i32 << (apm_bits - 1));
+        let map: Vec<u16> = (0..knots).map(|j| squash(l, (j as i32 - half) * SMAX / half) as u16).collect();
+        let apm = map.repeat(1 << 16);
+        let apm2 = apm[..(1 << 13) * knots].to_vec();
+        let start = r.fax_mixer_start().min(1 << 16) as i32;
+        let (b1, b2) = (r.fax_blend_apm1().min(8) as u32, r.fax_blend_apm2().min(8) as u32);
         Bilevel {
             l,
             big_bits,
+            mix_shift: (r.fax_mixer_shift() as u32).clamp(4, 24),
+            apm_shift: (r.fax_apm_shift() as u32).clamp(1, 15),
+            limit: r.fax_limit() as u32,
+            limit_hashed: r.fax_hashed_limit() as u32,
+            blend: [16 - b1 - b2, b1, b2],
+            apm_bits,
+            shortcut: r.fax_white_shortcut() != 0,
             apm2,
             tables: TABLE_BITS.iter().map(|&b| vec![Counter::new(); 1 << if b == 0 { big_bits } else { b }]).collect(),
             fast: [Counter::new(); 8],
             same_row: [Counter::new(); 2],
-            weights: vec![(1 << 16) * 3 / 10; INPUTS * 32],
-            weights2: vec![(1 << 16) * 3 / 10; INPUTS * 128],
+            weights: vec![start; INPUTS * 32],
+            weights2: vec![start; INPUTS * 128],
             apm,
             width: 0,
             rows: [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
@@ -161,7 +176,7 @@ impl Bilevel {
         let same_in = row.map(|r| (r == self.prev.as_slice()) as u32);
         let cx = &mut self.same_row[self.prev_same];
         let same = c.code(same_in, cx.p12());
-        cx.update(same, LIMIT);
+        cx.update(same, self.limit);
         self.prev_same = same as usize;
         if same == 1 {
             let (a, b) = self.rows.split_at_mut(1);
@@ -178,6 +193,12 @@ impl Bilevel {
         }
         let encoding = row.is_some();
         let l = self.l;
+        let (mix_shift, apm_shift, limit, limit_hashed) =
+            (self.mix_shift, self.apm_shift, self.limit, self.limit_hashed);
+        let ([bm, b1, b2], shortcut) = (self.blend, self.shortcut);
+        // The maps: `top` intervals between their knots, `knots` knots per context.
+        let (apm_bits, top) = (self.apm_bits, 1usize << self.apm_bits);
+        let knots = top + 1;
         let (r0, rest) = self.rows.split_at_mut(1);
         let cur = &mut r0[0];
         let (row1, row2, row3, row4) = (&rest[0], &rest[1], &rest[2], &rest[3]);
@@ -213,14 +234,14 @@ impl Bilevel {
             let big = (c0 & 0x7F) | ((a1 >> 3) & 0x7FF) << 7 | ((a2 >> 5) & 0x7F) << 18 | ((a3 >> 7) & 7) << 25;
             let px_in = if encoding { Some(cur[M + x] as u32) } else { None };
             let bit;
-            if big == 0 {
+            if big == 0 && shortcut {
                 // A white neighbourhood: one counter, chosen by what is a little farther away.
                 let f = ((a1 & 0x7) != 0) as usize
                     | ((((a2 & 0x1F) | (a3 & 0x3F)) != 0) as usize * 2)
                     | ((c0 >> 7) as usize * 4);
                 let ct = &mut self.fast[f];
                 bit = c.code16(px_in, ct.p16());
-                ct.update(bit, LIMIT);
+                ct.update(bit, limit);
             } else {
                 let t16 = ((c0 & 0xF) | ((a1 >> 5) & 0x7F) << 4 | ((a2 >> 6) & 0x1F) << 11) as usize;
                 let small = ((c0 & 7) | ((a1 >> 5) & 0x3F) << 3 | ((a2 >> 7) & 7) << 9) as usize;
@@ -286,32 +307,38 @@ impl Bilevel {
                 let sm = (s1 + s2) / 2;
                 let pm = squash(l, sm);
                 // Adaptive probability map over the stretched mixer output, by template 0.
-                let pos = (sm + SMAX) * 32 * 64 / (2 * SMAX);
+                let pos = ((sm + SMAX) << apm_bits) * 64 / (2 * SMAX);
                 let (lo, fr) = ((pos >> 6) as usize, pos & 63);
-                let base = t16 * 33;
-                let pa = ((self.apm[base + lo] as i32 * (64 - fr) + self.apm[base + (lo + 1).min(32)] as i32 * fr) >> 6)
-                    as u32;
-                let base2 = vert * 33;
-                let pb = ((self.apm2[base2 + lo] as i32 * (64 - fr) + self.apm2[base2 + (lo + 1).min(32)] as i32 * fr)
+                let base = t16 * knots;
+                let pa = ((self.apm[base + lo] as i32 * (64 - fr) + self.apm[base + (lo + 1).min(top)] as i32 * fr)
                     >> 6) as u32;
-                let p = ((pm + pa + 2 * pb + 2) >> 2).clamp(1, 65535);
+                let base2 = vert * knots;
+                let pb = ((self.apm2[base2 + lo] as i32 * (64 - fr) + self.apm2[base2 + (lo + 1).min(top)] as i32 * fr)
+                    >> 6) as u32;
+                // By default a quarter each of the mixers' result and the first map's, and half of the second's:
+                // the same sum without the multiplications, as in the general model.
+                let p = match [bm, b1, b2] {
+                    [4, 4, 8] => (pm + pa + 2 * pb + 2) >> 2,
+                    _ => (bm * pm + b1 * pa + b2 * pb + 8) >> 4,
+                };
+                let p = p.clamp(1, 65535);
                 bit = c.code16(px_in, p);
                 // Learn.
                 for i in 0..N {
-                    self.tables[i][cxs[i]].update(bit, if i == 2 || i == 6 { LIMIT_HASHED } else { LIMIT });
+                    self.tables[i][cxs[i]].update(bit, if i == 2 || i == 6 { limit_hashed } else { limit });
                 }
                 let err = ((bit as i64) << 16) - p1 as i64;
                 let err2 = ((bit as i64) << 16) - p2 as i64;
                 for i in 0..INPUTS {
-                    wts[i] = (wts[i] + ((st[i] as i64 * err) >> MIX_SHIFT) as i32).clamp(-W_MAX, W_MAX);
-                    wts2[i] = (wts2[i] + ((st[i] as i64 * err2) >> MIX_SHIFT) as i32).clamp(-W_MAX, W_MAX);
+                    wts[i] = (wts[i] + ((st[i] as i64 * err) >> mix_shift) as i32).clamp(-W_MAX, W_MAX);
+                    wts2[i] = (wts2[i] + ((st[i] as i64 * err2) >> mix_shift) as i32).clamp(-W_MAX, W_MAX);
                 }
-                let near = if fr >= 32 { (lo + 1).min(32) } else { lo };
+                let near = if fr >= 32 { (lo + 1).min(top) } else { lo };
                 let target: i32 = if bit == 1 { 65535 } else { 0 };
                 let a = self.apm[base + near] as i32;
-                self.apm[base + near] = (a + ((target - a) >> APM_SHIFT)) as u16;
+                self.apm[base + near] = (a + ((target - a) >> apm_shift)) as u16;
                 let a = self.apm2[base2 + near] as i32;
-                self.apm2[base2 + near] = (a + ((target - a) >> APM_SHIFT)) as u16;
+                self.apm2[base2 + near] = (a + ((target - a) >> apm_shift)) as u16;
             }
             if bit == (c0 & 1) {
                 run += 1;
@@ -390,7 +417,7 @@ mod tests {
                 ch
             })
             .collect();
-        let mut m = Bilevel::new(20);
+        let mut m = Bilevel::new(20, &ArchiveRules::default());
         m.start(w);
         let mut e = Encoder::new();
         let mut out = Vec::new();
@@ -400,7 +427,7 @@ mod tests {
         }
         let data = e.finish();
         assert!(data.len() < w * h / 8 / 8, "{} bytes", data.len());
-        let mut m = Bilevel::new(20);
+        let mut m = Bilevel::new(20, &ArchiveRules::default());
         m.start(w);
         let mut d = Decoder::new(&data);
         for r in &rows {

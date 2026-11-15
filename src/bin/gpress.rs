@@ -5,22 +5,31 @@
 //!   gpress pack IN OUT [options]       the gpress archive of IN (any file)
 //!   gpress unpack IN OUT [options]     the original from an archive; a damaged archive is an error
 //!
-//! Options (the library's `Options`, the same defaults): --effort N (0 fast .. 100 smallest, default 100;
-//! --quick = 0), --threads N (0: every core the machine offers, at most 8; at most 64), --max-input BYTES,
+//! Options (the library's `Options`, the same defaults): --effort N (0 to 100 in steps of 20, a value in
+//! between counting as the step below: 0 fast, 20 and 40 smaller, all three lossless, 40 the default and the
+//! smallest lossless output; 60, 80 and 100 lossy, changing images only, smaller each step; pack is lossless
+//! at every effort; --quick = 0), --target-size V (optimize: the lowest of the six efforts whose output is at
+//! most V, which is bytes, with k or m for KiB or MiB, or N% of the input; up to six runs of the engine; the
+//! output line then ends with effort=E target=reached|missed, missed meaning the smallest of the six),
+//! --engine-effort N (for measuring: the engine's own lossless level, 0 to 100, in place of what the effort
+//! means, and nothing lossy unless a flag below asks), --threads N (0: every core the machine offers, at most 8; at most 64), --max-input BYTES,
 //! --max-stream BYTES (normal PDF), --max-stream-archive BYTES, --max-decoded BYTES (the archive's decoded-bytes
 //! budget, for pack and unpack), --max-len BYTES (unpack: a file declaring more is refused),
 //! --objects-per-stream N, --time-budget MS (give up after that long), --ignore-conformance,
 //! --no-flate-over-jpeg, --no-jpeg-tables, --no-jbig2, --no-palette, --keep-encrypted, --store-budget BYTES
-//! (normal PDF), --drop-history (normal PDF: a file that keeps earlier saves is written with only the newest;
-//! each dropped save is listed on standard error), --no-decrypt (archive), --no-existing. The output never
-//! depends on the thread count or the time budget: a budget that runs out gives an error and no file.
+//! (normal PDF), --photo-ppi N, --art-ppi N, --jpeg-quality N (normal PDF: each sets one setting of the lossy
+//! image step, see `gpress::Lossy`, over the effort's; 0 leaves it as it is), --no-decrypt (archive),
+//! --no-existing. The output never depends on the thread count or the time budget: a budget that runs out gives
+//! an error and no file. A file that keeps earlier saves (incremental updates) is written as its newest save
+//! alone; each dropped save is listed on standard error.
 //!
 //! Measuring tools (the engine's own modules, for the benchmarks): deflate, inflate, batch, pdf-batch,
 //! repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info, fax-decode, fax-encode, fax-scan,
 //! fax-model, jbig2-encode, claim-archive (the security suite's crafted archive). `--iter`, `--exact`,
 //! `--chain`, `--nice`, `--nosplit`, `--noalt`, `--nomulti` and `--nopolish` fine-tune the strong encoder's
-//! settings for the effort in the deflate tools; below effort 20, where the fast encoder runs, any of them
-//! selects the strong encoder (its quick settings, fine-tuned). `--fast N` (1 to `flate::fast::LEVELS`) uses
+//! settings for the engine's level (`--engine-effort`, or else what `--effort` means) in the deflate tools;
+//! below level 20, where the fast encoder runs, any of them selects the strong encoder (its quick settings,
+//! fine-tuned). `--fast N` (1 to `flate::fast::LEVELS`) uses
 //! the fast encoder at level N instead, and `--fast 0` the strong encoder. The deflate tools work on a thread
 //! pool only with `--threads N` above 0. A build without a part of the engine (a Cargo feature) has no tools
 //! of that part: asked for one, it says which feature the tool needs and exits with 10.
@@ -67,12 +76,14 @@ usage: gpress optimize IN OUT [options]   a smaller PDF that any reader opens (o
        gpress pack IN OUT [options]       the gpress archive of IN (any file)
        gpress unpack IN OUT [options]     the original from an archive (a damaged archive is an error)
 
-options: --effort N (0 fast .. 100 smallest, default 100; --quick = 0)   --threads N (0: up to 8 cores; max 64)
+options: --effort N (0, 20, 40 lossless: fast .. smallest, default 40; 60, 80, 100 lossy: images only; --quick = 0)
+         --target-size V (optimize: the lowest effort that gives at most V: bytes, k, m or N% of the input)
+         --engine-effort N (measuring: the engine's lossless level, 0 .. 100)   --threads N (0: up to 8 cores; max 64)
          --max-input BYTES   --max-stream BYTES (normal PDF)   --max-stream-archive BYTES   --max-decoded BYTES (archive,
          pack and unpack)   --max-len BYTES (unpack)   --objects-per-stream N   --time-budget MS   --ignore-conformance
          --no-flate-over-jpeg   --no-jpeg-tables   --no-jbig2   --no-palette   --keep-encrypted
-         --store-budget BYTES (normal PDF)
-         --drop-history (normal PDF: write only the newest save of a file that keeps earlier ones)
+         --store-budget BYTES (normal PDF)   --photo-ppi N   --art-ppi N   --jpeg-quality N (one setting of the lossy
+         image step each, over the effort's)
          --no-decrypt (archive)   --no-existing
 measuring tools: deflate, inflate, batch, pdf-batch, repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info,
          fax-decode, fax-encode, fax-scan, fax-model, jbig2-encode, claim-archive (see the comments at the top of
@@ -87,6 +98,8 @@ const WITH_VALUE: &[&str] = &[
     "--fast",
     "--threads",
     "--effort",
+    "--engine-effort",
+    "--target-size",
     "--max-input",
     "--max-stream",
     "--max-stream-archive",
@@ -95,6 +108,9 @@ const WITH_VALUE: &[&str] = &[
     "--objects-per-stream",
     "--time-budget",
     "--store-budget",
+    "--photo-ppi",
+    "--art-ppi",
+    "--jpeg-quality",
 ];
 
 /// The flags that fine-tune the strong encoder's settings in the deflate tools.
@@ -123,8 +139,13 @@ fn main() {
     };
     let size = |name: &str| num(name).map(|n| usize::try_from(n).unwrap_or(usize::MAX));
     // The library's options, from the flags.
-    let effort = if flag("--quick") { 0 } else { num("--effort").unwrap_or(100).min(255) as u8 };
-    let mut lib = gpress::Options::default().effort(effort);
+    let mut lib = gpress::Options::default();
+    if flag("--quick") {
+        lib = lib.effort(0);
+    } else if let Some(n) = num("--effort") {
+        lib = lib.effort(n.min(255) as u8);
+    }
+    lib.engine_effort = num("--engine-effort").map(|n| n.min(255) as u8);
     if let Some(n) = size("--threads") {
         lib.threads = n;
     }
@@ -158,13 +179,20 @@ fn main() {
     lib.jbig2 = !flag("--no-jbig2");
     lib.palette = !flag("--no-palette");
     lib.rewrite_encrypted = !flag("--keep-encrypted");
-    lib.drop_history = flag("--drop-history");
+    // The lossy image step: single settings over what the effort means (after --effort and --engine-effort:
+    // an override starts from what they mean).
+    let setting = |name: &str, most: u64| num(name).unwrap_or(0).min(most);
+    lib = lib.lossy_overrides(
+        setting("--photo-ppi", u16::MAX as u64) as u16,
+        setting("--art-ppi", u16::MAX as u64) as u16,
+        setting("--jpeg-quality", u8::MAX as u64) as u8,
+    );
     lib.decrypt = !flag("--no-decrypt");
     lib.use_existing_libraries = !flag("--no-existing");
     lib.check().unwrap_or_else(|e| fail(&e));
     let threads = lib.threads;
-    // The Flate settings of the measuring tools: the effort's, fine-tuned by the flags below it.
-    let mut opt = Options::effort(effort);
+    // The Flate settings of the measuring tools: the engine level's, fine-tuned by the flags below it.
+    let mut opt = lib.flate_for_cli();
     if let Some(v) = size("--iter") {
         opt.iterations = v;
     }
@@ -254,10 +282,22 @@ fn main() {
         Some("optimize") => {
             let (i, o) = (pos.get(1).unwrap_or_else(|| die("need IN")), pos.get(2).unwrap_or_else(|| die("need OUT")));
             let data = std::fs::read(i).unwrap_or_else(|e| die(&format!("{i}: {e}")));
+            let target = args.iter().position(|a| a == "--target-size").map(|k| {
+                let v = args.get(k + 1).unwrap_or_else(|| die("--target-size needs a size"));
+                target_size(v, data.len())
+                    .unwrap_or_else(|| die(&format!("--target-size: {v} is not a size (bytes, with k or m, or N%)")))
+            });
             let t = Instant::now();
-            let r = gpress::optimize(&data, &lib).unwrap_or_else(|e| fail(&e));
+            let (r, picked) = match target {
+                Some(target) => {
+                    let p = gpress::optimize_to_size(&data, target, &lib).unwrap_or_else(|e| fail(&e));
+                    let how = if p.reached { "reached" } else { "missed" };
+                    (p.result, format!(" effort={} target={how}", p.effort.level()))
+                }
+                None => (gpress::optimize(&data, &lib).unwrap_or_else(|e| fail(&e)), String::new()),
+            };
             std::fs::write(o, &r.data).unwrap_or_else(|e| die(&format!("{o}: {e}")));
-            println!("{}", describe(i, data.len(), &r, t.elapsed().as_secs_f64()));
+            println!("{}{picked}", describe(i, data.len(), &r, t.elapsed().as_secs_f64()));
             list_dropped(i, &r);
         }
         Some("pdf-batch") => {
@@ -369,7 +409,7 @@ fn main() {
             let bpp: usize = pos.get(4).and_then(|x| x.parse().ok()).unwrap_or(1);
             let exact = pos.get(5).map(|s| s.as_str()) == Some("exact");
             let t = Instant::now();
-            let mut m = Model::new(18);
+            let mut m = Model::new(18, &Default::default());
             m.set_kind(kind, Geom { stride, bpp, exact }, 0);
             let mut e = gpress::cm::Encoder::new();
             for &b in &data {
@@ -516,25 +556,26 @@ fn main() {
             // gpress fax-model RAW K COLUMNS ALIGN(0|1): size of a raw fax stream as an archive fax part, with
             // the time to code it and to restore it (checked).
             use gpress::fax::{ccitt, part};
+            let rules = gpress::ArchiveRules::default();
             let raw =
                 std::fs::read(pos.get(1).unwrap_or_else(|| die("need RAW"))).unwrap_or_else(|e| die(&e.to_string()));
             let k: i64 = pos.get(2).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need K"));
             let cols: usize = pos.get(3).and_then(|x| x.parse().ok()).unwrap_or_else(|| die("need COLUMNS"));
             let align = pos.get(4).map(|s| s.as_str()) == Some("1");
             // Prepared as pack prepares it (the stream's byte alignment, or the other one if that reads more).
-            let p = part::prepare(&raw, ccitt::Scheme::from_k(k), cols, align)
+            let p = part::prepare(&raw, ccitt::Scheme::from_k(k), cols, align, rules.fax_max_leftover())
                 .unwrap_or_else(|| die("not stored as a fax part"));
             // The work budget as if the stream started a file (where it is smallest); the size is measured anyway.
             let within = part::Work::default().admit(&p, 0);
             let at = if within { 0 } else { usize::MAX / 4 };
             let t = Instant::now();
             let mut e = gpress::cm::Encoder::new();
-            let back = part::code(&mut e, &mut part::FaxCoder::new(raw.len()), Some(&p), at, raw.len());
+            let back = part::code(&mut e, &mut part::FaxCoder::new(raw.len(), &rules), Some(&p), at, raw.len());
             let z = e.finish();
             let t1 = t.elapsed().as_secs_f64();
             let t = Instant::now();
             let mut d = gpress::cm::Decoder::new(&z);
-            let restored = part::code(&mut d, &mut part::FaxCoder::new(raw.len()), None, at, raw.len());
+            let restored = part::code(&mut d, &mut part::FaxCoder::new(raw.len(), &rules), None, at, raw.len());
             let t2 = t.elapsed().as_secs_f64();
             println!(
                 "{} -> {} bytes ({} rows, {} trailing), coded in {t1:.2}s, restored in {t2:.2}s, exact: {}, within the work budget at the start of a file: {within}",
@@ -563,6 +604,20 @@ fn main() {
             std::process::exit(2);
         }
     }
+}
+
+/// The value of `--target-size`: bytes, with `k` or `m` for KiB or MiB, or `N%` of the input's length (a whole
+/// number of percent). None for anything else.
+fn target_size(v: &str, input_len: usize) -> Option<u64> {
+    if let Some(percent) = v.strip_suffix('%') {
+        let share = input_len as u128 * percent.parse::<u64>().ok()? as u128 / 100;
+        return Some(u64::try_from(share).unwrap_or(u64::MAX));
+    }
+    let (number, unit) = match v.strip_suffix(['k', 'K']) {
+        Some(n) => (n, 1 << 10),
+        None => v.strip_suffix(['m', 'M']).map_or((v, 1), |n| (n, 1 << 20)),
+    };
+    number.parse::<u64>().ok()?.checked_mul(unit)
 }
 
 #[cfg(feature = "fax")]
@@ -622,6 +677,7 @@ fn read_pbm(d: &[u8]) -> Option<gpress::fax::ccitt::Image> {
     Some(img)
 }
 
+/// The output line of one normal-PDF result; what the lossy image step did is added when it changed an image.
 fn describe(name: &str, in_len: usize, r: &gpress::Optimized, secs: f64) -> String {
     match &r.outcome {
         gpress::Outcome::Smaller(s) => format!(
@@ -639,7 +695,11 @@ fn describe(name: &str, in_len: usize, r: &gpress::Optimized, secs: f64) -> Stri
             s.bilevel_to_jbig2,
             s.images_indexed,
             if s.encryption.is_empty() { String::new() } else { format!(" encrypted={}", s.encryption) },
-            if s.history_kept == 0 { String::new() } else { format!(" revisions_kept={}", s.history_kept) },
+            if s.images_resampled + s.images_to_jpeg + s.jpegs_rewritten > 0 {
+                format!(" resampled={} to_jpeg={} rejpeg={}", s.images_resampled, s.images_to_jpeg, s.jpegs_rewritten)
+            } else {
+                String::new()
+            },
             if s.history_dropped.is_empty() {
                 String::new()
             } else {
@@ -650,7 +710,7 @@ fn describe(name: &str, in_len: usize, r: &gpress::Optimized, secs: f64) -> Stri
     }
 }
 
-/// One line on standard error for each earlier save `--drop-history` dropped.
+/// One line on standard error for each earlier save dropped.
 fn list_dropped(name: &str, r: &gpress::Optimized) {
     let gpress::Outcome::Smaller(s) = &r.outcome else { return };
     for (k, d) in s.history_dropped.iter().enumerate() {
@@ -694,5 +754,20 @@ mod tests {
             assert_eq!(super::tool_needs(tool), needs, "{tool}");
         }
         assert_eq!(super::tool_needs("optimize"), None);
+    }
+
+    #[test]
+    fn a_target_size_is_bytes_a_unit_or_a_share_of_the_input() {
+        let t = |v| super::target_size(v, 1000);
+        assert_eq!((t("0"), t("1500"), t("2k"), t("2K")), (Some(0), Some(1500), Some(2048), Some(2048)));
+        assert_eq!((t("3m"), t("3M")), (Some(3 << 20), Some(3 << 20)));
+        assert_eq!((t("20%"), t("0%"), t("100%"), t("250%")), (Some(200), Some(0), Some(1000), Some(2500)));
+        assert_eq!(super::target_size("33%", 10), Some(3));
+        // Too large to count is no size, never a wrapped one; a share is worked out without overflow.
+        assert_eq!(t("18446744073709551615k"), None);
+        assert_eq!(super::target_size("18446744073709551615%", usize::MAX), Some(u64::MAX));
+        for bad in ["", "k", "%", "-5", "1.5m", "20 %", "5kb", "ten", "1g", "5\u{ff4b}"] {
+            assert_eq!(t(bad), None, "{bad:?}");
+        }
     }
 }

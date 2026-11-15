@@ -70,10 +70,8 @@ pub struct Options {
     /// Rewrite files the empty user password opens, keeping their encryption (see `crate::pdf::crypt`). Off,
     /// every encrypted file is left untouched.
     pub rewrite_encrypted: bool,
-    /// A file that keeps earlier saves (incremental updates) is written with every one of them kept (see
-    /// `history`). With `true` only the newest is written, as a file of one save: what the earlier saves held
-    /// and the newest doesn't is gone (`Stats::history_dropped` lists them).
-    pub drop_history: bool,
+    /// The lossy image step (see `crate::pdf::lossy`); `Lossy::OFF` leaves every image to the lossless path.
+    pub lossy: super::lossy::Lossy,
     /// Stop when this passes (checked between streams and Flate segments): the outcome is then `TimedOut`
     /// and nothing is returned. A rewrite that finishes gives the same bytes with or without a deadline.
     pub deadline: Deadline,
@@ -97,7 +95,7 @@ impl Default for Options {
             palette: true,
             jpeg_tables: true,
             rewrite_encrypted: true,
-            drop_history: false,
+            lossy: super::lossy::Lossy::OFF,
             deadline: Deadline::NONE,
             rules: Arc::default(),
         }
@@ -114,6 +112,9 @@ impl Options {
 
 /// The reason `rewrite` gives up when its deadline passes (see `Outcome::TimedOut`).
 const TIMED_OUT: &str = "out of time";
+/// What `rewrite` gives when only the lossy step made the file too short for its object numbers (qpdf 12's
+/// bound, below): `optimize` then writes the lossless output, which is longer. Never a reason a caller sees.
+const LOSSY_TOO_SHORT: &str = "object numbers far apart for the lossy output";
 
 #[derive(Debug, Default, Clone)]
 pub struct Stats {
@@ -131,13 +132,16 @@ pub struct Stats {
     pub bilevel_to_jbig2: usize,
     /// Images of few colours written as Indexed images (the same colours).
     pub images_indexed: usize,
+    /// Images the lossy step resampled to a lower resolution (see `crate::pdf::lossy`).
+    pub images_resampled: usize,
+    /// Photos stored without JPEG that the lossy step wrote as a JPEG.
+    pub images_to_jpeg: usize,
+    /// JPEG photos the lossy step wrote again at a lower quality (not resampled).
+    pub jpegs_rewritten: usize,
     /// How the file is encrypted (kept exactly as it was), e.g. "R4/AESV2"; empty when it isn't.
     pub encryption: String,
-    /// Earlier saves kept, each written again and checked (see `history`). The counts above are then of what
-    /// was written: an object or stream once for each revision that adds or changes it, and no count of
-    /// unreachable objects.
-    pub history_kept: usize,
-    /// Earlier saves dropped because `Options::drop_history` asked, oldest first.
+    /// Earlier saves dropped, oldest first: a file that keeps earlier saves (incremental updates) is written as its
+    /// newest save alone (see `history`), and what the earlier saves held and the newest doesn't is gone.
     pub history_dropped: Vec<Dropped>,
 }
 
@@ -172,7 +176,11 @@ pub struct Optimized {
 }
 
 pub fn optimize(input: &[u8], opt: &Options) -> Optimized {
-    match rewrite(input, opt) {
+    let mut r = rewrite(input, opt);
+    if matches!(&r, Err(why) if why == LOSSY_TOO_SHORT) {
+        r = rewrite(input, &Options { lossy: super::lossy::Lossy::OFF, ..opt.clone() });
+    }
+    match r {
         Ok((out, stats)) => {
             if out.len() as u64 + opt.rules.at(R::min_file_saving) <= input.len() as u64 {
                 Optimized { data: out, outcome: Outcome::Smaller(stats) }
@@ -839,7 +847,7 @@ fn samples<'a>(
 }
 
 /// The PNG predictor parameters for an image of geometry `g`.
-fn png_parms(g: &images::Geometry) -> Dict {
+pub(super) fn png_parms(g: &images::Geometry) -> Dict {
     let mut p = Dict::default();
     p.set(b"Predictor", Obj::Int(15));
     p.set(b"Colors", Obj::Int(g.colors as i64));
@@ -999,7 +1007,12 @@ fn predictor_budget(effort: u8, rules: &RewriteRules) -> usize {
 /// Rows for ranking the predictor candidates of an image below effort 100 (the rule `full_from`): bands of
 /// whole rows spread over the image (see `sample_bands`), at most a budget of bytes that grows with the
 /// effort. None: rank on the whole image (effort 100, or a small image).
-fn predictor_sample(nrows: usize, row: usize, effort: u8, rules: &RewriteRules) -> Option<Vec<(usize, usize)>> {
+pub(super) fn predictor_sample(
+    nrows: usize,
+    row: usize,
+    effort: u8,
+    rules: &RewriteRules,
+) -> Option<Vec<(usize, usize)>> {
     if effort as u64 >= rules.at(R::full_from) {
         return None;
     }
@@ -1109,7 +1122,7 @@ fn decoded_size(s: &Stream, limit: usize, last: usize) -> Option<usize> {
 /// share of their input, and the time against level 7's): 7 87.02%; 8 87.04%, 1.3x; 9 86.70%, 1.45x; 10
 /// 86.63%, 1.6x; 11 86.37%, 1.95x; 12 86.30%, 2.15x. Level 8 is the one level weaker than 7 on images, so the
 /// scale goes from 7 to 9.
-fn image_level(effort: u8, rules: &RewriteRules) -> u8 {
+pub(super) fn image_level(effort: u8, rules: &RewriteRules) -> u8 {
     rules.cell(R::image_level_0, effort.min(FAST_BELOW - 1) as usize) as u8
 }
 
@@ -1551,19 +1564,13 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
             s.shared
         );
     }
-    let objs = objs?;
-    // A file that keeps earlier saves: every save is kept and written by `history`, or, when the caller asks,
-    // every save is checked there and the newest goes on alone.
-    let mut history_dropped = Vec::new();
-    match gate(&doc, &objs, opt.respect_conformance) {
-        Err(why) if why == xref::KEEPS && !opt.drop_history => {
-            drop((objs, doc));
-            return history::keep(input, opt);
-        }
+    let mut objs = objs?;
+    // A file that keeps earlier saves: every save is checked by `history`, and the newest goes on alone.
+    let history_dropped = match gate(&doc, &objs, opt.respect_conformance) {
         // Every save passes the gate there, the newest among them.
-        Err(why) if why == xref::KEEPS => history_dropped = history::dropped(input, opt, &objs)?,
-        gated => gated?,
-    }
+        Err(why) if why == xref::KEEPS => history::dropped(input, opt, &objs)?,
+        gated => gated.map(|()| Vec::new())?,
+    };
     let mut stats = Stats {
         history_dropped,
         objects: objs.len(),
@@ -1588,6 +1595,14 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         },
         ..opt.clone()
     };
+
+    // The lossy image step, when asked for: the images it reduces are new streams to everything below.
+    if !opt.lossy.is_off() {
+        let done = super::lossy::reduce(&mut objs, &doc.trailer, opt, pool);
+        stats.images_resampled = done.resampled;
+        stats.images_to_jpeg = done.to_jpeg;
+        stats.jpegs_rewritten = done.rejpeg;
+    }
 
     // Streams are re-encoded first, in parallel (the biggest first, identical streams once); the results are
     // used in object order below, so the output doesn't depend on the number of threads.
@@ -1755,7 +1770,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     for (chunk, ((_, first), z)) in chunks.iter().zip(raws.iter().zip(zs)) {
         let sn = next_num;
         next_num += 1;
-        direct.insert(sn, (0, objstm_body(crypt, 0, sn, (chunk.len(), *first), z, hex)?));
+        direct.insert(sn, (0, objstm_body(crypt, sn, (chunk.len(), *first), z, hex)?));
         stats.objstms += 1;
     }
     // The encryption dictionary and its objects as they were: never encrypted, never in an object stream.
@@ -1829,9 +1844,10 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
 
     // qpdf 12 reads an object only when its number is below a third of the file's length, this cross-reference
     // stream included, and objects keep their numbers: a file whose numbers are too high for its new length
-    // stays as it is.
+    // stays as it is, or, when the lossy step changed images, gets the lossless output.
     if xn as usize >= out.len() / 3 {
-        return Err("object numbers far apart".into());
+        let lossy = stats.images_resampled + stats.images_to_jpeg + stats.jpegs_rewritten > 0;
+        return Err(if lossy { LOSSY_TOO_SHORT } else { "object numbers far apart" }.into());
     }
     // Read our own output back and compare everything reachable.
     let taken = self_check(&objs, &out, &doc.trailer, crypt, &proven, pool)?;
@@ -1871,11 +1887,10 @@ fn objstm_raw(chunk: &[(u32, &Obj)], hex: bool) -> (Vec<u8>, usize) {
 }
 
 /// Object stream `sn` as it goes into the file: `z` is its deflated data, of `count` objects, the first at
-/// `first`. Encrypted as a stream, for revision `rev` (see `Crypt::seal_stream_at`); the objects inside are not
-/// encrypted on their own. `hex`: every string in hexadecimal (the rule `string_form`).
+/// `first`. Encrypted as a stream; the objects inside are not encrypted on their own. `hex`: every string in
+/// hexadecimal (the rule `string_form`).
 fn objstm_body(
     crypt: Option<&Crypt>,
-    rev: u32,
     sn: u32,
     (count, first): (usize, usize),
     z: Vec<u8>,
@@ -1887,7 +1902,7 @@ fn objstm_body(
     d.set(b"First", Obj::Int(first as i64));
     d.set(b"Filter", Obj::Name(b"FlateDecode".to_vec()));
     let (mut d, z) = match crypt {
-        Some(c) => c.seal_stream_at(rev, sn, 0, &d, &z).map_err(|e| format!("object stream: {e}"))?,
+        Some(c) => c.seal_stream(sn, 0, &d, &z).map_err(|e| format!("object stream: {e}"))?,
         None => (d, z),
     };
     d.set(b"Length", Obj::Int(z.len() as i64));

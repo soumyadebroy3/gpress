@@ -315,7 +315,7 @@ fn small_doc() -> Vec<u8> {
 }
 
 fn with_rules(effort: u8, rules: &[(&str, u64)]) -> Options {
-    let mut opt = Options::default().effort(effort).threads(1);
+    let mut opt = Options::default().engine_effort(Some(effort)).threads(1);
     for &(name, value) in rules {
         assert!(opt.rewrite_rules.set(name, value), "{name}={value} is not a rule and a value in its range");
     }
@@ -374,7 +374,10 @@ fn a_rule_set_to_its_default_is_a_rule_left_alone() {
     // And so is the output, where the fast path, the bridge, the budgets and the full search decide.
     let doc = small_doc();
     for effort in [0, 15, 40, 100] {
-        let (set, unset) = (opt.clone().effort(effort).threads(1), Options::default().effort(effort).threads(1));
+        let (set, unset) = (
+            opt.clone().engine_effort(Some(effort)).threads(1),
+            Options::default().engine_effort(Some(effort)).threads(1),
+        );
         assert!(optimize(&doc, &set).unwrap().data == optimize(&doc, &unset).unwrap().data, "effort {effort}");
     }
 }

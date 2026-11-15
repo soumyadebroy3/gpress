@@ -12,7 +12,7 @@ use common::*;
 use gpress::api::MAX_STORE_BUDGET;
 #[cfg(feature = "archive")]
 use gpress::Compressed;
-use gpress::{compress, expand, optimize, Error, Options, Outcome, Report};
+use gpress::{compress, expand, optimize, optimize_to_size, Error, Lossy, Options, Outcome, Report};
 use std::time::Duration;
 
 fn base() -> Options {
@@ -45,12 +45,13 @@ fn pack(input: &[u8], opt: &Options) -> Compressed {
 fn effort_changes_the_work_and_every_level_restores() {
     let pdf = plain_pdf();
     let quick = optimize(&pdf, &base().effort(0)).unwrap();
-    let full = optimize(&pdf, &base().effort(100)).unwrap();
+    let full = optimize(&pdf, &base().effort(40)).unwrap();
     assert!(report(&quick).streams_reencoded > 0 && report(&full).streams_reencoded > 0);
-    assert_ne!(quick.data, full.data, "effort 0 and 100 use different Flate settings");
+    assert_ne!(quick.data, full.data, "efforts 0 and 40 use different Flate settings");
     assert!(full.data.len() < pdf.len() && quick.data.len() < pdf.len());
-    // The archive: below effort 50, data that looks compressed already (a stream of random bytes here) is
-    // coded plainly, so the bytes differ; both restore.
+    // The archive: at efforts 0 and 20 (below the engine's level 50), data that looks compressed already (a
+    // stream of random bytes here) is coded plainly, so the bytes differ; both restore. It is lossless at
+    // every effort: 40 and above are one setting.
     #[cfg(feature = "archive")]
     {
         let mut seed = 0x9E37_79B9u32;
@@ -59,10 +60,78 @@ fn effort_changes_the_work_and_every_level_restores() {
         objs.push((12, "/Type /XObject /Subtype /Image /Width 400 /Height 250 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode".into(), Some(random)));
         let doc = rebuild(&objs);
         let a = pack(&doc, &base().effort(0));
-        let b = pack(&doc, &base().effort(100));
+        let b = pack(&doc, &base().effort(40));
         assert_ne!(a.data, b.data);
         assert!(b.data.len() < doc.len());
+        assert_eq!(pack(&doc, &base().effort(100)).data, b.data);
     }
+}
+
+/// The effort counts in steps of 20: a value in between is the step below it, the default is 40, and steps 0,
+/// 20 and 40 are the engine's levels 0, 20 and 100, which `engine_effort` sets apart from the effort.
+#[test]
+fn an_effort_is_its_step_and_the_default_is_the_smallest_lossless_output() {
+    let pdf = plain_pdf();
+    let at = |opt: Options| optimize(&pdf, &opt).unwrap().data;
+    let (e0, e20, e40) = (at(base().effort(0)), at(base().effort(20)), at(base().effort(40)));
+    assert_eq!(at(base()), e40, "the default is effort 40");
+    assert!(at(base().effort(19)) == e0 && at(base().effort(39)) == e20 && at(base().effort(59)) == e40);
+    assert!(at(base().engine_effort(Some(0))) == e0 && at(base().engine_effort(Some(20))) == e20);
+    assert!(at(base().engine_effort(Some(100))) == e40);
+    // With the engine's level set the effort decides nothing, and a lossy effort made lossless again is
+    // effort 40's file.
+    assert!(at(base().effort(100).engine_effort(Some(0))) == e0);
+    assert!(at(base().effort(100).lossy(Some(Lossy::OFF))) == e40);
+}
+
+/// A target size picks the lowest of the six efforts whose output reaches it, and the smallest output when
+/// none does.
+#[test]
+fn a_target_size_picks_the_lowest_effort_that_reaches_it() {
+    let pdf = plain_pdf();
+    let sizes: Vec<usize> =
+        (0..=100).step_by(20).map(|e| optimize(&pdf, &base().effort(e)).unwrap().data.len()).collect();
+    // The fast level's own size: reached by the first effort tried, whatever effort the options carry.
+    let fast = optimize(&pdf, &base().effort(0)).unwrap();
+    let p = optimize_to_size(&pdf, fast.data.len() as u64, &base().effort(100)).unwrap();
+    assert_eq!((p.effort.level(), p.reached), (0, true));
+    assert_eq!(p.result.data, fast.data);
+    // The smallest size any effort gives: reached by the lowest effort that gives it, which is not the fast one.
+    let least = *sizes.iter().min().unwrap();
+    let lowest = sizes.iter().position(|&s| s == least).unwrap() as u8 * 20;
+    assert!(lowest > 0, "{sizes:?}");
+    let best = optimize_to_size(&pdf, least as u64, &base()).unwrap();
+    assert_eq!((best.effort.level(), best.reached, best.result.data.len()), (lowest, true, least));
+    // One byte less: no effort reaches it, and the same result comes back marked as missed.
+    let missed = optimize_to_size(&pdf, least as u64 - 1, &base()).unwrap();
+    assert_eq!((missed.effort.level(), missed.reached), (lowest, false));
+    assert_eq!(missed.result.data, best.result.data);
+    // A file left untouched at every effort (not a PDF): the input, at the first effort.
+    let p = optimize_to_size(b"hello", 0, &base()).unwrap();
+    assert_eq!((p.effort.level(), p.reached, &p.result.data[..]), (0, false, &b"hello"[..]));
+    assert!(optimize_to_size(b"hello", 5, &base()).unwrap().reached);
+    // The picker sets the effort itself: the engine's level or lossy settings are refused, and so is whatever
+    // `optimize` refuses.
+    for bad in [
+        base().engine_effort(Some(0)),
+        base().lossy(Some(Lossy::OFF)),
+        base().lossy_overrides(0, 0, 80),
+        base().threads(gpress::api::MAX_THREADS + 1),
+    ] {
+        let e = optimize_to_size(&pdf, 0, &bad).unwrap_err();
+        assert!(matches!(e, Error::InvalidOptions(_)), "{bad:?}: {e}");
+    }
+    assert_eq!(
+        optimize_to_size(&pdf, 0, &base().max_input(10)).unwrap_err(),
+        Error::TooLarge { size: pdf.len(), limit: 10 }
+    );
+    // One time budget covers every run: a budget that has passed gives the error with the whole budget, an ample
+    // one the same result as none.
+    let tiny = Duration::from_nanos(1);
+    assert_eq!(optimize_to_size(&pdf, 0, &base().time_budget(Some(tiny))).unwrap_err(), Error::TimeBudget(tiny));
+    let ample = optimize_to_size(&pdf, least as u64 - 1, &base().time_budget(Some(Duration::from_secs(600)))).unwrap();
+    assert_eq!((ample.effort.level(), ample.reached), (lowest, false));
+    assert_eq!(ample.result.data, missed.result.data);
 }
 
 #[test]

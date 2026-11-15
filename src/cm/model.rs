@@ -2,6 +2,7 @@
 //! contexts that understand PDF syntax, page drawing instructions (content streams) and image rows.
 
 use super::*;
+use crate::pack::rules::ArchiveRules;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -43,8 +44,8 @@ fn hb(h: u32, b: u8) -> u32 {
     (h ^ b as u32).wrapping_mul(0x0100_0193)
 }
 
-/// Bit-history states: (n0, n1, last bit) with counts up to 7; the opposite count is halved when it is
-/// large, so recent bits weigh more. 128 states; state 0 is "nothing seen".
+/// Bit-history states: (n0, n1, last bit) with counts up to 7 by default; the opposite count is halved when it
+/// is large (above 2 by default), so recent bits weigh more. 128 states; state 0 is "nothing seen".
 pub struct States {
     next: [[u8; 2]; 128],
     init_p: [i32; 128],
@@ -59,14 +60,17 @@ fn st_pack(n0: usize, n1: usize, last: usize) -> usize {
 }
 
 impl States {
-    pub fn new() -> States {
+    /// `count`: the highest count kept, at most 7. `discount`: the opposite count is halved above this (rules
+    /// `state_count`, `state_discount`).
+    pub fn new(count: usize, discount: usize) -> States {
+        let count = count.min(7);
         let mut next = [[0u8; 2]; 128];
         let mut init_p = [2048i32; 128];
         for s in 0..128 {
             let (n0, n1, _) = st_unpack(s);
             let up = |a: usize, b: usize| -> (usize, usize) {
                 // a: count of the bit seen (incremented), b: opposite count (discounted)
-                ((a + 1).min(7), if b > 2 { b.div_ceil(2) } else { b })
+                ((a + 1).min(count), if b > discount { b.div_ceil(2) } else { b })
             };
             let (a1, b1) = up(n1, n0);
             next[s][1] = st_pack(b1, a1, 1) as u8;
@@ -80,7 +84,7 @@ impl States {
 
 impl Default for States {
     fn default() -> Self {
-        Self::new()
+        Self::new(7, 2)
     }
 }
 
@@ -273,16 +277,28 @@ pub struct Model {
     /// slot holds (written back before the slot changes, see `reslot`).
     cur: [[u8; 16]; NCTX],
     states: States,
+    /// The count cap of `smaps` (rule `state_limit`).
+    state_limit: u32,
     /// One map per kind and context (kind * NCTX + context), from bit-history state (always below 128) to
     /// probability.
     smaps: Box<[[Counter; 128]; KINDS * NCTX]>,
-    // long matches
-    mm_table: Box<[u32; MM_SIZE]>,
+    // long matches: the table (a power of two of positions, found by the top bits of the hash of the last
+    // `match_min` bytes: the hash shifted right by `mm_shift`), and the rules `match_min`, `match_check`,
+    // `match_cap`, `match_long` and `repeat_min`.
+    mm_table: Vec<u32>,
+    mm_shift: u32,
+    match_min: usize,
+    match_check: usize,
+    match_cap: usize,
+    match_long: usize,
+    repeat_min: usize,
     mm_ptr: usize,
     mm_len: usize,
     mm_sm: StateMap<128>,
     mm_miss: bool,
-    // expected text
+    // expected text (rules `expect_text`, `expect_cap`)
+    exp_wanted: bool,
+    exp_cap: u32,
     exp: Vec<u8>,
     exp_i: usize,
     exp_hits: u32,
@@ -291,12 +307,18 @@ pub struct Model {
     mx: Mixer<NIN>,
     a1: Apm<{ 256 * KINDS }>,
     a2: Apm<65536>,
+    /// The shares of the mixer's result and of the two APMs in the final probability, in sixteenths.
+    blend: [i32; 3],
+    /// `WORD_BYTES` row of the rule `word_bytes`, and the classes of the rules `image_step_1` to `7`.
+    word_byte: &'static [u8; 256],
+    q: [u8; 512],
     tok: Tok,
     cs: Cs,
     /// Original offsets of objects seen ("N G obj"), for predicting cross-reference tables.
     obj_offsets: std::collections::HashMap<i64, (u64, i64)>,
     // Long repeats: one almost-certain decision ("same byte as the match") instead of eight.
     rep: [Counter; REP_N],
+    rep_limit: u32,
     rep_last: u32,
     /// Hash contexts are stale after bytes that skipped the full model; recomputed before the next full one.
     ctx_dirty: bool,
@@ -327,59 +349,48 @@ struct ByteCx {
     a2: usize,
 }
 
-// Fixed settings of the format. They are part of it: the decoder must use exactly the same values as the
-// encoder, so they are constants (never read from the environment).
-const STATE_LIMIT: u32 = 1023;
-const MATCH_MIN: usize = 5;
-/// A match at least this long codes the next byte with one decision (measured: 32, 64, 128 and 256; 128 is
-/// the smallest on a random sample and on huge repetitive images).
-const LONG_MIN: usize = 128;
-const REP_LIMIT: u32 = 1023;
+// The model's settings are part of the format: the decoder must use exactly the same values as the encoder.
+// The numbers among them are rules (`ArchiveRules`, never read from the environment): the defaults are what
+// version 9 has, and an archive made with others carries them in its header (version 10). Of the defaults, a
+// match of at least 128 bytes codes the next byte with one decision (rule `repeat_min`; measured: 32, 64, 128
+// and 256; 128 is the smallest on a random sample and on huge repetitive images).
 /// Long-repeat counters: kind x match length class x last decision x run.
 const REP_N: usize = KINDS * 16 * 2 * 2;
-/// The match table: 2^20 positions, found by the top bits of the hash of the last MATCH_MIN bytes.
-const MM_BITS: u32 = 20;
-const MM_SIZE: usize = 1 << MM_BITS;
 /// Mixer weight sets for charstring bytes: at a token start 7 operand counts x 6 kinds of last command, plus 3
 /// other places (end of a number, escaped command, other), each x 8 bits x 3 match states.
 const CS_SEL: usize = 45 * 8 * 3;
 
-/// For the word hash: each letter or digit in lower case, 0 for any other byte.
-static WORD_BYTE: [u8; 256] = {
-    let mut t = [0u8; 256];
+/// For the word hash, by the rule `word_bytes`: each letter or digit in lower case (0, the default), each
+/// letter or digit as it is (1), each letter in lower case (2); 0 for any other byte.
+static WORD_BYTES: [[u8; 256]; 3] = {
+    let mut t = [[0u8; 256]; 3];
     let mut i = 0;
     while i < 256 {
         let b = i as u8;
         if b.is_ascii_alphanumeric() {
-            t[i] = b.to_ascii_lowercase();
+            t[0][i] = b.to_ascii_lowercase();
+            t[1][i] = b;
+        }
+        if b.is_ascii_alphabetic() {
+            t[2][i] = b.to_ascii_lowercase();
         }
         i += 1;
     }
     t
 };
 
-/// The difference of two bytes in classes (`Q[d + 255]` for -255..255): 0, 1, 2, then up to 4, 8, 16, 32 and
-/// more, plus 8 below 0.
-static Q: [u8; 512] = {
+/// The difference of two bytes in classes (`q[d + 255]` for -255..255): the number of `steps` it is above
+/// (by default 0, 1, 2, 4, 8, 16 and 32: the classes 0, 1, 2, then up to 4, 8, 16, 32 and more), plus 8 below
+/// 0.
+fn diff_classes(steps: &[u64]) -> [u8; 512] {
     let mut t = [0u8; 512];
-    let mut i = 0;
-    while i < 511 {
+    for (i, c) in t.iter_mut().take(511).enumerate() {
         let d = i as i32 - 255;
-        let m = match d.unsigned_abs() {
-            0 => 0,
-            1 => 1,
-            2 => 2,
-            3..=4 => 3,
-            5..=8 => 4,
-            9..=16 => 5,
-            17..=32 => 6,
-            _ => 7,
-        };
-        t[i] = if d < 0 { m + 8 } else { m };
-        i += 1;
+        let m = steps.iter().take(7).filter(|&&s| d.unsigned_abs() as u64 > s).count() as u8;
+        *c = if d < 0 { m + 8 } else { m };
     }
     t
-};
+}
 
 /// LOCO-I's median edge prediction from the left, upper and upper-left samples.
 #[inline]
@@ -407,9 +418,14 @@ fn loco8(w: u8, n: u8, nw: u8) -> u8 {
 }
 
 impl Model {
-    pub fn new(table_bits: u32) -> Model {
+    /// `table_bits`: each of the ten tables has 2^table_bits buckets. `r`: the model's rules; both sides of an
+    /// archive must give the same.
+    pub fn new(table_bits: u32, r: &ArchiveRules) -> Model {
         let tables = std::array::from_fn(|_| Table::new(table_bits));
-        let states = States::new();
+        let states = States::new(r.state_count() as usize, r.state_discount() as usize);
+        let mm_bits = (r.match_bits() as u32).clamp(1, 31);
+        let (apm_bits, apm_round) = (r.apm_bits() as u32, r.apm_round() as i32);
+        let (b1, b2) = (r.blend_apm1().min(8) as i32, r.blend_apm2().min(8) as i32);
         let smap: [Counter; 128] = std::array::from_fn(|st| Counter((states.init_p[st] as u32) << 20));
         let mut m = Model {
             hist: Vec::new(),
@@ -435,24 +451,43 @@ impl Model {
             next: [0; NCTX],
             cur: [[0; 16]; NCTX],
             states,
+            state_limit: r.state_limit() as u32,
             smaps: super::boxed(smap),
-            mm_table: super::boxed(0),
+            mm_table: vec![0; 1 << mm_bits],
+            mm_shift: 32 - mm_bits,
+            match_min: (r.match_min() as usize).clamp(1, 8),
+            match_check: r.match_check() as usize,
+            // The match and expected-text maps have 128 contexts: a length up to 63, a count up to 15.
+            match_cap: r.match_cap().min(63) as usize,
+            match_long: r.match_long() as usize,
+            repeat_min: (r.repeat_min() as usize).max(1),
             mm_ptr: 0,
             mm_len: 0,
-            mm_sm: StateMap::new(1023),
+            mm_sm: StateMap::new(r.match_limit() as u32),
             mm_miss: false,
+            exp_wanted: r.expect_text() != 0,
+            exp_cap: r.expect_cap().min(15) as u32,
             exp: Vec::new(),
             exp_i: 0,
             exp_hits: 0,
-            exp_sm: StateMap::new(1023),
+            exp_sm: StateMap::new(r.expect_limit() as u32),
             exp_miss: false,
-            mx: Mixer::new(KINDS * 8 * 3 + CS_SEL),
-            a1: Apm::new(7),
-            a2: Apm::new(7),
+            mx: Mixer::new(
+                KINDS * 8 * 3 + CS_SEL,
+                r.mixer_start() as i32,
+                r.mixer_rate() as i32,
+                r.mixer_shift() as i32,
+            ),
+            a1: Apm::new(r.apm1_rate() as i32, apm_bits, apm_round),
+            a2: Apm::new(r.apm2_rate() as i32, apm_bits, apm_round),
+            blend: [16 - b1 - b2, b1, b2],
+            word_byte: &WORD_BYTES[(r.word_bytes() as usize).min(2)],
+            q: diff_classes(r.image_steps()),
             tok: Tok::default(),
             cs: Cs::new(),
             obj_offsets: std::collections::HashMap::new(),
             rep: [Counter::new(); REP_N],
+            rep_limit: r.repeat_limit() as u32,
             rep_last: 1,
             ctx_dirty: false,
             bypass_on: true,
@@ -460,7 +495,7 @@ impl Model {
             bypassed: 0,
         };
         // The last mixer input is a constant.
-        m.mx.x[NIN - 1] = 256;
+        m.mx.x[NIN - 1] = r.mixer_bias().min(2047) as i16;
         m.contexts();
         m
     }
@@ -539,7 +574,7 @@ impl Model {
     #[inline(always)]
     fn code_one<C: Coder>(&mut self, c: &mut C, byte: Option<u8>) -> u8 {
         // A long repeat: one almost-certain decision for the whole byte.
-        if self.bypass_on && self.mm_len >= LONG_MIN && !self.mm_miss {
+        if self.bypass_on && self.mm_len >= self.repeat_min && !self.mm_miss {
             let pb = self.hist[self.mm_ptr];
             // The last byte is c4's low byte: the history holds at least mm_len bytes.
             let run = (self.c4 as u8 == pb) as usize;
@@ -549,7 +584,7 @@ impl Model {
             let cx = (((self.kind as usize * 16 + lb) * 2 + self.rep_last as usize) * 2 + run) & (REP_N - 1);
             let p = self.rep[cx].p16();
             let hit = c.code16(byte.map(|b| (b == pb) as u32), p);
-            self.rep[cx].update(hit, REP_LIMIT);
+            self.rep[cx].update(hit, self.rep_limit);
             self.rep_last = hit;
             if hit == 1 {
                 self.bypassed += 1;
@@ -630,11 +665,11 @@ impl Model {
             kind,
             mm_on: self.mm_len > 0,
             mm_byte,
-            mm_cx: self.mm_len.min(63) * 2,
-            mm_state: 1 + (self.mm_len >= 24) as usize,
-            exp_on: self.exp_i < self.exp.len() && !self.resid,
+            mm_cx: self.mm_len.min(self.match_cap) * 2,
+            mm_state: 1 + (self.mm_len >= self.match_long) as usize,
+            exp_on: self.exp_wanted && self.exp_i < self.exp.len() && !self.resid,
             exp_byte,
-            exp_cx: self.exp_hits.min(15) as usize * 8 + (self.kind as usize % 4),
+            exp_cx: self.exp_hits.min(self.exp_cap) as usize * 8 + (self.kind as usize % 4),
             sel,
             a1: 256 * kind,
             a2: ((self.c4 & 0xff) as usize) << 8,
@@ -678,7 +713,13 @@ impl Model {
         let st = stretch(pm);
         let p1 = self.a1.p(st, bc.a1 + self.c0 as usize);
         let p2 = self.a2.p(st, bc.a2 | self.c0 as usize);
-        (((pm + p1 + 2 * p2 + 2) >> 2).clamp(1, 4095), states)
+        // By default a quarter each of the mixer's result and the first APM's, and half of the second's: the
+        // same sum without the multiplications, which would lengthen the path to every coded bit.
+        let p = match self.blend {
+            [4, 4, 8] => (pm + p1 + 2 * p2 + 2) >> 2,
+            [bm, b1, b2] => (bm * pm + b1 * p1 + b2 * p2 + 8) >> 4,
+        };
+        (p.clamp(1, 4095), states)
     }
 
     /// Learns the coded bit `k` in the match and expected-text models; at the first nibble's last bit, works out
@@ -710,9 +751,10 @@ impl Model {
         let node = self.nib as usize & 15;
         let kb = (bc.kind & (KINDS - 1)) * NCTX;
         let sm = &mut self.smaps[kb..kb + NCTX];
+        let limit = self.state_limit;
         for i in 0..NCTX {
             let state = states[i] as usize & 127;
-            sm[i][state].update(bit, STATE_LIMIT);
+            sm[i][state].update(bit, limit);
             self.cur[i][node] = self.states.next[state][bit as usize & 1];
         }
         self.mx.update(bit);
@@ -802,23 +844,29 @@ impl Model {
         }
         self.c8 = (self.c8 << 8) | (self.c4 >> 24);
         self.c4 = (self.c4 << 8) | b as u32;
-        let w = WORD_BYTE[b as usize];
+        let w = self.word_byte[b as usize];
         self.word = if w != 0 { hb(self.word, w) } else { 0 };
     }
 
-    /// The hash of the last MATCH_MIN bytes, oldest first: c8's low byte, then c4's four.
+    /// The hash of the last `match_min` bytes (5 by default: c8's low byte, then c4's four), oldest first.
     #[inline(always)]
     fn match_hash(&self) -> u32 {
         let c = self.c4;
-        hb(hb(hb(hb(hb(0, self.c8 as u8), (c >> 24) as u8), (c >> 16) as u8), (c >> 8) as u8), c as u8)
+        if self.match_min == 5 {
+            // The same as below, without the loop (this runs for every byte).
+            return hb(hb(hb(hb(hb(0, self.c8 as u8), (c >> 24) as u8), (c >> 16) as u8), (c >> 8) as u8), c as u8);
+        }
+        let last = (self.c8 as u64) << 32 | c as u64;
+        (0..self.match_min).rev().fold(0, |h, i| hb(h, (last >> (8 * i)) as u8))
     }
 
-    /// The match table learns the position after the last MATCH_MIN bytes, and gives a match when there is none.
+    /// The match table learns the position after the last `match_min` bytes, and gives a match when there is
+    /// none.
     #[inline(always)]
     fn match_table(&mut self) {
         let n = self.hist.len();
-        if n >= MATCH_MIN {
-            let idx = (self.match_hash() >> (32 - MM_BITS)) as usize & (MM_SIZE - 1);
+        if n >= self.match_min {
+            let idx = (self.match_hash() >> self.mm_shift) as usize & (self.mm_table.len() - 1);
             if self.mm_len == 0 {
                 self.match_start(self.mm_table[idx] as usize, n);
             }
@@ -826,14 +874,15 @@ impl Model {
         }
     }
 
-    /// A match at `cand` when the bytes before it are the last bytes of the history: at least MATCH_MIN of
-    /// them, compared up to 64 back.
+    /// A match at `cand` when the bytes before it are the last bytes of the history: at least `match_min` of
+    /// them, compared up to `match_check` back (64 by default).
     #[inline]
     fn match_start(&mut self, cand: usize, n: usize) {
         if cand > 0 && cand < n {
             let h = &self.hist[..n];
-            let l = h[..cand].iter().rev().zip(h.iter().rev()).take(64).take_while(|(a, b)| a == b).count();
-            if l >= MATCH_MIN {
+            let l =
+                h[..cand].iter().rev().zip(h.iter().rev()).take(self.match_check).take_while(|(a, b)| a == b).count();
+            if l >= self.match_min {
                 self.mm_len = l;
                 self.mm_ptr = cand;
             }
@@ -1363,7 +1412,7 @@ impl Model {
                 let pred = loco(w, n, nw);
                 self.pred = pred as u8;
                 // The differences are of bytes, so the table holds every one.
-                let q = |d: i32| Q[(d + 255) as usize & 511] as u32;
+                let q = |d: i32| self.q[(d + 255) as usize & 511] as u32;
                 let (dh, dv, dd) = (q(w - nw), q(n - nw), q(ne - n));
                 [
                     h2(1, ch | dh << 4 | dv << 8),
@@ -1450,7 +1499,7 @@ mod tests {
         // Rows of noise and long repeats (coded by the one-decision shortcut), with switches of kind and row
         // length in between.
         let mut s = 77u64;
-        let mut m = Model::new(12);
+        let mut m = Model::new(12, &ArchiveRules::default());
         let mut n = Null;
         for (stride, bpp, exact) in
             [(7usize, 1usize, false), (300, 3, false), (64, 1, true), (1, 1, false), (5, 2, false)]
@@ -1484,7 +1533,7 @@ mod tests {
             content.extend_from_slice(format!("{i} 0 {} Td (text) Tj ", "9".repeat(i * 50)).as_bytes());
             content.extend_from_slice(b"/F1 12 Tf [<00ff> 3 <0102>] TJ q 1 0 0 1 0 0 cm Q\n");
         }
-        let mut m = Model::new(12);
+        let mut m = Model::new(12, &ArchiveRules::default());
         let mut n = Null;
         let fold0 = |t: &[u8]| t.iter().fold(0u32, |h, &x| hb(h, x));
         let fold7 = |t: &[u8]| t.iter().fold(7u32, |h, &x| hb(h, x));
@@ -1779,7 +1828,7 @@ mod tests {
     /// Runs the script through the model with coder `c` (the bytes given when encoding) and returns the bytes
     /// the model gave back.
     fn run_script<C: Coder>(steps: &[Step], c: &mut C, encode: bool) -> (Vec<u8>, u64) {
-        let mut m = Model::new(12);
+        let mut m = Model::new(12, &ArchiveRules::default());
         let mut got = Vec::new();
         for st in steps {
             match st {
@@ -1818,7 +1867,7 @@ mod tests {
 
     /// `run_script` with the bytes coded by `code_bytes`, in runs of 1 to 5000 bytes.
     fn run_script_in_runs<C: Coder>(steps: &[Step], c: &mut C, encode: bool) -> Vec<u8> {
-        let mut m = Model::new(12);
+        let mut m = Model::new(12, &ArchiveRules::default());
         let mut got = Vec::new();
         let mut run = 0;
         for st in steps {
@@ -1860,7 +1909,7 @@ mod tests {
     fn match_hash_is_the_hash_of_the_last_five_bytes() {
         // Text, image rows, long repeats and plain bytes.
         let mut r = Rng(3);
-        let mut m = Model::new(12);
+        let mut m = Model::new(12, &ArchiveRules::default());
         let mut n = Null;
         for k in 0..6000usize {
             if k % 1000 == 0 {
@@ -1871,8 +1920,9 @@ mod tests {
             let b = if k % 300 < 150 { b"0 0 obj\n"[k % 8] } else { r.byte() };
             m.code_byte(&mut n, Some(b));
             let h = &m.hist;
-            if h.len() >= MATCH_MIN {
-                assert_eq!(m.match_hash(), h[h.len() - MATCH_MIN..].iter().fold(0, |h, &x| hb(h, x)), "byte {k}");
+            // By default the last 5 bytes.
+            if h.len() >= 5 {
+                assert_eq!(m.match_hash(), h[h.len() - 5..].iter().fold(0, |h, &x| hb(h, x)), "byte {k}");
             }
         }
         assert!(m.bypassed > 0);
@@ -1880,6 +1930,7 @@ mod tests {
 
     #[test]
     fn difference_classes_are_the_ones_worked_out_each_time() {
+        let q = diff_classes(ArchiveRules::default().image_steps());
         for d in -255i32..=255 {
             let m = match d.unsigned_abs() {
                 0 => 0,
@@ -1891,7 +1942,7 @@ mod tests {
                 17..=32 => 6,
                 _ => 7,
             };
-            assert_eq!(Q[(d + 255) as usize], if d < 0 { m + 8 } else { m }, "{d}");
+            assert_eq!(q[(d + 255) as usize], if d < 0 { m + 8 } else { m }, "{d}");
         }
     }
 
@@ -1930,7 +1981,7 @@ mod tests {
         // Rows of noise, long repeats and plain bytes, at several row lengths and pixel sizes: whenever the
         // contexts are up to date, every residual they may read is the byte less its prediction.
         let mut r = Rng(11);
-        let mut m = Model::new(12);
+        let mut m = Model::new(12, &ArchiveRules::default());
         let mut n = Null;
         for (stride, bpp) in [(7usize, 1usize), (300, 3), (1, 1), (5, 2), (31, 3), (2, 3), (64, 4)] {
             m.set_kind(Kind::Image, Geom { stride, bpp, exact: false }, 0);
@@ -1955,7 +2006,7 @@ mod tests {
         // Row lengths just below, at and just above a power of two, alone and with the pixel added, at 1 to 4
         // bytes per pixel. Each segment is many rings long, with noise, long repeats and plain bytes.
         let mut r = Rng(29);
-        let mut m = Model::new(12);
+        let mut m = Model::new(12, &ArchiveRules::default());
         let mut n = Null;
         for bpp in 1..=4usize {
             for stride in [31, 32, 33, 32 - bpp, 33 - bpp, 255, 256, 257, 256 - bpp, 257 - bpp] {
@@ -1985,7 +2036,7 @@ mod tests {
         // `pack` caps the row length at 2^30, but the model takes any: the gap a fill skips is a row and a pixel
         // back, and that sum must not wrap, or the residuals of long repeats and plain bytes are never stored.
         let mut r = Rng(5);
-        let mut m = Model::new(12);
+        let mut m = Model::new(12, &ArchiveRules::default());
         let mut n = Null;
         for (stride, bpp) in [(usize::MAX - 15, 64usize), (usize::MAX, 1)] {
             m.set_kind(Kind::Image, Geom { stride, bpp, exact: false }, 0);
@@ -2008,7 +2059,7 @@ mod tests {
 
     #[test]
     fn a_huge_row_length_costs_only_the_bytes_that_come() {
-        let mut m = Model::new(12);
+        let mut m = Model::new(12, &ArchiveRules::default());
         let mut n = Null;
         let mut r = Rng(29);
         m.set_kind(Kind::Image, Geom { stride: 1 << 30, bpp: 64, exact: false }, 0);

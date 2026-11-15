@@ -150,8 +150,7 @@ pub fn aes_open(key: &[u8], data: &[u8]) -> Result<Vec<u8>, &'static str> {
     if data.len() < 32 || !data.len().is_multiple_of(16) {
         return Err("AES data is not whole blocks");
     }
-    let mut iv = [0u8; 16];
-    iv.copy_from_slice(&data[..16]);
+    let iv: [u8; 16] = data[..16].try_into().expect("16 bytes");
     let mut out = cbc_decrypt(&c, &iv, &data[16..]);
     let pad = *out.last().unwrap() as usize;
     if !(1..=16).contains(&pad) || out[out.len() - pad..].iter().any(|&b| b as usize != pad) {
@@ -231,8 +230,7 @@ pub fn hash_r6(r: i64, password: &[u8], salt: &[u8], udata: &[u8]) -> [u8; 32] {
         one.extend_from_slice(udata);
         let k1 = one.repeat(64);
         let c = Aes::new(&k[..16]).expect("16-byte key");
-        let mut iv = [0u8; 16];
-        iv.copy_from_slice(&k[16..32]);
+        let iv: [u8; 16] = k[16..32].try_into().expect("16 bytes");
         let e = cbc_encrypt(&c, &iv, &k1);
         // The first 16 bytes as a big-endian number, modulo 3 (256 is 1 modulo 3, so the byte sum will do).
         let m = e[..16].iter().map(|&b| b as u32).sum::<u32>() % 3;
@@ -246,9 +244,7 @@ pub fn hash_r6(r: i64, password: &[u8], salt: &[u8], udata: &[u8]) -> [u8; 32] {
             break;
         }
     }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&k[..32]);
-    out
+    k[..32].try_into().expect("32 bytes")
 }
 
 /// The key for one object's strings and streams (algorithm 1; AES-256 uses the file key itself).
@@ -559,55 +555,34 @@ impl Crypt {
     }
 
     /// The initialization vector for the `counter`-th string or stream of object `num gen` in our output:
-    /// derived from the file key, so the output is the same on every run. A file that keeps its revisions can
-    /// write one object in several of them: each revision after the first (`rev` above 0) gets vectors of its
-    /// own, so two values of an object never share one.
-    fn iv(&self, rev: u32, num: u32, gen: u16, counter: u32) -> [u8; 16] {
-        let rev = rev.to_le_bytes();
-        let rev: &[u8] = if rev == [0; 4] { &[] } else { &rev };
-        let h = sha256(&[&self.key, &num.to_le_bytes(), &gen.to_le_bytes(), &counter.to_le_bytes(), b"iv", rev]);
+    /// derived from the file key, so the output is the same on every run.
+    fn iv(&self, num: u32, gen: u16, counter: u32) -> [u8; 16] {
+        let h = sha256(&[&self.key, &num.to_le_bytes(), &gen.to_le_bytes(), &counter.to_le_bytes(), b"iv"]);
         // The first 16 bytes of the hash, built from it alone: no constant is ever the vector.
         std::array::from_fn(|i| h[i])
     }
 
     /// A non-stream object with its strings encrypted for object `num gen`.
     pub fn seal_object(&self, num: u32, gen: u16, o: &Obj) -> Result<Obj, &'static str> {
-        self.seal_object_at(0, num, gen, o)
-    }
-
-    /// `seal_object` for revision `rev` of a file that keeps its revisions (see `iv`).
-    pub fn seal_object_at(&self, rev: u32, num: u32, gen: u16, o: &Obj) -> Result<Obj, &'static str> {
         let mut o = o.clone();
         let mut k = 0u32;
         map_strings(&mut o, &mut |s| {
             k += 1;
-            seal(&self.key, self.strs, num, gen, &self.iv(rev, num, gen, k - 1), s)
+            seal(&self.key, self.strs, num, gen, &self.iv(num, gen, k - 1), s)
         })?;
         Ok(o)
     }
 
     /// A stream's dictionary and data encrypted for object `num gen` (the caller sets /Length afterwards).
     pub fn seal_stream(&self, num: u32, gen: u16, dict: &Dict, data: &[u8]) -> Result<(Dict, Vec<u8>), &'static str> {
-        self.seal_stream_at(0, num, gen, dict, data)
-    }
-
-    /// `seal_stream` for revision `rev` of a file that keeps its revisions (see `iv`).
-    pub fn seal_stream_at(
-        &self,
-        rev: u32,
-        num: u32,
-        gen: u16,
-        dict: &Dict,
-        data: &[u8],
-    ) -> Result<(Dict, Vec<u8>), &'static str> {
         let m = self.stream_method(num, dict)?;
         let mut d = Obj::Dict(dict.clone());
         let mut k = 0u32;
         map_strings(&mut d, &mut |s| {
             k += 1;
-            seal(&self.key, self.strs, num, gen, &self.iv(rev, num, gen, k - 1), s)
+            seal(&self.key, self.strs, num, gen, &self.iv(num, gen, k - 1), s)
         })?;
-        let data = seal(&self.key, m, num, gen, &self.iv(rev, num, gen, k), data)?;
+        let data = seal(&self.key, m, num, gen, &self.iv(num, gen, k), data)?;
         match d {
             Obj::Dict(d) => Ok((d, data)),
             _ => unreachable!(),

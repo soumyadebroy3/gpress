@@ -92,7 +92,7 @@ fn plan_bytes(raw: Vec<u8>, dict: Dict, at: usize, resolve: &dyn Fn(&Obj) -> Opt
         return found.plan(Source::Bytes(raw));
     }
     #[cfg(feature = "fax")]
-    if let Some(parsed) = fax_parse(&raw, dict, resolve) {
+    if let Some(parsed) = fax_parse(&raw, dict, resolve, &opt.rules) {
         return Plan::Fax { parsed: Box::new(parsed), at, raw: None };
     }
     Plan::Plain(raw)

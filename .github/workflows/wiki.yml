@@ -1,0 +1,43 @@
+name: Wiki
+# The wiki's pages are kept in docs/wiki/ and changed through pull requests like the rest of the repository; each
+# push to main that changes them copies them to the wiki (its own git repository, which takes no pull requests).
+on:
+  push:
+    branches: [main]
+    paths: ['docs/wiki/**', .github/workflows/wiki.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wiki
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Copy docs/wiki to the wiki
+    # Only main's pages: a start by hand from another branch would publish pages no review has passed.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the wiki's repository is written with the token's contents permission
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The wiki is replaced by docs/wiki/: a page taken out there goes from the wiki too.
+      - name: Replace the wiki's pages
+        env:
+          TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${REPO}.wiki.git" "$RUNNER_TEMP/wiki"
+          find "$RUNNER_TEMP/wiki" -maxdepth 1 -name '*.md' -delete
+          cp docs/wiki/*.md "$RUNNER_TEMP/wiki/"
+          cd "$RUNNER_TEMP/wiki"
+          git add -A
+          if git diff --cached --quiet; then echo "the wiki already has these pages"; exit 0; fi
+          git -c user.name=soumyadebroy3 -c user.email=43921833+soumyadebroy3@users.noreply.github.com \
+            commit -q -m "Pages from docs/wiki at ${GITHUB_SHA::7}"
+          git push origin HEAD

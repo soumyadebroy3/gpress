@@ -13,7 +13,7 @@
 //! end, one letter case), so the same text can be written back; otherwise the font stays as it is. The encoder
 //! closes every opened font again and opens it only if that gives back exactly the original bytes.
 
-use super::{find as find_from, Io, PackStats};
+use super::{find as find_from, ArchiveRules, Io, PackStats};
 use crate::cm::model::{Geom, Kind};
 use crate::cm::Coder;
 use crate::pdf::object::{is_delim, is_white, Dict, Obj};
@@ -255,11 +255,15 @@ fn number(t: &[u8]) -> Option<i64> {
     Some(if neg { -v } else { v })
 }
 
-/// Decrypted bytes that must be text for a layout to be taken.
-const MIN_TEXT: usize = 32;
+/// Decrypted bytes that must be text for a layout to be taken: 32 by default (the rule `font_min_text`).
+fn min_text(r: &ArchiveRules) -> usize {
+    r.font_min_text().min(4096) as usize
+}
 
-fn texty(b: &[u8]) -> bool {
-    b.iter().all(|&c| matches!(c, 9 | 10 | 12 | 13 | 32..=126))
+/// Text: tab, line ends, form feed and 32 to 126; with the rule `font_text_bytes` at 1 also 160 to 255.
+fn texty(b: &[u8], r: &ArchiveRules) -> bool {
+    let latin1 = r.font_text_bytes() != 0;
+    b.iter().all(|&c| matches!(c, 9 | 10 | 12 | 13 | 32..=126) || (latin1 && c >= 160))
 }
 
 fn rfind(h: &[u8], n: &[u8]) -> Option<usize> {
@@ -295,15 +299,16 @@ fn unhex(text: &[u8], n: usize) -> Option<Vec<u8>> {
 
 /// Encoder side: the layout of a font program's encrypted part, if it has one that decrypts to text. `len1` and
 /// `len2` are the dictionary's /Length1 and /Length2 (0 when unknown), used as hints only.
-pub fn find(font: &[u8], len1: usize, len2: usize) -> Option<Layout> {
+pub fn find(font: &[u8], len1: usize, len2: usize, r: &ArchiveRules) -> Option<Layout> {
     let mut starts = Vec::new();
     if len1 > 0 {
         starts.push(len1);
     }
     // After "eexec": past all the white space that follows it, and past one or two bytes of it only (the first
     // encrypted byte may look like white space).
+    // At the first 4 places it appears (the rule `font_tries`).
     let mut from = 0;
-    for _ in 0..4 {
+    for _ in 0..r.font_tries() {
         let Some(k) = find_from(font, b"eexec", from) else { break };
         let a = k + 5;
         let mut s = a;
@@ -327,7 +332,7 @@ pub fn find(font: &[u8], len1: usize, len2: usize) -> Option<Layout> {
             }
             _ => (s, font.len()),
         };
-        if let Some(l) = binary_at(font, s, limit, len2).or_else(|| hex_at(font, s)) {
+        if let Some(l) = binary_at(font, s, limit, len2, r).or_else(|| hex_at(font, s, r)) {
             return Some(l);
         }
     }
@@ -335,13 +340,14 @@ pub fn find(font: &[u8], len1: usize, len2: usize) -> Option<Layout> {
 }
 
 /// The binary form at `s` (up to `limit`): it decrypts to text after the 4 random bytes.
-fn binary_at(font: &[u8], s: usize, limit: usize, len2: usize) -> Option<Layout> {
-    if limit <= s || limit - s < 4 + MIN_TEXT {
+fn binary_at(font: &[u8], s: usize, limit: usize, len2: usize, r: &ArchiveRules) -> Option<Layout> {
+    let min_text = min_text(r);
+    if limit <= s || limit - s < 4 + min_text {
         return None;
     }
-    let mut head = font[s..s + 4 + MIN_TEXT].to_vec();
+    let mut head = font[s..s + 4 + min_text].to_vec();
     decrypt(&mut head, EEXEC);
-    if !texty(&head[4..]) {
+    if !texty(&head[4..], r) {
         return None;
     }
     let mut p = font[s..limit].to_vec();
@@ -379,7 +385,8 @@ fn private_len(p: &[u8], len2: usize) -> usize {
 
 /// The hex form at `s`: digits (and line ends) that decrypt to text, up to just past "closefile" and the white
 /// space after it, in a regular line layout.
-fn hex_at(font: &[u8], s: usize) -> Option<Layout> {
+fn hex_at(font: &[u8], s: usize, r: &ArchiveRules) -> Option<Layout> {
+    let min_text = min_text(r);
     font.get(s).and_then(|&c| hex_value(c))?;
     // The digits from `s` as bytes, up to the first byte that is neither a digit nor white space. The first
     // bytes must decrypt to text before the rest is read.
@@ -391,10 +398,10 @@ fn hex_at(font: &[u8], s: usize) -> Option<Layout> {
                 None => hi = Some(v),
                 Some(h) => {
                     bytes.push(h << 4 | v);
-                    if bytes.len() == 4 + MIN_TEXT {
+                    if bytes.len() == 4 + min_text {
                         let mut head = bytes.clone();
                         decrypt(&mut head, EEXEC);
-                        if !texty(&head[4..]) {
+                        if !texty(&head[4..], r) {
                             return None;
                         }
                     }
@@ -404,7 +411,7 @@ fn hex_at(font: &[u8], s: usize) -> Option<Layout> {
             None => break,
         }
     }
-    if bytes.len() < 4 + MIN_TEXT {
+    if bytes.len() < 4 + min_text {
         return None;
     }
     decrypt(&mut bytes, EEXEC);
@@ -464,9 +471,10 @@ pub(super) fn is_type1(dict: Option<&Dict>) -> bool {
 }
 
 /// The dictionary of the unfiltered stream whose bytes follow `out`, if it announces a Type 1 font program.
-/// A quick look for "/Length2" comes first, so other streams don't pay for parsing their dictionary.
-pub(super) fn raw_font_dict(out: &[u8]) -> Option<Dict> {
-    find_from(&out[out.len().saturating_sub(4096)..], b"/Length2", 0)?;
+/// A quick look for "/Length2" in the last 4096 bytes (the shared rule `font_window`) comes first, so other
+/// streams don't pay for parsing their dictionary.
+pub(super) fn raw_font_dict(out: &[u8], r: &ArchiveRules) -> Option<Dict> {
+    find_from(&out[out.len().saturating_sub(r.font_window().min(65536) as usize)..], b"/Length2", 0)?;
     super::dict_before(out, out.len().saturating_sub(1)).filter(|d| is_type1(Some(d)))
 }
 
@@ -481,8 +489,8 @@ fn hints(dict: Option<&Dict>, n: usize) -> (usize, usize) {
 }
 
 /// Encoder side: the layout and the opened font, if the opened font closes back to exactly the same bytes.
-fn opened(font: &[u8], len1: usize, len2: usize) -> Option<(Layout, Vec<u8>)> {
-    let l = find(font, len1, len2)?;
+fn opened(font: &[u8], len1: usize, len2: usize, r: &ArchiveRules) -> Option<(Layout, Vec<u8>)> {
+    let l = find(font, len1, len2, r)?;
     let t = open(font, &l)?;
     (close(&t, &l)? == font).then_some((l, t))
 }
@@ -493,7 +501,7 @@ pub(super) fn expanded<'a>(prev: &[u8], data: &'a [u8]) -> (Cow<'a, [u8]>, usize
     let dict = super::dict_before(prev, prev.len().saturating_sub(1));
     if is_type1(dict.as_ref()) {
         let (h1, h2) = hints(dict.as_ref(), data.len());
-        if let Some((_, t)) = opened(data, h1, h2) {
+        if let Some((_, t)) = opened(data, h1, h2, &ArchiveRules::default()) {
             return (Cow::Owned(t), 3);
         }
     }
@@ -513,7 +521,7 @@ pub(super) fn code<C: Coder>(
     stats: &mut PackStats,
 ) {
     let (h1, h2) = hints(dict, n);
-    let opened = src.map(|f| opened(f, h1, h2));
+    let opened = src.map(|f| opened(f, h1, h2, io.rules));
     let lay = opened.as_ref().and_then(|o| o.as_ref()).map(|(l, _)| *l);
     io.m.set_kind(Kind::Meta, Geom::default(), 0);
     let form = io.byte(opened.as_ref().map(|o| match o {
@@ -714,7 +722,7 @@ mod tests {
     }
 
     fn check_opens(f: &[u8], want: &[u8], l1: usize, l2: usize) -> Layout {
-        let l = find(f, l1, l2).expect("layout");
+        let l = find(f, l1, l2, &ArchiveRules::default()).expect("layout");
         let t = open(f, &l).expect("open");
         assert_eq!(t, want);
         assert_eq!(close(&t, &l).unwrap(), f);
@@ -798,10 +806,10 @@ mod tests {
                 hf.push(b'\n');
             }
             hf.extend_from_slice(trailer);
-            let l = find(&hf, l1, 0).expect("hex layout");
+            let l = find(&hf, l1, 0, &ArchiveRules::default()).expect("hex layout");
             assert_eq!(l.hex, Some(h));
             // /Length1 pointing at the line end before the digits: the digits still start the layout.
-            assert_eq!(find(&hf, l1 - 1, 0), Some(l));
+            assert_eq!(find(&hf, l1 - 1, 0, &ArchiveRules::default()), Some(l));
             let opened = open(&hf, &l).unwrap();
             assert_eq!(&opened[l1..l1 + l2], &t[l1..l1 + l2]);
             assert_eq!(close(&opened, &l).unwrap(), hf);
@@ -822,7 +830,7 @@ mod tests {
         for bad in [moved, mixed, spaced] {
             let hf = [&f[..l1], &bad[..], trailer].concat();
             assert_eq!(unhex(&bad, cipher.len()).as_deref(), Some(cipher), "same digits");
-            if let Some(l) = find(&hf, l1, 0) {
+            if let Some(l) = find(&hf, l1, 0, &ArchiveRules::default()) {
                 let opened = open(&hf, &l).expect("the digits read back");
                 assert_ne!(close(&opened, &l).unwrap(), hf);
             }
@@ -884,9 +892,11 @@ mod tests {
     /// choosing: the flag, the layout (written by `code_layout`, as `code` writes it), then `parts`, each with
     /// its model kind. The real encoder only writes layouts it found in the font.
     fn write_opened(l: &Layout, n: usize, parts: &[(Kind, &[u8])]) -> Vec<u8> {
-        let mut m = Model::new(14);
+        let rules = ArchiveRules::default();
+        let mut m = Model::new(14, &rules);
         let mut io = Io {
             m: &mut m,
+            rules: &rules,
             c: Encoder::new(),
             damaged: false,
             plain: false,
@@ -908,9 +918,11 @@ mod tests {
     /// `code` restoring a font of `n` bytes from `data`: the bytes it gave, whether it found the data damaged,
     /// and how many decisions it decoded.
     fn read_font(data: &[u8], n: usize) -> (Vec<u8>, bool, u64) {
-        let mut m = Model::new(14);
+        let rules = ArchiveRules::default();
+        let mut m = Model::new(14, &rules);
         let mut io = Io {
             m: &mut m,
+            rules: &rules,
             c: Counted { c: Decoder::new(data), decisions: 0 },
             damaged: false,
             plain: false,
@@ -970,13 +982,13 @@ mod tests {
                 x as u8
             })
             .collect();
-        assert!(find(&random, 100, 5000).is_none());
+        assert!(find(&random, 100, 5000, &ArchiveRules::default()).is_none());
         let mut fake = b"%!PS-AdobeFont-1.0\ncurrentfile eexec\n".to_vec();
         fake.extend_from_slice(&random);
-        assert!(find(&fake, 37, 20000).is_none());
+        assert!(find(&fake, 37, 20000, &ArchiveRules::default()).is_none());
         // A TrueType font announced as Type 1 (as in some test files), and too little to decrypt.
-        assert!(find(b"\x00\x01\x00\x00\x00\x0f\x000\x00\x03\x00 OS/2", 16, 0).is_none());
+        assert!(find(b"\x00\x01\x00\x00\x00\x0f\x000\x00\x03\x00 OS/2", 16, 0, &ArchiveRules::default()).is_none());
         let (f, _, l1, _) = font(None, "RD", 3);
-        assert!(find(&f[..l1 + 20], l1, 0).is_none());
+        assert!(find(&f[..l1 + 20], l1, 0, &ArchiveRules::default()).is_none());
     }
 }

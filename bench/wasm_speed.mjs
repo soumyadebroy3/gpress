@@ -8,7 +8,8 @@
 // output there under its corpus path, for a byte-for-byte check against the native tool. Prints one JSON
 // object: the time to load the module, and per file and in total the CPU and wall seconds of the optimize
 // call and the sha256 of its output. CPU time is the whole process's (V8's compiler threads included).
-// Run it pinned to one core (taskset -c N) and compare builds back to back.
+// Run it pinned to one core (taskset -c N) and compare builds back to back. --effort is the engine's own
+// level, 0 to 100.
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -24,6 +25,9 @@ const opt = (name, dflt) => {
   return v;
 };
 const effort = Number(opt("--effort", "0"));
+// The module's flags bit: the effort argument is the engine's own level. A module from before the effort
+// levels ignores the bit, and its effort is that level already.
+const FLAG_ENGINE_EFFORT = 256;
 const corpus = resolve(opt("--corpus", process.env.CORPUS || join(dirname(fileURLToPath(import.meta.url)), "corpus")));
 const outDir = opt("--out", null);
 if (args.length !== 2) {
@@ -62,7 +66,7 @@ for (const rel of files) {
   c0 = cpuNow();
   let rc;
   try {
-    rc = ex.gpress_optimize(p, input.length, effort, 0, 0, 0, 0);
+    rc = ex.gpress_optimize(p, input.length, effort, 0, 0, 0, FLAG_ENGINE_EFFORT);
   } catch (e) {
     // A trap leaves the instance dead: note it and start a fresh one.
     rc = -1;

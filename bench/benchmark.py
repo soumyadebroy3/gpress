@@ -63,9 +63,11 @@ DEFAULTS = {
     'largest': 10,  # files in the "memory against input size" table
     'opens_pages': 50,  # pages whose content is decoded by the opens-check
     # The engine's commands. {engine} {in} {out} {effort} {threads} are filled in.
+    # Both flags: a build from before the effort levels knows only --effort (it skips the other), and in a
+    # later one --engine-effort decides.
     'ours': {
-        'pdf': ['{engine}', 'optimize', '{in}', '{out}', '--effort', '{effort}', '--threads', '{threads}'],
-        'archive': ['{engine}', 'pack', '{in}', '{out}', '--effort', '{effort}', '--threads', '{threads}'],
+        'pdf': ['{engine}', 'optimize', '{in}', '{out}', '--effort', '{effort}', '--engine-effort', '{effort}', '--threads', '{threads}'],
+        'archive': ['{engine}', 'pack', '{in}', '{out}', '--effort', '{effort}', '--engine-effort', '{effort}', '--threads', '{threads}'],
         'unpack': ['{engine}', 'unpack', '{in}', '{out}'],
         'expand': ['{engine}', 'expand', '{in}', '{out}'],
     },
@@ -729,8 +731,9 @@ def measure(cfg, a, with_fixed):
     jobs = plan(cfg, a)
     if a.dry_run:
         print(f'{run}: {len(files)} files of {set_name(a.set)}, {len(jobs)} settings:')
-        for j in jobs:
-            print('  ' + j[0])
+        for name, tool, mode, effort, threads in jobs:
+            cmd = fill(cfg['ours'][mode], engine=cfg['engine'], **{'in': 'IN'}, out='OUT', effort=effort, threads=threads) if tool == 'ours' else []
+            print('  ' + name + (': ' + ' '.join(cmd) if cmd else ''))
         return
     if not os.path.exists(cfg['engine']) and 'ours' in cfg['who']:
         sys.exit(f'engine not found: {cfg["engine"]} (set PDFE or --engine)')
@@ -1319,7 +1322,7 @@ def main():
     ap.add_argument('--set', help='file list: a name in bench/sets/ or a path (default sample120; report: restrict to these files)')
     ap.add_argument('--who', help='comma list of ours,qpdf,xz,brotli,zstd,expandxz')
     ap.add_argument('--modes', help='comma list of pdf,archive')
-    ap.add_argument('--efforts', help='comma list, e.g. 0,50,100')
+    ap.add_argument('--efforts', help='comma list of the engine\'s own levels (--engine-effort), e.g. 0,50,100')
     ap.add_argument('--threads', help='comma list, e.g. 1,2')
     ap.add_argument('--timeout', type=float)
     ap.add_argument('--verify', type=int, help='outputs per normal-PDF setting through verify_pdf.py (0 = none)')
