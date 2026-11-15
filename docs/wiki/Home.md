@@ -32,7 +32,7 @@ A file `optimize` can't make smaller, or can't safely touch (a signed file, PDF/
 
 ## Where it stands
 
-Version 0.1.0, in active development. Nothing is published to crates.io or npm yet, so gpress builds from the repository. The archive format is version 9 (version 10 when one of the model's archive rules is changed from its default, which only the Rust API can do so far). CI builds and tests on Linux (x86-64). The licence is MIT OR Apache-2.0.
+Version 0.1.0, in active development. Nothing is published to crates.io or npm yet, so gpress builds from the repository. The archive format is version 9 (version 10 when one of the model's archive rules is changed from its default). CI builds and tests on Linux (x86-64). The licence is MIT OR Apache-2.0.
 
 Figures from the README and `bench/` on `main` (907 public test PDFs, 130.5 MB, from the pdf.js, pypdf, OCRmyPDF and pikepdf test suites):
 
