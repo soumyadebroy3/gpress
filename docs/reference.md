@@ -222,8 +222,7 @@ password only (algorithms 2, 2.A and 2.B), and is confirmed by /U (algorithms 6 
 - Normal PDF: strings and streams are decrypted while reading, optimised as usual, and written with the same
   encryption: the same /Encrypt dictionary (and the objects it refers to), /ID, file key and permissions. Each
   string and stream is encrypted with its own object's key; object streams are encrypted as streams, the
-  cross-reference stream is not; AES initialization vectors are derived from the file key and the object (and,
-  in a kept revision after the first, from that revision's place), so
+  cross-reference stream is not; AES initialization vectors are derived from the file key and the object, so
   the output is the same on every run. Encrypted XMP metadata is compressed (no tool can read it from the file
   anyway); metadata left unencrypted stays as it is. The self-check reads the output back, checks that it opens
   with the same key and dictionary, and compares the decrypted objects. The file keeps exactly the same
