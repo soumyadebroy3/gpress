@@ -8,7 +8,7 @@ All figures are from each pull request's description, on the 907 public test PDF
 
 | Pull request | Merged (UTC) | What it gives |
 | --- | --- | --- |
-| [#55](https://github.com/soumyadebroy3/gpress/pull/55) Rewrite settings | 2026-11-15 | The normal-PDF rewrite's 88 tuning values are named settings (group `rewrite_`), set by name on every surface. Four of them bound what a hostile file can cost, so, like #49's walk rules, they can be lowered but not raised. Also: the store budget in C, WebAssembly and TypeScript (`storeBudgetMiB`), the archive's stream limit as a TypeScript option of its own (`maxStreamArchiveMiB`), and in TypeScript a size in MiB with a fraction is rounded up, where 0.5 had become 0, the 1 GiB default. With no rule set, byte-identical on the 907 files at efforts 0, 20, 40, 60, 80 and 100 (`optimize`) and 0 and 40 (`pack`). The web module's recorded size went from 347,887 to 353,062 bytes of gzip (1.5%, #52's growth included). |
+| [#55](https://github.com/soumyadebroy3/gpress/pull/55) Rewrite settings | 2026-11-15 | The normal-PDF rewrite's 88 tuning values are named settings (group `rewrite_`), set by name on every surface. Four of them bound what a hostile file can cost, so, like #49's walk rules, they can be lowered but not raised. Also: the store budget in C, WebAssembly and TypeScript (`storeBudgetMiB`), the archive's stream limit as a TypeScript option of its own (`maxStreamArchiveMiB`), and in TypeScript a size in MiB with a fraction is rounded up, so 0.5 no longer becomes 0 (which meant the option's default). With no rule set, byte-identical on the 907 files at efforts 0, 20, 40, 60, 80 and 100 (`optimize`) and 0 and 40 (`pack`). The web module's recorded size went from 347,887 to 353,062 bytes of gzip (1.5%, #52's growth included). |
 | [#52](https://github.com/soumyadebroy3/gpress/pull/52) Sharp photographs | 2026-11-15 | The lossy step's photo test gives a third answer, a sharp photo (such as grass, gravel or coins: more hard edges than a photo may have, but at most an eighth flat, among other tests). It keeps the line-art floor of 300 pixels per inch and may become a JPEG within the same two quality checks. Small print makes a picture line art only when a tile's hard edges are more than 1.5 times its soft ones (was more than 1). The test's 14 values are rules of `lossy_`: `lossy_sharp_floor=1` gives a sharp photo the photo floor, and `lossy_print_edges=100` the old tile rule. On the 23-file photo set, 18,255,139 to 16,452,936 bytes at effort 60, 17,737,195 to 15,934,992 at 80 and 17,703,925 to 15,795,015 at 100; only its astronaut and coffee files change. Byte-identical on the 907 files at efforts 0, 60, 80 and 100. The web module grew by 1,230 bytes of gzip in its own build. |
 | [#54](https://github.com/soumyadebroy3/gpress/pull/54) Wiki update | 2026-11-15 | These pages brought up to date for #49, #50, #51 and #53. |
 | [#49](https://github.com/soumyadebroy3/gpress/pull/49) Settings by name | 2026-11-15 | Any rule is set by name on every surface: `--rule name=value` on the command line, `Options::set_rule` in Rust, a `name=value,...` text in the C options struct (which grows from 80 to 16,464 bytes), calls in WebAssembly and a `rules` option in TypeScript. The reference has one table per group, held equal to the code by a test. 272 rules in three groups: `lossy_` (the lossy step's 15 values, new here), `flate_` (181) and `archive_` (76). `lossy_walk_operators` and `lossy_walk_draws` can be lowered but not raised, because they bound what a hostile file can make the step do. A file whose lossy output is too short for its object numbers now gets the output of the strongest lossy level below that is long enough, and only then the lossless one (at once when `--photo-ppi`, `--art-ppi` or `--jpeg-quality` make the settings none of the levels'). With no rule set, byte-identical on the 907 files at efforts 0, 40 and 100 (`optimize` and `pack`), and at 60, 80 and 100 on the 26 files with lossy candidates. The web module grew by 8,097 bytes of gzip (2.4%), to 347,887. |
@@ -31,20 +31,20 @@ Earlier pull requests are in the [Changelog](Changelog).
 
 ## In progress
 
-Nothing is being built right now; what comes next is below.
+| Work | What it will give |
+| --- | --- |
+| A fresh head-to-head on `main` at 2d3bf64 | All 907 files against qpdf, MuPDF, cpdf, pdfsizeopt and Ghostscript, and the six efforts' sizes on the 907 files measured again: the README's and these pages' figures predate #51. |
 
 Paused: the "Deep check" workflow, draft [#36](https://github.com/soumyadebroy3/gpress/pull/36), which would run both builds over the test files and the readers on every pull request.
 
 ## Next
 
-- A fresh head-to-head on all 907 files against qpdf, MuPDF, cpdf, pdfsizeopt and Ghostscript, on the current `main`.
-- The six efforts' sizes on the 907 files measured again: the README's and these pages' figures predate #51.
 - A security pass over the new code.
 - Checks of the WebAssembly module in Firefox, Safari and on phones.
 - The first release, v0.1.0: push the tag, then publish the draft release that the workflow makes.
 
 ## Known limits today
 
-- The lossy step's photo test is cautious: an image in doubt counts as line art. Black 6 and 8 point labels on a dark part of a photograph are not found (#52 tried seven measures; each also caught real photographs or missed labels stored as a JPEG), so such a picture can be taken for a photo and its labels blurred at efforts 80 and 100.
+- The lossy step's photo test is cautious: an image in doubt counts as line art. Black 6 and 8 point labels on a dark part of a photograph may not be seen (#52 tried seven measures; each also caught real photographs or missed labels stored as a JPEG), so such a picture can be taken for a photo and its labels blurred at efforts 80 and 100.
 - A progressive JPEG is left alone at every effort, and so is a baseline JPEG whose scan header is not as the standard writes it.
 - CI builds and tests on Linux (x86-64) only.
