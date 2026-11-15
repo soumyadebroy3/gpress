@@ -1,5 +1,5 @@
-//! `log2` and `exp2` from +, -, * and / alone, which IEEE 754 rounds the same way on every machine, so a choice
-//! made from them is the same on Linux, macOS, Windows and in WebAssembly. The standard library's `log2` and
+//! `log2` and `exp2` from +, -, * and /, which IEEE 754 rounds the same way on every machine, and exact steps
+//! (floor, bit operations), so a choice made from them is the same on Linux, macOS, Windows and in WebAssembly. The standard library's `log2` and
 //! `powf` call the platform's maths library, and those differ in the last bit: glibc 2.39 (x86-64) and Rust's
 //! WebAssembly libm disagree on log2 of 22 of the integers 1 to 20,000. Both functions here work in
 //! double-double (about 106 bits) and round once, so they are correctly rounded except within about 2^-100 of
@@ -188,9 +188,9 @@ pub(crate) fn exp2(y: f64) -> f64 {
         return 0.0;
     }
     // 2^y = 2^n e^t with n = floor(y) and t = (y - n) ln 2 in [0, 0.694), so 28 terms of the series reach
-    // 2^-106. y - n is exact.
+    // 2^-106. y - n is taken exactly, as a double-double: it rounds as one double for y in (-1/2, 0).
     let n = y.floor();
-    let t = mul((y - n, 0.0), LN_2);
+    let t = mul(two_sum(y, -n), LN_2);
     let mut s: Dd = (0.0, 0.0);
     let mut k = FACT.len();
     while k > 0 {
@@ -258,6 +258,33 @@ mod tests {
         assert_eq!(exp2(11.0 / 12.0), 1.8877486253633868);
         // The rewrite's work budget at effort 20.
         assert_eq!(exp2(1.9), 3.7321319661472296);
+        // log2 of these is within a millionth of an ulp of halfway between two doubles (the closest of the
+        // integers to 2,000,000), so only an accurate series rounds them right.
+        assert_eq!(log2(145_985.0), 17.15546061383419);
+        assert_eq!(log2(1_892_350.0), 20.85174751665132);
+        assert_eq!(log2(1_321_597.0), 20.333850886307644);
+        assert_eq!(log2(567_989.0), 19.115503464379586);
+        assert_eq!(log2(57_198.0), 15.80367708178866);
+        // Between -1/2 and 0, where y - floor(y) is not one double.
+        assert_eq!(exp2(-0.3), 0.8122523963562356);
+        assert_eq!(exp2(-0.31), 0.8066417592221263);
+        assert_eq!(exp2(-1.0 / 9.0), 0.9258747122872905);
+        assert_eq!(exp2(-5.6e-17), 1.0);
+    }
+
+    #[test]
+    fn the_series_is_good_to_100_bits() {
+        // log2(1 + i/64) as hi + lo from 80-digit decimal arithmetic, for table entries at both ends of the
+        // series' interval (z near 0.17 and -0.17) and inside it.
+        for (i, hi, lo) in [
+            (26, 0.4918530963296747, -1.0820682119194486e-17),
+            (27, 0.5077946401986962, 2.2368792763711565e-17),
+            (45, 0.7681843247769263, 2.7943000056050083e-17),
+            (63, 0.9886846867721658, 4.274898271281587e-17),
+        ] {
+            let (h, l) = LOG2_STEP[i];
+            assert!(h == hi && (l - lo).abs() <= hi * pow2i(-100), "{i}: {h:e} {l:e}");
+        }
     }
 
     #[test]
