@@ -82,6 +82,35 @@ crate::rules::rule_group! {
         /// Image and form draws the walk may make in one file, a form's counted every time the form is drawn;
         /// over it no image of the file is reduced. Like `walk_operators`, it can be lowered but not raised.
         walk_draws = 1_000_000, 1, 1_000_000;
+        /// What tells a photo from line art (`look`), this rule and the thirteen below: a sample that ends a run
+        /// of at least this many equal samples, along its row or down its column, is flat.
+        flat_run = 32, 8, 256;
+        /// A step of this many levels or more between a sample and its left or upper neighbour is a hard edge.
+        hard_step = 64, 2, 255;
+        /// A step of at least this many levels and fewer than `hard_step` is a soft edge.
+        soft_step = 32, 1, 254;
+        /// This many of an image's most frequent levels are its ground.
+        ground_levels = 8, 1, 64;
+        /// A photo has at most one flat sample in this many,
+        photo_flat = 16, 1, 65_536;
+        /// at most one hard edge in this many samples,
+        photo_hard = 128, 1, 65_536;
+        /// and at most this percent of its samples in its ground.
+        photo_ground = 50, 1, 100;
+        /// A sharp photo (more hard edges than a photo may have) has at most one flat sample in this many,
+        sharp_flat = 8, 1, 65_536;
+        /// at most this percent of its samples in its ground,
+        sharp_ground = 25, 1, 100;
+        /// and at most this percent as many hard edges as soft ones.
+        sharp_edges = 100, 1, 1000;
+        /// The floor of a sharp photo: 0 the line-art floor, 1 the photo floor.
+        sharp_floor = 0, 0, 1;
+        /// Small print is looked for in tiles of this many samples a side;
+        print_tile = 32, 8, 1024;
+        /// a tile is small print when more than one sample in this many is a hard edge (1: never)
+        print_share = 8, 1, 65_536;
+        /// and its hard edges are more than this percent of its soft ones.
+        print_edges = 150, 1, 1000;
     }
 }
 
@@ -98,9 +127,10 @@ crate::rules::rule_group! {
 // else is left to the lossless pipeline exactly as it is.
 //
 // What is done: an image shown at 5/4 of its floor or more is resampled down to the floor (an area average).
-// The floor is the photo setting for a photo and the line-art setting for line art and for a scan (an image
-// that covers most of a page). A photo that was resampled, or is not a JPEG, is written as a baseline JPEG;
-// line art stays samples behind Flate and a JPEG that looks like line art is left alone.
+// The floor is the photo setting for a photo and the line-art setting for line art, for a scan (an image that
+// covers most of a page) and for a sharp photo (one with edges as hard as text's, see `look`). A photo that was
+// resampled, or is not a JPEG, is written as a baseline JPEG, and so may a sharp photo be; line art stays
+// samples behind Flate and a JPEG that looks like line art is left alone.
 //
 // What is kept: a candidate of at most nine tenths of the image's lossless size (the smaller of its stored
 // bytes and a quick lossless encode of it), whose JPEG, decoded again, stays close to the samples it was made
@@ -322,6 +352,7 @@ fn candidate(img: &Image, opt: &Options) -> Result<Candidate, &'static str> {
     let art_floor = floor(lossy.art_ppi, rules.art_floor);
     // A scan gets the line-art floor whatever its samples look like.
     let photo_floor = if img.shown.scan { art_floor } else { floor(lossy.photo_ppi, rules.photo_floor) };
+    let sharp_floor = if rules.sharp_floor == 1 { photo_floor } else { art_floor };
     // `quality_max` wins when the two cross (`clamp` would panic).
     let within = |q: u8| (q as u64).max(rules.quality_min).min(rules.quality_max) as u8;
     let quality = (cfg!(feature = "jpeg") && lossy.jpeg_quality > 0).then(|| within(lossy.jpeg_quality));
@@ -329,7 +360,7 @@ fn candidate(img: &Image, opt: &Options) -> Result<Candidate, &'static str> {
     // Nothing these settings could do to it whatever its samples are: it is not decoded.
     let any = match (img.jpeg, quality) {
         (true, None) => false,
-        (true, Some(_)) => lossy.rejpeg || size(photo_floor).is_some(),
+        (true, Some(_)) => lossy.rejpeg || size(photo_floor).is_some() || size(sharp_floor).is_some(),
         (false, None) => size(art_floor).is_some(),
         (false, Some(_)) => true,
     };
@@ -347,13 +378,23 @@ fn candidate(img: &Image, opt: &Options) -> Result<Candidate, &'static str> {
     }
     if img.jpeg {
         let quality = quality.ok_or("no JPEG in these settings")?;
-        return from_jpeg(img, &data, size(photo_floor), quality, opt);
+        return from_jpeg(img, &data, size(photo_floor), size(sharp_floor), quality, opt);
     }
     // Fewer samples than the size needs: readers differ on such an image.
     let px = data.get(..w * h * img.channels).ok_or("fewer samples than its size")?;
-    if is_photo(&luma(px, img.channels), w, h) {
-        let quality = quality.ok_or("a photo, and no JPEG in these settings")?;
-        return from_photo(img, px, size(photo_floor), quality, opt);
+    // Bound first, so that the grey copy of an RGB image is freed before a JPEG is made.
+    let looks = look(&luma(px, img.channels), w, h, &rules);
+    match (looks, quality) {
+        (Look::Photo, None) => return Err("a photo, and no JPEG in these settings"),
+        (Look::Photo, Some(quality)) => return from_photo(img, px, size(photo_floor), quality, opt),
+        // A sharp photo keeps the line-art floor and may become a JPEG: one that does not is resampled below.
+        (Look::Sharp, Some(quality)) => match from_photo(img, px, size(sharp_floor), quality, opt) {
+            Ok(made) => return Ok(made),
+            // At or near the line-art floor there is nothing else to try: the JPEG's reason stands.
+            Err(why) if size(art_floor).is_none() => return Err(why),
+            Err(_) => {}
+        },
+        (Look::Sharp, None) | (Look::Art, _) => {}
     }
     let (tw, th) = size(art_floor).ok_or("line art at or near its floor")?;
     let small = resample(px, w, h, img.channels, tw, th, opt.deadline).ok_or("out of time")?;
@@ -418,83 +459,129 @@ fn luma(px: &[u8], channels: usize) -> Cow<'_, [u8]> {
     Cow::Owned(px.as_chunks::<3>().0.iter().map(y).collect())
 }
 
-/// A run of equal samples this long, along a row or down a column, is flat (see `is_photo`).
-const RUN: u16 = 32;
-/// A step of this many levels between neighbouring samples is a hard edge.
-const EDGE: u8 = 64;
-/// A step of this many levels, and less than `EDGE`, is a soft edge.
-const SOFT: u8 = 32;
-/// The side of the tiles small print is looked for in. At 32, each of four drawings of labels on a photograph
-/// (6 and 8 point at 504 samples an inch: black, white, outlined) has 8 or more tiles of small print; at 64
-/// none has more than one. (Black labels on the photograph's dark parts may have none: see below.)
-const TILE: usize = 32;
+/// What an image's samples look like (see `look`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Look {
+    /// Line art, and everything in doubt: the line-art floor, and never a JPEG.
+    Art,
+    /// A photo: the photo floor, written as a JPEG.
+    Photo,
+    /// A sharp photo, one with edges as hard as text's: the line-art floor (`sharp_floor`), and it may become a
+    /// JPEG.
+    Sharp,
+}
 
-/// Whether `luma` (`w` by `h`) is a clear continuous-tone picture: a photo. Everything else, and everything in
-/// doubt, is line art, which has the safer floor and never becomes a JPEG. Decided from three counts, in whole
-/// numbers, so that every machine decides the same. A photo has all of:
-/// - flat samples, the ones that go on a run of at least `RUN` equal samples along their row or down their
-///   column, are at most 1/16 of all: screenshots, charts, diagrams and renders on a plain ground have large
-///   areas of one value (a run that long is more than the 8 by 8 blocks a JPEG photo decodes to in smooth
-///   places);
-/// - hard edges, samples at least `EDGE` levels from their left or upper neighbour, are at most 1/128 of all:
-///   text and line work are hard edges, while a camera's picture is soft from one sample to the next;
-/// - its 8 most frequent levels hold at most half of the samples: a few levels that hold most of a picture
-///   are a ground and its inks;
-/// - no whole tile of `TILE` by `TILE` samples has hard edges on more than 1/8 of it that outnumber its soft
-///   edges (samples `SOFT` levels or more from a neighbour, and less than `EDGE`): small print. A few labels,
-///   a caption or a subtitle on a photograph are too few hard edges for the count over the whole picture,
-///   but where they stand the edges are dense and sudden, and a photo's floor would blur them. Among the
-///   photographs the three counts above take, measured as stored and as JPEGs of three qualities, one tile
-///   is like that: the glinting corner of a picture frame.
+/// What `luma` (`w` by `h`) looks like. Decided from counts in whole numbers, so that every machine decides the
+/// same; each limit is a rule (`LossyRules`), named here with its default:
+/// - flat samples, the ones that end a run of at least `flat_run` (32) equal samples along their row or
+///   down their column: screenshots, charts, diagrams and renders on a plain ground have large areas of one
+///   value (a run that long is more than the 8 by 8 blocks a JPEG photo decodes to in smooth places);
+/// - hard and soft edges: each sample counted once, by the larger of its steps from its left and its upper
+///   neighbour, a hard edge from `hard_step` (64) levels and a soft one from `soft_step` (32);
+/// - the samples at the `ground_levels` (8) most frequent levels: a few levels that hold much of a picture
+///   are a ground, such as a scanned page's paper;
+/// - small print: a whole tile of `print_tile` (32) samples a side where more than one sample in
+///   `print_share` (8) is a hard edge, and hard edges are more than `print_edges` (150) percent of the soft
+///   ones. A few labels, a caption or a subtitle on a photograph are too few hard edges for the counts over
+///   the whole picture, but where they stand the edges are dense and sudden. An image with small print is
+///   line art.
 ///
-/// Not found: a word or two (a tile may hold too little of them); print whose edges step less than `EDGE` from
-/// the picture around it (black 6 and 8 point labels on a dark sky or dark rock may make no such tile: then the
-/// picture is a photo, a JPEG at every level and at 150 pixels per inch at levels 2 and 3, the labels
-/// blurred); and print that is soft itself (a photographed or scanned note), which no count of edges tells
-/// from a photograph.
-fn is_photo(luma: &[u8], w: usize, h: usize) -> bool {
+/// A photo is a clear continuous-tone picture: at most 1/16 of its samples are flat (`photo_flat`), at most
+/// 1/128 are hard edges (`photo_hard`), and its ground holds at most half of it (`photo_ground`).
+///
+/// A sharp photo has more hard edges than that, as grass, gravel, the rim of a coin and a picture made
+/// smaller have, and as text has. At most 1/8 of it is flat (`sharp_flat`), it has no ground (at most a
+/// quarter of it, `sharp_ground`) and no more hard edges than soft ones (`sharp_edges`): a camera's edge is a
+/// ramp, with more soft steps than hard ones, where rendered text steps at once. Measured: of 19 photographs
+/// 13 have at most 17% of their samples at 8 levels (the others, a night sky and pictures of low contrast,
+/// have 27% and more and mostly stay line art), and a page scanned in even light has 30% and more; a
+/// photograph that was not sharpened has fewer hard edges than soft ones, rendered text at least 1.9 times as
+/// many. A scanned page's edges are ramps too, so only its paper keeps it out, and a page in uneven light, a
+/// map on shaded relief or a halftone can pass both tests. That is why a sharp photo keeps the line-art
+/// floor, and the quality floor guards its JPEG (`close`).
+///
+/// Small print, measured on labels drawn on a real photograph (5 to 12 point: black, white, outlined, grey) and on
+/// drawn pictures: each one with more than a word or two, 64 levels or more from the photograph around it, that the
+/// counts over the whole picture take for a photo has a tile of it, and so have most of them made half as large,
+/// which are sharp photos (all but an outlined subtitle). Of 13 photographs (scikit-image's samples and two of the
+/// corpus; as stored, as JPEGs of quality 60 and 90, and halved) one has such a tile at 150 percent, an astronaut's
+/// mission patch halved; at 100 percent five have, the patch's lettering at every size among them. Not found: a word
+/// or two (a tile may hold too little of them), print that is soft itself (a photographed or scanned note), print
+/// whose tiles have at most 1.5 times as many hard edges as soft ones (at 100 percent real photographs have such
+/// tiles too), and print close in brightness to the photograph around it (black labels on a dark sky or rock, white
+/// ones on pale rock: edges under 64 levels). No count of edges tried tells those from a photograph: lower steps,
+/// steps over two samples, or edges at black ink each gave real photographs a tile, or missed the labels stored as a
+/// JPEG.
+///
+/// Everything else, and everything in doubt, is line art.
+fn look(luma: &[u8], w: usize, h: usize, rules: &LossyRules) -> Look {
     if w < 2 || h < 2 || luma.len() < w * h {
-        return false;
+        return Look::Art;
     }
-    let (mut flat, mut hard) = (0u64, 0u64);
+    // `flat_run` is at most 256 and `print_tile` at most 1024, so these hold them.
+    let (run, tile) = (rules.flat_run as u16, rules.print_tile as usize);
+    let (mut flat, mut hard, mut soft) = (0u64, 0u64, 0u64);
     // The hard and the soft edges of each whole tile in the band of rows being read.
-    let mut tiles = vec![(0u32, 0u32); w / TILE];
+    let mut tiles = vec![(0u64, 0u64); w / tile];
     let mut levels = [0u64; 256];
-    // The length of the run of equal samples that ends at each column of the row before, capped at `RUN`.
+    // The length of the run of equal samples that ends at each column of the row before, capped at `run`.
     let mut down = vec![0u16; w];
     for y in 0..h {
         let row = &luma[y * w..(y + 1) * w];
         let above = if y > 0 { &luma[(y - 1) * w..y * w] } else { row };
         let mut along = 0u16;
+        // The tile column `x` is in, and how far into it: no division for each sample.
+        let (mut t, mut into) = (0, 0);
         for x in 0..w {
             let v = row[x];
             levels[v as usize] += 1;
             let left = if x > 0 { row[x - 1] } else { v };
-            along = if x > 0 && v == left { (along + 1).min(RUN) } else { 0 };
-            down[x] = if y > 0 && v == above[x] { (down[x] + 1).min(RUN) } else { 0 };
-            flat += (along + 1 >= RUN || down[x] + 1 >= RUN) as u64;
-            let step = v.abs_diff(left).max(v.abs_diff(above[x]));
-            hard += (step >= EDGE) as u64;
-            if let Some(tile) = tiles.get_mut(x / TILE) {
-                tile.0 += (step >= EDGE) as u32;
-                tile.1 += (SOFT..EDGE).contains(&step) as u32;
+            along = if x > 0 && v == left { (along + 1).min(run) } else { 0 };
+            down[x] = if y > 0 && v == above[x] { (down[x] + 1).min(run) } else { 0 };
+            flat += (along + 1 >= run || down[x] + 1 >= run) as u64;
+            let step = v.abs_diff(left).max(v.abs_diff(above[x])) as u64;
+            let (is_hard, is_soft) = (step >= rules.hard_step, (rules.soft_step..rules.hard_step).contains(&step));
+            hard += is_hard as u64;
+            soft += is_soft as u64;
+            if let Some(edges) = tiles.get_mut(t) {
+                edges.0 += is_hard as u64;
+                edges.1 += is_soft as u64;
+            }
+            into += 1;
+            if into == tile {
+                (t, into) = (t + 1, 0);
             }
         }
-        if y % TILE == TILE - 1 {
-            if tiles.iter().any(|&(hard, soft)| hard as usize * 8 > TILE * TILE && hard > soft) {
-                return false;
+        if y % tile == tile - 1 {
+            let print =
+                |&(h, s): &(u64, u64)| h * rules.print_share > (tile * tile) as u64 && h * 100 > s * rules.print_edges;
+            if tiles.iter().any(print) {
+                return Look::Art;
             }
             tiles.fill((0, 0));
         }
     }
     let all = (w * h) as u64;
-    // The 8 most frequent levels, picked one at a time: so few need no sort.
-    let mut top = 0;
-    for _ in 0..8 {
+    // The most frequent levels, picked one at a time: so few need no sort.
+    let mut ground = 0;
+    for _ in 0..rules.ground_levels {
         let most = (0..256).max_by_key(|&k| levels[k]).unwrap_or(0);
-        top += std::mem::take(&mut levels[most]);
+        ground += std::mem::take(&mut levels[most]);
     }
-    flat * 16 <= all && hard * 128 <= all && top * 2 <= all
+    // At most one in `n`, and at most `p` percent, of all samples.
+    let one_in = |count: u64, n: u64| count.saturating_mul(n) <= all;
+    let percent = |count: u64, p: u64| count * 100 <= all * p;
+    if one_in(flat, rules.photo_flat) && one_in(hard, rules.photo_hard) && percent(ground, rules.photo_ground) {
+        Look::Photo
+    } else if !one_in(hard, rules.photo_hard)
+        && one_in(flat, rules.sharp_flat)
+        && percent(ground, rules.sharp_ground)
+        && hard * 100 <= soft * rules.sharp_edges
+    {
+        Look::Sharp
+    } else {
+        Look::Art
+    }
 }
 
 /// Each output position's share of the input along one axis, for an area average of `s` input samples down to
@@ -665,13 +752,15 @@ fn close(coded: &[u8], y: &Plane, opt: &Options) -> Result<(), &'static str> {
 }
 
 /// A JPEG image (`data`: the JPEG file): decoded to its own planes, and when their luma is a photo's, resampled
-/// to `size` or, without one, only coded again. A JPEG that looks like line art is left alone: line art is
-/// never made a JPEG, and its samples behind Flate would need a colour conversion.
+/// to its size (`photo` for a photo, `sharp` for a sharp one) or, without one, only coded again where the
+/// settings ask for that. A JPEG that looks like line art is left alone: line art is never made a JPEG, and its
+/// samples behind Flate would need a colour conversion.
 #[cfg(feature = "jpeg")]
 fn from_jpeg(
     img: &Image,
     data: &[u8],
-    size: Option<(usize, usize)>,
+    photo: Option<(usize, usize)>,
+    sharp: Option<(usize, usize)>,
     quality: u8,
     opt: &Options,
 ) -> Result<Candidate, &'static str> {
@@ -680,8 +769,13 @@ fn from_jpeg(
     if (pic.width, pic.height, pic.planes.len()) != (w, h, img.channels) {
         return Err("the JPEG and the dictionary disagree");
     }
-    if !is_photo(&pic.planes[0].px, w, h) {
-        return Err("a JPEG that looks like line art");
+    let size = match look(&pic.planes[0].px, w, h, &opt.rules) {
+        Look::Art => return Err("a JPEG that looks like line art"),
+        Look::Photo => photo,
+        Look::Sharp => sharp,
+    };
+    if size.is_none() && !opt.lossy.rejpeg {
+        return Err("a JPEG at or near its floor");
     }
     let lossless = || jpeg::optimize(data).map_or(data.len(), |j| j.len());
     let (coded, (w, h)) = photo_jpeg(pic.planes, size, quality, img.s.data.len(), lossless, opt)?;
@@ -715,7 +809,14 @@ fn from_photo(
 // Without the `jpeg` feature an image that would need a JPEG is left alone (`candidate` never gets this far:
 // it has no JPEG quality then).
 #[cfg(not(feature = "jpeg"))]
-fn from_jpeg(_: &Image, _: &[u8], _: Option<(usize, usize)>, _: u8, _: &Options) -> Result<Candidate, &'static str> {
+fn from_jpeg(
+    _: &Image,
+    _: &[u8],
+    _: Option<(usize, usize)>,
+    _: Option<(usize, usize)>,
+    _: u8,
+    _: &Options,
+) -> Result<Candidate, &'static str> {
     Err("needs the jpeg feature")
 }
 
@@ -764,11 +865,29 @@ mod tests {
         assert!(Lossy::level(3).rejpeg && Lossy::level(3).jpeg_quality == 75);
     }
 
+    /// What `px` (320 by 240) looks like with the rules at their defaults but for `moved`.
+    fn looks(px: &[u8], moved: &[(&str, u64)]) -> Look {
+        let mut rules = LossyRules::default();
+        assert!(moved.iter().all(|(name, v)| rules.set(name, *v)));
+        look(px, 320, 240, &rules)
+    }
+
+    /// `px` (320 by 240) with a label of 48 by 16 samples on it: each sample of its columns is what `ink` makes
+    /// of the column (`x`) and the sample.
+    fn labelled(mut px: Vec<u8>, ink: impl Fn(usize, u8) -> u8) -> Vec<u8> {
+        for y in 100..116 {
+            for x in 96..144 {
+                px[y * 320 + x] = ink(x, px[y * 320 + x]);
+            }
+        }
+        px
+    }
+
     #[test]
     fn photos_and_line_art_are_told_apart() {
         let (w, h) = (320, 240);
-        assert!(is_photo(&photo(w, h), w, h));
-        assert!(!is_photo(&diagram(w, h), w, h), "flat areas");
+        assert_eq!(looks(&photo(w, h), &[]), Look::Photo);
+        assert_eq!(looks(&diagram(w, h), &[]), Look::Art, "flat areas");
         // Text-like: a soft ground with many hard edges and no flat run.
         let mut text = photo(w, h);
         for (i, v) in text.iter_mut().enumerate() {
@@ -776,30 +895,117 @@ mod tests {
                 *v = 0;
             }
         }
-        assert!(!is_photo(&text, w, h), "hard edges");
-        // A few levels hold most of it, without a run of 32: a two-level checker of 4 by 4.
+        assert_eq!(looks(&text, &[]), Look::Art, "hard edges");
+        // Two levels hold all of it, without a run of 32: a checker of 4 by 4. A photo only where a ground may
+        // hold all of one.
         let checker: Vec<u8> =
             (0..w * h).map(|i| if ((i % w) / 4 + (i / w) / 4) % 2 == 0 { 100 } else { 130 }).collect();
-        assert!(!is_photo(&checker, w, h), "few levels");
-        // A flat band over a tenth of a photo: more than 1/16 of it is flat.
+        assert_eq!(looks(&checker, &[]), Look::Art, "few levels");
+        assert_eq!(looks(&checker, &[("photo_ground", 100)]), Look::Photo);
+        // A tenth of a photo at one value: 9.03% of it is flat, over 1/16 and 1/12 and under 1/11.
         let mut banded = photo(w, h);
         banded[..w * h / 10].fill(255);
-        assert!(!is_photo(&banded, w, h));
-        // One label on a photo, 48 by 16 samples of strokes two samples wide: one sample in 274 is a hard
-        // edge, too few for the count over the whole picture, but a tile the label stands in is full of them.
-        let label = |ink: fn(u8) -> u8| {
-            let mut px = photo(w, h);
-            for y in 100..116 {
-                for x in (96..144).filter(|x| x % 6 < 2) {
-                    px[y * w + x] = ink(px[y * w + x]);
-                }
-            }
+        assert_eq!(looks(&banded, &[]), Look::Art, "flat areas");
+        assert_eq!(looks(&banded, &[("photo_flat", 12)]), Look::Art);
+        assert_eq!(looks(&banded, &[("photo_flat", 11)]), Look::Photo);
+        // Runs of 16 equal samples along every row: flat only where a flat run is that short. Then it is no
+        // photo, and with no hard edges no sharp photo either.
+        let soft = photo(w, h);
+        let stepped: Vec<u8> = (0..w * h).map(|i| soft[i - (i % w) % 16]).collect();
+        assert_eq!(looks(&stepped, &[("flat_run", 17)]), Look::Photo);
+        assert_eq!(looks(&stepped, &[("flat_run", 16)]), Look::Art);
+        let rules = LossyRules::default();
+        assert!(look(&[1, 2, 3], 3, 1, &rules) == Look::Art && look(&[], 0, 0, &rules) == Look::Art);
+    }
+
+    #[test]
+    fn small_print_on_a_photo_is_line_art() {
+        let (w, h) = (320, 240);
+        // Strokes two samples wide: one sample in 274 is a hard edge, too few for the counts over the whole
+        // picture, but the tile the label mostly stands in has 194 of them, and no soft one.
+        let print = labelled(photo(w, h), |x, v| if x % 6 < 2 { 0 } else { v });
+        assert_eq!(looks(&print, &[]), Look::Art, "small print");
+        // A photo where more than one sample in 5 of a tile must be a hard edge (194 of 1,024 is not), where no
+        // tile is small print, or where the tiles are 64 samples a side (194 of 4,096).
+        assert_eq!(looks(&print, &[("print_share", 6)]), Look::Art);
+        assert_eq!(looks(&print, &[("print_share", 5)]), Look::Photo);
+        assert_eq!(looks(&print, &[("print_share", 1)]), Look::Photo);
+        assert_eq!(looks(&print, &[("print_tile", 64)]), Look::Photo);
+        // The same strokes as a shadow, 40 levels darker: soft edges are a photo's own.
+        assert_eq!(looks(&labelled(photo(w, h), |x, v| if x % 6 < 2 { v - 40 } else { v }), &[]), Look::Photo);
+        // Hard strokes beside soft ones: 198 hard edges in the tile and 165 soft, 1.2 times as many.
+        let mixed = labelled(photo(w, h), |x, v| match x % 6 {
+            0 => 0,
+            3 => v - 40,
+            _ => v,
+        });
+        assert_eq!(looks(&mixed, &[]), Look::Photo);
+        assert_eq!(looks(&mixed, &[("print_edges", 120)]), Look::Photo);
+        assert_eq!(looks(&mixed, &[("print_edges", 119)]), Look::Art, "small print");
+    }
+
+    #[test]
+    fn a_sharp_photo_is_told_from_text() {
+        let (w, h) = (320, 240);
+        let mut s = 0x2545_f491_4f6c_dd1du64;
+        // Texture like grass or gravel: every sample far from its neighbours, by a soft step more often than
+        // by a hard one (48.1% and 20.8% of the samples), and no level that holds much of it.
+        let grass: Vec<u8> = (0..w * h).map(|i| (40 + (i % w) * 110 / w + (rng(&mut s) % 96) as usize) as u8).collect();
+        assert_eq!(looks(&grass, &[]), Look::Sharp);
+        // A photo where a photo may have that many hard edges, or where steps that large are not hard ones.
+        assert_eq!(looks(&grass, &[("photo_hard", 5)]), Look::Sharp);
+        assert_eq!(looks(&grass, &[("photo_hard", 4)]), Look::Photo);
+        assert_eq!(looks(&grass, &[("hard_step", 96)]), Look::Photo);
+        // Line art where 0.43 hard edges for each soft one are too many, or where fewer steps are soft.
+        assert_eq!(looks(&grass, &[("sharp_edges", 44)]), Look::Sharp);
+        assert_eq!(looks(&grass, &[("sharp_edges", 43)]), Look::Art);
+        assert_eq!(looks(&grass, &[("soft_step", 48)]), Look::Sharp);
+        assert_eq!(looks(&grass, &[("soft_step", 50)]), Look::Art);
+        // A label on it: among so many soft edges its tile is small print only where hard edges as many as the
+        // soft ones count, and the texture's own tiles are not.
+        let print = labelled(grass.clone(), |x, v| if x % 6 < 2 { 0 } else { v });
+        assert_eq!(looks(&print, &[]), Look::Sharp);
+        assert_eq!(looks(&print, &[("print_edges", 100)]), Look::Art, "small print");
+        assert_eq!(looks(&grass, &[("print_edges", 100)]), Look::Sharp);
+        // A clipped shadow over an eighth of it (11.3% flat) leaves it sharp; over a seventh (13.0%) it is
+        // line art, unless a seventh of a sharp photo may be flat.
+        let shadow = |part: usize| {
+            let mut px = grass.clone();
+            px[..w * h / part].fill(0);
             px
         };
-        assert!(!is_photo(&label(|_| 0), w, h), "small print");
-        // The same strokes as a shadow, 40 levels darker: soft edges are a photo's own.
-        assert!(is_photo(&label(|v| v - 40), w, h), "a soft pattern");
-        assert!(!is_photo(&[1, 2, 3], 3, 1) && !is_photo(&[], 0, 0));
+        assert_eq!(looks(&shadow(8), &[]), Look::Sharp);
+        assert_eq!(looks(&shadow(7), &[]), Look::Art, "flat areas");
+        assert_eq!(looks(&shadow(7), &[("sharp_flat", 7)]), Look::Sharp);
+        // Strokes of ink with a soft shoulder over a soft picture: no ground, but 1.37 hard edges for each
+        // soft one.
+        let mut ink = photo(w, h);
+        for (i, v) in ink.iter_mut().enumerate() {
+            if (i / w) % 9 < 6 {
+                match (i % w) % 16 {
+                    0 => *v = v.saturating_sub(48),
+                    1 => *v = 0,
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(looks(&ink, &[]), Look::Art, "more hard edges than soft ones");
+        assert_eq!(looks(&ink, &[("sharp_edges", 137)]), Look::Art);
+        assert_eq!(looks(&ink, &[("sharp_edges", 138)]), Look::Sharp);
+        // A scanned page with soft strokes: five soft edges for each hard one, but its paper is a ground, with
+        // 31.6% of the page at 8 levels (27.7% at 7 levels, 23.7% at 6).
+        let stroke = [190u8, 150, 80, 120, 160, 200];
+        let scan: Vec<u8> = (0..w * h)
+            .map(|i| match stroke.get((i % w) % 16) {
+                Some(&v) => v + (rng(&mut s) % 4) as u8,
+                None => 225 + (rng(&mut s) % 16) as u8,
+            })
+            .collect();
+        assert_eq!(looks(&scan, &[]), Look::Art, "a ground");
+        assert_eq!(looks(&scan, &[("sharp_ground", 31)]), Look::Art);
+        assert_eq!(looks(&scan, &[("sharp_ground", 32)]), Look::Sharp);
+        assert_eq!(looks(&scan, &[("ground_levels", 7)]), Look::Art);
+        assert_eq!(looks(&scan, &[("ground_levels", 6)]), Look::Sharp);
     }
 
     #[test]
@@ -846,7 +1052,12 @@ mod tests {
 
     #[test]
     fn the_rules_default_to_the_values_that_were_fixed() {
-        let was = [65_536, 150, 300, 125, 10, 50, 95, 10, 3, 35, 26, 16, 70, 20_000_000, 1_000_000];
+        let was = [
+            65_536, 150, 300, 125, 10, 50, 95, 10, 3, 35, 26, 16, 70, 20_000_000, 1_000_000, 32, 64, 32, 8, 16, 128,
+            50, 8, 25, 100, 0, 32, 8, 150,
+        ];
+        // But for two: `sharp_floor` came with the sharp photos, and a tile was small print where its hard edges
+        // outnumbered its soft ones (`print_edges` 100) before sharp photos had to pass the test too.
         let d = LossyRules::default();
         assert_eq!(LossyRules::RULES.len(), was.len());
         for (&(name, default, lowest, highest), was) in LossyRules::RULES.iter().zip(was) {

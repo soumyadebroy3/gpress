@@ -261,6 +261,87 @@ fn a_jpeg_photo_is_resampled_or_written_again() {
     assert!(again.len() * 10 <= file.len() * 9, "{} of {}", again.len(), file.len());
 }
 
+/// A sharp picture, grey: a ramp of four levels, three soft steps and a hard step back, over and over, on a
+/// slow ramp with a little noise. Three soft edges for each hard one, no flat run and no level that holds much of it.
+#[cfg(feature = "jpeg")]
+fn sharp_photo(w: usize, h: usize) -> Vec<u8> {
+    let mut s = 0x2545_f491_4f6c_dd1du64;
+    (0..w * h)
+        .map(|i| {
+            let (x, y) = (i % w, i / w);
+            (30 + (x % 4) * 45 + x * 40 / w + y * 30 / h + (rng(&mut s) % 9) as usize) as u8
+        })
+        .collect()
+}
+
+#[cfg(feature = "jpeg")]
+#[test]
+fn a_sharp_photo_becomes_a_jpeg_at_the_line_art_floor() {
+    let px = sharp_photo(600, 600);
+    let at = |side: u32| page(image(600, 600, "DeviceGray", 8, "", &px), side, "", "", &[]);
+    // At 600 pixels an inch: a JPEG at 300 at every level, where a photo goes down to 150 at levels 2 and 3.
+    for level in 1..=3 {
+        let (out, did) = optimize(&at(72), Some(Lossy::level(level)));
+        assert_eq!(did, (1, 1, 0), "level {level}");
+        let (w, h, jpeg, _) = image_of(&out);
+        assert_eq!((w, h, jpeg), (300, 300, true), "level {level}");
+    }
+    // With `lossy_sharp_floor` at 1 it has a photo's floor: 150 at level 2.
+    let mut opt = options(Some(Lossy::level(2)), 1);
+    opt.set_rule("lossy_sharp_floor", 1).expect("a rule");
+    let (w, h, jpeg, _) = image_of(&gpress::optimize(&at(72), &opt).expect("optimize").data);
+    assert_eq!((w, h, jpeg), (150, 150, true));
+    // When its JPEG is not kept (a floor of 99 dB no JPEG meets), it is resampled as line art: 300, samples
+    // behind Flate.
+    for level in 1..=3 {
+        let mut opt = options(Some(Lossy::level(level)), 1);
+        opt.set_rule("lossy_min_psnr", 99).expect("a rule");
+        let (w, h, jpeg, _) = image_of(&gpress::optimize(&at(72), &opt).expect("optimize").data);
+        assert_eq!((w, h, jpeg), (300, 300, false), "level {level}");
+    }
+    // Without a JPEG quality it is line art: resampled to 300, samples behind Flate.
+    let (out, did) = optimize(&at(72), Some(Lossy { jpeg_quality: 0, ..Lossy::level(2) }));
+    assert_eq!(did, (1, 0, 0));
+    let (w, h, jpeg, _) = image_of(&out);
+    assert_eq!((w, h, jpeg), (300, 300, false));
+    // At 200 pixels an inch it is under 5/4 of the line-art floor: a JPEG of its own size at every level,
+    // where level 2 takes a photo down to 150 pixels an inch.
+    let mut file = Vec::new();
+    for level in 1..=3 {
+        let (out, did) = optimize(&at(216), Some(Lossy::level(level)));
+        assert_eq!(did, (0, 1, 0), "level {level}");
+        let (w, h, jpeg, bytes) = image_of(&out);
+        assert_eq!((w, h, jpeg), (600, 600, true), "level {level}");
+        if level == 1 {
+            file = bytes;
+        }
+    }
+    // Stored as a JPEG and shown at 200 pixels an inch: levels 1 and 2 leave it alone, since it is near its
+    // floor and they write no JPEG again.
+    let dict = "/Type /XObject /Subtype /Image /Width 600 /Height 600 /ColorSpace /DeviceGray \
+                /BitsPerComponent 8 /Filter /DCTDecode";
+    let pdf = page(stream(dict, &file), 216, "", "", &[]);
+    let (lossless, _) = optimize(&pdf, None);
+    for level in 1..=2 {
+        let (out, did) = optimize(&pdf, Some(Lossy::level(level)));
+        assert_eq!(did, (0, 0, 0), "level {level}");
+        assert!(out == lossless, "level {level}");
+    }
+    // Shown at 600 it is resampled to 300 at every level, still a JPEG.
+    let pdf = page(stream(dict, &file), 72, "", "", &[]);
+    for level in 1..=3 {
+        let (out, did) = optimize(&pdf, Some(Lossy::level(level)));
+        assert_eq!(did, (1, 0, 0), "level {level}");
+        let (w, h, jpeg, _) = image_of(&out);
+        assert_eq!((w, h, jpeg), (300, 300, true), "level {level}");
+    }
+    // A photo floor of 600, above the line-art floor, changes nothing: it keeps a sharp photo's floor.
+    let (out, did) = optimize(&pdf, Some(Lossy { photo_ppi: 600, art_ppi: 300, ..Lossy::level(1) }));
+    assert_eq!(did, (1, 0, 0));
+    let (w, h, jpeg, _) = image_of(&out);
+    assert_eq!((w, h, jpeg), (300, 300, true));
+}
+
 #[test]
 fn line_art_is_resampled_to_300_ppi_and_never_a_jpeg() {
     let px = line_art(600, 600);
