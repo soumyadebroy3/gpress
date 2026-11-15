@@ -515,7 +515,8 @@ fn the_rules_are_settings_and_their_defaults_change_nothing() {
     let art = image(600, 600, "DeviceGray", 8, "", &line_art(600, 600));
     let shot = image(300, 300, "DeviceRGB", 8, "", &photo(300, 300, 3));
     let pdf = page(shot, 36, "/Im1 6 0 R", "q 36 0 0 36 100 20 cm /Im1 Do Q", &[art]);
-    let base = |effort: u8| Options::default().threads(1).effort(effort);
+    // Without the palette step, which would write a blank image as an Indexed one and hide its samples.
+    let base = |effort: u8| Options::default().threads(1).effort(effort).palette(false);
     let at = |o: Options| gpress::optimize(&pdf, &o).expect("optimize").data;
     let set = |mut o: Options, rules: &str| {
         o.set_rules(rules).expect(rules);
