@@ -30,6 +30,7 @@ input.onchange = async () => {                                      // <input ty
 };
 g.optimize(bytes, { effort: 60 });                                  // one effort: 60 is the first lossy one
 g.optimize(bytes, { effort: 100, photoPpi: 200 });                  // effort 100 with photos kept at 200 pixels per inch
+g.optimize(bytes, { effort: 100, rules: { lossy_min_saving: 25 } }); // a tuning value by name: keep a lossy result only when 25% smaller
 ```
 
 The options, the effort levels, the outcomes and the error codes are in the project's

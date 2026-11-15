@@ -33,8 +33,9 @@ export interface GpressOptions {
    * 0..100 in steps of 20; a value in between counts as the step below (default 40). 0, 20 and 40 are
    * lossless: 0 fastest, 40 the smallest lossless output. 60, 80 and 100 are lossy: the work of 40 after a
    * step that changes images only, stronger each step, within floors (photos never below 150 pixels per inch
-   * at their displayed size, line art and scans never below 300, 1-bit and small images never touched). The
-   * archive is lossless at every effort: 40 and above all mean its strongest setting.
+   * at their displayed size, line art and scans never below 300, unless `rules` moves them; 1-bit and small
+   * images never touched). The archive is lossless at every effort: 40 and above all mean its strongest
+   * setting.
    */
   effort?: number;
   /**
@@ -44,24 +45,42 @@ export interface GpressOptions {
   engineEffort?: number;
   /**
    * Lossy overrides for optimize(), each 0 or absent = what the effort says. Photos shown at 5/4 of this many
-   * pixels per inch or more are resampled down to it (never below 150, whatever is asked) on their way to a
-   * JPEG: alone it changes nothing below effort 60, where no JPEG quality is set.
+   * pixels per inch or more (the rule `lossy_resample_margin`) are resampled down to it (never below the rule
+   * `lossy_photo_floor`, 150 unless `rules` sets it) on their way to a JPEG: alone it changes nothing below
+   * effort 60, where no JPEG quality is set.
    */
   photoPpi?: number;
   /**
    * Line art and scans shown at 5/4 of this many pixels per inch or more are resampled down to it (never below
-   * 300). Set, it makes the output lossy at any effort.
+   * the rule `lossy_art_floor`, 300). Set, it makes the output lossy at any effort.
    */
   artPpi?: number;
   /**
-   * JPEG quality, kept within 50 to 95, for a photo that is resampled or stored without JPEG. Set, it makes
-   * the output lossy at any effort.
+   * JPEG quality, kept within the rules `lossy_quality_min` and `lossy_quality_max` (50 and 95), for a photo
+   * that is resampled or stored without JPEG. Set, it makes the output lossy at any effort.
    */
   jpegQuality?: number;
-  /** Largest accepted input in MiB (default 1024). */
+  /**
+   * Rules: the engine's tuning values by name, such as `{ lossy_min_saving: 20, lossy_photo_floor: 100 }`. A
+   * rule that is absent has its default; the project's reference ("Rules") lists the names with their defaults
+   * and ranges. A name that is no rule, or a value outside the rule's range, throws GpressError with code
+   * INVALID_OPTIONS and a message that says which values the rule takes.
+   */
+  rules?: Record<string, number>;
+  /**
+   * Largest accepted input in MiB (default 1024). Every size here is in MiB, and a fraction is rounded up
+   * (0.5 is 1 MiB), so a small limit never becomes 0, which means the default.
+   */
   maxInputMiB?: number;
-  /** Largest decoded stream re-encoded (normal PDF) or stored decoded (archive), MiB (default 64 / 256). */
+  /** Normal PDF: largest decoded stream re-encoded, MiB (default 64). */
   maxStreamMiB?: number;
+  /** Archive: largest decoded stream stored decoded, MiB (default 256; when absent, maxStreamMiB if that is set). */
+  maxStreamArchiveMiB?: number;
+  /**
+   * Normal PDF: MiB of encoded outputs one file keeps, so that a stream another one repeats is encoded once
+   * (default 2, at most 1024). Never changes the output.
+   */
+  storeBudgetMiB?: number;
   /**
    * Archive: the most decoded bytes the parts of one archive may claim in all, MiB (default 256); streams
    * past it are stored as they are. The archive's header declares the total, and expand() refuses an archive
@@ -102,6 +121,8 @@ export interface ExpandOptions {
    * 164 MiB), so a page sets both to what it can afford.
    */
   maxDecodedMiB?: number;
+  /** Rules by name, as in GpressOptions. */
+  rules?: Record<string, number>;
 }
 
 export interface GpressResult {
@@ -153,7 +174,10 @@ export class GpressFeatureError extends GpressError {
 /** Largest input the 32-bit module takes: under 2 GiB. */
 export const MAX_INPUT_BYTES = 0x7fffffff;
 
-/** The switches in the module's flags word: a set bit turns the step off, except the last, which turns dropping on. */
+/**
+ * The switches in the module's flags word: a set bit turns the step off, except the last, which makes the effort
+ * the engine's own level.
+ */
 const FLAG_IGNORE_CONFORMANCE = 1;
 const FLAG_NO_FLATE_OVER_JPEG = 2;
 const FLAG_NO_EXISTING_LIBRARIES = 4;
@@ -169,8 +193,13 @@ interface Exports {
   memory: WebAssembly.Memory;
   gpress_alloc(len: number): number;
   gpress_free_input(ptr: number, len: number): void;
-  gpress_optimize(ptr: number, len: number, effort: number, maxIn: number, maxStream: number, objectsPerStream: number, flags: number, photoPpi: number, artPpi: number, jpegQuality: number): number;
-  gpress_optimize_to_size(ptr: number, len: number, target: number, maxIn: number, maxStream: number, objectsPerStream: number, flags: number): number;
+  gpress_optimize(ptr: number, len: number, effort: number, maxIn: number, maxStream: number, objectsPerStream: number, flags: number, photoPpi: number, artPpi: number, jpegQuality: number, storeBudget: number): number;
+  gpress_optimize_to_size(ptr: number, len: number, target: number, maxIn: number, maxStream: number, objectsPerStream: number, flags: number, storeBudget: number): number;
+  gpress_rule_count(): number;
+  gpress_rule_name(index: number): number;
+  gpress_rule_name_len(index: number): number;
+  gpress_rule(index: number, low: number, high: number): number;
+  gpress_rules_reset(): void;
   gpress_compress(ptr: number, len: number, effort: number, maxIn: number, maxStream: number, maxDecoded: number, flags: number): number;
   gpress_expand(ptr: number, len: number, maxIn: number, maxLen: number, maxDecoded: number): number;
   gpress_out_ptr(): number;
@@ -192,7 +221,9 @@ interface Packed {
   effort: number;
   maxIn: number;
   maxStream: number;
+  maxStreamArchive: number;
   maxDecoded: number;
+  storeBudget: number;
   objectsPerStream: number;
   flags: number;
   photoPpi: number;
@@ -204,7 +235,16 @@ export class Gpress {
   /** Set once the module has trapped: its memory and state can no longer be trusted. */
   private dead: GpressError | null = null;
 
-  private constructor(private readonly ex: Exports) {}
+  /** Every rule's place in the module's list, by name: read from the module, so there is no list to keep here. */
+  private readonly ruleIndex = new Map<string, number>();
+
+  private constructor(private readonly ex: Exports) {
+    const text = new TextDecoder();
+    for (let i = 0; i < ex.gpress_rule_count(); i++) {
+      const name = new Uint8Array(ex.memory.buffer, ex.gpress_rule_name(i), ex.gpress_rule_name_len(i));
+      this.ruleIndex.set(text.decode(name), i);
+    }
+  }
 
   /**
    * Compiles the module without making an instance. Compiling is most of the cost of a first load, so
@@ -270,9 +310,28 @@ export class Gpress {
    */
   optimize(input: Uint8Array, options: GpressOptions = {}): GpressResult {
     const o = pack(options);
+    this.rules(options.rules);
     return this.run(input, (ptr, len) =>
-      this.ex.gpress_optimize(ptr, len, o.effort, o.maxIn, o.maxStream, o.objectsPerStream, o.flags, o.photoPpi, o.artPpi, o.jpegQuality),
+      this.ex.gpress_optimize(ptr, len, o.effort, o.maxIn, o.maxStream, o.objectsPerStream, o.flags, o.photoPpi, o.artPpi, o.jpegQuality, o.storeBudget),
     );
+  }
+
+  /** Sets the rules for the call that follows: only those given, so none of an earlier call stays. */
+  private rules(rules: Record<string, number> = {}): void {
+    if (this.dead) throw this.dead;
+    this.ex.gpress_rules_reset();
+    for (const [name, value] of Object.entries(rules)) {
+      const index = this.ruleIndex.get(name);
+      if (index === undefined) {
+        throw new GpressError(GpressError.INVALID_OPTIONS, `invalid options: there is no rule called ${name}`);
+      }
+      // A rule's value is a whole number; one a JavaScript number does not hold exactly is refused here.
+      if (!Number.isSafeInteger(value) || value < 0) {
+        throw new GpressError(GpressError.INVALID_OPTIONS, `invalid options: rule ${name} is ${value}: it takes a whole number`);
+      }
+      const code = this.ex.gpress_rule(index, value % 2 ** 32, Math.floor(value / 2 ** 32));
+      if (code !== 0) throw new GpressError(code, this.message() || `gpress error ${code}`);
+    }
   }
 
   /**
@@ -289,11 +348,12 @@ export class Gpress {
     if (typeof targetBytes !== "number" || Number.isNaN(targetBytes)) {
       throw new GpressError(GpressError.INVALID_OPTIONS, "invalid options: the target size must be a number of bytes");
     }
+    this.rules(options.rules);
     // Every output is under 4 GiB here, so a larger target (Infinity too) is as good as that.
     const target = Math.min(0xffffffff, Math.max(0, Math.floor(targetBytes)));
     let picked = 0;
     const r = this.run(input, (ptr, len) => {
-      const code = this.ex.gpress_optimize_to_size(ptr, len, target, o.maxIn, o.maxStream, o.objectsPerStream, o.flags);
+      const code = this.ex.gpress_optimize_to_size(ptr, len, target, o.maxIn, o.maxStream, o.objectsPerStream, o.flags, o.storeBudget);
       // The outcome also carries the effort (bits 8 to 15) and whether the target was reached (bit 16).
       picked = this.ex.gpress_outcome();
       return code;
@@ -304,14 +364,16 @@ export class Gpress {
   /** The gpress archive of any input; expand() restores it byte for byte. */
   compress(input: Uint8Array, options: GpressOptions = {}): GpressResult {
     const o = pack(options);
-    return this.run(input, (ptr, len) => this.ex.gpress_compress(ptr, len, o.effort, o.maxIn, o.maxStream, o.maxDecoded, o.flags));
+    this.rules(options.rules);
+    return this.run(input, (ptr, len) => this.ex.gpress_compress(ptr, len, o.effort, o.maxIn, o.maxStreamArchive, o.maxDecoded, o.flags));
   }
 
   /** The original bytes from an archive. A damaged archive throws GpressError, never returns a wrong file. */
   expand(archive: Uint8Array, options: ExpandOptions = {}): Uint8Array {
-    const maxIn = clamp(options.maxInputMiB ?? 0, 0, 1 << 20);
-    const maxLen = clamp(options.maxLenMiB ?? 0, 0, 1 << 24);
-    const maxDecoded = clamp(options.maxDecodedMiB ?? 0, 0, 1 << 24);
+    const maxIn = mib(options.maxInputMiB, 1 << 20);
+    const maxLen = mib(options.maxLenMiB, 1 << 24);
+    const maxDecoded = mib(options.maxDecodedMiB, 1 << 24);
+    this.rules(options.rules);
     return this.run(archive, (ptr, len) => this.ex.gpress_expand(ptr, len, maxIn, maxLen, maxDecoded)).data;
   }
 
@@ -372,9 +434,11 @@ export class Gpress {
 function pack(options: GpressOptions): Packed {
   return {
     effort: clamp(options.engineEffort ?? options.effort ?? 40, 0, 100),
-    maxIn: clamp(options.maxInputMiB ?? 0, 0, 1 << 20),
-    maxStream: clamp(options.maxStreamMiB ?? 0, 0, 1 << 20),
-    maxDecoded: clamp(options.maxDecodedMiB ?? 0, 0, 1 << 24),
+    maxIn: mib(options.maxInputMiB, 1 << 20),
+    maxStream: mib(options.maxStreamMiB, 1 << 20),
+    maxStreamArchive: mib(options.maxStreamArchiveMiB ?? options.maxStreamMiB, 1 << 20),
+    maxDecoded: mib(options.maxDecodedMiB, 1 << 24),
+    storeBudget: mib(options.storeBudgetMiB, 1 << 20),
     objectsPerStream: clamp(options.objectsPerStream ?? 0, 0, 1 << 20),
     flags:
       (options.respectConformance === false ? FLAG_IGNORE_CONFORMANCE : 0) |
@@ -404,6 +468,11 @@ function tagOf(v: unknown): string {
 function bytesOf(b: ArrayBufferLike | ArrayBufferView): BufferSource {
   const view = ArrayBuffer.isView(b) ? new Uint8Array(b.buffer, b.byteOffset, b.byteLength) : new Uint8Array(b);
   return (tagOf(view.buffer) === "SharedArrayBuffer" ? view.slice() : view) as BufferSource;
+}
+
+/** A size in MiB as the module takes it (0 = the default): a fraction rounded up, so it never becomes 0. */
+function mib(v: number | undefined, hi: number): number {
+  return clamp(Math.ceil(v ?? 0), 0, hi);
 }
 
 function clamp(v: number, lo: number, hi: number): number {

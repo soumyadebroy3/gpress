@@ -243,7 +243,7 @@ pub fn jbig2_candidate(s: &Stream, resolve: Resolve, min_saving: u64) -> Option<
 /// What `jbig2_candidate` does with a stream, in words (for measuring).
 pub fn explain(s: &Stream, resolve: Resolve) -> String {
     use crate::pdf::rules::{RewriteRules, Rule};
-    match decide(s, resolve, RewriteRules::default_of(Rule::jbig2_min_saving)) {
+    match decide(s, resolve, RewriteRules::default().at(Rule::jbig2_min_saving)) {
         Ok((_, out)) => format!("JBIG2 {} -> {} bytes", s.data.len(), out.len()),
         Err(why) => format!("kept: {why}"),
     }

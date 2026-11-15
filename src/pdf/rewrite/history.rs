@@ -189,7 +189,7 @@ fn read(
 /// Every save of a file that keeps earlier ones, read and checked on its own, and the list of the earlier saves, which
 /// are dropped. `newest` is what the whole file's trailer reaches.
 pub(super) fn dropped(input: &[u8], opt: &Options, newest: &Reached) -> Result<Vec<Dropped>, String> {
-    let saves = find(input, &opt.rules)?;
+    let saves = find(input, &opt.rewrite_rules)?;
     let mut budget = Budget::new(input, opt);
     let mut out = Vec::new();
     let mut start = 0;

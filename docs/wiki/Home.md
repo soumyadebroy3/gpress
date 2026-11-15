@@ -25,14 +25,14 @@ In the owner's order:
 | --- | --- | --- |
 | Call | `optimize` | `compress` and `expand` (`pack` and `unpack` on the command line) |
 | Takes | a PDF | any file, a PDF above all |
-| Gives | a smaller PDF that standard readers open. Efforts 0, 20 and 40 are lossless; at 60, 80 and 100 images may change, within fixed floors | an archive that restores the original byte for byte |
+| Gives | a smaller PDF that standard readers open. Efforts 0, 20 and 40 are lossless; at 60, 80 and 100 images may change, within floors | an archive that restores the original byte for byte |
 | Checked | the output is read back and compared with the input before it is returned | the archive is restored and compared before it is returned; if that check ever fails, a simpler model-only archive is written instead (not checked again) |
 
 A file `optimize` can't make smaller, or can't safely touch (a signed file, PDF/A, an encrypted file that needs a password, a damaged one), comes back unchanged with the reason.
 
 ## Where it stands
 
-Version 0.1.0, in active development. Nothing is published to crates.io or npm yet, so gpress builds from the repository. The archive format is version 9 (version 10 when one of the model's archive rules is changed from its default, which only the Rust API can do so far). CI builds and tests on Linux (x86-64). The licence is MIT OR Apache-2.0.
+Version 0.1.0, in active development. Nothing is published to crates.io or npm yet, so gpress builds from the repository. The archive format is version 9 (version 10 when one of the model's archive rules is changed from its default). CI builds and tests on Linux (x86-64). The licence is MIT OR Apache-2.0.
 
 Figures from the README and `bench/` on `main` (907 public test PDFs, 130.5 MB, from the pdf.js, pypdf, OCRmyPDF and pikepdf test suites):
 

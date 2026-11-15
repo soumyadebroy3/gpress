@@ -269,6 +269,63 @@ test("efforts 60, 80 and 100 and the lossy overrides reach the lossy image step"
   assert.deepEqual(fits.data, at({ effort: 60 }));
 });
 
+test("rules are set by name, and one call's rules do not reach the next", () => {
+  const pdf = photoPdf();
+  const at = (options) => g.optimize(pdf, options).data;
+  const [lossless, plain] = [at({ effort: 40 }), at({ effort: 100 })];
+  assert.ok(plain.length < lossless.length);
+  // The picture has 76,800 pixels: with `lossy_min_pixels` at that it is not touched.
+  assert.deepEqual(at({ effort: 100, rules: { lossy_min_pixels: 76800 } }), lossless);
+  // The rule's highest value, which fills the low half of the two the module takes a value in.
+  assert.deepEqual(at({ effort: 100, rules: { lossy_min_pixels: 4294967295 } }), lossless);
+  // The call after it has the defaults again, and a rule set to its default is the default.
+  assert.deepEqual(at({ effort: 100 }), plain);
+  assert.deepEqual(at({ effort: 100, rules: { lossy_min_pixels: 65536, lossy_min_saving: 10 } }), plain);
+  // A lower floor, when a lower resolution is asked for: 75 pixels an inch is a smaller file than the 150
+  // the request is raised to without the rule.
+  const low = at({ effort: 100, photoPpi: 75, rules: { lossy_photo_floor: 75 } });
+  assert.ok(low.length < at({ effort: 100, photoPpi: 75 }).length);
+  // A target size takes the rules too: with the picture out of reach no effort gets under the lossless size.
+  const least = Math.min(...[0, 20, 40].map((effort) => at({ effort }).length));
+  assert.equal(g.optimizeToSize(pdf, least - 1, { rules: { lossy_min_pixels: 76800 } }).reached, false);
+  assert.equal(g.optimizeToSize(pdf, least - 1).reached, true);
+  // A name that is no rule, or a value outside the rule's range (one of them by the high half only), not a
+  // whole number, or past what a number holds exactly: an error that names the rule, from every call, and the
+  // call after it has the defaults.
+  // The other groups are reached by name too: a Flate rule at the end of its range, and past it, as an archive
+  // rule past its range, refused like the rest.
+  assert.equal(g.optimize(pdf, { effort: 100, rules: { flate_e100_depth: 0 } }).outcome, "smaller");
+  const bad = [{ nothing: 1 }, { lossy_min_saving: 9 }, { lossy_min_pixels: 2 ** 32 }, { lossy_min_pixels: 70000.5 }, { lossy_min_pixels: -1 }, { lossy_min_pixels: 2 ** 53 }, { flate_e100_depth: 32769 }, { archive_mixer_rate: 9 }];
+  for (const rules of bad) {
+    const refused = (e) => e instanceof GpressError && e.code === GpressError.INVALID_OPTIONS && e.message.includes(Object.keys(rules)[0]);
+    assert.throws(() => g.optimize(pdf, { effort: 100, rules }), refused, JSON.stringify(rules));
+    assert.throws(() => g.optimizeToSize(pdf, 1, { rules }), refused, JSON.stringify(rules));
+    assert.throws(() => g.compress(pdf, { rules }), refused, JSON.stringify(rules));
+    assert.throws(() => g.expand(pdf, { rules }), refused, JSON.stringify(rules));
+  }
+  assert.deepEqual(at({ effort: 100 }), plain);
+});
+
+archiveTest("an archive rule set by name changes the archive, which still expands to the input", () => {
+  const pdf = photoPdf();
+  const plain = g.compress(pdf).data;
+  const ruled = g.compress(pdf, { rules: { archive_mixer_rate: 5 } }).data;
+  assert.notDeepEqual(ruled, plain);
+  assert.deepEqual(g.expand(ruled), pdf);
+  assert.deepEqual(g.compress(pdf).data, plain);
+});
+
+test("a size in MiB rounds a fraction up, and the store budget is the caller's", () => {
+  // Half a MiB is 1 MiB, not 0, which would be the 1 GiB default.
+  const over = new Uint8Array((1 << 20) + 1);
+  assert.throws(() => g.optimize(over, { maxInputMiB: 0.5 }), (e) => e instanceof GpressError && e.code === GpressError.TOO_LARGE);
+  // The store never changes the output; past 1 GiB it is refused.
+  const pdf = photoPdf();
+  assert.deepEqual(g.optimize(pdf, { storeBudgetMiB: 0.25 }).data, g.optimize(pdf).data);
+  assert.throws(() => g.optimize(pdf, { storeBudgetMiB: 1025 }), (e) => e instanceof GpressError && e.code === GpressError.INVALID_OPTIONS);
+  assert.throws(() => g.optimizeToSize(pdf, 1, { storeBudgetMiB: 1025 }), (e) => e instanceof GpressError && e.code === GpressError.INVALID_OPTIONS);
+});
+
 test("optimize returns untouched with a reason for non-PDF input", () => {
   const r = g.optimize(new TextEncoder().encode("hello"), { jbig2: false, jpegTables: false, objectsPerStream: 50 });
   assert.equal(r.outcome, "untouched");

@@ -7,7 +7,7 @@
 //!
 //! Options (the library's `Options`, the same defaults): --effort N (0 to 100 in steps of 20, a value in
 //! between counting as the step below: 0 fast, 20 and 40 smaller, all three lossless, 40 the default and the
-//! smallest lossless output; 60, 80 and 100 lossy, changing images only, smaller each step; pack is lossless
+//! smallest lossless output; 60, 80 and 100 lossy, changing images only, stronger each step; pack is lossless
 //! at every effort; --quick = 0), --target-size V (optimize: the lowest of the six efforts whose output is at
 //! most V, which is bytes, with k or m for KiB or MiB, or N% of the input; up to six runs of the engine; the
 //! output line then ends with effort=E target=reached|missed, missed meaning the smallest of the six),
@@ -18,10 +18,13 @@
 //! --objects-per-stream N, --time-budget MS (give up after that long), --ignore-conformance,
 //! --no-flate-over-jpeg, --no-jpeg-tables, --no-jbig2, --no-palette, --keep-encrypted, --store-budget BYTES
 //! (normal PDF), --photo-ppi N, --art-ppi N, --jpeg-quality N (normal PDF: each sets one setting of the lossy
-//! image step, see `gpress::Lossy`, over the effort's; 0 leaves it as it is), --no-decrypt (archive),
-//! --no-existing. The output never depends on the thread count or the time budget: a budget that runs out gives
-//! an error and no file. A file that keeps earlier saves (incremental updates) is written as its newest save
-//! alone; each dropped save is listed on standard error.
+//! image step, see `gpress::Lossy`, over the effort's; 0 leaves it as it is), --rule NAME=VALUE (one of the
+//! engine's tuning values by its name, such as lossy_min_saving=20; several with commas between or the flag
+//! again; docs/reference.md, "Rules", lists them with their defaults and ranges, and a name that is no rule or
+//! a value outside the rule's range is an error, exit 5), --no-decrypt (archive), --no-existing. The output
+//! never depends on the thread count or the time budget: a budget that runs out gives an error and no file. A
+//! file that keeps earlier saves (incremental updates) is written as its newest save alone; each dropped save
+//! is listed on standard error.
 //!
 //! Measuring tools (the engine's own modules, for the benchmarks): deflate, inflate, batch, pdf-batch,
 //! repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info, fax-decode, fax-encode, fax-scan,
@@ -84,6 +87,8 @@ options: --effort N (0, 20, 40 lossless: fast .. smallest, default 40; 60, 80, 1
          --no-flate-over-jpeg   --no-jpeg-tables   --no-jbig2   --no-palette   --keep-encrypted
          --store-budget BYTES (normal PDF)   --photo-ppi N   --art-ppi N   --jpeg-quality N (one setting of the lossy
          image step each, over the effort's)
+         --rule NAME=VALUE (a tuning value by name, such as lossy_min_saving=20; again, or with commas, for more;
+         docs/reference.md, \"Rules\", has the names, defaults and ranges)
          --no-decrypt (archive)   --no-existing
 measuring tools: deflate, inflate, batch, pdf-batch, repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info,
          fax-decode, fax-encode, fax-scan, fax-model, jbig2-encode, claim-archive (see the comments at the top of
@@ -111,6 +116,7 @@ const WITH_VALUE: &[&str] = &[
     "--photo-ppi",
     "--art-ppi",
     "--jpeg-quality",
+    "--rule",
 ];
 
 /// The flags that fine-tune the strong encoder's settings in the deflate tools.
@@ -187,6 +193,11 @@ fn main() {
         setting("--art-ppi", u16::MAX as u64) as u16,
         setting("--jpeg-quality", u8::MAX as u64) as u8,
     );
+    // Rules by name: every --rule, in the order given.
+    for (i, _) in args.iter().enumerate().filter(|(_, a)| *a == "--rule") {
+        let text = args.get(i + 1).unwrap_or_else(|| die("--rule needs NAME=VALUE"));
+        lib.set_rules(text).unwrap_or_else(|e| fail(&e));
+    }
     lib.decrypt = !flag("--no-decrypt");
     lib.use_existing_libraries = !flag("--no-existing");
     lib.check().unwrap_or_else(|e| fail(&e));

@@ -589,30 +589,3 @@ fn the_ranking_level_decides_between_predictors_that_are_close() {
     });
     assert!(differs, "no width at which the ranking level changes the predictor");
 }
-
-/// docs/reference.md ("Rules of the rewrite") has a row for every rule with the default, the lowest and the
-/// highest value the code has, in the code's order, and no row that is not a rule.
-#[test]
-fn the_reference_lists_the_rules_as_the_code_has_them() {
-    let doc = include_str!("../docs/reference.md");
-    let section = doc.split_once("\n## Rules of the rewrite\n").expect("the section Rules of the rewrite").1;
-    let section = section.split_once("\n## ").map_or(section, |s| s.0);
-    // A number as the tables write it: commas between the thousands.
-    let number = |n: u64| {
-        let digits = n.to_string();
-        let mut out = String::new();
-        for (i, c) in digits.chars().enumerate() {
-            if i > 0 && (digits.len() - i).is_multiple_of(3) {
-                out.push(',');
-            }
-            out.push(c);
-        }
-        out
-    };
-    let rows: Vec<&str> = section.lines().filter(|l| l.starts_with("| `")).collect();
-    assert_eq!(rows.len(), RewriteRules::RULES.len(), "docs/reference.md has a row that is no rule, or misses one");
-    for (row, &(name, default, lowest, highest)) in rows.iter().zip(RewriteRules::RULES) {
-        let want = format!("| `rewrite_{name}` | {} | {} | {} | ", number(default), number(lowest), number(highest));
-        assert!(row.starts_with(&want), "docs/reference.md: {row}\nshould start {want}");
-    }
-}

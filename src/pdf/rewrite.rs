@@ -72,12 +72,14 @@ pub struct Options {
     pub rewrite_encrypted: bool,
     /// The lossy image step (see `crate::pdf::lossy`); `Lossy::OFF` leaves every image to the lossless path.
     pub lossy: super::lossy::Lossy,
+    /// The rules that step works by, the same whatever `lossy` asks for.
+    pub rules: super::lossy::LossyRules,
     /// Stop when this passes (checked between streams and Flate segments): the outcome is then `TimedOut`
     /// and nothing is returned. A rewrite that finishes gives the same bytes with or without a deadline.
     pub deadline: Deadline,
     /// The values the rewrite decides by (see `RewriteRules`). The numbers the notes in this file give are
     /// their defaults.
-    pub rules: Arc<RewriteRules>,
+    pub rewrite_rules: Arc<RewriteRules>,
 }
 
 impl Default for Options {
@@ -96,8 +98,9 @@ impl Default for Options {
             jpeg_tables: true,
             rewrite_encrypted: true,
             lossy: super::lossy::Lossy::OFF,
+            rules: Default::default(),
             deadline: Deadline::NONE,
-            rules: Arc::default(),
+            rewrite_rules: Arc::default(),
         }
     }
 }
@@ -113,7 +116,8 @@ impl Options {
 /// The reason `rewrite` gives up when its deadline passes (see `Outcome::TimedOut`).
 const TIMED_OUT: &str = "out of time";
 /// What `rewrite` gives when only the lossy step made the file too short for its object numbers (qpdf 12's
-/// bound, below): `optimize` then writes the lossless output, which is longer. Never a reason a caller sees.
+/// bound, below): `optimize` then tries the lossy levels below the one asked for, strongest first, and then the
+/// lossless output, each longer than the one before. Never a reason a caller sees.
 const LOSSY_TOO_SHORT: &str = "object numbers far apart for the lossy output";
 
 #[derive(Debug, Default, Clone)]
@@ -176,13 +180,19 @@ pub struct Optimized {
 }
 
 pub fn optimize(input: &[u8], opt: &Options) -> Optimized {
+    use super::lossy::Lossy;
     let mut r = rewrite(input, opt);
-    if matches!(&r, Err(why) if why == LOSSY_TOO_SHORT) {
-        r = rewrite(input, &Options { lossy: super::lossy::Lossy::OFF, ..opt.clone() });
+    // The levels below the one asked for (none when the settings are no level: overrides set), then lossless,
+    // which never gives this reason.
+    let below = (1..=3).rev().skip_while(|&n| Lossy::level(n) != opt.lossy).skip(1).map(Lossy::level);
+    let mut below = below.chain([Lossy::OFF]);
+    while matches!(&r, Err(why) if why == LOSSY_TOO_SHORT) {
+        let Some(lossy) = below.next() else { break };
+        r = rewrite(input, &Options { lossy, ..opt.clone() });
     }
     match r {
         Ok((out, stats)) => {
-            if out.len() as u64 + opt.rules.at(R::min_file_saving) <= input.len() as u64 {
+            if out.len() as u64 + opt.rewrite_rules.at(R::min_file_saving) <= input.len() as u64 {
                 Optimized { data: out, outcome: Outcome::Smaller(stats) }
             } else {
                 Optimized { data: input.to_vec(), outcome: Outcome::Untouched("no saving possible".into()) }
@@ -516,7 +526,7 @@ fn reencode(
     }
     // A scanned black-and-white image: JBIG2 instead of CCITT fax when that is clearly smaller (same pixels).
     if opt.jbig2 {
-        if let Some((d, z)) = crate::fax::pdf::jbig2_candidate(s, resolve, opt.rules.at(R::jbig2_min_saving)) {
+        if let Some((d, z)) = crate::fax::pdf::jbig2_candidate(s, resolve, opt.rewrite_rules.at(R::jbig2_min_saving)) {
             return Some((d, z, Change { fax_to_jbig2: true, ..Change::default() }));
         }
     }
@@ -561,8 +571,8 @@ fn reencode(
     // alone. (An image goes on: a predictor may still make it smaller.) The quick settings the plans of 20 and
     // above give carry effort 0, so the range test keeps them exactly as they were.
     if opt.flate.fast == 0
-        && on_bridge(&opt.rules, opt.effort)
-        && opt.rules.on(R::bridge_test)
+        && on_bridge(&opt.rewrite_rules, opt.effort)
+        && opt.rewrite_rules.on(R::bridge_test)
         && rest.is_empty()
         && carried.is_none()
         && stages[..k].iter().any(|st| st.name == b"FlateDecode")
@@ -581,15 +591,19 @@ fn reencode(
     }
     let mut best: Option<(Dict, Vec<u8>)> = None;
     // The first candidate kept must save `min_stream_saving` bytes; a later one must be smaller than it.
-    let mut best_len = s.data.len().saturating_sub(opt.rules.size(R::min_stream_saving) - 1);
+    let mut best_len = s.data.len().saturating_sub(opt.rewrite_rules.size(R::min_stream_saving) - 1);
     // Whether `best` holds the JPEG with its new tables (alone, or behind Flate).
     let mut best_retabled = false;
     // A JPEG with optimal Huffman tables: the same coefficients in fewer bytes, read back and compared before
     // it is used (anything unusual is left as it is).
     let jpeg = match rest {
         [st] if opt.jpeg_tables && st.name == b"DCTDecode" && carried.is_none() && data.len() <= opt.max_stream => {
-            crate::jpeg::optimize_with(&data, opt.rules.at(R::jpeg_min_saving), opt.rules.at(R::jpeg_code_orders) as u8)
-                .ok()
+            crate::jpeg::optimize_with(
+                &data,
+                opt.rewrite_rules.at(R::jpeg_min_saving),
+                opt.rewrite_rules.at(R::jpeg_code_orders) as u8,
+            )
+            .ok()
         }
         _ => None,
     };
@@ -628,14 +642,14 @@ fn reencode(
         set_chain(&mut d, &with_flate);
         let z = flate::deflate_zlib(jpeg.as_deref().unwrap_or(&data), &opt.flate);
         flate_len = jpeg.is_none().then_some(z.len());
-        let again = opt.effort as u64 >= opt.rules.at(R::full_from)
-            && jpeg.as_ref().is_some_and(|j| second_pass(z.len(), j.len(), data.len(), &opt.rules));
+        let again = opt.effort as u64 >= opt.rewrite_rules.at(R::full_from)
+            && jpeg.as_ref().is_some_and(|j| second_pass(z.len(), j.len(), data.len(), &opt.rewrite_rules));
         // The first candidate is Flate over the JPEG with its new tables (when there is one), the second
         // over the original bytes.
         for (z, retabled) in
             std::iter::once((z, jpeg.is_some())).chain(again.then(|| (flate::deflate_zlib(&data, &opt.flate), false)))
         {
-            let margin = (bare_len as u64 * opt.rules.at(R::flate_over_image_min_saving) / 100) as usize;
+            let margin = (bare_len as u64 * opt.rewrite_rules.at(R::flate_over_image_min_saving) / 100) as usize;
             let limit = if adds_layer { best_len.min(bare_len - margin) } else { best_len };
             if z.len() < limit {
                 best_len = z.len();
@@ -655,8 +669,8 @@ fn reencode(
     // Images: try storing the samples with a different (or no) PNG predictor. The fast path tries one,
     // chosen without encoding, and compares whole sizes (the dictionaries counted). (Without a codec after the
     // general filters, our Flate over `data` was made above.)
-    let searched = rest.is_empty() && data.len() <= predictor_cap(opt);
-    if searched && opt.flate.fast > 0 && (opt.effort as u64) < opt.rules.at(R::trial_predictors_from) {
+    let searched = rest.is_empty() && data.len() <= opt.rewrite_rules.size(R::max_predictor_image);
+    if searched && opt.flate.fast > 0 && (opt.effort as u64) < opt.rewrite_rules.at(R::trial_predictors_from) {
         let dict = best.as_ref().map_or(&s.dict, |b| &b.0);
         let plain = best_len + to_bytes(&Obj::Dict(dict.clone())).len();
         if let Some((d, z)) = repredict_fast(s, &data, carried.as_ref(), opt, resolve, plain) {
@@ -760,7 +774,7 @@ fn exact_form(
     resolve: &dyn Fn(&Obj) -> Option<Obj>,
     other: (usize, &Dict),
 ) -> Option<Reencoded> {
-    let min_saving = opt.rules.at(R::jbig2_min_saving);
+    let min_saving = opt.rewrite_rules.at(R::jbig2_min_saving);
     let (d, z, change) = if let Some((d, z)) =
         opt.jbig2.then(|| crate::fax::pdf::bilevel_candidate(s, px, other.0, min_saving)).flatten()
     {
@@ -800,7 +814,7 @@ fn reencode_xmp(s: &Stream, opt: &Options) -> Option<Reencoded> {
         data = decode_stage(st, &data, opt.max_stream).ok()?;
     }
     let z = flate::deflate_zlib(&data, &opt.flate);
-    if z.len() as u64 + opt.rules.at(R::min_stream_saving) > s.data.len() as u64 {
+    if z.len() as u64 + opt.rewrite_rules.at(R::min_stream_saving) > s.data.len() as u64 {
         return None;
     }
     let mut d = s.dict.clone();
@@ -868,7 +882,7 @@ fn repredict_fast(
     resolve: &dyn Fn(&Obj) -> Option<Obj>,
     plain: usize,
 ) -> Option<(Dict, Vec<u8>)> {
-    let rules = &*opt.rules;
+    let rules = &*opt.rewrite_rules;
     let (g, px) = samples(s, data, carried, resolve, rules)?;
     let (row, bpp) = (g.row(), g.bpp());
     let nrows = px.len() / row;
@@ -903,14 +917,6 @@ fn candidates(rules: &RewriteRules) -> Vec<Option<images::Choice>> {
     all.into_iter().filter(|c| asked >> c.0 & 1 == 1).map(|c| c.1).collect()
 }
 
-/// The largest image that gets a predictor search: the rule `max_predictor_image`, of which a value over its
-/// default counts only as far as `max_stream` (the search holds copies of the image, and with the rule unset
-/// the search is what it always was whatever `max_stream` is).
-fn predictor_cap(opt: &Options) -> usize {
-    let default = RewriteRules::default_of(R::max_predictor_image) as usize;
-    opt.rules.size(R::max_predictor_image).min(opt.max_stream.max(default))
-}
-
 /// The smallest score, the first of equals: the pick of a loop where only a strictly smaller score replaces
 /// the best so far.
 fn best_of(scores: &[u64]) -> Option<usize> {
@@ -927,7 +933,7 @@ fn repredict(
     opt: &Options,
     resolve: &dyn Fn(&Obj) -> Option<Obj>,
 ) -> Option<(Dict, Vec<u8>)> {
-    let rules = &*opt.rules;
+    let rules = &*opt.rewrite_rules;
     let (g, px) = samples(s, data, carried, resolve, rules)?;
     let (row, bpp) = (g.row(), g.bpp());
     let candidates = candidates(rules);
@@ -1162,8 +1168,8 @@ fn big_level(effort: u8, rules: &RewriteRules) -> u8 {
 /// effort 19 ends where 20 begins.
 fn structure_flate(opt: &Options, raw: usize, input_len: usize) -> flate::Options {
     if opt.flate.fast > 0
-        && on_bridge(&opt.rules, opt.effort)
-        && raw as f64 <= bridge_budget(opt.effort, input_len, &opt.rules)
+        && on_bridge(&opt.rewrite_rules, opt.effort)
+        && raw as f64 <= bridge_budget(opt.effort, input_len, &opt.rewrite_rules)
     {
         flate::Options {
             shared: opt.flate.shared.clone(),
@@ -1236,7 +1242,7 @@ fn effort_plan(
             decoded_len(s, opt.max_stream)
         })
     };
-    let rules = &*opt.rules;
+    let rules = &*opt.rewrite_rules;
     if opt.effort as u64 >= rules.at(R::full_from) {
         return counted().into_iter().map(|(_, decodes)| decodes.then(|| opt.clone())).collect();
     }
@@ -1516,7 +1522,7 @@ fn run_job(
     // The new data checked against the stream's content here, in parallel and without decoding the
     // stream again, so the self-check only has to find the same data in the output.
     let proof = match (&r, content) {
-        (Some(r), Some(c)) => prove(n, s, &c, r, opt.rules.size(R::job_check_ratio)),
+        (Some(r), Some(c)) => prove(n, s, &c, r, opt.rewrite_rules.size(R::job_check_ratio)),
         _ => None,
     };
     if dbg {
@@ -1688,8 +1694,8 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
 
     // The rules of the output's layout: how strings are written, and whether small objects go into object
     // streams.
-    let hex = opt.rules.on(R::string_form);
-    let pack = opt.rules.on(R::object_streams);
+    let hex = opt.rewrite_rules.on(R::string_form);
+    let pack = opt.rewrite_rules.on(R::object_streams);
     // Every stream gets a direct /Length.
     let mut direct: BTreeMap<u32, (u16, Vec<u8>)> = BTreeMap::new(); // serialised indirect objects
     let mut packable: Vec<(u32, &Obj)> = Vec::new();
@@ -1748,7 +1754,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         }
     }
 
-    by_kind(&mut packable, &opt.rules);
+    by_kind(&mut packable, &opt.rewrite_rules);
     // New objects are numbered after the highest number the document uses (the encryption dictionary's
     // objects keep their numbers; a dangling reference keeps its number free), never after the old /Size:
     // that is a claim of the file, not something it holds, and the gate has already checked that no object
@@ -1840,11 +1846,12 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         }
     }
     let structure = |more| structure_flate(opt, objstm_bytes + more, input.len());
-    write_xref(&mut out, xn, xd, (&rows, 1 + w1 + w2), &structure, pool, &opt.rules)?;
+    write_xref(&mut out, xn, xd, (&rows, 1 + w1 + w2), &structure, pool, &opt.rewrite_rules)?;
 
     // qpdf 12 reads an object only when its number is below a third of the file's length, this cross-reference
     // stream included, and objects keep their numbers: a file whose numbers are too high for its new length
-    // stays as it is, or, when the lossy step changed images, gets the lossless output.
+    // stays as it is, or, when the lossy step changed images, gets a weaker lossy level's output or the lossless one
+    // (`optimize`).
     if xn as usize >= out.len() / 3 {
         let lossy = stats.images_resampled + stats.images_to_jpeg + stats.jpegs_rewritten > 0;
         return Err(if lossy { LOSSY_TOO_SHORT } else { "object numbers far apart" }.into());

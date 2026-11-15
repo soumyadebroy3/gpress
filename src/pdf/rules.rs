@@ -10,8 +10,8 @@
 //! readers (the gate), and the scale of the effort itself (0 to 100, in bands of 20, the fast encoder below
 //! 20), which the tables here and the Flate encoder's are both laid out on.
 //!
-//! `docs/reference.md` says what each rule decides ("Rules of the rewrite"); a test holds that table equal to
-//! `RewriteRules::RULES`.
+//! `docs/reference.md` says what each rule decides (in "Rules", the group `rewrite_`); a test holds that table
+//! equal to the code.
 
 /// The highest value of a rule that is a size in bytes: more than any input (`max_input` is 1 GiB by default).
 const ANY: u64 = 1 << 40;
@@ -60,10 +60,9 @@ rules! {
     // A fax image becomes JBIG2 only when that saves at least this percentage (and at least a byte).
     jbig2_min_saving = 5, 0, 100;
 
-    // Image predictors. An image that decodes to more than this gets no predictor search (a value over the
-    // default counts only as far as `max_stream`: the search holds copies of the image; at most 1 GiB: the
-    // fast path's estimate counts an image's bytes in 32 bits).
-    max_predictor_image = 48 << 20, 0, 1 << 30;
+    // Image predictors. An image that decodes to more than this gets no predictor search. The search holds
+    // copies of the image, so this bounds what a hostile file can cost: its highest value is its default.
+    max_predictor_image = 48 << 20, 0, 48 << 20;
     // An image with fewer bytes of samples gets none either.
     min_predictor_image = 1024, 0, ANY;
     // The candidates ranked by encoding them (bits: 1 no predictor, 2 Sub, 4 Up, 8 Average, 16 Paeth, 32 a
@@ -92,8 +91,8 @@ rules! {
     // settings, as from effort 20).
     predictor_rank_level = 7, 0, TOP;
     // Candidate inputs up to this size are ranked side by side, bigger ones one after another. Speed and
-    // memory only.
-    rank_together = 8 << 20, 0, ANY;
+    // memory only; it bounds the memory of each thread (SECURITY.md), so its highest value is its default.
+    rank_together = 8 << 20, 0, 8 << 20;
 
     // The layout of the output. Small objects are packed into object streams (1) or written one by one (0).
     object_streams = 1, 0, 1;
@@ -197,10 +196,10 @@ rules! {
     job_check_ratio = 2, 1, ANY;
 
     // A file that keeps earlier saves: with more saves than this it is left as it is. Each save is read as a file
-    // of its own, so the time grows with them.
-    most_saves = crate::pdf::xref::MOST_SAVES as u64, 1, 1000;
+    // of its own, so these two bound the time a hostile file can cost: their highest values are their defaults.
+    most_saves = crate::pdf::xref::MOST_SAVES as u64, 1, crate::pdf::xref::MOST_SAVES as u64;
     // The same when its saves' lengths add up to more than this many times the file's length.
-    saves_length_factor = 16, 1, 256;
+    saves_length_factor = 16, 1, 16;
 }
 
 const COUNT: usize = RewriteRules::RULES.len();
@@ -252,11 +251,6 @@ impl RewriteRules {
     pub(crate) fn cell(&self, first: Rule, i: usize) -> u64 {
         self.0[first as usize + i]
     }
-
-    /// The default of a rule.
-    pub(crate) fn default_of(rule: Rule) -> u64 {
-        RewriteRules::RULES[rule as usize].1
-    }
 }
 
 #[cfg(test)]
@@ -304,7 +298,7 @@ mod tests {
         }
         assert_eq!(r.cell(Rule::image_level_0, 19), 12);
         assert_eq!(r.at(Rule::job_check_ratio), 2);
-        assert_eq!(RewriteRules::default_of(Rule::max_predictor_image), 48 << 20);
+        assert_eq!(r.size(Rule::max_predictor_image), 48 << 20);
         assert_eq!(r.size(Rule::big_stream), 4 << 20);
     }
 }

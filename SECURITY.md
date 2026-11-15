@@ -26,7 +26,7 @@ gpress reads files that may be hostile. These are the rules the code is held to,
 | Memory safety at the C boundary | Null and length checks on every pointer; buffers and messages are only freed with the library's own functions, which take the field's address and clear it, so a double free or a part freed before the whole result is harmless by construction; an empty output is a null pointer with length 0, never a dangling one; every `unsafe` block carries its reason (`bench/security.py supply` counts them). | `crates/gpress-c/src/lib.rs` |
 | 32-bit targets | Sizes are `u64` in the format and clamped, never wrapped, in the WebAssembly module; the TypeScript wrapper refuses inputs of 2 GiB and more before they reach it. | `crates/gpress-wasm` |
 | Encrypted and signed files | Files that need a password, signed or certified files, PDF/A and PDF/X are left untouched by the normal-PDF writer (`respect_conformance` governs the conformance ones; files the empty password opens are rewritten with their encryption kept exactly). A file that keeps earlier saves is left untouched when any save is signed, certified, PDF/A or PDF/X or has usage rights, whatever the options say, so no earlier save that carries a signature is dropped. | `src/pdf/rewrite.rs` (`gate`), `src/pdf/rewrite/history.rs`, `src/pdf/crypt.rs` |
-| Earlier saves are read within bounds | Each save of a file that keeps them is read on its own: at most 64 saves and 1001 cross-reference sections, save lengths adding up to at most 16 times the file (the first and third are the defaults of the rules `rewrite_most_saves`, up to 1,000, and `rewrite_saves_length_factor`, up to 256), and in all the cross-reference rows and object-stream bytes that one read of the whole file may take; the time budget is checked between saves. Past any of these the file is left untouched. Within them, a file whose saves pass the checks of docs/reference.md ("Earlier revisions") is written as its newest save alone, and each dropped save is listed. | `src/pdf/xref.rs` (`saves`), `src/pdf/rewrite/history.rs` |
+| Earlier saves are read within bounds | Each save of a file that keeps them is read on its own: at most 64 saves and 1001 cross-reference sections, save lengths adding up to at most 16 times the file (the first and third are the highest values of the rules `rewrite_most_saves` and `rewrite_saves_length_factor`, which can only lower them), and in all the cross-reference rows and object-stream bytes that one read of the whole file may take; the time budget is checked between saves. Past any of these the file is left untouched. Within them, a file whose saves pass the checks of docs/reference.md ("Earlier revisions") is written as its newest save alone, and each dropped save is listed. | `src/pdf/xref.rs` (`saves`), `src/pdf/rewrite/history.rs` |
 | Licences and advisories | Our own code plus libraries under MIT, Apache-2.0, BSD, ISC, Zlib, Unicode or MPL-2.0 only; `deny.toml` holds the rule and `cargo deny check` (licences, advisories, bans, sources) runs in CI, for every feature and target; `bench/check_dep_sources.py` refuses any dependency that is not from crates.io, since `cargo deny` skips crates marked `publish = false`. | `deny.toml`, `bench/check_dep_sources.py`, `.github/workflows/ci.yml` |
 
 ## Memory with threads
@@ -41,16 +41,16 @@ With T threads (at most 64), the normal-PDF writer needs about this for one file
 - J: the most one thread holds besides its encoder, in a stream job or in the self-check: a stream as stored
   and up to three decoded copies of it (its content, and its new data decoded with and without its predictor;
   `self_check` says what a comparison holds), each at most `max_stream` in a job and 16 MiB in the self-check
-  on the pool; for an image whose predictor is chosen again (one that decodes to at most 48 MiB), its samples
-  and one candidate's input as well, and while the winner is encoded its filtered input, its plain encode,
+  on the pool; for an image whose predictor is chosen again (one that decodes to at most 48 MiB, the rule
+  `rewrite_max_predictor_image`, which can only lower it), its samples and one candidate's input as well, and while the winner is encoded its filtered input, its plain encode,
   and that encode's output and zlib copy. A 1-bit image tried as JBIG2 adds the changing elements of its rows
   (4 bytes each; at most 2^24, and at most 65,536 and 8 for each stored byte, so that the list follows the data
   as a fax image's does), once for the image and once for what the new stream decodes to; an image
   tried as an Indexed one adds its indexes (at most a byte for each pixel) and their own predictor search.
 - E: one encoder's working set at the effort, about 42 MB at effort 40 (measured). The output an encode is
   making for the store, at most one per thread, is part of it.
-- RANK_TOGETHER, 8 MiB: an image's predictor candidates are ranked side by side only up to this size, and
-  one after another above it.
+- RANK_TOGETHER, 8 MiB (the rule `rewrite_rank_together`, which can only lower it): an image's predictor
+  candidates are ranked side by side only up to this size, and one after another above it.
 - `store_budget`: 2 MiB by default, the 512 bytes each kept output counts included.
 
 It is an estimate: memory the allocator keeps after a free, and jobs whose peaks fall at the same time, come
