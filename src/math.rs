@@ -268,7 +268,7 @@ mod tests {
         assert!(exp2(1024.0) == f64::INFINITY && exp2(-1075.0) == 0.0 && exp2(-1074.5) == 5e-324);
     }
 
-    /// Against glibc's log2 and exp2, which are within an ulp (other platforms' libraries don't promise it).
+    /// Against glibc's log2 and exp2 (other platforms' libraries are not compared here).
     #[test]
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     fn within_an_ulp_of_glibc() {
