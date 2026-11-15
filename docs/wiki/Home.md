@@ -10,7 +10,7 @@ This wiki follows the project's progress. The [README](https://github.com/soumya
 
 ## The six goals
 
-In the order the project gives them:
+In the owner's order:
 
 1. **The best PDF compressor.**
 2. **The smallest compressed PDF.** The lossless levels stay lossless, and the output is always a standard PDF that every reader opens.
@@ -39,7 +39,7 @@ Figures from the README and `bench/` on `main` (907 public test PDFs, 130.5 MB, 
 | What | gpress | Compared with |
 | --- | --- | --- |
 | Archive, 907 files, effort 100, built with Lepton | 60.9% of the original size | the best of xz -9e, Brotli 11 and Zstandard 19 --long, file by file: 76.3% |
-| Normal PDF, the 90 files gpress rewrites from a hard 120-file sample, default effort | 85.01% of the input | qpdf 11.9.0 at its strongest lossless setting: 87.23% |
+| Normal PDF, the 90 files gpress rewrites from a hard 120-file sample, default effort (build 37bd3f3, before #41 and #42) | 85.01% of the input | qpdf 11.9.0 at its strongest lossless setting: 87.23% |
 | Normal PDF, all 907 files, default effort 40 (lossless) | 86.9% of the input | |
 | Normal PDF, all 907 files, effort 100 (lossy) | 85.3% of the input | |
 | Web module (normal PDFs only), gzip | 359,089 bytes | CI fails it when it grows more than 5% over the recorded size, or passes 1,000,000 bytes ([#47](https://github.com/soumyadebroy3/gpress/pull/47)) |

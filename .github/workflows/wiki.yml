@@ -17,6 +17,8 @@ concurrency:
 jobs:
   publish:
     name: Copy docs/wiki to the wiki
+    # Only main's pages: a start by hand from another branch would publish pages no review has passed.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write # the wiki's repository is written with the token's contents permission
@@ -25,7 +27,8 @@ jobs:
         with:
           persist-credentials: false
       # The wiki is replaced by docs/wiki/: a page taken out there goes from the wiki too.
-      - env:
+      - name: Replace the wiki's pages
+        env:
           TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |

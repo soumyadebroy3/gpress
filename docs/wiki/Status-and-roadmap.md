@@ -20,15 +20,15 @@ All figures are from each pull request's description, on the 907 public test PDF
 | [#37](https://github.com/soumyadebroy3/gpress/pull/37) aes 0.9.4 | 2026-11-14 | Dependency update. Byte-identical on the 907 files at effort 0. |
 | [#39](https://github.com/soumyadebroy3/gpress/pull/39) Clippy fix | 2026-11-14 | A test loop that clippy of Rust 1.100 rejected, so CI passes again. |
 
-Earlier milestones, from the first engine in October 2026 to going public on 2026-10-25, are in the [Changelog](Changelog).
+Earlier pull requests are in the [Changelog](Changelog).
 
 ## In progress
 
 | Work | What it will give |
 | --- | --- |
 | The settings mechanism, draft [#49](https://github.com/soumyadebroy3/gpress/pull/49) | Any setting by name on every surface: `--rule name=value` on the command line, `Options::set_rule` in Rust, a text field in C, calls in WebAssembly and a `rules` option in TypeScript, with one table per group in the reference. It brings the `flate_` and `archive_` groups to the command line, C and WebAssembly, and makes the lossy step's 15 values the group `lossy_`. |
-| The rewrite's settings | The normal-PDF rewrite's tuning values as the group `rewrite_` (88 rules). It lands after the mechanism. |
-| Recognising real photos, draft [#52](https://github.com/soumyadebroy3/gpress/pull/52) | The lossy step counts an image in doubt as line art, and none of the three photographs of the photo set is taken for a photo today. This work adds a "sharp photo" answer to the photo test, so sharp photographs such as the set's astronaut and coffee cup can become JPEGs. |
+| The rewrite's settings, branch `feat/settings-rewrite` | The normal-PDF rewrite's tuning values as the group `rewrite_` (88 rules). It lands after the mechanism. |
+| Recognising real photos, draft [#52](https://github.com/soumyadebroy3/gpress/pull/52) | The lossy step counts an image in doubt as line art, and none of the three photographs of the photo set is taken for a photo today. This work adds a "sharp photo" answer to the photo test, so sharp photographs such as the set's astronaut and coffee cup can become JPEGs, and makes the test's 14 values rules of `lossy_`. |
 | Dropping earlier saves always, draft [#51](https://github.com/soumyadebroy3/gpress/pull/51) | A file that keeps earlier saves will always be written as its newest save alone. Keeping every save, which #42 added, goes away, and so does the `--drop-history` option. |
 | Code scanning, draft [#50](https://github.com/soumyadebroy3/gpress/pull/50) | CodeQL reports 17 critical results on `main`. Three come from arrays it reads as hard-coded but that are filled from the data; #50 rewrites those, and the others are to be dismissed with a written reason. Draft [#48](https://github.com/soumyadebroy3/gpress/pull/48) is temporary and only lists the results. |
 

@@ -83,4 +83,4 @@ Every pull request merged into `main` (or into a branch that reached it), newest
 
 ## Before pull requests
 
-The engine came first, committed to `main` on 2026-10-07 and 2026-10-08 (partly through a merge of an integration branch): gpress's own Flate decoder and optimal-parse encoder, the PDF reader and writer with its safety gate, the archive format with its context-mixing model, and the engine as a library with C and WebAssembly bindings. Planning documents followed on 2026-10-09, and the first pull request was merged on 2026-10-15.
+The engine came first, committed to `main` on 2026-10-07 and 2026-10-08 (partly through a merge of an integration branch): gpress's own Flate decoder and optimal-parse encoder, the PDF reader and writer with its safety gate, the archive format with its context-mixing model, and the engine as a library with C and WebAssembly bindings. The optimisation plan and its task briefs followed on 2026-10-08 and 2026-10-09, and the first pull request was merged on 2026-10-15.

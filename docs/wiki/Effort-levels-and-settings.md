@@ -71,13 +71,13 @@ For measuring there is also `engine_effort` (`--engine-effort N`): the engine's 
 
 ## Settings: every tuning value by name
 
-The project's aim is no hard-coded tuning values: each value that decides whether or how a file is changed is becoming a setting (a "rule"), with today's value as its default and a lowest and a highest value. A value out of range is refused, never clamped. Format facts, safety bounds on hostile input, limits that mirror what other PDF readers accept, and choices that exist in one variant only (listed in each group's pull request) stay fixed.
+The project's aim is no hard-coded tuning values: each value that decides whether or how a file is changed is becoming a setting (a "rule"), with today's value as its default and a lowest and a highest value. A rule's value out of range is refused, never clamped. Format facts, safety bounds on hostile input, limits that mirror what other PDF readers accept, and choices that exist in one variant only (listed in each group's pull request) stay fixed.
 
 | Group | Part of the engine | Rules | State |
 | --- | --- | ---: | --- |
 | `flate_` | the Flate encoders | 181 | on `main` ([#45](https://github.com/soumyadebroy3/gpress/pull/45)), from Rust: `Options::flate_rules` |
 | `archive_` | the archive | 76 | on `main` ([#46](https://github.com/soumyadebroy3/gpress/pull/46)), from Rust: `Options::archive_rules`. A change to one of the 51 rules the model shares with `expand` writes a version-10 archive that carries the changed values. |
-| `lossy_` | the lossy image step | 15 | being built, with the mechanism (draft [#49](https://github.com/soumyadebroy3/gpress/pull/49)) |
+| `lossy_` | the lossy image step | 15 | being built, with the mechanism (draft [#49](https://github.com/soumyadebroy3/gpress/pull/49)); the photo test's 14 more come with draft [#52](https://github.com/soumyadebroy3/gpress/pull/52) |
 | `rewrite_` | the normal-PDF rewrite | 88 | being built, lands after the mechanism |
 
 The mechanism being built in draft [#49](https://github.com/soumyadebroy3/gpress/pull/49) sets any rule by name on every surface: `--rule name=value` (repeatable) on the command line, `Options::set_rule(name, value)` in Rust, a `name=value,...` text in the C options struct, calls in WebAssembly, and a `rules` option by name in TypeScript. The reference will get one table per group, held equal to the code by a test.
