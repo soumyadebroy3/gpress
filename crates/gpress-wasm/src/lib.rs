@@ -60,8 +60,7 @@ fn set_needed(bit: u32) {
 }
 
 /// Switches in the `flags` argument: a set bit turns the step off (the defaults are all on), except
-/// `FLAG_ENGINE_EFFORT`, which makes `effort` the engine's own level, and `FLAG_DROP_HISTORY`, which turns
-/// dropping on.
+/// `FLAG_ENGINE_EFFORT`, which makes `effort` the engine's own level.
 pub const FLAG_IGNORE_CONFORMANCE: u32 = 1;
 pub const FLAG_NO_FLATE_OVER_JPEG: u32 = 2;
 pub const FLAG_NO_EXISTING_LIBRARIES: u32 = 4;
@@ -73,8 +72,6 @@ pub const FLAG_NO_PALETTE: u32 = 128;
 /// For measuring: the `effort` argument is the engine's own lossless level, and nothing is lossy unless a
 /// lossy override is set.
 pub const FLAG_ENGINE_EFFORT: u32 = 256;
-/// Set: write only the newest save of a file that keeps earlier ones (see `gpress::Options::drop_history`).
-pub const FLAG_DROP_HISTORY: u32 = 512;
 
 /// A size given in MiB, or the default for 0, clamped to what this module can address.
 fn mib(v: u32, default: usize) -> usize {
@@ -105,7 +102,6 @@ fn options(effort: u32, max_input_mb: u32, max_stream_mb: u32, objects_per_strea
     o.palette = flags & FLAG_NO_PALETTE == 0;
     o.rewrite_encrypted = flags & FLAG_KEEP_ENCRYPTED == 0;
     o.decrypt = flags & FLAG_NO_DECRYPT == 0;
-    o.drop_history = flags & FLAG_DROP_HISTORY != 0;
     // `gpress_rule` kept only what the library takes, so every one of these is set.
     for &(index, value) in RULES.with(|r| r.borrow().clone()).iter() {
         let _ = NAMES.with(|n| o.set_rule(&n[index as usize], value));
@@ -466,7 +462,6 @@ mod tests {
         assert_eq!(o.objects_per_stream, 9);
         assert!(!o.jpeg_tables && !o.rewrite_encrypted && !o.decrypt && !o.palette);
         assert!(o.jbig2 && o.respect_conformance && o.flate_over_jpeg && o.use_existing_libraries);
-        assert!(!o.drop_history && options(100, 0, 0, 0, FLAG_DROP_HISTORY).drop_history);
         let default = gpress::Effort::default().level();
         let d = options(default as u32, 0, 0, 0, 0);
         assert_eq!(d, gpress::Options::default().threads(1));

@@ -321,7 +321,7 @@ test("optimize returns untouched with a reason for non-PDF input", () => {
   assert.ok(r.reason && r.reason.length > 0);
 });
 
-test("a file of two saves keeps both, or only the newest with dropHistory", () => {
+test("a file of two saves is written as the newest alone", () => {
   // Plain ASCII, so a string offset is a byte offset. The second save changes the page's text.
   let s = "%PDF-1.5\n";
   const at = [];
@@ -340,12 +340,9 @@ test("a file of two saves keeps both, or only the newest with dropHistory", () =
   s += `xref\n4 1\n${row(4)}trailer\n<< /Size 6 /Root 1 0 R /Prev ${x1} >>\nstartxref\n${x2}\n%%EOF\n`;
   const pdf = new TextEncoder().encode(s);
   const saves = (d) => new TextDecoder().decode(d).split("startxref").length - 1;
-  const kept = g.optimize(pdf, { effort: 0 });
-  const dropped = g.optimize(pdf, { effort: 0, dropHistory: true });
-  assert.equal(kept.outcome, "smaller", kept.reason);
-  assert.equal(dropped.outcome, "smaller", dropped.reason);
-  assert.equal(saves(kept.data), 2);
-  assert.equal(saves(dropped.data), 1);
+  const r = g.optimize(pdf, { effort: 0 });
+  assert.equal(r.outcome, "smaller", r.reason);
+  assert.equal(saves(r.data), 1);
 });
 
 archiveTest("the limits are the caller's", () => {

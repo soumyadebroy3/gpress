@@ -1,6 +1,6 @@
 //! The command-line tool's Flate flags: `--fast N`, the engine's level and the effort, the strong encoder's
 //! tuning flags and the thread count, each checked against the library's own output for the same settings;
-//! `--store-budget`; `--target-size`; and `--drop-history`.
+//! `--store-budget`; `--target-size`; and the earlier saves it drops.
 
 use gpress::flate::{self, zlib, Options};
 use std::path::{Path, PathBuf};
@@ -227,10 +227,10 @@ fn the_target_size_flag_picks_the_effort() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `--drop-history` is the library's `drop_history`: the same bytes, the summary's count of the saves kept or
-/// dropped, and one line on standard error for each dropped save, as the library's report lists it.
+/// A file that keeps an earlier save is written as its newest save alone, the library's bytes: the summary counts the
+/// dropped save, and standard error has one line for it, as the library's report lists it.
 #[test]
-fn the_drop_history_flag_is_the_library_option() {
+fn the_tool_drops_earlier_saves_as_the_library_does() {
     // `small_pdf`, then an update that writes the second content stream (5) again, empty.
     let mut pdf = small_pdf();
     let first = pdf.len();
@@ -243,33 +243,23 @@ fn the_drop_history_flag_is_the_library_option() {
     std::fs::create_dir_all(&dir).unwrap();
     let (i, o) = (dir.join("in.pdf"), dir.join("out.pdf"));
     std::fs::write(&i, &pdf).unwrap();
-    for drop_history in [false, true] {
-        let r = Command::new(env!("CARGO_BIN_EXE_gpress"))
-            .arg("optimize")
-            .arg(&i)
-            .arg(&o)
-            .args(["--effort", "0", "--threads", "1"])
-            .args(if drop_history { &["--drop-history"][..] } else { &[] })
-            .output()
-            .unwrap();
-        let (said, listed) = (String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
-        assert_eq!(r.status.code(), Some(0), "{listed}");
-        let lib = gpress::optimize(&pdf, &gpress::Options::new().effort(0).threads(1).drop_history(drop_history));
-        let lib = lib.unwrap();
-        assert!(std::fs::read(&o).unwrap() == lib.data, "--drop-history {drop_history}");
-        let gpress::Outcome::Smaller(report) = &lib.outcome else { panic!("{:?}", lib.outcome) };
-        if drop_history {
-            assert_eq!((report.history_kept, report.history_dropped.len()), (0, 1));
-            let d = &report.history_dropped[0];
-            assert_eq!((d.start, d.end, d.versions), (0, first, 1));
-            assert!(said.contains(" revisions_dropped=1") && !said.contains("revisions_kept"), "{said}");
-            let line = format!("dropped revision 0 of 2: bytes 0-{first}, 1 object versions the output doesn't hold");
-            assert!(listed.contains(&line), "{listed}");
-        } else {
-            assert_eq!((report.history_kept, report.history_dropped.len()), (1, 0));
-            assert!(said.contains(" revisions_kept=1") && !said.contains("revisions_dropped"), "{said}");
-            assert!(!listed.contains("dropped revision"), "{listed}");
-        }
-    }
+    let r = Command::new(env!("CARGO_BIN_EXE_gpress"))
+        .arg("optimize")
+        .arg(&i)
+        .arg(&o)
+        .args(["--effort", "0", "--threads", "1"])
+        .output()
+        .unwrap();
+    let (said, listed) = (String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+    assert_eq!(r.status.code(), Some(0), "{listed}");
+    let lib = gpress::optimize(&pdf, &gpress::Options::new().effort(0).threads(1)).unwrap();
+    assert!(std::fs::read(&o).unwrap() == lib.data);
+    let gpress::Outcome::Smaller(report) = &lib.outcome else { panic!("{:?}", lib.outcome) };
+    assert_eq!(report.history_dropped.len(), 1);
+    let d = &report.history_dropped[0];
+    assert_eq!((d.start, d.end, d.versions), (0, first, 1));
+    assert!(said.contains(" revisions_dropped=1"), "{said}");
+    let line = format!("dropped revision 0 of 2: bytes 0-{first}, 1 object versions the output doesn't hold");
+    assert!(listed.contains(&line), "{listed}");
     let _ = std::fs::remove_dir_all(&dir);
 }

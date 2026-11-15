@@ -18,13 +18,13 @@
 //! --objects-per-stream N, --time-budget MS (give up after that long), --ignore-conformance,
 //! --no-flate-over-jpeg, --no-jpeg-tables, --no-jbig2, --no-palette, --keep-encrypted, --store-budget BYTES
 //! (normal PDF), --photo-ppi N, --art-ppi N, --jpeg-quality N (normal PDF: each sets one setting of the lossy
-//! image step, see `gpress::Lossy`, over the effort's; 0 leaves it as it is), --drop-history (normal PDF: a
-//! file that keeps earlier saves is written with only the newest; each dropped save is listed on standard
-//! error), --rule NAME=VALUE (one of the engine's tuning values by its name, such as lossy_min_saving=20;
-//! several with commas between or the flag again; docs/reference.md, "Rules", lists them with their defaults
-//! and ranges, and a name that is no rule or a value outside the rule's range is an error, exit 5),
-//! --no-decrypt (archive), --no-existing. The output never depends on the thread count or the time budget: a
-//! budget that runs out gives an error and no file.
+//! image step, see `gpress::Lossy`, over the effort's; 0 leaves it as it is), --rule NAME=VALUE (one of the
+//! engine's tuning values by its name, such as lossy_min_saving=20; several with commas between or the flag
+//! again; docs/reference.md, "Rules", lists them with their defaults and ranges, and a name that is no rule or
+//! a value outside the rule's range is an error, exit 5), --no-decrypt (archive), --no-existing. The output
+//! never depends on the thread count or the time budget: a budget that runs out gives an error and no file. A
+//! file that keeps earlier saves (incremental updates) is written as its newest save alone; each dropped save
+//! is listed on standard error.
 //!
 //! Measuring tools (the engine's own modules, for the benchmarks): deflate, inflate, batch, pdf-batch,
 //! repro, expand, cm-test, pack-batch, jpeg, jpeg-batch, jpeg-info, fax-decode, fax-encode, fax-scan,
@@ -87,7 +87,6 @@ options: --effort N (0, 20, 40 lossless: fast .. smallest, default 40; 60, 80, 1
          --no-flate-over-jpeg   --no-jpeg-tables   --no-jbig2   --no-palette   --keep-encrypted
          --store-budget BYTES (normal PDF)   --photo-ppi N   --art-ppi N   --jpeg-quality N (one setting of the lossy
          image step each, over the effort's)
-         --drop-history (normal PDF: write only the newest save of a file that keeps earlier ones)
          --rule NAME=VALUE (a tuning value by name, such as lossy_min_saving=20; again, or with commas, for more;
          docs/reference.md, \"Rules\", has the names, defaults and ranges)
          --no-decrypt (archive)   --no-existing
@@ -194,7 +193,6 @@ fn main() {
         setting("--art-ppi", u16::MAX as u64) as u16,
         setting("--jpeg-quality", u8::MAX as u64) as u8,
     );
-    lib.drop_history = flag("--drop-history");
     // Rules by name: every --rule, in the order given.
     for (i, _) in args.iter().enumerate().filter(|(_, a)| *a == "--rule") {
         let text = args.get(i + 1).unwrap_or_else(|| die("--rule needs NAME=VALUE"));
@@ -695,7 +693,7 @@ fn describe(name: &str, in_len: usize, r: &gpress::Optimized, secs: f64) -> Stri
     match &r.outcome {
         gpress::Outcome::Smaller(s) => format!(
             "{name}\tSMALLER\t{in_len}\t{}\t{secs:.2}\tobjects={} streams={} reencoded={} kept={} objstms={} dropped={} \
-             jpegs_retabled={} fax_to_jbig2={} bilevel_to_jbig2={} images_indexed={}{}{}{}{}",
+             jpegs_retabled={} fax_to_jbig2={} bilevel_to_jbig2={} images_indexed={}{}{}{}",
             r.data.len(),
             s.objects,
             s.streams,
@@ -713,7 +711,6 @@ fn describe(name: &str, in_len: usize, r: &gpress::Optimized, secs: f64) -> Stri
             } else {
                 String::new()
             },
-            if s.history_kept == 0 { String::new() } else { format!(" revisions_kept={}", s.history_kept) },
             if s.history_dropped.is_empty() {
                 String::new()
             } else {
@@ -724,7 +721,7 @@ fn describe(name: &str, in_len: usize, r: &gpress::Optimized, secs: f64) -> Stri
     }
 }
 
-/// One line on standard error for each earlier save `--drop-history` dropped.
+/// One line on standard error for each earlier save dropped.
 fn list_dropped(name: &str, r: &gpress::Optimized) {
     let gpress::Outcome::Smaller(s) = &r.outcome else { return };
     for (k, d) in s.history_dropped.iter().enumerate() {
