@@ -188,8 +188,8 @@ Why the ranges end where they do:
   10 (each try is a full encode and decode of the image): both are choices, not limits of the number.
 - The photo test's rules cost one pass over an image's samples whatever their values. `lossy_flat_run` and
   `lossy_print_tile` start at 8, the side of a JPEG's block. `lossy_print_tile` ends at 1,024, longer than most
-  images' sides, so that no tile is looked at; `lossy_flat_run` ends at 256, the longest run that fits along a
-  side of every image the step changes at the default `lossy_min_pixels` (more than 65,536 pixels).
+  images' sides, so that no tile is looked at; `lossy_flat_run` ends at 256: at the default `lossy_min_pixels` an
+  image the step changes has more than 65,536 = 256 by 256 pixels, so a run of 256 fits along its longer side.
   `lossy_hard_step` is 2 to 255 levels and `lossy_soft_step` 1 to 254, so that a soft step can be below a hard
   one. `lossy_ground_levels` ends at 64, a quarter of the 256 levels, a choice: a ground is a few levels. A
   share is one sample in 1 to 65,536, and `lossy_sharp_edges` and `lossy_print_edges` end at 1,000 percent, a

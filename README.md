@@ -216,8 +216,9 @@ setting can move it within that range ([Rules](docs/reference.md#rules) in the r
 Small print on a picture makes it line art only where the print's edges step 64 levels of brightness or more
 from the picture around it: black 6 and 8 point labels on a dark part of a photograph (a blue sky, dark rock)
 may not be seen, and such a picture can be taken for a photo: written as a JPEG at every lossy effort, and at 80
-and 100 resampled to 150 pixels per inch, its labels blurred. Nor are a word or two, or print that is soft
-itself (a photographed note).
+and 100 resampled to 150 pixels per inch, its labels blurred. Nor are a word or two, print that is soft
+itself (a photographed note), or print whose tiles have at most 1.5 times as many hard edges as soft ones
+(`lossy_print_edges`).
 
 What the photo set shows. An image in doubt counts as line art. Of the three scikit-image photographs, the
 astronaut and the coffee cup are sharp photos (edges as hard as text's, see `lossy_flat_run` and the rules
