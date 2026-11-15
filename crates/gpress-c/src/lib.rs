@@ -52,9 +52,6 @@ pub struct GpressOptions {
     /// 1 = write an 8-bit image of few colours as an Indexed image when that is smaller. (A byte that was
     /// padding: no other field moved when it came.)
     pub palette: u8,
-    /// Exactly 1 = write only the newest save of a file that keeps earlier ones (the earlier saves are gone for
-    /// good). Any other value keeps every save, so a byte the caller never set rarely drops anything.
-    pub drop_history: u8,
     /// 1 = for measuring: `effort` is the engine's own lossless level (0..=100), and nothing is lossy unless
     /// an override below is set.
     pub effort_is_engine_level: u8,
@@ -151,7 +148,6 @@ fn options_from(o: Option<&GpressOptions>) -> gpress::Options {
         opt.rewrite_encrypted = o.rewrite_encrypted != 0;
         opt.decrypt = o.decrypt != 0;
         opt.use_existing_libraries = o.use_existing_libraries != 0;
-        opt.drop_history = o.drop_history == 1;
         opt = opt.lossy_overrides(o.photo_ppi, o.art_ppi, o.jpeg_quality);
     }
     opt
@@ -220,7 +216,6 @@ pub unsafe extern "C" fn gpress_options_default(out: *mut GpressOptions) {
         decrypt: d.decrypt as u8,
         use_existing_libraries: d.use_existing_libraries as u8,
         palette: d.palette as u8,
-        drop_history: d.drop_history as u8,
         effort_is_engine_level: 0,
         photo_ppi: 0,
         art_ppi: 0,
@@ -435,16 +430,9 @@ mod tests {
         unsafe {
             gpress_options_default(&mut o);
             assert_eq!(
-                (o.effort, o.jbig2, o.palette, o.decrypt, o.max_len, o.max_decoded, o.drop_history),
-                (40, 1, 1, 1, 1 << 30, 256 << 20, 0)
+                (o.effort, o.jbig2, o.palette, o.decrypt, o.max_len, o.max_decoded),
+                (40, 1, 1, 1, 1 << 30, 256 << 20)
             );
-            // Only exactly 1 drops the earlier saves: a byte the caller never set drops nothing.
-            for (byte, drops) in [(0, false), (1, true), (2, false), (255, false)] {
-                o.drop_history = byte;
-                assert_eq!(options_from(Some(&o)).drop_history, drops, "{byte}");
-            }
-            o.drop_history = 0;
-            assert!(!options_from(None).drop_history);
             // Without the archive: compress and expand give GPRESS_ERR_NEEDS_FEATURE, a message that names the
             // feature and no output; optimize works.
             if !cfg!(feature = "archive") {

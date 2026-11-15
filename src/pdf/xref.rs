@@ -745,8 +745,9 @@ pub fn decode_fully(dict: &Dict, data: &[u8], limit: usize) -> Option<Vec<u8>> {
     Some(cur)
 }
 
-/// Why a file with earlier saves is left as it is: today's reason for all of them (also given when its saves can't
-/// be told apart for certain), and the reason of one with more to check than a file of its size is checked for.
+/// What the gate says of a file with earlier saves, which `rewrite` then writes as its newest save alone (also the
+/// reason one is left as it is when its saves can't be told apart for certain), and the reason of one with more to
+/// check than a file of its size is checked for.
 pub const KEEPS: &str = "keeps earlier revisions (incremental updates)";
 pub const TOO_MANY: &str = "keeps earlier revisions: too many to check for its size";
 
@@ -761,14 +762,11 @@ const MOST_NESTED: usize = 16;
 pub struct Save {
     /// The file cut here is this save: just past its `%%EOF` and one end of line (the whole file, for the newest).
     pub end: usize,
-    /// Where the cross-reference section its `startxref` names starts.
-    pub section: usize,
     /// The newest save's /Prev chain reaches it: a revision of the file. Otherwise it is an earlier save the newest
     /// doesn't link (a whole file appended after another, say).
     pub linked: bool,
     /// Its trailer lacks a key about the document that the trailer of the revision before it has, one whose value
-    /// there names no object. Readers that fill a trailer in from older ones still see the key: the save can be
-    /// kept after the others, not written alone.
+    /// there names no object. Readers that fill a trailer in from older ones see that older value.
     pub lacks_key: bool,
 }
 
@@ -906,7 +904,7 @@ pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
         if own.iter().any(|c| sections[c].2 > eof) {
             return Err(KEEPS);
         }
-        out.push(Save { end, section: n, linked: place.is_some(), lacks_key: false });
+        out.push(Save { end, linked: place.is_some(), lacks_key: false });
     }
     // PDFium keeps the row with the higher generation where the others keep the newer row: no row in use has a
     // lower generation than an older section's row of its number, free rows counted.
@@ -946,7 +944,7 @@ pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
         // Some readers fill in what the newest trailer lacks from older ones (see `adds_nothing`): a revision's
         // trailer has every key about the document that the trailer of the one before it has, whatever its value.
         // A key it lacks may only have a value that names no object: such a reader then sees that same value in
-        // every later revision, in the input and in what is written with every save kept.
+        // every later revision of the input.
         let trailer = &first_page.1;
         for (k, v) in older.iter().flat_map(|o| &o.0) {
             if !STRUCTURAL.contains(&k.as_slice()) && !trailer.has(k) {
@@ -991,11 +989,6 @@ pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
         }
     }
     Ok(out)
-}
-
-/// The rows and the trailer of the cross-reference section at `off`, as `open_with` reads them.
-pub fn section(data: &[u8], off: usize) -> Option<(Vec<(u32, Entry)>, Dict)> {
-    read_section(data, off, &mut row_limit(data.len())).ok().map(|s| (s.0, s.1))
 }
 
 impl<'a> Doc<'a> {
