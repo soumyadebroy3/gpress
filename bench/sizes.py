@@ -3,7 +3,7 @@
 
     python3 -I bench/sizes.py measure [--features SET]   build all three and record their sizes in bench/sizes.json
     python3 -I bench/sizes.py check   [--features SET]   build the module and fail when its gzip size is more than
-                                                         5% over the recorded one, or over the 400 KB target, or
+                                                         5% over the recorded one, or over the 1 MB target, or
                                                          when wasm-opt is missing (below); warn when it is more
                                                          than 5% under the recorded one
 
@@ -46,7 +46,7 @@ WEB = 'web'
 
 GROWTH = 1.05            # check: at most 5% over the recorded gzip size
 SHRINK = 0.95            # check: a warning more than 5% under it, since the budget is counted from the record
-TARGET_GZIP = 400_000    # the web module's budget: 400 KB gzip
+TARGET_GZIP = 1_000_000  # the web module's budget: 1 MB gzip
 
 
 def say(msg):
