@@ -121,9 +121,8 @@ of the three scikit-image photographs was taken for a photo. A progressive JPEG 
 ## Rules
 
 A rule is one of the engine's tuning values as a setting: a whole number with a name, a default (the value
-that was fixed in the code before), a lowest and a highest value. A rule that is not set has its default, and
-with no rule set every output is byte for byte what it was before the rules were settings. The rules come in
-groups, one for each part of the engine; a rule's full name is its group's prefix and its own name.
+that was fixed in the code before), a lowest and a highest value. A rule that is not set has its default. The
+rules come in groups, one for each part of the engine; a rule's full name is its group's prefix and its own name.
 
 | Where | How rules are set |
 | --- | --- |
