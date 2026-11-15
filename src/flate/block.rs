@@ -312,13 +312,13 @@ pub fn entropy_estimate_bits(h: &Hist) -> u64 {
         if total == 0 {
             return 0.0;
         }
-        let lt = (total as f64).log2();
+        let lt = crate::math::log2(total as f64);
         let mut bits = 0.0;
         let mut used = 0;
         for (s, &x) in c.iter().enumerate() {
             if x > 0 {
                 let xf = x as f64;
-                bits += xf * (lt - xf.log2()) + xf * extra(s) as f64;
+                bits += xf * (lt - crate::math::log2(xf)) + xf * extra(s) as f64;
                 used += 1;
             }
         }

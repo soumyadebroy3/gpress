@@ -102,7 +102,7 @@ fn entropy(h: &[u64; 256]) -> f64 {
         .filter(|&&c| c > 0)
         .map(|&c| {
             let p = c as f64 / n;
-            -p * p.log2()
+            -p * crate::math::log2(p)
         })
         .sum()
 }

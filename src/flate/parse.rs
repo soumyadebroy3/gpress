@@ -69,8 +69,11 @@ impl Costs {
 
 fn entropy_bits(counts: &[u32], unused: f32) -> Vec<f32> {
     let total: u64 = counts.iter().map(|&c| c as u64).sum::<u64>().max(1);
-    let lt = (total as f64).log2();
-    counts.iter().map(|&c| if c == 0 { lt as f32 + unused } else { (lt - (c as f64).log2()).max(0.0) as f32 }).collect()
+    let lt = crate::math::log2(total as f64);
+    counts
+        .iter()
+        .map(|&c| if c == 0 { lt as f32 + unused } else { (lt - crate::math::log2(c as f64)).max(0.0) as f32 })
+        .collect()
 }
 
 /// Scratch space reused between parses.

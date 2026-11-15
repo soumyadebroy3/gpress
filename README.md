@@ -388,7 +388,9 @@ g.optimize(bytes, { effort: 100, photoPpi: 200 });                  // effort 10
 ```
 
 The module gives the same bytes as the native library (the web module too, for `optimize`; see
-[Building only what a product needs](docs/reference.md#building-only-what-a-product-needs)), is
+[Building only what a product needs](docs/reference.md#building-only-what-a-product-needs)); the choices
+made in floating point use a log2 and an exp2 built from basic arithmetic (`src/math.rs`), so no platform's
+maths library changes a byte. It is
 single-threaded and has no clock (so no time budget: run it in a Web Worker to keep a page responsive and to
 end it when it has taken too long). It is built with `panic = "abort"` (`wasm32-unknown-unknown` aborts on a
 panic anyway), so the panic guard that turns a bug into `Error::Internal` natively catches nothing there: a bug,
