@@ -211,10 +211,6 @@ pub(crate) fn exp2(y: f64) -> f64 {
 mod tests {
     use super::*;
 
-    fn ulps(a: f64, b: f64) -> u64 {
-        a.to_bits().abs_diff(b.to_bits())
-    }
-
     #[test]
     fn powers_of_two_are_exact() {
         for k in -1074..=1023i64 {
@@ -265,7 +261,18 @@ mod tests {
     }
 
     #[test]
-    fn within_an_ulp_of_the_platform_and_its_special_values() {
+    fn special_values() {
+        assert!(log2(0.0) == f64::NEG_INFINITY && log2(-1.0).is_nan() && log2(f64::INFINITY) == f64::INFINITY);
+        assert!(log2(f64::NAN).is_nan() && exp2(f64::NAN).is_nan());
+        assert!(exp2(-1074.0) == 5e-324 && exp2(2000.0) == f64::INFINITY && exp2(-2000.0) == 0.0);
+        assert!(exp2(1024.0) == f64::INFINITY && exp2(-1075.0) == 0.0 && exp2(-1074.5) == 5e-324);
+    }
+
+    /// Against glibc's log2 and exp2, which are within an ulp (other platforms' libraries don't promise it).
+    #[test]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    fn within_an_ulp_of_glibc() {
+        let ulps = |a: f64, b: f64| a.to_bits().abs_diff(b.to_bits());
         for i in 1..=200_000u64 {
             assert!(ulps(log2(i as f64), (i as f64).log2()) <= 1, "{i}");
         }
@@ -284,10 +291,6 @@ mod tests {
         for x in [f64::MIN_POSITIVE / 3.0, 5e-324, 1e-300, 1e300, f64::MAX] {
             assert!(ulps(log2(x), x.log2()) <= 1, "{x}");
         }
-        assert!(log2(0.0) == f64::NEG_INFINITY && log2(-1.0).is_nan() && log2(f64::INFINITY) == f64::INFINITY);
-        assert!(log2(f64::NAN).is_nan() && exp2(f64::NAN).is_nan());
-        assert!(exp2(-1074.0) == 5e-324 && exp2(2000.0) == f64::INFINITY && exp2(-2000.0) == 0.0);
-        assert!(exp2(1024.0) == f64::INFINITY && exp2(-1075.0) == 0.0 && exp2(-1074.5) == 5e-324);
         for y in [1023.99, 1000.5, -1010.5, -1022.5, -1050.25, -1073.9] {
             assert!(ulps(exp2(y), y.exp2()) <= 1, "{y}");
         }
