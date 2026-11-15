@@ -109,7 +109,9 @@ def run_one(engine, src, out, err_path, effort, threads, budget, timeout):
     """One optimize: the child's return code, wall, CPU and peak memory, and what it wrote."""
     if os.path.exists(out):
         os.remove(out)
-    cmd = [engine, 'optimize', src, out, '--effort', str(effort), '--threads', str(threads)]
+    # Both flags: a build from before the effort levels knows only --effort (it skips the other), and in a
+    # later one --engine-effort decides.
+    cmd = [engine, 'optimize', src, out, '--effort', str(effort), '--engine-effort', str(effort), '--threads', str(threads)]
     if budget is not None:
         cmd += ['--store-budget', str(budget)]
     env = dict(os.environ, PDFE_DEBUG='1')
@@ -277,7 +279,7 @@ def main():
     g = r.add_mutually_exclusive_group()
     g.add_argument('--set', default='sample120', help='a list in bench/sets/ or a path (default sample120)')
     g.add_argument('--files', help='files relative to the corpus, comma-separated')
-    r.add_argument('--efforts', default='0,50,100')
+    r.add_argument('--efforts', default='0,50,100', help="the engine's own levels, --engine-effort (default 0,50,100)")
     r.add_argument('--threads', default='1,2,0')
     r.add_argument('--limit', type=int, default=0, help='only the N smallest files')
     r.add_argument('--store-budget', type=int, default=None, help="the engine's --store-budget (default: its own)")

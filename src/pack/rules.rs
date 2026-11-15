@@ -179,8 +179,9 @@ rules! {
     fax_white_shortcut = 1, 0, 1;
 
     // ---- Choices of the packing side only (never in a profile).
-    /// Below this effort, data that looks compressed is coded plainly (faster, about 1% larger). 0: never;
-    /// 101: at every effort.
+    /// Below this level of the engine (`PackOptions::effort`: efforts 0 and 20 are its levels 0 and 20, 40 and
+    /// above its 100), data that looks compressed is coded plainly (faster, about 1% larger). 0: never; 101: at
+    /// every level.
     plain_below = 50, 0, 101;
     /// How random bytes must look to be coded plainly, in hundredths of a bit per byte. Lowest 0: not at all;
     /// highest 800, the most a byte holds.

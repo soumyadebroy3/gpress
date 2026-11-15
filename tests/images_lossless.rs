@@ -216,7 +216,7 @@ fn one_bit_pdf() -> Vec<u8> {
 fn one_bit_images_become_jbig2_with_the_same_pixels() {
     use gpress::fax::{ccitt, jbig2};
     let pdf = one_bit_pdf();
-    for effort in [0, 100] {
+    for effort in [0, 40] {
         let (out, report) = smaller(&pdf, &quick().effort(effort));
         assert_eq!((report.bilevel_to_jbig2, report.fax_to_jbig2, report.images_indexed), (3, 0, 0), "effort {effort}");
         assert!(out.starts_with(b"%PDF-1.") && out[7] >= b'4', "JBIG2Decode needs PDF 1.4");
@@ -371,7 +371,7 @@ fn charts_pdf() -> Vec<u8> {
 #[test]
 fn few_colours_become_an_indexed_image() {
     let pdf = charts_pdf();
-    for effort in [0, 100] {
+    for effort in [0, 40] {
         let (out, report) = smaller(&pdf, &quick().effort(effort));
         assert_eq!((report.images_indexed, report.bilevel_to_jbig2), (4, 0), "effort {effort}");
         for (k, (_, px, w, m, bits)) in charts().into_iter().enumerate() {
@@ -468,7 +468,7 @@ fn an_indexed_image_is_compared_with_the_best_other_encoding() {
         })
         .collect();
     let pdf = page_of(&[image(&format!("/Width 64 /Height 64 {RGB}"), &px)]);
-    for effort in [0, 100] {
+    for effort in [0, 40] {
         let (on, report) = smaller(&pdf, &quick().effort(effort));
         assert_eq!(report.images_indexed, 0, "effort {effort}");
         assert!(on == smaller(&pdf, &quick().effort(effort).palette(false)).0, "effort {effort}");
@@ -548,7 +548,7 @@ fn an_encoding_read_in_more_than_one_way_keeps_its_bytes() {
         // 10: a predictor we don't read.
         stream_of(&format!("{flate} {rgb} /DP << /Predictor 2 /Colors 3 /Columns 120 >>"), &zlib(&chart)),
     ]);
-    for effort in [0, 100] {
+    for effort in [0, 40] {
         let (on, report) = smaller(&pdf, &quick().effort(effort));
         assert_eq!((report.images_indexed, report.bilevel_to_jbig2), (0, 0), "effort {effort}");
         assert!(on == smaller(&pdf, &quick().effort(effort).jbig2(false).palette(false)).0, "effort {effort}");
@@ -564,7 +564,7 @@ fn an_encoding_read_in_more_than_one_way_keeps_its_bytes() {
 #[cfg(feature = "fax")]
 fn a_one_bit_image_of_more_changes_than_its_bytes_pay_for_keeps_its_filter() {
     let stripes = image("/Width 1024 /Height 1024 /ColorSpace /DeviceGray /BitsPerComponent 1", &[0x55; 128 * 1024]);
-    let (out, report) = smaller(&page_of(&[stripes]), &quick().effort(100));
+    let (out, report) = smaller(&page_of(&[stripes]), &quick().effort(40));
     assert_eq!(report.bilevel_to_jbig2, 0);
     assert!(filters(&stream(&out, 5)) == [b"FlateDecode".to_vec()]);
 }
@@ -626,7 +626,7 @@ const CHART_BEFORE: (usize, u64) = (4923, 0xaeff_2c19_76aa_fac0);
 #[test]
 fn one_and_four_threads_give_the_same_bytes() {
     for pdf in [one_bit_pdf(), charts_pdf(), guarded_pdf()] {
-        for effort in [0, 100] {
+        for effort in [0, 40] {
             let one = smaller(&pdf, &quick().effort(effort));
             let four = smaller(&pdf, &quick().effort(effort).threads(4));
             assert!(one.0 == four.0 && one.1 == four.1, "effort {effort}");

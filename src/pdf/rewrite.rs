@@ -69,6 +69,8 @@ pub struct Options {
     /// Rewrite files the empty user password opens, keeping their encryption (see `crate::pdf::crypt`). Off,
     /// every encrypted file is left untouched.
     pub rewrite_encrypted: bool,
+    /// The lossy image step (see `crate::pdf::lossy`); `Lossy::OFF` leaves every image to the lossless path.
+    pub lossy: super::lossy::Lossy,
     /// A file that keeps earlier saves (incremental updates) is written with every one of them kept (see
     /// `history`). With `true` only the newest is written, as a file of one save: what the earlier saves held
     /// and the newest doesn't is gone (`Stats::history_dropped` lists them).
@@ -93,6 +95,7 @@ impl Default for Options {
             palette: true,
             jpeg_tables: true,
             rewrite_encrypted: true,
+            lossy: super::lossy::Lossy::OFF,
             drop_history: false,
             deadline: Deadline::NONE,
         }
@@ -109,6 +112,9 @@ impl Options {
 
 /// The reason `rewrite` gives up when its deadline passes (see `Outcome::TimedOut`).
 const TIMED_OUT: &str = "out of time";
+/// What `rewrite` gives when only the lossy step made the file too short for its object numbers (qpdf 12's
+/// bound, below): `optimize` then writes the lossless output, which is longer. Never a reason a caller sees.
+const LOSSY_TOO_SHORT: &str = "object numbers far apart for the lossy output";
 
 #[derive(Debug, Default, Clone)]
 pub struct Stats {
@@ -126,6 +132,12 @@ pub struct Stats {
     pub bilevel_to_jbig2: usize,
     /// Images of few colours written as Indexed images (the same colours).
     pub images_indexed: usize,
+    /// Images the lossy step resampled to a lower resolution (see `crate::pdf::lossy`).
+    pub images_resampled: usize,
+    /// Photos stored without JPEG that the lossy step wrote as a JPEG.
+    pub images_to_jpeg: usize,
+    /// JPEG photos the lossy step wrote again at a lower quality (not resampled).
+    pub jpegs_rewritten: usize,
     /// How the file is encrypted (kept exactly as it was), e.g. "R4/AESV2"; empty when it isn't.
     pub encryption: String,
     /// Earlier saves kept, each written again and checked (see `history`). The counts above are then of what
@@ -167,7 +179,11 @@ pub struct Optimized {
 }
 
 pub fn optimize(input: &[u8], opt: &Options) -> Optimized {
-    match rewrite(input, opt) {
+    let mut r = rewrite(input, opt);
+    if matches!(&r, Err(why) if why == LOSSY_TOO_SHORT) {
+        r = rewrite(input, &Options { lossy: super::lossy::Lossy::OFF, ..opt.clone() });
+    }
+    match r {
         Ok((out, stats)) => {
             if out.len() < input.len() {
                 Optimized { data: out, outcome: Outcome::Smaller(stats) }
@@ -816,7 +832,7 @@ fn samples<'a>(
 }
 
 /// The PNG predictor parameters for an image of geometry `g`.
-fn png_parms(g: &images::Geometry) -> Dict {
+pub(super) fn png_parms(g: &images::Geometry) -> Dict {
     let mut p = Dict::default();
     p.set(b"Predictor", Obj::Int(15));
     p.set(b"Colors", Obj::Int(g.colors as i64));
@@ -962,7 +978,7 @@ fn predictor_budget(effort: u8) -> usize {
 /// Rows for ranking the predictor candidates of an image below effort 100: bands of whole rows spread over
 /// the image (neighbouring rows keep what predictors and matches see), at most a budget of bytes that grows
 /// with the effort. None: rank on the whole image (effort 100, or a small image).
-fn predictor_sample(nrows: usize, row: usize, effort: u8) -> Option<Vec<(usize, usize)>> {
+pub(super) fn predictor_sample(nrows: usize, row: usize, effort: u8) -> Option<Vec<(usize, usize)>> {
     if effort >= 100 || row == 0 {
         return None;
     }
@@ -1059,7 +1075,7 @@ fn decoded_size(s: &Stream, limit: usize, last: usize) -> Option<usize> {
 
 /// The fast encoder's level for image streams below `FAST_BELOW` (other streams get `flate::Options::effort`).
 /// Images are most of the decoded bytes and gain least from a closer parse, so they get a lazy level.
-fn image_level(effort: u8) -> u8 {
+pub(super) fn image_level(effort: u8) -> u8 {
     IMAGE_LEVEL[effort.min(FAST_BELOW - 1) as usize]
 }
 
@@ -1497,7 +1513,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
             s.shared
         );
     }
-    let objs = objs?;
+    let mut objs = objs?;
     // A file that keeps earlier saves: every save is kept and written by `history`, or, when the caller asks,
     // every save is checked there and the newest goes on alone.
     let mut history_dropped = Vec::new();
@@ -1534,6 +1550,14 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         },
         ..opt.clone()
     };
+
+    // The lossy image step, when asked for: the images it reduces are new streams to everything below.
+    if !opt.lossy.is_off() {
+        let done = super::lossy::reduce(&mut objs, &doc.trailer, opt, pool);
+        stats.images_resampled = done.resampled;
+        stats.images_to_jpeg = done.to_jpeg;
+        stats.jpegs_rewritten = done.rejpeg;
+    }
 
     // Streams are re-encoded first, in parallel (the biggest first, identical streams once); the results are
     // used in object order below, so the output doesn't depend on the number of threads.
@@ -1771,9 +1795,10 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
 
     // qpdf 12 reads an object only when its number is below a third of the file's length, this cross-reference
     // stream included, and objects keep their numbers: a file whose numbers are too high for its new length
-    // stays as it is.
+    // stays as it is, or, when the lossy step changed images, gets the lossless output.
     if xn as usize >= out.len() / 3 {
-        return Err("object numbers far apart".into());
+        let lossy = stats.images_resampled + stats.images_to_jpeg + stats.jpegs_rewritten > 0;
+        return Err(if lossy { LOSSY_TOO_SHORT } else { "object numbers far apart" }.into());
     }
     // Read our own output back and compare everything reachable.
     let taken = self_check(&objs, &out, &doc.trailer, crypt, &proven, pool)?;

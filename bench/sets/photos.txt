@@ -1,0 +1,24 @@
+# The photo set: python3 -I bench/photo_set.py makes the files under photos/.
+pdfjs/issue19971.pdf
+pdfjs/issue14200.pdf
+photos/astronaut-150-flate.pdf
+photos/astronaut-150-jpeg.pdf
+photos/astronaut-300-flate.pdf
+photos/astronaut-300-jpeg.pdf
+photos/astronaut-600-flate.pdf
+photos/astronaut-600-jpeg.pdf
+photos/coffee-150-flate.pdf
+photos/coffee-150-jpeg.pdf
+photos/coffee-300-flate.pdf
+photos/coffee-300-jpeg.pdf
+photos/coffee-600-flate.pdf
+photos/coffee-600-jpeg.pdf
+photos/hubble-150-flate.pdf
+photos/hubble-150-jpeg.pdf
+photos/hubble-300-flate.pdf
+photos/hubble-300-jpeg.pdf
+photos/hubble-600-flate.pdf
+photos/hubble-600-jpeg.pdf
+photos/room-754-jpeg.pdf
+photos/scan-300-jpeg.pdf
+photos/scan-300-flate.pdf

@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { deflateSync as zlibSync } from "node:zlib";
 import { Gpress, GpressError, GpressFeatureError } from "../dist/gpress.js";
 import { modulePath } from "./module.mjs";
+import { onePagePdf } from "./onepage.mjs";
 
 const g = await Gpress.load(modulePath);
 // The web module has no archive: there every archive test checks that compress and expand say so instead.
@@ -132,8 +133,8 @@ archiveTest("an image row past 2^32 bits packs as on 64 bits", () => {
   assert.deepEqual(g.expand(native), pdf);
 });
 
-test("optimize makes a page smaller at every effort, the fast path too", () => {
-  // The fast encoder (efforts below 20) once trapped in this 32-bit module: an empty hash table entry passed
+test("optimize makes a page smaller at every engine level, the fast path too", () => {
+  // The fast encoder (engine levels below 20) once trapped in this 32-bit module: an empty hash table entry passed
   // for a match. A page with a content stream stored by zlib's fastest level leaves room to gain.
   const enc = new TextEncoder();
   let text = "";
@@ -159,11 +160,113 @@ test("optimize makes a page smaller at every effort, the fast path too", () => {
   const pdf = new Uint8Array(at);
   let k = 0;
   for (const p of parts) { pdf.set(p, k); k += p.length; }
-  for (const effort of [0, 10, 100]) {
-    const r = g.optimize(pdf, { effort });
-    assert.equal(r.outcome, "smaller", `effort ${effort}: ${r.reason}`);
+  for (const engineEffort of [0, 10, 100]) {
+    const r = g.optimize(pdf, { engineEffort });
+    assert.equal(r.outcome, "smaller", `engine level ${engineEffort}: ${r.reason}`);
     assert.ok(r.data.length < pdf.length);
   }
+});
+
+test("the effort counts in steps of 20, the default is 40, and the engine's level is a knob of its own", () => {
+  const pdf = onePagePdf();
+  const at = (options) => g.optimize(pdf, options).data;
+  // The default is effort 40, the smallest lossless output: the engine's level 100.
+  assert.deepEqual(at({}), at({ effort: 40 }));
+  assert.deepEqual(at({ effort: 40 }), at({ engineEffort: 100 }));
+  // A value in between counts as the step below it, and steps 20 and 0 are the engine's 20 and 0.
+  assert.deepEqual(at({ effort: 59 }), at({ effort: 40 }));
+  assert.deepEqual(at({ effort: 39 }), at({ engineEffort: 20 }));
+  assert.deepEqual(at({ effort: 19 }), at({ engineEffort: 0 }));
+  assert.notDeepEqual(at({ engineEffort: 0 }), at({ engineEffort: 100 }));
+  // With the engine's level set the effort decides nothing, and a lossy effort lossless again is the same file.
+  assert.deepEqual(at({ effort: 100, engineEffort: 0 }), at({ effort: 0 }));
+});
+
+test("optimizeToSize picks the lowest effort that reaches the target, or else the smallest result", () => {
+  const pdf = onePagePdf();
+  const efforts = [0, 20, 40, 60, 80, 100];
+  const sizes = efforts.map((effort) => g.optimize(pdf, { effort }).data.length);
+  // The fast level's own size: reached by the first level tried.
+  const fast = g.optimize(pdf, { effort: 0 });
+  const first = g.optimizeToSize(pdf, fast.data.length);
+  assert.deepEqual([first.effort, first.reached, first.outcome], [0, true, fast.outcome]);
+  assert.deepEqual(first.data, fast.data);
+  // The smallest size any level gives: reached by the lowest level that gives it.
+  const least = Math.min(...sizes);
+  const best = g.optimizeToSize(pdf, least, { effort: 0 });
+  assert.deepEqual([best.effort, best.reached, best.data.length], [efforts[sizes.indexOf(least)], true, least]);
+  // One byte less: no level reaches it, and the same result comes back marked as missed.
+  const missed = g.optimizeToSize(pdf, least - 1);
+  assert.deepEqual([missed.effort, missed.reached], [best.effort, false]);
+  assert.deepEqual(missed.data, best.data);
+  // A target past 4 GiB is as good as any: reached at once.
+  assert.equal(g.optimizeToSize(pdf, Number.MAX_SAFE_INTEGER).effort, 0);
+  // So is Infinity, and what is no number is refused, not taken for a target of 0.
+  const any = g.optimizeToSize(pdf, Infinity);
+  assert.deepEqual([any.effort, any.reached], [0, true]);
+  for (const bad of [NaN, undefined, "1000000"]) {
+    assert.throws(() => g.optimizeToSize(pdf, bad), (e) => e instanceof GpressError && e.code === GpressError.INVALID_OPTIONS, String(bad));
+  }
+  // The picker sets the effort itself: the engine's level or a lossy override is refused.
+  for (const bad of [{ engineEffort: 0 }, { photoPpi: 200 }, { artPpi: 400 }, { jpegQuality: 80 }]) {
+    assert.throws(() => g.optimizeToSize(pdf, 1, bad), (e) => e instanceof GpressError && e.code === GpressError.INVALID_OPTIONS, JSON.stringify(bad));
+  }
+});
+
+/** One page showing a soft grey picture, 320 by 240 pixels of slow ramps with a little noise, at 500 pixels an inch. */
+function photoPdf() {
+  const [w, h] = [320, 240];
+  const px = new Uint8Array(w * h);
+  let s = 12345;
+  for (let i = 0; i < px.length; i++) {
+    s = (s * 1103515245 + 12345) % 2147483648;
+    px[i] = 40 + Math.floor(((i % w) * 150) / w) + Math.floor((Math.floor(i / w) * 50) / h) + ((s >> 8) % 9);
+  }
+  const image = zlibSync(px);
+  const content = "q 46 0 0 34.5 20 20 cm /Im0 Do Q";
+  const enc = new TextEncoder();
+  const objs = [
+    enc.encode("<< /Type /Catalog /Pages 2 0 R >>"),
+    enc.encode("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+    enc.encode("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R /Resources << /XObject << /Im0 4 0 R >> >> >>"),
+    Buffer.concat([
+      enc.encode(`<< /Type /XObject /Subtype /Image /Width ${w} /Height ${h} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length ${image.length} >>\nstream\n`),
+      image,
+      enc.encode("\nendstream"),
+    ]),
+    enc.encode(`<< /Length ${content.length} >>\nstream\n${content}\nendstream`),
+  ];
+  const parts = [enc.encode("%PDF-1.4\n")];
+  const offsets = [];
+  let at = parts[0].length;
+  objs.forEach((o, i) => {
+    offsets.push(at);
+    parts.push(enc.encode(`${i + 1} 0 obj\n`), o, enc.encode("\nendobj\n"));
+    at = parts.reduce((n, p) => n + p.length, 0);
+  });
+  const rows = offsets.map((o) => `${String(o).padStart(10, "0")} 00000 n \n`).join("");
+  parts.push(enc.encode(`xref\n0 ${objs.length + 1}\n0000000000 65535 f \n${rows}trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${at}\n%%EOF\n`));
+  return new Uint8Array(Buffer.concat(parts));
+}
+
+test("efforts 60, 80 and 100 and the lossy overrides reach the lossy image step", () => {
+  const pdf = photoPdf();
+  const at = (options) => g.optimize(pdf, options).data;
+  const lossless = [0, 20, 40].map((effort) => at({ effort }).length);
+  // Effort 60 resamples the photo to 300 pixels an inch and writes it as a JPEG; effort 80 goes to 150.
+  const [e60, e80] = [at({ effort: 60 }).length, at({ effort: 80 }).length];
+  assert.ok(e60 < lossless[2] / 2 && e80 < e60, `${lossless} ${e60} ${e80}`);
+  // One override over what the effort means: effort 60 with photos at 150 pixels an inch is effort 80.
+  assert.deepEqual(at({ effort: 60, photoPpi: 150 }), at({ effort: 80 }));
+  // On a lossless effort an override alone turns the step on, and a lower quality is a smaller file.
+  const [q90, q60] = [at({ effort: 40, jpegQuality: 90 }).length, at({ effort: 40, jpegQuality: 60 }).length];
+  assert.ok(q90 < lossless[2] && q60 < q90, `${lossless} ${q90} ${q60}`);
+  // The engine's level turns the step off whatever the effort.
+  assert.equal(at({ effort: 100, engineEffort: 100 }).length, lossless[2]);
+  // A target the lossless efforts miss by one byte takes the first lossy one.
+  const fits = g.optimizeToSize(pdf, Math.min(...lossless) - 1);
+  assert.deepEqual([fits.effort, fits.reached], [60, true]);
+  assert.deepEqual(fits.data, at({ effort: 60 }));
 });
 
 test("optimize returns untouched with a reason for non-PDF input", () => {
