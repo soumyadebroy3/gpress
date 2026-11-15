@@ -289,9 +289,9 @@ crates.io. A default build depends on `aes`, `md-5` and `sha2` (RustCrypto, MIT 
 | `fuzz/` | Fuzz targets for the archive decoder, the Flate decoder and the PDF path. |
 | `tests/` | Integration tests; `tests/data/` holds the zlib vectors, the encrypted and JPEG fixtures and the format fixture. |
 | `bench/` | The benchmark suite, the security suite, the independent checks, the stored results, the corpus lock. |
-| `docs/` | This reference, the optimisation plan and the task briefs (`docs/tasks/`) for the work it recommends. |
+| `docs/` | This reference, the optimisation plan, the task briefs (`docs/tasks/`) for the work it recommends, and the wiki's pages (`docs/wiki/`, which `.github/workflows/wiki.yml` copies to the GitHub wiki on each push to main that changes them). |
 | `deny.toml`, `SECURITY.md` | The licence rule; the threat model and how the safety rules are checked. |
-| `.github/` | CI, CodeQL, Dependabot and the pull request template. |
+| `.github/` | CI, CodeQL, the release and wiki workflows, Dependabot and the pull request template. |
 | `LICENSE-MIT`, `LICENSE-APACHE` | gpress's own licence: MIT or Apache-2.0, at your option. |
 
 ## Benchmarks (`bench/`)
