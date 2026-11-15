@@ -71,10 +71,6 @@ pub struct Options {
     pub rewrite_encrypted: bool,
     /// The lossy image step (see `crate::pdf::lossy`); `Lossy::OFF` leaves every image to the lossless path.
     pub lossy: super::lossy::Lossy,
-    /// A file that keeps earlier saves (incremental updates) is written with every one of them kept (see
-    /// `history`). With `true` only the newest is written, as a file of one save: what the earlier saves held
-    /// and the newest doesn't is gone (`Stats::history_dropped` lists them).
-    pub drop_history: bool,
     /// Stop when this passes (checked between streams and Flate segments): the outcome is then `TimedOut`
     /// and nothing is returned. A rewrite that finishes gives the same bytes with or without a deadline.
     pub deadline: Deadline,
@@ -96,7 +92,6 @@ impl Default for Options {
             jpeg_tables: true,
             rewrite_encrypted: true,
             lossy: super::lossy::Lossy::OFF,
-            drop_history: false,
             deadline: Deadline::NONE,
         }
     }
@@ -140,11 +135,8 @@ pub struct Stats {
     pub jpegs_rewritten: usize,
     /// How the file is encrypted (kept exactly as it was), e.g. "R4/AESV2"; empty when it isn't.
     pub encryption: String,
-    /// Earlier saves kept, each written again and checked (see `history`). The counts above are then of what
-    /// was written: an object or stream once for each revision that adds or changes it, and no count of
-    /// unreachable objects.
-    pub history_kept: usize,
-    /// Earlier saves dropped because `Options::drop_history` asked, oldest first.
+    /// Earlier saves dropped, oldest first: a file that keeps earlier saves (incremental updates) is written as its
+    /// newest save alone (see `history`), and what the earlier saves held and the newest doesn't is gone.
     pub history_dropped: Vec<Dropped>,
 }
 
@@ -1514,18 +1506,12 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         );
     }
     let mut objs = objs?;
-    // A file that keeps earlier saves: every save is kept and written by `history`, or, when the caller asks,
-    // every save is checked there and the newest goes on alone.
-    let mut history_dropped = Vec::new();
-    match gate(&doc, &objs, opt.respect_conformance) {
-        Err(why) if why == xref::KEEPS && !opt.drop_history => {
-            drop((objs, doc));
-            return history::keep(input, opt);
-        }
+    // A file that keeps earlier saves: every save is checked by `history`, and the newest goes on alone.
+    let history_dropped = match gate(&doc, &objs, opt.respect_conformance) {
         // Every save passes the gate there, the newest among them.
-        Err(why) if why == xref::KEEPS => history_dropped = history::dropped(input, opt, &objs)?,
-        gated => gated?,
-    }
+        Err(why) if why == xref::KEEPS => history::dropped(input, opt, &objs)?,
+        gated => gated.map(|()| Vec::new())?,
+    };
     let mut stats = Stats {
         history_dropped,
         objects: objs.len(),
@@ -1721,7 +1707,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     for (chunk, ((_, first), z)) in chunks.iter().zip(raws.iter().zip(zs)) {
         let sn = next_num;
         next_num += 1;
-        direct.insert(sn, (0, objstm_body(crypt, 0, sn, (chunk.len(), *first), z)?));
+        direct.insert(sn, (0, objstm_body(crypt, sn, (chunk.len(), *first), z)?));
         stats.objstms += 1;
     }
     // The encryption dictionary and its objects as they were: never encrypted, never in an object stream.
@@ -1838,22 +1824,15 @@ fn objstm_raw(chunk: &[(u32, &Obj)]) -> (Vec<u8>, usize) {
 }
 
 /// Object stream `sn` as it goes into the file: `z` is its deflated data, of `count` objects, the first at
-/// `first`. Encrypted as a stream, for revision `rev` (see `Crypt::seal_stream_at`); the objects inside are not
-/// encrypted on their own.
-fn objstm_body(
-    crypt: Option<&Crypt>,
-    rev: u32,
-    sn: u32,
-    (count, first): (usize, usize),
-    z: Vec<u8>,
-) -> Result<Vec<u8>, String> {
+/// `first`. Encrypted as a stream; the objects inside are not encrypted on their own.
+fn objstm_body(crypt: Option<&Crypt>, sn: u32, (count, first): (usize, usize), z: Vec<u8>) -> Result<Vec<u8>, String> {
     let mut d = Dict::default();
     d.set(b"Type", Obj::Name(b"ObjStm".to_vec()));
     d.set(b"N", Obj::Int(count as i64));
     d.set(b"First", Obj::Int(first as i64));
     d.set(b"Filter", Obj::Name(b"FlateDecode".to_vec()));
     let (mut d, z) = match crypt {
-        Some(c) => c.seal_stream_at(rev, sn, 0, &d, &z).map_err(|e| format!("object stream: {e}"))?,
+        Some(c) => c.seal_stream(sn, 0, &d, &z).map_err(|e| format!("object stream: {e}"))?,
         None => (d, z),
     };
     d.set(b"Length", Obj::Int(z.len() as i64));

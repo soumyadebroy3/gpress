@@ -94,9 +94,6 @@ typedef struct gpress_options {
   uint8_t use_existing_libraries; /* 1: use the optional existing library (Lepton) when built in */
   uint8_t palette;                /* 1: write an 8-bit image of few colours as an Indexed image when smaller
                                      (same colours). A byte that was padding: no other field moved */
-  uint8_t drop_history;           /* exactly 1: write only the newest save of a file that keeps earlier ones
-                                     (the earlier saves are gone for good); any other value keeps every save,
-                                     and the default is 0 */
   uint8_t effort_is_engine_level; /* 1: for measuring: effort is the engine's own lossless level, 0..100,
                                      and nothing is lossy unless an override below is set */
   uint16_t photo_ppi;             /* lossy overrides, each 0 = what the effort says: photos shown at 5/4 of
@@ -127,7 +124,7 @@ typedef struct gpress_result {
 /* Version string, e.g. "0.1.0". Static; do not free. */
 const char *gpress_version(void);
 
-/* Fills *out with the defaults (effort 40, the smallest lossless output; every step on; drop_history 0). */
+/* Fills *out with the defaults (effort 40, the smallest lossless output; every step on). */
 void gpress_options_default(gpress_options *out);
 
 /* A smaller PDF that any reader opens, or the input untouched. Every object's value is preserved at efforts

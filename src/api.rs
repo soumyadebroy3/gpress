@@ -76,10 +76,9 @@ pub const MAX_STORE_BUDGET: usize = crate::flate::deflate::MAX_STORE_BUDGET;
 /// scans never below 300; 1-bit images and small images (at most 65,536 pixels) are never touched; a lossy
 /// result is kept only when it is clearly smaller than what the lossless path makes of the image and a
 /// per-image quality check passes; a file the safety gate leaves untouched (signed, PDF/A, PDF/X, needing a
-/// password) stays untouched, and an encrypted file keeps its encryption; a file that keeps earlier saves keeps
-/// them all, written losslessly (with `drop_history` the step works on the newest save, which goes on alone); a
-/// file whose object numbers are too high for the shorter lossy output (qpdf 12's bound, see the safety gate)
-/// gets the lossless one.
+/// password) stays untouched, and an encrypted file keeps its encryption; a file that keeps earlier saves is
+/// written as its newest save alone, which the step works on; a file whose object numbers are too high for the
+/// shorter lossy output (qpdf 12's bound, see the safety gate) gets the lossless one.
 ///
 /// The archive ([`compress`]) is always lossless: there 40 and above all mean its strongest setting.
 ///
@@ -185,11 +184,6 @@ pub struct Options {
     /// [`Effort`]); `Some`: exactly these settings whatever the effort (`Some(Lossy::OFF)` keeps any effort
     /// lossless).
     pub lossy: Option<Lossy>,
-    /// Normal PDF: a file that keeps earlier saves (incremental updates) keeps every one of them, each read
-    /// back and compared. With `true` only the newest save is written and the earlier ones are gone for good:
-    /// [`Report::history_dropped`] lists them. A file where any save is signed, certified, PDF/A or PDF/X or
-    /// has usage rights stays untouched either way.
-    pub drop_history: bool,
     /// Archive: store the streams of a file the empty user password opens decrypted (so they can be rebuilt
     /// and modelled) and encrypt them again on expand. Off, encrypted streams are stored as they are.
     pub decrypt: bool,
@@ -237,7 +231,6 @@ impl Default for Options {
             palette: true,
             rewrite_encrypted: true,
             lossy: None,
-            drop_history: false,
             decrypt: true,
             use_existing_libraries: true,
             time_budget: None,
@@ -339,10 +332,6 @@ impl Options {
         }
         self
     }
-    pub fn drop_history(mut self, yes: bool) -> Options {
-        self.drop_history = yes;
-        self
-    }
     pub fn decrypt(mut self, yes: bool) -> Options {
         self.decrypt = yes;
         self
@@ -436,7 +425,6 @@ impl Options {
             jpeg_tables: self.jpeg_tables,
             rewrite_encrypted: self.rewrite_encrypted,
             lossy: self.lossy_settings(),
-            drop_history: self.drop_history,
             deadline: self.deadline(),
         }
     }
@@ -587,11 +575,9 @@ pub struct Report {
     pub jpegs_rewritten: usize,
     /// How the file is encrypted, kept exactly as it was (e.g. "R4/AESV2"); empty when it isn't.
     pub encryption: String,
-    /// Earlier saves (incremental updates) kept, each one read back and compared with the input's. The counts
-    /// above are then of what was written: an object or stream once for each revision that adds or changes it,
-    /// and no count of unreachable objects.
-    pub history_kept: usize,
-    /// Earlier saves dropped because [`Options::drop_history`] asked, oldest first.
+    /// Earlier saves dropped, oldest first. A file that keeps earlier saves (incremental updates) is written as its
+    /// newest save alone, and the earlier ones are gone for good. A file where any save is signed, certified,
+    /// PDF/A or PDF/X or has usage rights is left untouched instead.
     pub history_dropped: Vec<Dropped>,
 }
 
@@ -695,7 +681,6 @@ fn optimize_until(input: &[u8], opt: &Options, deadline: Deadline) -> Result<Opt
                 images_to_jpeg: s.images_to_jpeg,
                 jpegs_rewritten: s.jpegs_rewritten,
                 encryption: s.encryption,
-                history_kept: s.history_kept,
                 history_dropped: s.history_dropped,
             }),
             rewrite::Outcome::Untouched(why) => Outcome::Untouched(why),
@@ -971,14 +956,12 @@ mod tests {
             .jbig2(false)
             .palette(false)
             .rewrite_encrypted(false)
-            .drop_history(true)
             .decrypt(false)
             .use_existing_libraries(false)
             .time_budget(Some(Duration::from_secs(9)));
         let r = opt.rewrite();
         assert_eq!((r.effort, r.threads, r.store_budget, r.max_stream, r.objstm_size), (40, 3, 4096, 1000, 7));
         assert!(!r.respect_conformance && !r.flate_over_jpeg && !r.jpeg_tables && !r.jbig2 && !r.rewrite_encrypted);
-        assert!(r.drop_history && !Options::default().rewrite().drop_history);
         assert!(!r.palette && Options::default().rewrite().palette);
         assert!(r.deadline.is_set() && r.flate.deadline == Deadline::NONE, "the pool sets the Flate deadline");
         assert!(!Options::default().rewrite().deadline.is_set());
