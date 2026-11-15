@@ -58,6 +58,9 @@ enum {
                                   archive stores the input as it is) */
 };
 
+/* The room for the rules text in the options, its closing NUL counted: every rule at once fits. */
+#define GPRESS_RULES_TEXT 16384
+
 /* The options, the same as the library's. Fill with gpress_options_default and change what you need: a
  * zeroed struct is not the defaults (it means effort 0 and every switch off), though a size left at 0
  * means its default. */
@@ -100,13 +103,25 @@ typedef struct gpress_options {
   uint8_t effort_is_engine_level; /* 1: for measuring: effort is the engine's own lossless level, 0..100,
                                      and nothing is lossy unless an override below is set */
   uint16_t photo_ppi;             /* lossy overrides, each 0 = what the effort says: photos shown at 5/4 of
-                                     this many pixels per inch or more are resampled down to it (never
-                                     below 150, whatever is asked) on their way to a JPEG, */
-  uint16_t art_ppi;               /* line art and scans likewise, without the JPEG (never below 300), */
-  uint8_t jpeg_quality;           /* and the JPEG quality, kept within 50 to 95, for a photo that is
-                                     resampled or stored without JPEG. art_ppi or jpeg_quality set makes
-                                     the output lossy at any effort; photo_ppi alone changes nothing below
-                                     effort 60, where no JPEG quality is set */
+                                     this many pixels per inch or more (the rule lossy_resample_margin) are
+                                     resampled down to it (never below the rule lossy_photo_floor, 150
+                                     unless it is set) on their way to a JPEG, */
+  uint16_t art_ppi;               /* line art and scans likewise, without the JPEG (never below
+                                     lossy_art_floor, 300), */
+  uint8_t jpeg_quality;           /* and the JPEG quality, kept within the rules lossy_quality_min and
+                                     lossy_quality_max (50 and 95), for a photo that is resampled or stored
+                                     without JPEG. art_ppi or jpeg_quality set makes the output lossy at any
+                                     effort; photo_ppi alone changes nothing below effort 60, where no JPEG
+                                     quality is set */
+  char rules[GPRESS_RULES_TEXT];  /* rules by name: the engine's tuning values, as text of the form
+                                     "name=value,name=value" with its closing NUL, such as
+                                     "lossy_min_saving=20" (strcpy or snprintf it in; every rule at once
+                                     fits). Empty for none, as gpress_options_default leaves it: every rule
+                                     then has its default. docs/reference.md ("Rules") lists the names with
+                                     their defaults and ranges. A name that is no rule, a value outside
+                                     the rule's range, or a text without its NUL fails the call with
+                                     GPRESS_ERR_BAD_ARGUMENT and a message that says which values the rule
+                                     takes */
 } gpress_options;
 
 typedef struct gpress_buffer {

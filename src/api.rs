@@ -42,7 +42,7 @@ use crate::pack;
 // Without the archive: its format's constants, which the options and `is_archive` use in every build.
 #[cfg(not(feature = "archive"))]
 use crate::off::pack;
-pub use crate::pdf::lossy::Lossy;
+pub use crate::pdf::lossy::{Lossy, LossyRules};
 use crate::pdf::rewrite;
 pub use crate::pdf::rewrite::Dropped;
 use crate::Feature;
@@ -71,7 +71,8 @@ pub const MAX_STORE_BUDGET: usize = crate::flate::deflate::MAX_STORE_BUDGET;
 /// 375 pixels per inch or more (5/4 of 300) is resampled down to 300, and a photo that is resampled, or stored without
 /// JPEG, becomes a JPEG at quality 85 (line art stays lossless Flate). 80 is the same with photos down to 150
 /// pixels per inch. 100 is as 80 at JPEG quality 75, and an existing JPEG photo is written again at that
-/// quality when that is at least a tenth smaller. Floors that hold at every lossy level: a photo is never
+/// quality when that is at least a tenth smaller. What holds at every lossy level (the numbers are the
+/// defaults of [`LossyRules`], which `Options::set_rule` can move within each rule's range): a photo is never
 /// taken below 150 pixels per inch at its displayed size, and line art (screenshots, charts, diagrams) and
 /// scans never below 300; 1-bit images and small images (at most 65,536 pixels) are never touched; a lossy
 /// result is kept only when it is clearly smaller than what the lossless path makes of the image and a
@@ -79,7 +80,7 @@ pub const MAX_STORE_BUDGET: usize = crate::flate::deflate::MAX_STORE_BUDGET;
 /// password) stays untouched, and an encrypted file keeps its encryption; a file that keeps earlier saves keeps
 /// them all, written losslessly (with `drop_history` the step works on the newest save, which goes on alone); a
 /// file whose object numbers are too high for the shorter lossy output (qpdf 12's bound, see the safety gate)
-/// gets the lossless one.
+/// gets that of the strongest lossy level below that is long enough, or else the lossless one.
 ///
 /// The archive ([`compress`]) is always lossless: there 40 and above all mean its strongest setting.
 ///
@@ -190,6 +191,12 @@ pub struct Options {
     /// [`Report::history_dropped`] lists them. A file where any save is signed, certified, PDF/A or PDF/X or
     /// has usage rights stays untouched either way.
     pub drop_history: bool,
+    /// Normal PDF: the rules the lossy image step works by, the same at every lossy effort and with a target
+    /// size: the least resolutions, the smallest image it touches, how much smaller a result must be, the
+    /// quality checks and so on. Each has a name, a default and a range ([`LossyRules`]); they are the group
+    /// `lossy_` of [`Options::set_rule`], as in `set_rule("lossy_photo_floor", 100)`. They decide nothing
+    /// while the step is off.
+    pub lossy_rules: LossyRules,
     /// Archive: store the streams of a file the empty user password opens decrypted (so they can be rebuilt
     /// and modelled) and encrypt them again on expand. Off, encrypted streams are stored as they are.
     pub decrypt: bool,
@@ -204,15 +211,17 @@ pub struct Options {
     /// (WebAssembly without a host clock) there is no budget.
     pub time_budget: Option<Duration>,
     /// Archive: the tuning values compress works by, each with a name, a default and a range
-    /// ([`ArchiveRules`]); change one with `archive_rules.set("plain_below", 0)`. Most are choices of compress
+    /// ([`ArchiveRules`]); they are the group `archive_` of [`Options::set_rule`], as in
+    /// `set_rule("archive_plain_below", 0)` (or `archive_rules.set("plain_below", 0)`). Most are choices of compress
     /// alone. The model's own values must be the same when the archive is expanded: with any of those changed,
     /// the archive carries them in its header and is version 10, which a build that reads only version 9
     /// refuses. Expand takes them from the archive, never from here (it reads `deadline_step` only).
     pub archive_rules: ArchiveRules,
     /// The values the two Flate encoders work by: how hard each of the engine's levels searches, where blocks
     /// end, and so on (efforts 0 and 20 are its levels 0 and 20, efforts 40 and above its level 100, the rows
-    /// `e100_`). Each has a name, a default and a range ([`FlateRules`]); change one with
-    /// `flate_rules.set("e100_depth", 4096)`. With none set the output is what it always was; any value in a
+    /// `e100_`). Each has a name, a default and a range ([`FlateRules`]); they are the group `flate_` of
+    /// [`Options::set_rule`], as in `set_rule("flate_e100_depth", 4096)` (or `flate_rules.set("e100_depth",
+    /// 4096)`). With none set the output is what it always was; any value in a
     /// rule's range gives a correct output, only smaller or larger, sooner or later.
     pub flate_rules: FlateRules,
 }
@@ -238,6 +247,7 @@ impl Default for Options {
             rewrite_encrypted: true,
             lossy: None,
             drop_history: false,
+            lossy_rules: LossyRules::default(),
             decrypt: true,
             use_existing_libraries: true,
             time_budget: None,
@@ -437,6 +447,7 @@ impl Options {
             rewrite_encrypted: self.rewrite_encrypted,
             lossy: self.lossy_settings(),
             drop_history: self.drop_history,
+            rules: self.lossy_rules,
             deadline: self.deadline(),
         }
     }

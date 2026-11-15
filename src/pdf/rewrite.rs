@@ -75,6 +75,8 @@ pub struct Options {
     /// `history`). With `true` only the newest is written, as a file of one save: what the earlier saves held
     /// and the newest doesn't is gone (`Stats::history_dropped` lists them).
     pub drop_history: bool,
+    /// The rules that step works by, the same whatever `lossy` asks for.
+    pub rules: super::lossy::LossyRules,
     /// Stop when this passes (checked between streams and Flate segments): the outcome is then `TimedOut`
     /// and nothing is returned. A rewrite that finishes gives the same bytes with or without a deadline.
     pub deadline: Deadline,
@@ -97,6 +99,7 @@ impl Default for Options {
             rewrite_encrypted: true,
             lossy: super::lossy::Lossy::OFF,
             drop_history: false,
+            rules: Default::default(),
             deadline: Deadline::NONE,
         }
     }
@@ -113,7 +116,8 @@ impl Options {
 /// The reason `rewrite` gives up when its deadline passes (see `Outcome::TimedOut`).
 const TIMED_OUT: &str = "out of time";
 /// What `rewrite` gives when only the lossy step made the file too short for its object numbers (qpdf 12's
-/// bound, below): `optimize` then writes the lossless output, which is longer. Never a reason a caller sees.
+/// bound, below): `optimize` then tries the lossy levels below the one asked for, strongest first, and then the
+/// lossless output, each longer than the one before. Never a reason a caller sees.
 const LOSSY_TOO_SHORT: &str = "object numbers far apart for the lossy output";
 
 #[derive(Debug, Default, Clone)]
@@ -179,9 +183,15 @@ pub struct Optimized {
 }
 
 pub fn optimize(input: &[u8], opt: &Options) -> Optimized {
+    use super::lossy::Lossy;
     let mut r = rewrite(input, opt);
-    if matches!(&r, Err(why) if why == LOSSY_TOO_SHORT) {
-        r = rewrite(input, &Options { lossy: super::lossy::Lossy::OFF, ..opt.clone() });
+    // The levels below the one asked for (none when the settings are no level: overrides set), then lossless,
+    // which never gives this reason.
+    let below = (1..=3).rev().skip_while(|&n| Lossy::level(n) != opt.lossy).skip(1).map(Lossy::level);
+    let mut below = below.chain([Lossy::OFF]);
+    while matches!(&r, Err(why) if why == LOSSY_TOO_SHORT) {
+        let Some(lossy) = below.next() else { break };
+        r = rewrite(input, &Options { lossy, ..opt.clone() });
     }
     match r {
         Ok((out, stats)) => {
@@ -1795,7 +1805,8 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
 
     // qpdf 12 reads an object only when its number is below a third of the file's length, this cross-reference
     // stream included, and objects keep their numbers: a file whose numbers are too high for its new length
-    // stays as it is, or, when the lossy step changed images, gets the lossless output.
+    // stays as it is, or, when the lossy step changed images, gets a weaker lossy level's output or the lossless one
+    // (`optimize`).
     if xn as usize >= out.len() / 3 {
         let lossy = stats.images_resampled + stats.images_to_jpeg + stats.jpegs_rewritten > 0;
         return Err(if lossy { LOSSY_TOO_SHORT } else { "object numbers far apart" }.into());

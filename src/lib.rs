@@ -35,6 +35,7 @@ mod off;
 pub mod pack;
 pub mod par;
 pub mod pdf;
+mod rules;
 
 // Without a feature, what the rest of the engine calls in its place (see `off`).
 #[cfg(not(feature = "fax"))]
@@ -46,7 +47,7 @@ use off::pack;
 
 pub use api::{
     compress, expand, is_archive, optimize, optimize_to_size, ArchiveRules, Compressed, Dropped, Effort, Error, Lossy,
-    Optimized, Options, Outcome, Picked, Report, VERSION,
+    LossyRules, Optimized, Options, Outcome, Picked, Report, VERSION,
 };
 pub use feature::Feature;
 pub use flate::FlateRules;
