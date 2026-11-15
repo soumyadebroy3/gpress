@@ -110,7 +110,8 @@ setting can move it within that range ([Rules](#rules), below):
   newest save alone, which the step works on; a file whose object numbers are too high for the shorter lossy
   output (qpdf 12 reads an object only when its number is below a third of the file's length) gets that of the
   strongest lossy level below that is long enough (so 80 and 100 can give a lower level's output), or else the
-  lossless one. No setting changes this.
+  lossless one (at once when `photo_ppi`, `art_ppi` or `jpeg_quality` make the lossy settings none of the
+  levels'). No setting changes this.
 
 What the six efforts make of the 907 test files and of a set of photographs is in the README's table
 ("Effort levels") and, with a row per file of the photo set, in bench/RESULTS.md ("Sizes at the six efforts").
@@ -154,8 +155,8 @@ These are the same at every lossy effort, and they change nothing at a lossless 
 | `lossy_min_block_psnr` | 26 | 1 | 99 | The same in the image's worst block. |
 | `lossy_psnr_block` | 16 | 8 | 64 | The side of those blocks, in pixels. |
 | `lossy_scan_cover` | 70 | 1 | 100 | An image drawn over this percent of its page or more is a scan: it gets the line-art floor whatever it looks like. |
-| `lossy_walk_operators` | 20,000,000 | 1 | 2,000,000,000 | Content operators the step may read in one file to measure where images are shown (decoding is charged to it too). Over it no image of the file is changed. |
-| `lossy_walk_draws` | 1,000,000 | 1 | 10,000,000 | Image and form draws it may follow in one file, a form's counted every time the form is drawn. Over it no image of the file is changed. |
+| `lossy_walk_operators` | 20,000,000 | 1 | 20,000,000 | Content operators the step may read in one file to measure where images are shown (decoding is charged to it too). Over it no image of the file is changed. |
+| `lossy_walk_draws` | 1,000,000 | 1 | 1,000,000 | Image and form draws it may follow in one file, a form's counted every time the form is drawn. Over it no image of the file is changed. |
 
 Why the ranges end where they do:
 
@@ -166,8 +167,11 @@ Why the ranges end where they do:
   saving under that a lossy output could be larger than the lossless one.
 - `lossy_min_pixels` cannot go under 10,000: a smaller image has too few samples to tell a photo from line
   art, and a few bytes decide whether its file grows.
-- `lossy_walk_operators` and `lossy_walk_draws` bound what a hostile file can make the step do. Their highest
-  values cost time, not safety, and `time_budget` still ends a run that takes too long.
+- `lossy_walk_operators` and `lossy_walk_draws` bound the memory and time a hostile file can make the step
+  take (the walk keeps every form's draws it has read, one for every 17 operators), so their highest values
+  are their defaults: a setting can lower them but not raise them.
+- `lossy_resample_margin` ends at 1,000 (an image shown at ten times its floor) and `lossy_quality_tries` at
+  10 (each try is a full encode and decode of the image): both are choices, not limits of the number.
 - The other lowest and highest values are where the number stops meaning anything (a percent, a JPEG quality,
   a block that is smaller than a JPEG's own or larger than a small image).
 

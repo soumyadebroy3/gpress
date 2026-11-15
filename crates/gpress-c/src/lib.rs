@@ -471,8 +471,10 @@ mod tests {
             assert_eq!((missed.code, missed.reached), (0, 0));
             assert!(missed.output.len > 0 && missed.output.len <= input.len());
             gpress_result_free(&mut missed);
-            // The picker sets the effort itself: the engine's level or a lossy override is refused.
-            for bad in [GpressOptions { effort_is_engine_level: 1, ..o }, GpressOptions { jpeg_quality: 80, ..o }] {
+            // The picker sets the effort itself: the engine's level or a lossy override is refused, and so is a
+            // bad rule.
+            for bad in [GpressOptions { effort_is_engine_level: 1, ..o }, GpressOptions { jpeg_quality: 80, ..o }, bad]
+            {
                 let mut r = gpress_optimize_to_size(input.as_ptr(), input.len(), 0, &bad);
                 assert_eq!(r.code, 5);
                 assert!(r.output.data.is_null() && !r.message.is_null());

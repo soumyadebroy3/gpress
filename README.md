@@ -210,7 +210,8 @@ setting can move it within that range ([Rules](docs/reference.md#rules) in the r
   newest save alone, which the step works on; a file whose object numbers are too high for the shorter lossy
   output (qpdf 12 reads an object only when its number is below a third of the file's length) gets that of the
   strongest lossy level below that is long enough (so 80 and 100 can give a lower level's output), or else the
-  lossless one. No setting changes this.
+  lossless one (at once when `photo_ppi`, `art_ppi` or `jpeg_quality` make the lossy settings none of the
+  levels'). No setting changes this.
 
 Small print on a picture makes it line art only where the print's edges step 64 levels of brightness or more
 from the picture around it: black 6 and 8 point labels on a dark part of a photograph (a blue sky, dark rock)

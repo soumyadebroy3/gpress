@@ -28,7 +28,7 @@ The sizes are all outputs together in bytes and their share of the input, one th
 - A lossy result is kept only when it is at most nine tenths of the image's lossless size and, for a JPEG, only when it decodes close to the samples it was made from. Otherwise the image goes through the lossless path.
 - A file the safety gate leaves untouched (signed, certified, PDF/A, PDF/X, needing a password...) stays untouched, and an encrypted file keeps its encryption.
 - A file that keeps earlier saves keeps them all, written losslessly (with `--drop-history` the step works on the newest save, which then goes on alone).
-- A file whose object numbers are too high for the shorter lossy output (qpdf 12 reads an object only when its number is below a third of the file's length) gets that of the strongest lossy level below that is long enough (so 80 and 100 can give a lower level's output), or else the lossless one.
+- A file whose object numbers are too high for the shorter lossy output (qpdf 12 reads an object only when its number is below a third of the file's length) gets that of the strongest lossy level below that is long enough (so 80 and 100 can give a lower level's output), or else the lossless one (at once when `--photo-ppi`, `--art-ppi` or `--jpeg-quality` make the lossy settings none of the levels').
 
 The floors, the 5/4, the 65,536 pixels and the nine tenths above are defaults: the rules `lossy_photo_floor` (down to 72), `lossy_art_floor` (down to 150), `lossy_resample_margin`, `lossy_min_pixels` and `lossy_min_saving` move them (see [Settings](#settings-every-tuning-value-by-name) below).
 

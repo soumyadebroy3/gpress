@@ -76,11 +76,12 @@ crate::rules::rule_group! {
         /// it looks like.
         scan_cover = 70, 1, 100;
         /// Content operators (and one for every 64 bytes decoded) the page walk may read in one file; over it
-        /// no image of the file is reduced.
-        walk_operators = 20_000_000, 1, 2_000_000_000;
+        /// no image of the file is reduced. It bounds the walk's memory and time against a hostile file, so it
+        /// can be lowered but not raised.
+        walk_operators = 20_000_000, 1, 20_000_000;
         /// Image and form draws the walk may make in one file, a form's counted every time the form is drawn;
-        /// over it no image of the file is reduced.
-        walk_draws = 1_000_000, 1, 10_000_000;
+        /// over it no image of the file is reduced. Like `walk_operators`, it can be lowered but not raised.
+        walk_draws = 1_000_000, 1, 1_000_000;
     }
 }
 
@@ -108,7 +109,7 @@ crate::rules::rule_group! {
 
 use super::filters::{self, chain, decode_stage, is_general, Stage};
 use super::images;
-use super::object::{to_bytes, Dict, Obj, Stream};
+use super::object::{Dict, Obj, Stream};
 use super::place::{self, Shown};
 use super::rewrite::{image_level, png_parms, predictor_sample, Options};
 use crate::clock::Deadline;
@@ -155,11 +156,7 @@ pub fn reduce(objs: &mut BTreeMap<u32, (u16, Obj)>, trailer: &Dict, opt: &Option
     let made = par::map(pool, images.len(), Some(&order), |k| {
         let (n, img) = &images[k];
         // Out of time: nothing more is made (the whole rewrite is given up after the step).
-        let made = if opt.deadline.passed() {
-            Err("out of time")
-        } else {
-            candidate(img, opt).and_then(|c| smaller(c, img.s))
-        };
+        let made = if opt.deadline.passed() { Err("out of time") } else { candidate(img, opt) };
         if dbg {
             let (w, h, stored) = (img.width, img.height, img.s.data.len());
             match &made {
@@ -181,17 +178,6 @@ pub fn reduce(objs: &mut BTreeMap<u32, (u16, Obj)>, trailer: &Dict, opt: &Option
         s.data = c.data;
     }
     done
-}
-
-/// The candidate when it is smaller than the stream it replaces with both dictionaries counted: the
-/// /DecodeParms of a predictor can cost more than resampling a nearly blank image saves.
-fn smaller(c: Candidate, s: &Stream) -> Result<Candidate, &'static str> {
-    let size = |d: &Dict, data: &[u8]| to_bytes(&Obj::Dict(d.clone())).len() + data.len();
-    if size(&c.dict, &c.data) < size(&s.dict, &s.data) {
-        Ok(c)
-    } else {
-        Err("not smaller with its dictionary")
-    }
 }
 
 /// What an object refers to: a reference followed once, anything else as it is.
@@ -857,60 +843,6 @@ mod tests {
     }
 
     #[test]
-    fn a_result_counts_with_its_dictionary() {
-        let s = Stream { dict: Dict::default(), data: vec![0; 200] };
-        let of = |parms: Option<Dict>, len: usize| Candidate {
-            dict: new_dict(&s.dict, 3, 4, b"FlateDecode", parms, len),
-            data: vec![0; len],
-            resampled: true,
-            to_jpeg: false,
-            what: "",
-        };
-        // The entries a new stream needs are about 50 bytes, and a predictor's /DecodeParms nearly 70 more:
-        // 100 bytes of data are smaller than the 200 they replace without it, and not with it.
-        assert!(smaller(of(None, 100), &s).is_ok() && smaller(of(None, 180), &s).is_err());
-        let parms = || Some(png_parms(&images::Geometry { colors: 3, bpc: 8, columns: 3 }));
-        assert!(smaller(of(parms(), 100), &s).is_err() && smaller(of(parms(), 40), &s).is_ok());
-    }
-
-    /// The image that showed why a result counts with its dictionary: 3 by 5 pixels shown a point square (which
-    /// `min_pixels` keeps out, so the rule is set past its range here). Resampled to 3 by 4 its data is a
-    /// tenth smaller, and with the predictor's /DecodeParms the stream would be larger than the one it replaces.
-    #[test]
-    fn a_small_image_does_not_grow_by_its_dictionary() {
-        let mut s = 0x9e37_79b9_7f4a_7c15u64;
-        let mut px = Vec::new();
-        for i in 0..15 {
-            for c in 0..3 {
-                px.push(
-                    (40 + (i % 3) * (150 - 30 * c) / 3 + (i / 3) * (50 + 20 * c) / 5 + (rng(&mut s) % 9) as usize)
-                        as u8,
-                );
-            }
-        }
-        let mut dict = Dict::default();
-        dict.set(b"Subtype", Obj::Name(b"Image".to_vec()));
-        dict.set(b"Width", Obj::Int(3));
-        dict.set(b"Height", Obj::Int(5));
-        dict.set(b"ColorSpace", Obj::Name(b"DeviceRGB".to_vec()));
-        dict.set(b"BitsPerComponent", Obj::Int(8));
-        dict.set(b"Filter", Obj::Name(b"FlateDecode".to_vec()));
-        let stream = Stream { dict, data: flate::deflate_zlib(&px, &flate::Options::quick()) };
-        let mut opt = Options { lossy: Lossy { photo_ppi: 1, art_ppi: 1, ..Lossy::level(3) }, ..Options::default() };
-        opt.rules = LossyRules { min_pixels: 1, photo_floor: 72, art_floor: 150, resample_margin: 100, ..opt.rules };
-        let shown = Shown { width: 1.0 / 72.0, height: 1.0 / 72.0, scan: false };
-        let img = eligible(&stream, shown, &BTreeMap::new(), &opt).expect("an image the step works on");
-        let c = candidate(&img, &opt).expect("resampled, and a tenth smaller");
-        assert!(
-            c.data.len() < stream.data.len() && c.dict.has(b"DecodeParms"),
-            "{} of {}",
-            c.data.len(),
-            stream.data.len()
-        );
-        assert_eq!(smaller(c, &stream).err(), Some("not smaller with its dictionary"));
-    }
-
-    #[test]
     fn the_rules_default_to_the_values_that_were_fixed() {
         let was = [65_536, 150, 300, 125, 10, 50, 95, 10, 3, 35, 26, 16, 70, 20_000_000, 1_000_000];
         let d = LossyRules::default();
@@ -953,6 +885,28 @@ mod tests {
         // Every sample off by 5: 25 everywhere.
         let c = vec![105u8; w * h];
         assert_eq!(errors(&a, &c, w, h, 16), (2500, 2500));
+    }
+
+    /// `lossy_psnr_block` decides what a local flaw weighs: 8 by 8 samples 20 off (on a JPEG block, so the JPEG
+    /// keeps them) are an error of 400 in a block of 8, over the 163 that 26 dB allows, and a quarter of that in a
+    /// block of 16. Over the whole image they are 6.25, within the 20.6 of 35 dB.
+    #[cfg(feature = "jpeg")]
+    #[test]
+    fn the_block_side_decides_what_a_local_flaw_weighs() {
+        let (w, h) = (64, 64);
+        let y = Plane { w, h, px: vec![100; w * h] };
+        let mut flawed = y.clone();
+        for row in 8..16 {
+            flawed.px[row * w + 8..row * w + 16].fill(120);
+        }
+        let coded = jpeg::encode(std::slice::from_ref(&flawed), 95, Deadline::NONE).unwrap();
+        let side = |s: u64| {
+            let mut opt = Options::default();
+            assert!(opt.rules.set("psnr_block", s));
+            close(&coded, &y, &opt)
+        };
+        assert_eq!(side(8), Err("quality: its worst block"));
+        assert!(side(16).is_ok() && side(64).is_ok());
     }
 
     #[cfg(feature = "jpeg")]

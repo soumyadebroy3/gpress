@@ -214,8 +214,9 @@ fn operand(data: &[u8], lx: &mut Lexer, depth: usize) -> Option<Obj> {
 }
 
 /// The `Do` operators of a content, or None when it is not measured. Each operator read is taken from `left`,
-/// and 16 more for each `Do` kept; a content holds at most `draws` of them (`walk_draws`), which bounds what
-/// the walk holds in memory. The time is a pass over the bytes (their decoding is paid for in `Walk::decoded`).
+/// and 16 more for each `Do` kept, which bounds what the walk holds in memory at about a million of them
+/// (`walk_operators` is at most 20,000,000); a content holds at most `draws` of them (`walk_draws`). The time
+/// is a pass over the bytes (their decoding is paid for in `Walk::decoded`).
 fn read(data: &[u8], left: &mut u64, draws: usize) -> Option<Dos> {
     let mut lx = Lexer::new(data, 0);
     let (mut ctm, mut saved, mut args, mut dos) = (ID, Vec::new(), Vec::new(), Vec::new());

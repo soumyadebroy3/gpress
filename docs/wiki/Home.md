@@ -25,7 +25,7 @@ In the owner's order:
 | --- | --- | --- |
 | Call | `optimize` | `compress` and `expand` (`pack` and `unpack` on the command line) |
 | Takes | a PDF | any file, a PDF above all |
-| Gives | a smaller PDF that standard readers open. Efforts 0, 20 and 40 are lossless; at 60, 80 and 100 images may change, within fixed floors | an archive that restores the original byte for byte |
+| Gives | a smaller PDF that standard readers open. Efforts 0, 20 and 40 are lossless; at 60, 80 and 100 images may change, within floors | an archive that restores the original byte for byte |
 | Checked | the output is read back and compared with the input before it is returned | the archive is restored and compared before it is returned; if that check ever fails, a simpler model-only archive is written instead (not checked again) |
 
 A file `optimize` can't make smaller, or can't safely touch (a signed file, PDF/A, an encrypted file that needs a password, a damaged one), comes back unchanged with the reason.
