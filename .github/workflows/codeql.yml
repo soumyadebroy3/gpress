@@ -24,6 +24,9 @@ jobs:
     permissions:
       contents: read
       security-events: write
+    env:
+      # Temporary diagnostic: report every result, not only those on the pull request's changed lines.
+      CODEQL_ACTION_DIFF_INFORMED_QUERIES: false
     strategy:
       fail-fast: false
       matrix:
@@ -39,3 +42,12 @@ jobs:
       - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           category: /language:${{ matrix.language }}
+      # Temporary diagnostic: print every result with its rule's security severity, for a session that cannot read alerts.
+      - name: List the results
+        run: |
+          jq -r '.runs[] | . as $run | .results[] |
+            (.rule.toolComponent.index // null) as $c | (.rule.index // .ruleIndex) as $i |
+            (try (if $c == null then $run.tool.driver.rules[$i] else $run.tool.extensions[$c].rules[$i] end) catch null) as $r |
+            [.ruleId, ($r.properties["security-severity"] // "-"), ($r.properties["problem.severity"] // .level // "-"),
+             .locations[0].physicalLocation.artifactLocation.uri, (.locations[0].physicalLocation.region.startLine|tostring),
+             (.message.text | gsub("\\s+"; " ") | .[0:220])] | @tsv' ../results/*.sarif
