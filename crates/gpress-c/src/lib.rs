@@ -12,9 +12,9 @@ use std::time::Duration;
 /// (a test holds that).
 pub const GPRESS_RULES_TEXT: usize = 16384;
 
-/// Options, laid out for C (the fields of `gpress::Options` but `store_budget`, which stays at its default, and
-/// the groups of rules, `lossy_rules`, `flate_rules` and `archive_rules`, which the `rules` text sets by name;
-/// `include/gpress.h` describes each).
+/// Options, laid out for C (the fields of `gpress::Options` but the groups of rules, `lossy_rules`,
+/// `flate_rules`, `archive_rules` and `rewrite_rules`, which the `rules` text sets by name; `include/gpress.h`
+/// describes each).
 /// Fill one with `gpress_options_default` and change what you need: a zeroed struct is not the defaults
 /// (it means effort 0 and every switch off), though every size field left at 0 means its default.
 #[repr(C)]
@@ -71,6 +71,9 @@ pub struct GpressOptions {
     /// (`gpress::Options::set_rules`). Empty (a first byte of 0, as in a zeroed struct): none. A name that is
     /// no rule, a value outside the rule's range, or a text without its NUL fails the call with code 5.
     pub rules: [c_char; GPRESS_RULES_TEXT],
+    /// Normal PDF: bytes of encoded outputs one file keeps, so that a stream another one repeats is encoded
+    /// once (0 = 2 MiB; at most 1 GiB). Never changes the output. (Last, so that no other field moved.)
+    pub store_budget: u64,
 }
 
 /// A buffer gpress allocated. Free it with `gpress_free`; never with `free()`.
@@ -140,6 +143,7 @@ fn options_from(o: Option<&GpressOptions>) -> Result<gpress::Options, gpress::Er
         opt.max_input = size(o.max_input, opt.max_input);
         opt.max_stream = size(o.max_stream, opt.max_stream);
         opt.max_stream_archive = size(o.max_stream_archive, opt.max_stream_archive);
+        opt.store_budget = size(o.store_budget, opt.store_budget);
         if o.max_decoded > 0 {
             opt.max_decoded = o.max_decoded;
         }
@@ -236,6 +240,7 @@ pub unsafe extern "C" fn gpress_options_default(out: *mut GpressOptions) {
         art_ppi: 0,
         jpeg_quality: 0,
         rules: [0; GPRESS_RULES_TEXT],
+        store_budget: d.store_budget as u64,
     };
     // SAFETY: `out` is non-null and the caller owns the struct it points to.
     unsafe { ptr::write(out, o) };
@@ -423,6 +428,8 @@ mod tests {
         assert_eq!(from(None), Ok(gpress::Options::default()));
         let z = from(Some(&zero)).unwrap();
         assert_eq!((z.effort.level(), z.engine_effort, z.lossy, z.check()), (0, None, None, Ok(())));
+        assert_eq!(z.store_budget, gpress::Options::default().store_budget, "0 is the default");
+        assert_eq!(from(Some(&GpressOptions { store_budget: 4096, ..o })).unwrap().store_budget, 4096);
         let engine = from(Some(&GpressOptions { effort: 50, effort_is_engine_level: 1, ..o })).unwrap();
         assert_eq!((engine.engine_effort, engine.rewrite().effort, engine.rewrite().lossy), (Some(50), 50, Lossy::OFF));
         let photos = from(Some(&GpressOptions { effort: 80, photo_ppi: 200, ..o })).unwrap();

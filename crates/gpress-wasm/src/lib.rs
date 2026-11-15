@@ -224,6 +224,7 @@ fn optimized(r: gpress::Optimized) -> (Vec<u8>, i32, String) {
 
 /// A smaller PDF (outcome 1) or the input untouched (outcome 2, message says why). `photo_ppi`, `art_ppi`
 /// and `jpeg_quality` are the lossy overrides: 0 (or left out by a JavaScript caller) is what the effort says.
+/// `store_budget_mb` is `store_budget` in MiB (0 or left out: the library's default).
 ///
 /// # Safety
 /// See `input`.
@@ -241,22 +242,26 @@ pub unsafe extern "C" fn gpress_optimize(
     photo_ppi: u32,
     art_ppi: u32,
     jpeg_quality: u32,
+    store_budget_mb: u32,
 ) -> i32 {
     let data = input(ptr, len);
-    let opt = options(effort, max_input_mb, max_stream_mb, objects_per_stream, flags).lossy_overrides(
+    let mut opt = options(effort, max_input_mb, max_stream_mb, objects_per_stream, flags).lossy_overrides(
         photo_ppi.min(u16::MAX as u32) as u16,
         art_ppi.min(u16::MAX as u32) as u16,
         jpeg_quality.min(u8::MAX as u32) as u8,
     );
+    opt.store_budget = mib(store_budget_mb, opt.store_budget);
     run(|| Ok(optimized(gpress::optimize(data, &opt)?)))
 }
 
 /// A PDF of at most `target` bytes at the lowest effort that reaches it, or the smallest of the six efforts
 /// (`gpress::optimize_to_size`). The outcome is `gpress_optimize`'s (1 or 2) with the effort that made the
 /// output in bits 8 to 15 and bit 16 set when it reached the target. `FLAG_ENGINE_EFFORT` is refused (code 5).
+/// `store_budget_mb` as in `gpress_optimize`.
 ///
 /// # Safety
 /// See `input`.
+#[allow(clippy::too_many_arguments)]
 #[no_mangle]
 pub unsafe extern "C" fn gpress_optimize_to_size(
     ptr: *const u8,
@@ -266,9 +271,11 @@ pub unsafe extern "C" fn gpress_optimize_to_size(
     max_stream_mb: u32,
     objects_per_stream: u32,
     flags: u32,
+    store_budget_mb: u32,
 ) -> i32 {
     let data = input(ptr, len);
-    let opt = options(0, max_input_mb, max_stream_mb, objects_per_stream, flags);
+    let mut opt = options(0, max_input_mb, max_stream_mb, objects_per_stream, flags);
+    opt.store_budget = mib(store_budget_mb, opt.store_budget);
     run(|| {
         let p = gpress::optimize_to_size(data, target as u64, &opt)?;
         let (data, outcome, msg) = optimized(p.result);
@@ -285,8 +292,9 @@ fn budget(v: u32, default: u64) -> u64 {
     }
 }
 
-/// The gpress archive (outcome 1, or 2 when it had to be stored as it was). `max_decoded_mb` is the
-/// archive's decoded-bytes budget (0 = the library's default): streams past it are stored as they are.
+/// The gpress archive (outcome 1, or 2 when it had to be stored as it was). `max_stream_mb` is the archive's
+/// stream limit (`max_stream_archive`) and `max_decoded_mb` its decoded-bytes budget (0 = the library's
+/// default for either): streams past them are stored as they are.
 ///
 /// # Safety
 /// See `input`.
@@ -434,16 +442,16 @@ mod tests {
             // Not a PDF: untouched with a reason.
             let r = gpress_alloc(5);
             std::ptr::copy_nonoverlapping(b"hello".as_ptr(), r, 5);
-            assert_eq!(gpress_optimize(r, 5, 100, 0, 0, 0, FLAG_NO_JBIG2 | FLAG_IGNORE_CONFORMANCE, 0, 0, 0), 0);
+            assert_eq!(gpress_optimize(r, 5, 100, 0, 0, 0, FLAG_NO_JBIG2 | FLAG_IGNORE_CONFORMANCE, 0, 0, 0, 0), 0);
             assert_eq!(gpress_outcome(), 2);
             assert!(gpress_message_len() > 0);
             // A target size: the outcome also carries the effort picked and whether the target was reached.
             // Five bytes fit in five (effort 0, the first tried) and never in four (the smallest of the six).
-            assert_eq!(gpress_optimize_to_size(r, 5, 5, 0, 0, 0, 0), 0);
+            assert_eq!(gpress_optimize_to_size(r, 5, 5, 0, 0, 0, 0, 0), 0);
             assert_eq!(gpress_outcome(), 2 | 1 << 16);
-            assert_eq!(gpress_optimize_to_size(r, 5, 4, 0, 0, 0, 0), 0);
+            assert_eq!(gpress_optimize_to_size(r, 5, 4, 0, 0, 0, 0, 0), 0);
             assert_eq!((gpress_outcome() & 0xff, gpress_outcome() >> 16, gpress_out_len()), (2, 0, 5));
-            assert_eq!(gpress_optimize_to_size(r, 5, 5, 0, 0, 0, FLAG_ENGINE_EFFORT), 5);
+            assert_eq!(gpress_optimize_to_size(r, 5, 5, 0, 0, 0, FLAG_ENGINE_EFFORT, 0), 5);
             gpress_free_input(r, 5);
         }
         assert_eq!(gpress_archive_version(), 9);

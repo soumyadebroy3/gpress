@@ -55,11 +55,11 @@ fn marker(input: &[u8]) -> Option<&'static str> {
 
 /// The file's saves, oldest first, when it has more than one and they may be read. An earlier save the newest doesn't
 /// link is allowed: it is dropped.
-fn find(input: &[u8]) -> Result<Vec<Save>, String> {
+fn find(input: &[u8], rules: &RewriteRules) -> Result<Vec<Save>, String> {
     if let Some(why) = marker(input) {
         return Err(why.into());
     }
-    let saves = xref::saves(input)?;
+    let saves = xref::saves_at_most(input, rules.size(R::most_saves))?;
     // One save in a layout `open_with` doesn't take for one (a hybrid file, say): left as it is, as before.
     if saves.len() < 2 {
         return Err(xref::KEEPS.into());
@@ -69,8 +69,10 @@ fn find(input: &[u8]) -> Result<Vec<Save>, String> {
     if saves.iter().any(|s| s.lacks_key) {
         return Err(LACKS.into());
     }
-    // Each save is read as a file of its own: together they are at most 16 times the input.
-    if saves.iter().map(|s| s.end as u64).sum::<u64>() > (input.len() as u64).saturating_mul(16) {
+    // Each save is read as a file of its own: together they are at most 16 times the input (the rule
+    // `saves_length_factor`).
+    let most = (input.len() as u64).saturating_mul(rules.at(R::saves_length_factor));
+    if saves.iter().map(|s| s.end as u64).sum::<u64>() > most {
         return Err(xref::TOO_MANY.into());
     }
     Ok(saves)
@@ -187,7 +189,7 @@ fn read(
 /// Every save of a file that keeps earlier ones, read and checked on its own, and the list of the earlier saves, which
 /// are dropped. `newest` is what the whole file's trailer reaches.
 pub(super) fn dropped(input: &[u8], opt: &Options, newest: &Reached) -> Result<Vec<Dropped>, String> {
-    let saves = find(input)?;
+    let saves = find(input, &opt.rewrite_rules)?;
     let mut budget = Budget::new(input, opt);
     let mut out = Vec::new();
     let mut start = 0;

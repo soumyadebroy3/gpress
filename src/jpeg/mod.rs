@@ -43,6 +43,16 @@ pub const MAX_LEN: usize = 1 << 30;
 
 /// The same JPEG with optimal Huffman tables, checked, when that is smaller.
 pub fn optimize(d: &[u8]) -> Result<Vec<u8>, Refused> {
+    optimize_with(d, 1, ALL_ORDERS)
+}
+
+/// Every order of code words `encode_scan` knows, as the bits of `optimize_with`'s `orders`.
+const ALL_ORDERS: u8 = 7;
+
+/// `optimize` by the rewrite's rules: the new JPEG must save at least `min_saving` bytes (1 or more), and of
+/// the orders of code words only those in `orders` are tried (bits: 1 by symbol value, 2 most frequent first,
+/// 4 fewest one bits; none set: all three).
+pub fn optimize_with(d: &[u8], min_saving: u64, orders: u8) -> Result<Vec<u8>, Refused> {
     if d.len() > MAX_LEN {
         return Err(Refused("too large"));
     }
@@ -53,11 +63,11 @@ pub fn optimize(d: &[u8]) -> Result<Vec<u8>, Refused> {
             match p {
                 Piece::Keep(r) => out.extend_from_slice(&d[r.clone()]),
                 Piece::Tables => {}
-                Piece::Scan(i) => encode_scan(&j, &j.scans[*i], &mut out).map_err(Refused)?,
+                Piece::Scan(i) => encode_scan(&j, &j.scans[*i], orders, &mut out).map_err(Refused)?,
             }
         }
     }
-    if out.len() >= d.len() {
+    if out.len() as u64 + min_saving.max(1) > d.len() as u64 {
         return Err(Refused("no saving"));
     }
     if !equivalent(d, &out) {
@@ -66,8 +76,9 @@ pub fn optimize(d: &[u8]) -> Result<Vec<u8>, Refused> {
     Ok(out)
 }
 
-/// One scan with optimal tables: the table segment, the scan header as it was, and the coded data.
-fn encode_scan(j: &Jpeg, s: &Scan, out: &mut Vec<u8>) -> Result<(), &'static str> {
+/// One scan with optimal tables: the table segment, the scan header as it was, and the coded data. `orders`:
+/// see `optimize_with`.
+fn encode_scan(j: &Jpeg, s: &Scan, orders: u8, out: &mut Vec<u8>) -> Result<(), &'static str> {
     let mut freq = [[0u64; 256]; 9]; // the last for restart markers, not counted
     let mut t = Tokens::new(j, s)?;
     let mut buf = Tokens::buffer();
@@ -91,8 +102,12 @@ fn encode_scan(j: &Jpeg, s: &Scan, out: &mut Vec<u8>) -> Result<(), &'static str
     // The lengths are optimal; which symbol of a length gets which code word decides how many 0xFF bytes come
     // out (each costs a stuffed 0x00). Every order gives the same bits otherwise, so one pass writes the first
     // and counts the 0xFF bytes of the others; another order is written only when it has fewer.
+    let orders = if orders & ALL_ORDERS == 0 { ALL_ORDERS } else { orders };
     let mut specs: Vec<Vec<Option<Spec>>> = Vec::with_capacity(3);
-    for order in [Order::Value, Order::Frequent, Order::FewestOnes] {
+    for (bit, order) in [Order::Value, Order::Frequent, Order::FewestOnes].into_iter().enumerate() {
+        if orders >> bit & 1 == 0 {
+            continue;
+        }
         let mut sp: Vec<Option<Spec>> = vec![None; 8];
         for &slot in &used {
             sp[slot] = Some(huffman::table(&lens[slot], &freq[slot], order).ok_or("no valid table")?);
@@ -100,7 +115,8 @@ fn encode_scan(j: &Jpeg, s: &Scan, out: &mut Vec<u8>) -> Result<(), &'static str
         specs.push(sp);
     }
     let start = out.len();
-    let ff = write_scan(j, s, &[&specs[0], &specs[1], &specs[2]], out)?;
+    let all: Vec<&[Option<Spec>]> = specs.iter().map(|sp| sp.as_slice()).collect();
+    let ff = write_scan(j, s, &all, out)?;
     let best = (0..ff.len()).min_by_key(|&o| (ff[o], o)).ok_or("no table order")?;
     if best != 0 {
         out.truncate(start);

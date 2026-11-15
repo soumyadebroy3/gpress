@@ -6,6 +6,7 @@
 use crate::api::{ArchiveRules, Error, Options};
 use crate::flate::FlateRules;
 use crate::pdf::lossy::LossyRules;
+use crate::pdf::rules::RewriteRules;
 
 /// A group of rules: a struct with one `u64` field a rule, today's values as its default, and the table,
 /// `set` and `get` every group has. One line a rule, `name = default, lowest, highest;`, after its doc comment.
@@ -66,6 +67,7 @@ const GROUPS: &[Group] = &[
     ("lossy_", LossyRules::RULES, |o, n, v| o.lossy_rules.set(n, v), |o, n| o.lossy_rules.get(n)),
     ("flate_", FlateRules::RULES, |o, n, v| o.flate_rules.set(n, v), |o, n| o.flate_rules.get(n)),
     ("archive_", ArchiveRules::RULES, |o, n, v| o.archive_rules.set(n, v), |o, n| o.archive_rules.get(n)),
+    ("rewrite_", RewriteRules::RULES, |o, n, v| o.rewrite_rules.set(n, v), |o, n| o.rewrite_rules.get(n)),
 ];
 
 /// The group `name` belongs to, and the name without the group's prefix.

@@ -8,7 +8,7 @@ pub mod pdf {
     pub type Resolve<'a> = &'a dyn Fn(&Obj) -> Option<Obj>;
 
     /// Never a JBIG2 stream.
-    pub fn jbig2_candidate(_s: &Stream, _resolve: Resolve) -> Option<(Dict, Vec<u8>)> {
+    pub fn jbig2_candidate(_s: &Stream, _resolve: Resolve, _min_saving: u64) -> Option<(Dict, Vec<u8>)> {
         None
     }
 
@@ -23,7 +23,7 @@ pub mod pdf {
     }
 
     /// Never a JBIG2 stream.
-    pub fn bilevel_candidate(_s: &Stream, _bits: &[u8], _best: usize) -> Option<(Dict, Vec<u8>)> {
+    pub fn bilevel_candidate(_s: &Stream, _bits: &[u8], _best: usize, _min_saving: u64) -> Option<(Dict, Vec<u8>)> {
         None
     }
 

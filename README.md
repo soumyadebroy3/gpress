@@ -345,9 +345,9 @@ the size limits to what the host can afford. Every buffer it hands out is freed 
 `gpress_free` / `gpress_free_message`, each given the field's address), which are safe on null and on a result
 already freed: a free clears what it freed, so freeing the same result twice, or a part before the whole
 result, is harmless by construction. An empty output is a null pointer with length 0. The options struct has the same
-fields as the Rust `Options` but `store_budget`, which stays at its default (fill it with `gpress_options_default`
-first; a size left at 0 means its default); the groups of rules (`lossy_rules`, `flate_rules`, `archive_rules`)
-are the text `rules`, by name (see [Rules](docs/reference.md#rules)); `engine_effort` is the switch
+fields as the Rust `Options` (fill it with `gpress_options_default` first; a size left at 0 means its
+default); the groups of rules (`lossy_rules`, `flate_rules`, `archive_rules`, `rewrite_rules`) are the text
+`rules`, by name (see [Rules](docs/reference.md#rules)); `engine_effort` is the switch
 `effort_is_engine_level`, and `lossy` the three overrides `photo_ppi`, `art_ppi` and `jpeg_quality` (0: what the
 effort says). `gpress_optimize_to_size` takes a target size as well and picks the effort (see [Options](#options)).
 [`crates/gpress-c/examples/roundtrip.c`](crates/gpress-c/examples/roundtrip.c) is a complete program, and

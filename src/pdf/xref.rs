@@ -751,7 +751,7 @@ pub fn decode_fully(dict: &Dict, data: &[u8], limit: usize) -> Option<Vec<u8>> {
 pub const KEEPS: &str = "keeps earlier revisions (incremental updates)";
 pub const TOO_MANY: &str = "keeps earlier revisions: too many to check for its size";
 
-/// The most saves a file is taken apart into.
+/// The most saves a file is taken apart into, unless the rewrite's rule `most_saves` says otherwise.
 pub const MOST_SAVES: usize = 64;
 
 /// How deep the arrays and dictionaries in a trailer may nest for its file to be taken apart.
@@ -808,9 +808,14 @@ fn rows_agree<'r>(rows: impl Iterator<Item = &'r (u32, Entry)>) -> bool {
 ///
 /// No object is loaded. Each section is read once, all of them within the rows a file of this size may have.
 pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
+    saves_at_most(data, MOST_SAVES)
+}
+
+/// `saves` with at most `most` saves instead of `MOST_SAVES` (the rewrite's rule `most_saves`); more is an error.
+pub fn saves_at_most(data: &[u8], most: usize) -> Result<Vec<Save>, &'static str> {
     // Every `startxref`: where it is, the number after it, the first `%%EOF` after that, and where that save ends.
-    let starts = places(data, b"startxref", MOST_SAVES + 2);
-    if starts.len() > MOST_SAVES + 1 {
+    let starts = places(data, b"startxref", most.saturating_add(2));
+    if starts.len() > most.saturating_add(1) {
         return Err(TOO_MANY);
     }
     let mut marks: Vec<(usize, usize, usize, usize)> = Vec::new();
@@ -962,7 +967,7 @@ pub fn saves(data: &[u8]) -> Result<Vec<Save>, &'static str> {
     if revisions.last() != Some(&0) {
         return Err(KEEPS);
     }
-    if out.len() > MOST_SAVES {
+    if out.len() > most {
         return Err(TOO_MANY);
     }
     // Poppler, and PDFium when it loads a file the way Chrome does, take a linearised file from its first-page

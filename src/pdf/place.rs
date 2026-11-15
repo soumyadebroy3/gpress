@@ -412,7 +412,7 @@ impl<'a> Walk<'a> {
     /// The dictionary counts by its written size, as the filter chain is built from all of it each time.
     fn decoded(&mut self, s: &'a Stream) -> Option<Cow<'a, [u8]>> {
         let mut written = Vec::new();
-        Writer { out: &mut written }.dict(&s.dict);
+        Writer { out: &mut written, hex: false }.dict(&s.dict);
         // Two lengths of vectors: the sum cannot overflow.
         if !spend(&mut self.left, (s.data.len() + written.len()) as u64 / 64 + 1) {
             return None;

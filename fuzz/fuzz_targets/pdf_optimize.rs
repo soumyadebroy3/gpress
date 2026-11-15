@@ -9,7 +9,10 @@ fuzz_target!(|data: &[u8]| {
     // Lossless, with the lossy image step at its strongest level, and with every floor asked lower and a value
     // for each rule taken from the input's last bytes: 0 leaves the default, any other byte is a point of the
     // rule's range, 1 its lowest value and 255 its highest.
-    let mut ruled = opt.clone().lossy(Some(gpress::Lossy { photo_ppi: 1, art_ppi: 1, ..gpress::Lossy::level(3) }));
+    // The rules count at the engine level the first byte picks: the fast path, the bridge to 20 or the budgets.
+    let level = [0, 15, 40][usize::from(data.first().copied().unwrap_or(0)) % 3];
+    let mut ruled = opt.clone().engine_effort(Some(level));
+    ruled = ruled.lossy(Some(gpress::Lossy { photo_ppi: 1, art_ppi: 1, ..gpress::Lossy::level(3) }));
     for ((name, _, lowest, highest), &b) in gpress::Options::rules().iter().zip(data.iter().rev()) {
         if b > 0 {
             let value = lowest + ((highest - lowest) as u128 * (b as u128 - 1) / 254) as u64;

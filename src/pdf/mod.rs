@@ -13,4 +13,5 @@ pub mod object;
 pub mod parse;
 pub mod place;
 pub mod rewrite;
+pub mod rules;
 pub mod xref;

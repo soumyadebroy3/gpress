@@ -280,14 +280,14 @@ fn the_jbig2_proof_compares_pixels_and_nothing_else_passes() {
     let bits = scan(301, 200, 7);
     let grey = "/Width 301 /Height 200 /ColorSpace /DeviceGray /BitsPerComponent 1";
     let a = image(grey, &bits);
-    let (d, z) = bilevel_candidate(&a, &bits, bits.len()).expect("JBIG2 is smaller than the bits");
+    let (d, z) = bilevel_candidate(&a, &bits, bits.len(), 5).expect("JBIG2 is smaller than the bits");
     let b = Stream { dict: d, data: z };
     assert!(same_bits(&a, &bits, &b));
     // The padding bits of a row are not pixels.
     let mut padded = bits.clone();
     padded.chunks_mut(38).for_each(|row| row[37] &= 0xF8);
     assert!(padded != bits && same_bits(&a, &padded, &b));
-    assert_eq!(bilevel_candidate(&image(grey, &padded), &padded, padded.len()).map(|x| x.1), Some(b.data.clone()));
+    assert_eq!(bilevel_candidate(&image(grey, &padded), &padded, padded.len(), 5).map(|x| x.1), Some(b.data.clone()));
     // One pixel changed, the other polarity, a row missing, another width: not the same image.
     let mut flipped = bits.clone();
     flipped[38 * 100 + 5] ^= 0x10;
@@ -316,12 +316,15 @@ fn the_jbig2_proof_compares_pixels_and_nothing_else_passes() {
         "/Width 301 /Height 199 /ColorSpace /DeviceGray /BitsPerComponent 1",
     ] {
         let other = image(entries, &bits);
-        assert!(bilevel_candidate(&other, &bits, bits.len()).is_none() && !same_bits(&other, &bits, &b), "{entries}");
+        assert!(
+            bilevel_candidate(&other, &bits, bits.len(), 5).is_none() && !same_bits(&other, &bits, &b),
+            "{entries}"
+        );
     }
     // At least 5% smaller than the best other encoding, or nothing.
     let n = b.data.len();
-    assert!(bilevel_candidate(&a, &bits, n * 100 / 95 + 1).is_some());
-    assert!(bilevel_candidate(&a, &bits, n * 100 / 95 - 1).is_none());
+    assert!(bilevel_candidate(&a, &bits, n * 100 / 95 + 1, 5).is_some());
+    assert!(bilevel_candidate(&a, &bits, n * 100 / 95 - 1, 5).is_none());
 }
 
 /// The images of `few_colours_become_an_indexed_image`: (entries, samples, width, components, bits per index

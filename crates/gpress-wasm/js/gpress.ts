@@ -67,10 +67,20 @@ export interface GpressOptions {
    * INVALID_OPTIONS and a message that says which values the rule takes.
    */
   rules?: Record<string, number>;
-  /** Largest accepted input in MiB (default 1024). */
+  /**
+   * Largest accepted input in MiB (default 1024). Every size here is in MiB, and a fraction is rounded up
+   * (0.5 is 1 MiB), so a small limit never becomes 0, which means the default.
+   */
   maxInputMiB?: number;
-  /** Largest decoded stream re-encoded (normal PDF) or stored decoded (archive), MiB (default 64 / 256). */
+  /** Normal PDF: largest decoded stream re-encoded, MiB (default 64). */
   maxStreamMiB?: number;
+  /** Archive: largest decoded stream stored decoded, MiB (default 256; when absent, maxStreamMiB if that is set). */
+  maxStreamArchiveMiB?: number;
+  /**
+   * Normal PDF: MiB of encoded outputs one file keeps, so that a stream another one repeats is encoded once
+   * (default 2, at most 1024). Never changes the output.
+   */
+  storeBudgetMiB?: number;
   /**
    * Archive: the most decoded bytes the parts of one archive may claim in all, MiB (default 256); streams
    * past it are stored as they are. The archive's header declares the total, and expand() refuses an archive
@@ -183,8 +193,8 @@ interface Exports {
   memory: WebAssembly.Memory;
   gpress_alloc(len: number): number;
   gpress_free_input(ptr: number, len: number): void;
-  gpress_optimize(ptr: number, len: number, effort: number, maxIn: number, maxStream: number, objectsPerStream: number, flags: number, photoPpi: number, artPpi: number, jpegQuality: number): number;
-  gpress_optimize_to_size(ptr: number, len: number, target: number, maxIn: number, maxStream: number, objectsPerStream: number, flags: number): number;
+  gpress_optimize(ptr: number, len: number, effort: number, maxIn: number, maxStream: number, objectsPerStream: number, flags: number, photoPpi: number, artPpi: number, jpegQuality: number, storeBudget: number): number;
+  gpress_optimize_to_size(ptr: number, len: number, target: number, maxIn: number, maxStream: number, objectsPerStream: number, flags: number, storeBudget: number): number;
   gpress_rule_count(): number;
   gpress_rule_name(index: number): number;
   gpress_rule_name_len(index: number): number;
@@ -211,7 +221,9 @@ interface Packed {
   effort: number;
   maxIn: number;
   maxStream: number;
+  maxStreamArchive: number;
   maxDecoded: number;
+  storeBudget: number;
   objectsPerStream: number;
   flags: number;
   photoPpi: number;
@@ -300,7 +312,7 @@ export class Gpress {
     const o = pack(options);
     this.rules(options.rules);
     return this.run(input, (ptr, len) =>
-      this.ex.gpress_optimize(ptr, len, o.effort, o.maxIn, o.maxStream, o.objectsPerStream, o.flags, o.photoPpi, o.artPpi, o.jpegQuality),
+      this.ex.gpress_optimize(ptr, len, o.effort, o.maxIn, o.maxStream, o.objectsPerStream, o.flags, o.photoPpi, o.artPpi, o.jpegQuality, o.storeBudget),
     );
   }
 
@@ -341,7 +353,7 @@ export class Gpress {
     const target = Math.min(0xffffffff, Math.max(0, Math.floor(targetBytes)));
     let picked = 0;
     const r = this.run(input, (ptr, len) => {
-      const code = this.ex.gpress_optimize_to_size(ptr, len, target, o.maxIn, o.maxStream, o.objectsPerStream, o.flags);
+      const code = this.ex.gpress_optimize_to_size(ptr, len, target, o.maxIn, o.maxStream, o.objectsPerStream, o.flags, o.storeBudget);
       // The outcome also carries the effort (bits 8 to 15) and whether the target was reached (bit 16).
       picked = this.ex.gpress_outcome();
       return code;
@@ -353,14 +365,14 @@ export class Gpress {
   compress(input: Uint8Array, options: GpressOptions = {}): GpressResult {
     const o = pack(options);
     this.rules(options.rules);
-    return this.run(input, (ptr, len) => this.ex.gpress_compress(ptr, len, o.effort, o.maxIn, o.maxStream, o.maxDecoded, o.flags));
+    return this.run(input, (ptr, len) => this.ex.gpress_compress(ptr, len, o.effort, o.maxIn, o.maxStreamArchive, o.maxDecoded, o.flags));
   }
 
   /** The original bytes from an archive. A damaged archive throws GpressError, never returns a wrong file. */
   expand(archive: Uint8Array, options: ExpandOptions = {}): Uint8Array {
-    const maxIn = clamp(options.maxInputMiB ?? 0, 0, 1 << 20);
-    const maxLen = clamp(options.maxLenMiB ?? 0, 0, 1 << 24);
-    const maxDecoded = clamp(options.maxDecodedMiB ?? 0, 0, 1 << 24);
+    const maxIn = mib(options.maxInputMiB, 1 << 20);
+    const maxLen = mib(options.maxLenMiB, 1 << 24);
+    const maxDecoded = mib(options.maxDecodedMiB, 1 << 24);
     this.rules(options.rules);
     return this.run(archive, (ptr, len) => this.ex.gpress_expand(ptr, len, maxIn, maxLen, maxDecoded)).data;
   }
@@ -422,9 +434,11 @@ export class Gpress {
 function pack(options: GpressOptions): Packed {
   return {
     effort: clamp(options.engineEffort ?? options.effort ?? 40, 0, 100),
-    maxIn: clamp(options.maxInputMiB ?? 0, 0, 1 << 20),
-    maxStream: clamp(options.maxStreamMiB ?? 0, 0, 1 << 20),
-    maxDecoded: clamp(options.maxDecodedMiB ?? 0, 0, 1 << 24),
+    maxIn: mib(options.maxInputMiB, 1 << 20),
+    maxStream: mib(options.maxStreamMiB, 1 << 20),
+    maxStreamArchive: mib(options.maxStreamArchiveMiB ?? options.maxStreamMiB, 1 << 20),
+    maxDecoded: mib(options.maxDecodedMiB, 1 << 24),
+    storeBudget: mib(options.storeBudgetMiB, 1 << 20),
     objectsPerStream: clamp(options.objectsPerStream ?? 0, 0, 1 << 20),
     flags:
       (options.respectConformance === false ? FLAG_IGNORE_CONFORMANCE : 0) |
@@ -454,6 +468,11 @@ function tagOf(v: unknown): string {
 function bytesOf(b: ArrayBufferLike | ArrayBufferView): BufferSource {
   const view = ArrayBuffer.isView(b) ? new Uint8Array(b.buffer, b.byteOffset, b.byteLength) : new Uint8Array(b);
   return (tagOf(view.buffer) === "SharedArrayBuffer" ? view.slice() : view) as BufferSource;
+}
+
+/** A size in MiB as the module takes it (0 = the default): a fraction rounded up, so it never becomes 0. */
+function mib(v: number | undefined, hi: number): number {
+  return clamp(Math.ceil(v ?? 0), 0, hi);
 }
 
 function clamp(v: number, lo: number, hi: number): number {

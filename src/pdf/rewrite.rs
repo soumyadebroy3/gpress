@@ -11,6 +11,7 @@ use super::filters::{self, chain, decode_stage, is_general, Stage};
 use super::images;
 use super::indexed;
 use super::object::*;
+use super::rules::{RewriteRules, Rule as R};
 use super::xref::{self, Doc, Entry};
 use crate::clock::{self, Deadline};
 use crate::flate;
@@ -31,9 +32,9 @@ pub struct Options {
     pub max_stream: usize,
     /// How hard to try, 0 to 100. Below 20 (`FAST_BELOW`) the fast encoder (`flate::fast`): effort 0 is the
     /// fast path, with the fast encoder's near-optimal top level for page content, fonts and the rest (a faster
-    /// near-optimal level for one that decodes to more than 4 MiB, `BIG_STREAM`), a lazy level for images
-    /// (`IMAGE_LEVEL`), image predictors chosen from an estimate and only the cheap steps.
-    /// 1 to 19 bridge to the strong encoder: images get closer parses and from 10 (`STRONG_FROM`) the streams
+    /// near-optimal level for one that decodes to more than 4 MiB, `big_level`), a lazy level for images
+    /// (`image_level`), image predictors chosen from an estimate and only the cheap steps.
+    /// 1 to 19 bridge to the strong encoder: images get closer parses and from 10 (`on_bridge`) the streams
     /// that take the most room get the strong encoder's quick settings within a budget that doubles every
     /// point, except a Flate stream that effort 0's settings can't shrink, which is kept as it is. From
     /// 20 on the strong encoder: at 100 every stream gets `flate` and the full predictor search; below, the
@@ -76,26 +77,32 @@ pub struct Options {
     /// Stop when this passes (checked between streams and Flate segments): the outcome is then `TimedOut`
     /// and nothing is returned. A rewrite that finishes gives the same bytes with or without a deadline.
     pub deadline: Deadline,
+    /// The values the rewrite decides by (see `RewriteRules`). The numbers the notes in this file give are
+    /// their defaults.
+    pub rewrite_rules: Arc<RewriteRules>,
 }
 
 impl Default for Options {
     fn default() -> Self {
+        // The library's defaults, written once (`crate::Options`).
+        let d = crate::Options::default();
         Options {
             flate: flate::Options::max(),
-            objstm_size: 200,
-            max_stream: 64 << 20,
+            objstm_size: d.objects_per_stream,
+            max_stream: d.max_stream,
             effort: 100,
-            threads: 0,
-            store_budget: 2 << 20,
-            respect_conformance: true,
-            flate_over_jpeg: true,
-            jbig2: true,
-            palette: true,
-            jpeg_tables: true,
-            rewrite_encrypted: true,
+            threads: d.threads,
+            store_budget: d.store_budget,
+            respect_conformance: d.respect_conformance,
+            flate_over_jpeg: d.flate_over_jpeg,
+            jbig2: d.jbig2,
+            palette: d.palette,
+            jpeg_tables: d.jpeg_tables,
+            rewrite_encrypted: d.rewrite_encrypted,
             lossy: super::lossy::Lossy::OFF,
             rules: Default::default(),
             deadline: Deadline::NONE,
+            rewrite_rules: Arc::default(),
         }
     }
 }
@@ -187,7 +194,7 @@ pub fn optimize(input: &[u8], opt: &Options) -> Optimized {
     }
     match r {
         Ok((out, stats)) => {
-            if out.len() < input.len() {
+            if out.len() as u64 + opt.rewrite_rules.at(R::min_file_saving) <= input.len() as u64 {
                 Optimized { data: out, outcome: Outcome::Smaller(stats) }
             } else {
                 Optimized { data: input.to_vec(), outcome: Outcome::Untouched("no saving possible".into()) }
@@ -519,9 +526,15 @@ fn reencode(
     if s.dict.name(b"Type") == Some(b"Metadata") || s.dict.has(b"F") {
         return None; // XMP stays readable by other tools; external file streams are left alone
     }
+    // A new encoding is taken only when one saves `min_stream_saving` bytes (its data under `need`, or where the
+    // dictionaries are counted, its whole stream under the stored one's less `cut`); a later one only when smaller.
+    let cut = opt.rewrite_rules.size(R::min_stream_saving) - 1;
+    let need = s.data.len().saturating_sub(cut);
     // A scanned black-and-white image: JBIG2 instead of CCITT fax when that is clearly smaller (same pixels).
     if opt.jbig2 {
-        if let Some((d, z)) = crate::fax::pdf::jbig2_candidate(s, resolve) {
+        if let Some((d, z)) = crate::fax::pdf::jbig2_candidate(s, resolve, opt.rewrite_rules.at(R::jbig2_min_saving))
+            .filter(|(_, z)| z.len() < need)
+        {
             return Some((d, z, Change { fax_to_jbig2: true, ..Change::default() }));
         }
     }
@@ -560,13 +573,15 @@ fn reencode(
         None
     };
     let rest = &stages[k..];
-    // On the bridge to 20, what won't shrink is left alone: a stream the plan gives the strong encoder (from
-    // `STRONG_FROM`), other than an image and already compressed by Flate, whose re-encode at effort 0's
+    // On the bridge to 20, what won't shrink is left alone (the rule `bridge_test`): a stream the plan gives the
+    // strong encoder (`on_bridge`), other than an image and already compressed by Flate, whose re-encode at effort 0's
     // settings is not smaller is kept as it is, and the strong encoder is not spent on it. Decided from sizes
     // alone. (An image goes on: a predictor may still make it smaller.) The quick settings the plans of 20 and
-    // above give carry effort 0, so the range test keeps them exactly as they were.
+    // above give carry effort 0, which the bridge never reaches (`bridge_from` is at least 1), so they are kept
+    // exactly as they were.
     if opt.flate.fast == 0
-        && (STRONG_FROM..FAST_BELOW).contains(&opt.effort)
+        && on_bridge(&opt.rewrite_rules, opt.effort)
+        && opt.rewrite_rules.on(R::bridge_test)
         && rest.is_empty()
         && carried.is_none()
         && stages[..k].iter().any(|st| st.name == b"FlateDecode")
@@ -584,14 +599,20 @@ fn reencode(
         }
     }
     let mut best: Option<(Dict, Vec<u8>)> = None;
-    let mut best_len = s.data.len();
+    // The first candidate kept must save `min_stream_saving` bytes; a later one must be smaller than it.
+    let mut best_len = need;
     // Whether `best` holds the JPEG with its new tables (alone, or behind Flate).
     let mut best_retabled = false;
     // A JPEG with optimal Huffman tables: the same coefficients in fewer bytes, read back and compared before
     // it is used (anything unusual is left as it is).
     let jpeg = match rest {
         [st] if opt.jpeg_tables && st.name == b"DCTDecode" && carried.is_none() && data.len() <= opt.max_stream => {
-            crate::jpeg::optimize(&data).ok()
+            crate::jpeg::optimize_with(
+                &data,
+                opt.rewrite_rules.at(R::jpeg_min_saving),
+                opt.rewrite_rules.at(R::jpeg_code_orders) as u8,
+            )
+            .ok()
         }
         _ => None,
     };
@@ -622,21 +643,23 @@ fn reencode(
     // The length of our Flate over `data` as it is, once made (repredict() compares with it).
     let mut flate_len = None;
     if !(adds_layer && shape_matters) && !(over_jpeg && !opt.flate_over_jpeg) {
-        let bare_len = best_len;
+        // What the image takes without a general filter: the JPEG with its new tables, or the stored data.
+        let bare_len = if jpeg_alone { best_len } else { s.data.len() };
         let mut with_flate = vec![Stage { name: b"FlateDecode".to_vec(), parms: carried.clone() }];
         with_flate.extend_from_slice(rest);
         let mut d = s.dict.clone();
         set_chain(&mut d, &with_flate);
         let z = flate::deflate_zlib(jpeg.as_deref().unwrap_or(&data), &opt.flate);
         flate_len = jpeg.is_none().then_some(z.len());
-        let again = opt.effort >= 100
-            && jpeg.as_ref().is_some_and(|j| z.len() * 10 <= j.len() * 9 && j.len() * 10 <= data.len() * 9);
+        let again = opt.effort as u64 >= opt.rewrite_rules.at(R::full_from)
+            && jpeg.as_ref().is_some_and(|j| second_pass(z.len(), j.len(), data.len(), &opt.rewrite_rules));
         // The first candidate is Flate over the JPEG with its new tables (when there is one), the second
         // over the original bytes.
         for (z, retabled) in
             std::iter::once((z, jpeg.is_some())).chain(again.then(|| (flate::deflate_zlib(&data, &opt.flate), false)))
         {
-            let limit = if adds_layer { best_len.min(bare_len - bare_len / 100) } else { best_len };
+            let margin = (bare_len as u64 * opt.rewrite_rules.at(R::flate_over_image_min_saving) / 100) as usize;
+            let limit = if adds_layer { best_len.min(bare_len - margin) } else { best_len };
             if z.len() < limit {
                 best_len = z.len();
                 best = Some((d.clone(), z));
@@ -655,14 +678,17 @@ fn reencode(
     // Images: try storing the samples with a different (or no) PNG predictor. The fast path tries one,
     // chosen without encoding, and compares whole sizes (the dictionaries counted). (Without a codec after the
     // general filters, our Flate over `data` was made above.)
-    if rest.is_empty() && data.len() <= 48 << 20 && opt.flate.fast > 0 && opt.effort < TRIAL_PREDICTORS {
-        let dict = best.as_ref().map_or(&s.dict, |b| &b.0);
-        let plain = best_len + to_bytes(&Obj::Dict(dict.clone())).len();
+    let searched = rest.is_empty() && data.len() <= opt.rewrite_rules.size(R::max_predictor_image);
+    if searched && opt.flate.fast > 0 && (opt.effort as u64) < opt.rewrite_rules.at(R::trial_predictors_from) {
+        let plain = match &best {
+            Some(b) => best_len + to_bytes(&Obj::Dict(b.0.clone())).len(),
+            None => (s.data.len() + to_bytes(&Obj::Dict(s.dict.clone())).len()).saturating_sub(cut),
+        };
         if let Some((d, z)) = repredict_fast(s, &data, carried.as_ref(), opt, resolve, plain) {
             best = Some((d, z));
             best_retabled = false;
         }
-    } else if rest.is_empty() && data.len() <= 48 << 20 {
+    } else if searched {
         if let Some((d, z)) = flate_len.and_then(|n| repredict(s, &data, n, carried.as_ref(), opt, resolve)) {
             if z.len() < best_len {
                 best = Some((d, z));
@@ -700,8 +726,8 @@ fn reencode(
     };
     if let Some(px) = samples.as_deref().filter(|_| form) {
         // (`best_len` is not the size of a `best` the predictor search gave.)
-        let other = best.as_ref().map_or((s.data.len(), &s.dict), |b| (b.1.len(), &b.0));
-        if let Some((d, z, c)) = exact_form(s, px, opt, resolve, other) {
+        let (other, cut) = best.as_ref().map_or(((s.data.len(), &s.dict), cut), |b| ((b.1.len(), &b.0), 0));
+        if let Some((d, z, c)) = exact_form(s, px, opt, resolve, other, cut) {
             best = Some((d, z));
             change = c;
         }
@@ -747,34 +773,46 @@ fn plain_encoding(d: &Dict) -> bool {
 }
 
 /// A smaller form of an image whose filters are general ones only, every pixel kept: a 1-bit image as JBIG2
-/// when that is at least 5% smaller than the best other candidate (`fax::pdf::bilevel_candidate`), or an 8-bit
+/// when that is at least 5% (the rule `jbig2_min_saving`) smaller than the best other candidate (`fax::pdf::bilevel_candidate`), or an 8-bit
 /// image of few colours as an Indexed image (`indexed::convert`), which then gets the Flate and predictor
 /// search of any other image. `px`: the stream's content (its filters decoded, a predictor undone); `other`:
-/// the data size and the dictionary of the best candidate so far. A form is given only when it is smaller with
-/// its dictionary counted (an Indexed image's holds its colour table).
+/// the data size and the dictionary of the best candidate so far, or of the stored stream. A form is given
+/// only when it is smaller with its dictionary counted (an Indexed image's holds its colour table), by more
+/// than `cut` bytes (what `min_stream_saving` asks beyond smaller, when `other` is the stored stream).
 fn exact_form(
     s: &Stream,
     px: &[u8],
     opt: &Options,
     resolve: &dyn Fn(&Obj) -> Option<Obj>,
     other: (usize, &Dict),
+    cut: usize,
 ) -> Option<Reencoded> {
-    let (d, z, change) =
-        if let Some((d, z)) = opt.jbig2.then(|| crate::fax::pdf::bilevel_candidate(s, px, other.0)).flatten() {
-            (d, z, Change { bilevel_to_jbig2: true, ..Change::default() })
-        } else {
-            let (dict, data) = opt.palette.then(|| indexed::convert(&s.dict, px)).flatten()?;
-            let raw = Stream { dict, data };
-            // Neither form is tried again on the Indexed image.
-            let plain = Options { jbig2: false, palette: false, ..opt.clone() };
-            let (d, z) = match reencode(&raw, &plain, resolve, &mut None) {
-                Some((d, z, _)) => (d, z),
-                None => (raw.dict, raw.data),
-            };
-            (d, z, Change { indexed: true, ..Change::default() })
+    let min_saving = opt.rewrite_rules.at(R::jbig2_min_saving);
+    let (d, z, change) = if let Some((d, z)) =
+        opt.jbig2.then(|| crate::fax::pdf::bilevel_candidate(s, px, other.0, min_saving)).flatten()
+    {
+        (d, z, Change { bilevel_to_jbig2: true, ..Change::default() })
+    } else {
+        let (dict, data) = opt.palette.then(|| indexed::convert(&s.dict, px)).flatten()?;
+        let raw = Stream { dict, data };
+        // Neither form is tried again on the Indexed image.
+        let plain = Options { jbig2: false, palette: false, ..opt.clone() };
+        let (d, z) = match reencode(&raw, &plain, resolve, &mut None) {
+            Some((d, z, _)) => (d, z),
+            None => (raw.dict, raw.data),
         };
+        (d, z, Change { indexed: true, ..Change::default() })
+    };
     let whole = |len: usize, d: &Dict| len + to_bytes(&Obj::Dict(d.clone())).len();
-    (whole(z.len(), &d) < whole(other.0, other.1)).then_some((d, z, change))
+    (whole(z.len(), &d) < whole(other.0, other.1).saturating_sub(cut)).then_some((d, z, change))
+}
+
+/// Whether a JPEG's original bytes (`original` of them) get a Flate pass of their own: when Flate took the
+/// percentage of the rule `jpeg_second_pass_flate_gain` (a tenth) off the JPEG with its new tables (`flate`
+/// bytes from `retabled`), and the new tables took that of `jpeg_second_pass_table_gain` off the original.
+fn second_pass(flate: usize, retabled: usize, original: usize, rules: &RewriteRules) -> bool {
+    let gain = |new: usize, old: usize, by: R| new as u64 * 100 <= old as u64 * (100 - rules.at(by));
+    gain(flate, retabled, R::jpeg_second_pass_flate_gain) && gain(retabled, original, R::jpeg_second_pass_table_gain)
 }
 
 /// An encrypted XMP metadata stream (no tool reads it from the file without decrypting it): our Flate when
@@ -789,7 +827,7 @@ fn reencode_xmp(s: &Stream, opt: &Options) -> Option<Reencoded> {
         data = decode_stage(st, &data, opt.max_stream).ok()?;
     }
     let z = flate::deflate_zlib(&data, &opt.flate);
-    if z.len() >= s.data.len() {
+    if z.len() as u64 + opt.rewrite_rules.at(R::min_stream_saving) > s.data.len() as u64 {
         return None;
     }
     let mut d = s.dict.clone();
@@ -798,12 +836,14 @@ fn reencode_xmp(s: &Stream, opt: &Options) -> Option<Reencoded> {
 }
 
 /// An image's geometry and its samples, whatever predictor they are stored with now; None when it is not an
-/// image we can work on (unknown geometry, a predictor that doesn't fit it, under 1 KiB, not whole rows).
+/// image we can work on (unknown geometry, a predictor that doesn't fit it, under 1 KiB, the rule
+/// `min_predictor_image`, not whole rows).
 fn samples<'a>(
     s: &Stream,
     data: &'a [u8],
     carried: Option<&Dict>,
     resolve: &dyn Fn(&Obj) -> Option<Obj>,
+    rules: &RewriteRules,
 ) -> Option<(images::Geometry, Cow<'a, [u8]>)> {
     let g = images::geometry(&s.dict, resolve)?;
     let (row, bpp) = (g.row(), g.bpp());
@@ -827,7 +867,7 @@ fn samples<'a>(
             }
         }),
     };
-    if px.is_empty() || !px.len().is_multiple_of(row) || px.len() < 1024 {
+    if px.is_empty() || !px.len().is_multiple_of(row) || px.len() < rules.size(R::min_predictor_image) {
         return None;
     }
     Some((g, px))
@@ -843,7 +883,7 @@ pub(super) fn png_parms(g: &images::Geometry) -> Dict {
     p
 }
 
-/// The fast path's predictor choice (efforts below `TRIAL_PREDICTORS`): one candidate, chosen without
+/// The fast path's predictor choice (efforts below the rule `trial_predictors_from`): one candidate, chosen without
 /// encoding (`images::estimate_choice`), and encoded once: the predictor the estimate prefers, else the plain
 /// samples when they are stored with a predictor now. `plain` is the best size `reencode` has so far with its
 /// stream dictionary counted; the candidate is kept only when it is smaller with its own dictionary.
@@ -855,11 +895,13 @@ fn repredict_fast(
     resolve: &dyn Fn(&Obj) -> Option<Obj>,
     plain: usize,
 ) -> Option<(Dict, Vec<u8>)> {
-    let (g, px) = samples(s, data, carried, resolve)?;
+    let rules = &*opt.rewrite_rules;
+    let (g, px) = samples(s, data, carried, resolve, rules)?;
     let (row, bpp) = (g.row(), g.bpp());
     let nrows = px.len() / row;
-    let bands = predictor_sample(nrows, row, 0).unwrap_or_else(|| vec![(0, nrows)]);
-    let (parms, bytes) = if let Some(how) = images::estimate_choice(&px, row, bpp, g.bpc, &bands) {
+    let bands =
+        sample_bands(nrows, row, rules.size(R::fast_predictor_sample), rules).unwrap_or_else(|| vec![(0, nrows)]);
+    let (parms, bytes) = if let Some(how) = images::estimate_choice(&px, row, bpp, g.bpc, &bands, rules) {
         (Some(png_parms(&g)), Cow::Owned(images::png_filter(&px, row, bpp, how)))
     } else if carried.is_some() {
         (None, px)
@@ -872,18 +914,21 @@ fn repredict_fast(
     (z.len() + to_bytes(&Obj::Dict(d.clone())).len() < plain).then_some((d, z))
 }
 
-/// The predictor candidates in ranking order (the first of equal scores wins).
-const CANDIDATES: [Option<images::Choice>; 5] = [
-    None,
-    Some(images::Choice::MinSum),
-    Some(images::Choice::Fixed(2)),
-    Some(images::Choice::Fixed(1)),
-    Some(images::Choice::Fixed(4)),
-];
-
-/// Candidate inputs up to this size are ranked side by side; bigger ones one after another (their segments
-/// still run in parallel), so a big image never has more than two copies alive.
-const RANK_TOGETHER: usize = 8 << 20;
+/// The predictor candidates of the rule `predictor_candidates`, in ranking order (the first of equal scores
+/// wins): by default none, a type for each row, Up, Sub and Paeth. Average comes last.
+fn candidates(rules: &RewriteRules) -> Vec<Option<images::Choice>> {
+    use images::Choice::{self, Fixed};
+    let all = [
+        (0, None),
+        (5, Some(Choice::per_row(rules))),
+        (2, Some(Fixed(2))),
+        (1, Some(Fixed(1))),
+        (4, Some(Fixed(4))),
+        (3, Some(Fixed(3))),
+    ];
+    let asked = rules.at(R::predictor_candidates);
+    all.into_iter().filter(|c| asked >> c.0 & 1 == 1).map(|c| c.1).collect()
+}
 
 /// The smallest score, the first of equals: the pick of a loop where only a strictly smaller score replaces
 /// the best so far.
@@ -901,22 +946,25 @@ fn repredict(
     opt: &Options,
     resolve: &dyn Fn(&Obj) -> Option<Obj>,
 ) -> Option<(Dict, Vec<u8>)> {
-    let (g, px) = samples(s, data, carried, resolve)?;
+    let rules = &*opt.rewrite_rules;
+    let (g, px) = samples(s, data, carried, resolve, rules)?;
     let (row, bpp) = (g.row(), g.bpp());
+    let candidates = candidates(rules);
     // The candidates are ranked by their size with the quick settings plus the size of their stream
     // dictionary (the predictor parameters take room too), and only the best one gets the full encode. Below
     // effort 100 the data is a sample of rows across the image, so the dictionary counts in proportion. The
     // first of equal sizes wins. Only their sizes count, so their outputs are not remembered, and they are
     // ranked side by side when threads are free.
-    // On the fast path the candidates are ranked with the level effort 0 gives images, else with the quick
-    // settings.
+    // On the fast path the candidates are ranked with the fast encoder's level of the rule
+    // `predictor_rank_level` (the level effort 0 gives images), else with the quick settings.
+    let level = rules.at(R::predictor_rank_level) as u8;
     let rank = flate::Options {
-        fast: if opt.flate.fast > 0 { image_level(0) } else { 0 },
+        fast: if opt.flate.fast > 0 { level } else { 0 },
         ..flate::Options::quick_with(&opt.flate.rules)
     };
     let quick = flate::Options { shared: opt.flate.shared.as_ref().map(|sh| sh.without_store()), ..rank };
     let nrows = px.len() / row;
-    let rows = predictor_sample(nrows, row, opt.effort);
+    let rows = predictor_sample(nrows, row, opt.effort, rules);
     let sampled = rows.as_ref().map_or(nrows, |r| r.iter().map(|&(a, b)| b - a).sum());
     let dict_with = |parms: &Option<Dict>| {
         let mut d = s.dict.clone();
@@ -930,22 +978,24 @@ fn repredict(
     // A candidate's score: (data for all rows + dictionary) x sampled rows, in whole numbers. Its input (the
     // sampled rows below effort 100) is dropped once encoded; the winner is filtered again below.
     let score = |k: usize| -> u64 {
-        let input: Cow<[u8]> = match (&rows, CANDIDATES[k]) {
+        let input: Cow<[u8]> = match (&rows, candidates[k]) {
             (None, None) => Cow::Borrowed(&px[..]),
             (None, Some(how)) => Cow::Owned(images::png_filter(&px, row, bpp, how)),
             (Some(r), None) => Cow::Owned(r.iter().flat_map(|&(a, b)| &px[a * row..b * row]).copied().collect()),
             (Some(r), Some(how)) => Cow::Owned(images::filter_rows(&px, row, bpp, how, r)),
         };
         let data_len = flate::deflate_zlib(&input, &quick).len() as u64;
-        let dict = if CANDIDATES[k].is_none() { dict_plain } else { dict_png };
+        let dict = if candidates[k].is_none() { dict_plain } else { dict_png };
         data_len * nrows as u64 + dict * sampled as u64
     };
-    // The size of a filtered candidate's input (the biggest): above RANK_TOGETHER the five go one at a time.
+    // The size of a filtered candidate's input (the biggest): up to the rule `rank_together` (8 MiB) the
+    // candidates are ranked side by side, above it one at a time (their segments still run in parallel), so a
+    // big image never has more than two copies alive.
     let input_len = rows.as_ref().map_or(px.len() + nrows, |r| r.iter().map(|&(a, b)| (b - a) * (row + 1)).sum());
-    let pool = quick.shared.as_ref().map(|sh| &*sh.pool).filter(|_| input_len <= RANK_TOGETHER);
-    let k = best_of(&par::map(pool, CANDIDATES.len(), None, score))?;
-    let parms = CANDIDATES[k].map(|_| png);
-    let bytes = match CANDIDATES[k] {
+    let pool = quick.shared.as_ref().map(|sh| &*sh.pool).filter(|_| input_len <= rules.size(R::rank_together));
+    let k = best_of(&par::map(pool, candidates.len(), None, score))?;
+    let parms = candidates[k].map(|_| png);
+    let bytes = match candidates[k] {
         None => px,
         Some(how) => Cow::Owned(images::png_filter(&px, row, bpp, how)),
     };
@@ -967,32 +1017,45 @@ fn repredict(
 /// the strong encoder with slower fast levels; from 20 on everything is as it was before the fast path.
 pub const FAST_BELOW: u8 = 20;
 
-/// From this effort on, image predictors are chosen by encoding candidates (on sampled rows below 100); below
-/// it, on the fast path, from an estimate (`repredict_fast`).
-const TRIAL_PREDICTORS: u8 = 10;
-
-/// Bytes of an image the predictor candidates are ranked on below effort 100: 64 KiB at effort 0, twice as
-/// much every 20 points.
-fn predictor_budget(effort: u8) -> usize {
-    (64usize << 10) << (effort.min(99) as usize / 20)
+/// Bytes of an image the predictor candidates are ranked on below effort 100 (the rules
+/// `predictor_sample_0` to `predictor_sample_80`): 64 KiB at effort 0, twice as much every 20 points.
+fn predictor_budget(effort: u8, rules: &RewriteRules) -> usize {
+    usize::try_from(rules.cell(R::predictor_sample_0, effort.min(99) as usize / 20)).unwrap_or(usize::MAX)
 }
 
-/// Rows for ranking the predictor candidates of an image below effort 100: bands of whole rows spread over
-/// the image (neighbouring rows keep what predictors and matches see), at most a budget of bytes that grows
-/// with the effort. None: rank on the whole image (effort 100, or a small image).
-pub(super) fn predictor_sample(nrows: usize, row: usize, effort: u8) -> Option<Vec<(usize, usize)>> {
-    if effort >= 100 || row == 0 {
+/// Rows for ranking the predictor candidates of an image below effort 100 (the rule `full_from`): bands of
+/// whole rows spread over the image (see `sample_bands`), at most a budget of bytes that grows with the
+/// effort. None: rank on the whole image (effort 100, or a small image).
+pub(super) fn predictor_sample(
+    nrows: usize,
+    row: usize,
+    effort: u8,
+    rules: &RewriteRules,
+) -> Option<Vec<(usize, usize)>> {
+    if effort as u64 >= rules.at(R::full_from) {
         return None;
     }
-    let budget = predictor_budget(effort);
-    if nrows.saturating_mul(row) <= budget {
+    sample_bands(nrows, row, predictor_budget(effort, rules), rules)
+}
+
+/// At most `budget` bytes of an image's rows, as bands of whole rows spread over the image (neighbouring rows
+/// keep what predictors and matches see): 8 bands (the rule `predictor_sample_bands`), each of at least one
+/// row. None: the whole image is within the budget.
+pub(super) fn sample_bands(
+    nrows: usize,
+    row: usize,
+    budget: usize,
+    rules: &RewriteRules,
+) -> Option<Vec<(usize, usize)>> {
+    if row == 0 || nrows.saturating_mul(row) <= budget {
         return None;
     }
-    const BANDS: usize = 8;
-    let per = (budget / BANDS / row).max(1);
-    let mut out: Vec<(usize, usize)> = Vec::with_capacity(BANDS);
-    for k in 0..BANDS {
-        let start = k * nrows / BANDS;
+    let bands = rules.size(R::predictor_sample_bands);
+    let per = (budget / bands / row).max(1);
+    let mut out: Vec<(usize, usize)> = Vec::with_capacity(bands);
+    for k in 0..bands {
+        // In 64 bits: on a 32-bit machine the product can pass a usize.
+        let start = (k as u64 * nrows as u64 / bands as u64) as usize;
         if out.last().is_some_and(|&(_, end)| start < end) {
             continue;
         }
@@ -1076,56 +1139,55 @@ fn decoded_size(s: &Stream, limit: usize, last: usize) -> Option<usize> {
 }
 
 /// The fast encoder's level for image streams below `FAST_BELOW` (other streams get `flate::Options::effort`).
-/// Images are most of the decoded bytes and gain least from a closer parse, so they get a lazy level.
-pub(super) fn image_level(effort: u8) -> u8 {
-    IMAGE_LEVEL[effort.min(FAST_BELOW - 1) as usize]
-}
-
-/// From this effort, the bridge to 20 gives some streams the strong encoder (see `effort_plan`).
-const STRONG_FROM: u8 = 10;
-
-/// Decoded bytes that get the strong encoder's quick settings at an effort below 20: none below `STRONG_FROM`,
-/// a sixteenth of the input's size at it, twice as much every point (32 times the input at 19).
-fn bridge_budget(effort: u8, input_len: usize) -> f64 {
-    if !(STRONG_FROM..FAST_BELOW).contains(&effort) {
-        return 0.0;
-    }
-    input_len as f64 * (1u64 << (effort - STRONG_FROM)) as f64 / 16.0
-}
-
+/// Images are most of the decoded bytes and gain least from a closer parse, so they get a lazy level: the
+/// rules `image_level_0` to `image_level_19`, by default 7, 7, 7, 9, 9, 9, 10, 10, 11, 11 and then 12.
 /// Effort 0 gives images the lazy level with two steps of lookahead, the fastest level that pays. With images
 /// at each level and everything else as at effort 0, the 90 files the sample rewrites come to (output as a
 /// share of their input, and the time against level 7's): 7 87.02%; 8 87.04%, 1.3x; 9 86.70%, 1.45x; 10
 /// 86.63%, 1.6x; 11 86.37%, 1.95x; 12 86.30%, 2.15x. Level 8 is the one level weaker than 7 on images, so the
 /// scale goes from 7 to 9.
-const IMAGE_LEVEL: [u8; FAST_BELOW as usize] =
-    [7, 7, 7, 9, 9, 9, 10, 10, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12];
+pub(super) fn image_level(effort: u8, rules: &RewriteRules) -> u8 {
+    rules.cell(R::image_level_0, effort.min(FAST_BELOW - 1) as usize) as u8
+}
 
-/// A stream other than an image that decodes to more than this gets at most `big_level` below `FAST_BELOW`.
-/// The top level parses about 6 MB a second on one thread, so this much takes about 0.65 s: past it, one
-/// stream would hold the whole file up (a 10 MB CJK font took 1.5 s of a 5.5 MB file's 1.8 s).
-const BIG_STREAM: usize = 4 << 20;
+/// Whether the effort is on the bridge to 20, where some streams get the strong encoder (see `effort_plan`):
+/// from the rule `bridge_from` (10) up to `FAST_BELOW`.
+fn on_bridge(rules: &RewriteRules, effort: u8) -> bool {
+    (rules.at(R::bridge_from)..FAST_BELOW as u64).contains(&(effort as u64))
+}
 
-/// The fast encoder's level for a stream over `BIG_STREAM` below `FAST_BELOW`: level 9 (one pass of the
-/// near-optimal parse, 40% faster than the top level, 0.2% larger on fonts and 1.4% on page content) up to
-/// effort 5, 10 from 6 and the top level again from 10. Level 11 is left out: on a 4.9 MB CFF font it was
-/// larger than both 10 and 12, so efforts 8 and 9 would have made a larger file than 6 and 7.
-fn big_level(effort: u8) -> u8 {
-    match image_level(effort) {
-        l if l < 10 => 9,
-        l if l < 12 => 10,
-        _ => flate::fast::LEVELS,
+/// Decoded bytes that get the strong encoder's quick settings at an effort below 20: none off the bridge
+/// (`on_bridge`), a sixteenth of the input's size where it starts (the rule `bridge_start`, in 256ths), twice
+/// as much every point (`bridge_growth`, in percent; 32 times the input at 19).
+fn bridge_budget(effort: u8, input_len: usize, rules: &RewriteRules) -> f64 {
+    if !on_bridge(rules, effort) {
+        return 0.0;
     }
+    // Exact for the defaults: every step is a power of two.
+    let growth = rules.at(R::bridge_growth) as f64 / 100.0;
+    let start = input_len as f64 * (rules.at(R::bridge_start) as f64 / 256.0);
+    (rules.at(R::bridge_from)..effort as u64).fold(start, |budget, _| budget * growth)
+}
+
+/// The fast encoder's level for a stream other than an image that decodes to more than the rule `big_stream`
+/// (4 MiB) below `FAST_BELOW`. The top level parses about 6 MB a second on one thread, so 4 MiB take about
+/// 0.65 s: past it, one stream would hold the whole file up (a 10 MB CJK font took 1.5 s of a 5.5 MB file's
+/// 1.8 s). The rules `big_level_0` to `big_level_19`, by default level 9 (one pass of the near-optimal parse,
+/// 40% faster than the top level, 0.2% larger on fonts and 1.4% on page content) up to effort 5, 10 from 6 and
+/// the top level again from 10. Level 11 is left out: on a 4.9 MB CFF font it was larger than both 10 and 12,
+/// so efforts 8 and 9 would have made a larger file than 6 and 7.
+fn big_level(effort: u8, rules: &RewriteRules) -> u8 {
+    rules.cell(R::big_level_0, effort.min(FAST_BELOW - 1) as usize) as u8
 }
 
 /// The Flate settings for the object streams and the cross-reference stream (`raw`: the bytes to encode): the
-/// effort's own, except on the bridge from `STRONG_FROM`, where they get the strong encoder's quick settings
+/// effort's own, except on the bridge (`on_bridge`), where they get the strong encoder's quick settings
 /// when those bytes fit in `bridge_budget` (a budget of their own, as large as the streams' one), so that
 /// effort 19 ends where 20 begins.
 fn structure_flate(opt: &Options, raw: usize, input_len: usize) -> flate::Options {
     if opt.flate.fast > 0
-        && (STRONG_FROM..FAST_BELOW).contains(&opt.effort)
-        && raw as f64 <= bridge_budget(opt.effort, input_len)
+        && on_bridge(&opt.rewrite_rules, opt.effort)
+        && raw as f64 <= bridge_budget(opt.effort, input_len, &opt.rewrite_rules)
     {
         flate::Options {
             shared: opt.flate.shared.clone(),
@@ -1144,28 +1206,31 @@ fn decoded_len(s: &Stream, limit: usize) -> (usize, bool) {
 }
 
 /// The extra work allowed below effort 100, per byte of input, in units of quick-encoding one decoded byte:
-/// 1 at effort 1, twice as much every 10 points (about 900 at 99).
-fn work_budget(effort: u8) -> f64 {
-    2f64.powf((effort.max(1) - 1) as f64 / 10.0)
+/// 1 at effort 1 (the rule `work_budget_start`, in hundredths), twice as much every 10 points
+/// (`work_budget_doubling`; about 900 at 99).
+fn work_budget(effort: u8, rules: &RewriteRules) -> f64 {
+    let doubling = rules.at(R::work_budget_doubling) as f64;
+    rules.at(R::work_budget_start) as f64 / 100.0 * 2f64.powf((effort.max(1) - 1) as f64 / doubling)
 }
 
 /// Decoded bytes the quick settings may work on below effort 100, per byte of input: 16 at effort 0, twice
-/// as much every 10 points, and at least 4 MiB in all (so small files are never cut short). A stream that
+/// as much every 10 points, and at least 4 MiB in all (so small files are never cut short); the rules
+/// `quick_budget_factor`, `quick_budget_doubling` and `quick_budget_floor`. A stream that
 /// doesn't fit in what is left is kept exactly as it is, which costs nothing and loses nothing: the time
 /// follows the file's size even when its streams decode to a hundred times their size.
-fn quick_budget(effort: u8, input_len: usize) -> f64 {
-    (input_len as f64 * 16.0 * 2f64.powf(effort as f64 / 10.0)).max((4u64 << 20) as f64)
+fn quick_budget(effort: u8, input_len: usize, rules: &RewriteRules) -> f64 {
+    let doubling = rules.at(R::quick_budget_doubling) as f64;
+    (input_len as f64 * rules.at(R::quick_budget_factor) as f64 * 2f64.powf(effort as f64 / doubling))
+        .max(rules.at(R::quick_budget_floor) as f64)
 }
 
 /// CPU time of a decoded byte at an effort's Flate settings, against the quick settings (measured, see
-/// `flate::Options::effort`; large images).
-fn work_per_byte(effort: u8) -> f64 {
+/// `flate::Options::effort`; large images): the rules `work_cost_20` to `work_cost_80`, in percent, by default
+/// 1.7, 2.0, 3.1 and 3.9. Below 20 it is the unit.
+fn work_per_byte(effort: u8, rules: &RewriteRules) -> f64 {
     match effort {
         0..=19 => 1.0,
-        20..=39 => 1.7,
-        40..=59 => 2.0,
-        60..=79 => 3.1,
-        _ => 3.9,
+        _ => rules.cell(R::work_cost_20, effort.min(99) as usize / 20 - 1) as f64 / 100.0,
     }
 }
 
@@ -1195,15 +1260,19 @@ fn effort_plan(
             decoded_len(s, opt.max_stream)
         })
     };
-    if opt.effort >= 100 {
+    let rules = &*opt.rewrite_rules;
+    if opt.effort as u64 >= rules.at(R::full_from) {
         return counted().into_iter().map(|(_, decodes)| decodes.then(|| opt.clone())).collect();
     }
+    // The rule `budget_order`: the streams that take the most room first, or as they are numbered.
     let mut order: Vec<usize> = (0..unique.len()).collect();
-    order.sort_by_key(|&u| (std::cmp::Reverse(streams[unique[u]].1.data.len()), u));
-    let mut floor = quick_budget(opt.effort, input_len);
+    if rules.at(R::budget_order) == 0 {
+        order.sort_by_key(|&u| (std::cmp::Reverse(streams[unique[u]].1.data.len()), u));
+    }
+    let mut floor = quick_budget(opt.effort, input_len, rules);
     let mut out = vec![None; unique.len()];
     // The fast path: every stream gets the effort's own settings while its decoded bytes fit, images a faster
-    // level of the fast encoder, and so does a stream over `BIG_STREAM` up to effort 9. From `STRONG_FROM` on,
+    // level of the fast encoder, and so does a stream over the rule `big_stream` up to effort 9. On the bridge,
     // the streams that take the most room get the strong encoder's quick settings instead (what effort 0 was
     // before the fast path) while their decoded bytes fit in `bridge_budget`, so the time and the size go on
     // smoothly to 20. A stream whose filters don't decode within `max_stream` is kept as it is (`reencode` would
@@ -1228,7 +1297,7 @@ fn effort_plan(
             },
             ..opt.clone()
         };
-        let mut budget = bridge_budget(opt.effort, input_len);
+        let mut budget = bridge_budget(opt.effort, input_len, rules);
         for u in order {
             let s = streams[unique[u]].1;
             let Some(n) = sizes[u] else { continue };
@@ -1243,9 +1312,9 @@ fn effort_plan(
             }
             let mut o = opt.clone();
             if s.dict.name(b"Subtype") == Some(b"Image") {
-                o.flate.fast = image_level(opt.effort);
-            } else if n > BIG_STREAM && o.flate.fast > big_level(opt.effort) {
-                o.flate.fast = big_level(opt.effort);
+                o.flate.fast = image_level(opt.effort, rules);
+            } else if n > rules.size(R::big_stream) && o.flate.fast > big_level(opt.effort, rules) {
+                o.flate.fast = big_level(opt.effort, rules);
             }
             out[u] = Some(o);
         }
@@ -1273,13 +1342,14 @@ fn effort_plan(
     };
     // The settings that may be given above quick, strongest first, with their extra work per decoded byte.
     let mut steps = Vec::new();
-    if !(opt.flate.same_output(&quick.flate) && predictor_budget(opt.effort) == predictor_budget(0)) {
-        steps.push((opt.clone(), work_per_byte(opt.effort) - 1.0));
-        for e in (20..opt.effort / 20 * 20).step_by(20).rev() {
-            steps.push((at(e), work_per_byte(e) - 1.0));
+    if !(opt.flate.same_output(&quick.flate) && predictor_budget(opt.effort, rules) == predictor_budget(0, rules)) {
+        steps.push((opt.clone(), work_per_byte(opt.effort, rules) - 1.0));
+        // The rule `step_down`: the lower steps of 20, or none.
+        for e in (20..opt.effort / 20 * 20).step_by(20).rev().filter(|_| rules.on(R::step_down)) {
+            steps.push((at(e), work_per_byte(e, rules) - 1.0));
         }
     }
-    let mut budget = input_len as f64 * work_budget(opt.effort);
+    let mut budget = input_len as f64 * work_budget(opt.effort, rules);
     for u in order {
         let (size, decodes) = sizes[u];
         if size as f64 > floor {
@@ -1302,9 +1372,12 @@ fn effort_plan(
     out
 }
 
-/// The objects of object streams, grouped by kind so similar objects sit together.
-fn by_kind(packable: &mut [(u32, &Obj)]) {
-    packable.sort_by(|a, b| kind_key(a.1).cmp(&kind_key(b.1)).then(a.0.cmp(&b.0)));
+/// The objects of object streams, grouped by kind so similar objects sit together (the rule
+/// `object_stream_order`; else they stay in the order of their numbers).
+fn by_kind(packable: &mut [(u32, &Obj)], rules: &RewriteRules) {
+    if rules.at(R::object_stream_order) == 0 {
+        packable.sort_by(|a, b| kind_key(a.1).cmp(&kind_key(b.1)).then(a.0.cmp(&b.0)));
+    }
 }
 
 /// The order the jobs start in: the largest stream first.
@@ -1467,7 +1540,7 @@ fn run_job(
     // The new data checked against the stream's content here, in parallel and without decoding the
     // stream again, so the self-check only has to find the same data in the output.
     let proof = match (&r, content) {
-        (Some(r), Some(c)) => prove(n, s, &c, r),
+        (Some(r), Some(c)) => prove(n, s, &c, r, opt.rewrite_rules.size(R::job_check_ratio)),
         _ => None,
     };
     if dbg {
@@ -1637,6 +1710,10 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         uses[slot[i]] += 1;
     }
 
+    // The rules of the output's layout: how strings are written, and whether small objects go into object
+    // streams.
+    let hex = opt.rewrite_rules.on(R::string_form);
+    let pack = opt.rewrite_rules.on(R::object_streams);
     // Every stream gets a direct /Length.
     let mut direct: BTreeMap<u32, (u16, Vec<u8>)> = BTreeMap::new(); // serialised indirect objects
     let mut packable: Vec<(u32, &Obj)> = Vec::new();
@@ -1678,16 +1755,16 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
                 };
                 dict.set(b"Length", Obj::Int(data.len() as i64));
                 let mut body = Vec::with_capacity(data.len() + 64);
-                Writer { out: &mut body }.dict(&dict);
+                Writer { out: &mut body, hex }.dict(&dict);
                 body.extend_from_slice(b"stream\n");
                 body.extend_from_slice(&data);
                 body.extend_from_slice(b"\nendstream");
                 direct.insert(n, (*g, body));
             }
-            _ if *g != 0 => {
+            _ if *g != 0 || !pack => {
                 let body = match crypt {
-                    Some(c) => to_bytes(&c.seal_object(n, *g, o).map_err(|e| format!("object {n}: {e}"))?),
-                    None => to_bytes(o),
+                    Some(c) => to_bytes_as(&c.seal_object(n, *g, o).map_err(|e| format!("object {n}: {e}"))?, hex),
+                    None => to_bytes_as(o, hex),
                 };
                 direct.insert(n, (*g, body));
             }
@@ -1695,7 +1772,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         }
     }
 
-    by_kind(&mut packable);
+    by_kind(&mut packable, &opt.rewrite_rules);
     // New objects are numbered after the highest number the document uses (the encryption dictionary's
     // objects keep their numbers; a dangling reference keeps its number free), never after the old /Size:
     // that is a claim of the file, not something it holds, and the gate has already checked that no object
@@ -1709,7 +1786,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         for (i, (n, _)) in chunk.iter().enumerate() {
             in_stm.insert(*n, (sn, i as u32));
         }
-        raws.push(objstm_raw(chunk));
+        raws.push(objstm_raw(chunk, hex));
     }
     let objstm_bytes: usize = raws.iter().map(|r| r.0.len()).sum();
     let structure = structure_flate(opt, objstm_bytes, input.len());
@@ -1717,16 +1794,16 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
     for (chunk, ((_, first), z)) in chunks.iter().zip(raws.iter().zip(zs)) {
         let sn = next_num;
         next_num += 1;
-        direct.insert(sn, (0, objstm_body(crypt, sn, (chunk.len(), *first), z)?));
+        direct.insert(sn, (0, objstm_body(crypt, sn, (chunk.len(), *first), z, hex)?));
         stats.objstms += 1;
     }
     // The encryption dictionary and its objects as they were: never encrypted, never in an object stream.
     if let Some(c) = crypt {
         if let Some((n, g)) = c.obj {
-            direct.insert(n, (g, to_bytes(&Obj::Dict(c.dict.clone()))));
+            direct.insert(n, (g, to_bytes_as(&Obj::Dict(c.dict.clone()), hex)));
         }
         for (n, g, o) in &c.parts {
-            direct.insert(*n, (*g, to_bytes(o)));
+            direct.insert(*n, (*g, to_bytes_as(o, hex)));
         }
     }
 
@@ -1787,7 +1864,7 @@ fn rewrite(input: &[u8], opt: &Options) -> Result<(Vec<u8>, Stats), String> {
         }
     }
     let structure = |more| structure_flate(opt, objstm_bytes + more, input.len());
-    write_xref(&mut out, xn, xd, (&rows, 1 + w1 + w2), &structure, pool)?;
+    write_xref(&mut out, xn, xd, (&rows, 1 + w1 + w2), &structure, pool, &opt.rewrite_rules)?;
 
     // qpdf 12 reads an object only when its number is below a third of the file's length, this cross-reference
     // stream included, and objects keep their numbers: a file whose numbers are too high for its new length
@@ -1818,8 +1895,8 @@ fn deflate_each(pool: Option<&par::Pool>, raws: &[&[u8]], structure: &flate::Opt
 }
 
 /// The data of an object stream of the objects of `chunk`, before it is deflated, and where its first object
-/// starts.
-fn objstm_raw(chunk: &[(u32, &Obj)]) -> (Vec<u8>, usize) {
+/// starts. `hex`: every string in hexadecimal (the rule `string_form`).
+fn objstm_raw(chunk: &[(u32, &Obj)], hex: bool) -> (Vec<u8>, usize) {
     let mut head = Vec::new();
     let mut body = Vec::new();
     for (i, (n, o)) in chunk.iter().enumerate() {
@@ -1827,7 +1904,7 @@ fn objstm_raw(chunk: &[(u32, &Obj)]) -> (Vec<u8>, usize) {
             body.push(b'\n');
         }
         head.extend_from_slice(format!("{} {} ", n, body.len()).as_bytes());
-        body.extend_from_slice(&to_bytes(o));
+        body.extend_from_slice(&to_bytes_as(o, hex));
     }
     let first = head.len();
     head.extend_from_slice(&body);
@@ -1835,8 +1912,15 @@ fn objstm_raw(chunk: &[(u32, &Obj)]) -> (Vec<u8>, usize) {
 }
 
 /// Object stream `sn` as it goes into the file: `z` is its deflated data, of `count` objects, the first at
-/// `first`. Encrypted as a stream; the objects inside are not encrypted on their own.
-fn objstm_body(crypt: Option<&Crypt>, sn: u32, (count, first): (usize, usize), z: Vec<u8>) -> Result<Vec<u8>, String> {
+/// `first`. Encrypted as a stream; the objects inside are not encrypted on their own. `hex`: every string in
+/// hexadecimal (the rule `string_form`).
+fn objstm_body(
+    crypt: Option<&Crypt>,
+    sn: u32,
+    (count, first): (usize, usize),
+    z: Vec<u8>,
+    hex: bool,
+) -> Result<Vec<u8>, String> {
     let mut d = Dict::default();
     d.set(b"Type", Obj::Name(b"ObjStm".to_vec()));
     d.set(b"N", Obj::Int(count as i64));
@@ -1848,7 +1932,7 @@ fn objstm_body(crypt: Option<&Crypt>, sn: u32, (count, first): (usize, usize), z
     };
     d.set(b"Length", Obj::Int(z.len() as i64));
     let mut out = Vec::new();
-    Writer { out: &mut out }.dict(&d);
+    Writer { out: &mut out, hex }.dict(&d);
     out.extend_from_slice(b"stream\n");
     out.extend_from_slice(&z);
     out.extend_from_slice(b"\nendstream");
@@ -1859,7 +1943,8 @@ fn objstm_body(crypt: Option<&Crypt>, sn: u32, (count, first): (usize, usize), z
 /// dictionary but for how its rows are stored, `rows` its rows (of `cols` bytes each), and `structure` gives the
 /// settings for a file with that many more bytes of structure: the rows count too, as a file can claim object
 /// numbers far beyond what it holds. PNG "Up" prediction usually helps the column-structured rows: whichever is
-/// smaller is kept, counting the bytes its parameters take in the dictionary.
+/// smaller is kept, counting the bytes its parameters take in the dictionary, unless the rule `xref_predictor`
+/// says plain or Up; the rule `string_form` says how strings are written.
 fn write_xref(
     out: &mut Vec<u8>,
     xn: u32,
@@ -1867,6 +1952,7 @@ fn write_xref(
     (rows, cols): (&[u8], usize),
     structure: &dyn Fn(usize) -> flate::Options,
     pool: Option<&par::Pool>,
+    rules: &RewriteRules,
 ) -> Result<(), String> {
     let up = images::png_filter(rows, cols, 1, images::Choice::Fixed(2));
     let mut both = deflate_each(pool, &[rows, &up], &structure(rows.len() + up.len()));
@@ -1878,7 +1964,11 @@ fn write_xref(
     p.set(b"Predictor", Obj::Int(12));
     p.set(b"Columns", Obj::Int(cols as i64));
     let parms = to_bytes(&Obj::Dict(p.clone())).len() + b"/DecodeParms".len();
-    let zx = if z_up.len() + parms < z_plain.len() {
+    let up_wins = match rules.at(R::xref_predictor) {
+        0 => z_up.len() + parms < z_plain.len(),
+        choice => choice == 2,
+    };
+    let zx = if up_wins {
         xd.set(b"DecodeParms", Obj::Dict(p));
         z_up
     } else {
@@ -1887,7 +1977,7 @@ fn write_xref(
     xd.set(b"Length", Obj::Int(zx.len() as i64));
     let xref_off = out.len();
     out.extend_from_slice(format!("{xn} 0 obj\n").as_bytes());
-    Writer { out }.dict(&xd);
+    Writer { out, hex: rules.on(R::string_form) }.dict(&xd);
     out.extend_from_slice(b"stream\n");
     out.extend_from_slice(&zx);
     out.extend_from_slice(b"\nendstream\nendobj\n");
@@ -1970,8 +2060,9 @@ impl Proof {
 /// about 5% more instructions and 15% more CPU time than with the self-check alone; the output is the same).
 /// The streams it leaves, and JPEGs and images whose bytes change by design (fax and other 1-bit images written
 /// as JBIG2, images written as Indexed ones), are compared in full by the self-check.
-fn prove(n: u32, s: &Stream, content: &Content, (d, z, change): &Reencoded) -> Option<Proof> {
-    let pays = content.0.len() / 2 >= s.data.len();
+/// `ratio`: the rule `job_check_ratio`, 2.
+fn prove(n: u32, s: &Stream, content: &Content, (d, z, change): &Reencoded, ratio: usize) -> Option<Proof> {
+    let pays = content.0.len() / ratio >= s.data.len();
     if !pays || *change != Change::default() || content_in(d, z, CHECK_LIMIT).as_ref() != Some(content) {
         return None;
     }
@@ -2125,6 +2216,10 @@ mod effort_tests {
     use super::*;
     use std::sync::Arc;
 
+    // The defaults of the rules `bridge_from` and `big_stream`, which these tests are written for.
+    const STRONG_FROM: u8 = 10;
+    const BIG_STREAM: usize = 4 << 20;
+
     fn flate_stream(decoded: &[u8], extra: &[(&[u8], Obj)]) -> Stream {
         let mut d = Dict::default();
         d.set(b"Filter", Obj::Name(b"FlateDecode".to_vec()));
@@ -2136,12 +2231,13 @@ mod effort_tests {
 
     #[test]
     fn predictor_samples_are_whole_rows_inside_the_image() {
-        assert_eq!(predictor_sample(1000, 300, 100), None);
-        assert_eq!(predictor_sample(100, 300, 0), None, "small images are ranked whole");
+        let rules = RewriteRules::default();
+        assert_eq!(predictor_sample(1000, 300, 100, &rules), None);
+        assert_eq!(predictor_sample(100, 300, 0, &rules), None, "small images are ranked whole");
         for (nrows, row, effort) in
             [(3000usize, 1000usize, 0u8), (5000, 4000, 50), (7, 200_000, 10), (1_000_000, 3, 99)]
         {
-            let bands = predictor_sample(nrows, row, effort).unwrap();
+            let bands = predictor_sample(nrows, row, effort, &rules).unwrap();
             let mut last_end = 0;
             let mut rows = 0;
             for &(a, b) in &bands {
@@ -2150,9 +2246,12 @@ mod effort_tests {
                 rows += b - a;
             }
             // About the budget (at least one row per band).
-            assert!(rows * row <= predictor_budget(effort).max(8 * row), "{nrows} x {row}: {rows} rows");
+            assert!(rows * row <= predictor_budget(effort, &rules).max(8 * row), "{nrows} x {row}: {rows} rows");
         }
-        assert!(predictor_budget(0) < predictor_budget(40) && predictor_budget(40) < predictor_budget(99));
+        assert!(
+            predictor_budget(0, &rules) < predictor_budget(40, &rules)
+                && predictor_budget(40, &rules) < predictor_budget(99, &rules)
+        );
     }
 
     #[test]
@@ -2205,6 +2304,8 @@ mod effort_tests {
 
     #[test]
     fn the_fast_path_gives_images_a_lazy_level_and_the_bridge_the_strong_encoder() {
+        let rules = RewriteRules::default();
+        assert_eq!((STRONG_FROM as u64, BIG_STREAM as u64), (rules.at(R::bridge_from), rules.at(R::big_stream)));
         let text: Vec<u8> = (0..60_000u32).map(|i| b"BT 12 Tf (abc) Tj ET\n"[(i % 21) as usize]).collect();
         let px: Vec<u8> = (0..200 * 150u32).map(|i| ((i % 200) + (i / 200)) as u8).collect();
         let page = flate_stream(&text, &[]);
@@ -2217,21 +2318,23 @@ mod effort_tests {
                 .collect()
         };
         // Effort 0: the page at the fast encoder's top level, the image at a lazy one.
-        assert_eq!(levels(0, 10_000), vec![flate::fast::LEVELS, image_level(0)]);
-        assert!(image_level(0) < flate::fast::LEVELS);
+        assert_eq!(levels(0, 10_000), vec![flate::fast::LEVELS, image_level(0, &rules)]);
+        assert!(image_level(0, &rules) < flate::fast::LEVELS);
         // Never weaker than effort 0's: level 8 (weaker than 7 on images) is skipped.
-        assert!((0..FAST_BELOW).all(|e| image_level(e) >= image_level(0) && image_level(e) != 8));
+        assert!(
+            (0..FAST_BELOW).all(|e| image_level(e, &rules) >= image_level(0, &rules) && image_level(e, &rules) != 8)
+        );
         // Images get closer parses as the effort grows; nothing gets the strong encoder below STRONG_FROM.
         for e in 1..STRONG_FROM {
             let l = levels(e, 10_000_000);
-            assert!(l[0] == flate::fast::LEVELS && l[1] >= image_level(e - 1), "effort {e}: {l:?}");
+            assert!(l[0] == flate::fast::LEVELS && l[1] >= image_level(e - 1, &rules), "effort {e}: {l:?}");
         }
         // From STRONG_FROM the streams that take the most room get the strong encoder (fast 0) while their
         // decoded bytes fit in the bridge budget: none of these at 10 in a 10 KB file, both at 19.
-        assert_eq!(levels(STRONG_FROM, 10_000), vec![flate::fast::LEVELS, image_level(STRONG_FROM)]);
+        assert_eq!(levels(STRONG_FROM, 10_000), vec![flate::fast::LEVELS, image_level(STRONG_FROM, &rules)]);
         assert_eq!(levels(19, 10_000), vec![0, 0]);
-        assert!(bridge_budget(9, 1000) == 0.0 && bridge_budget(20, 1000) == 0.0);
-        assert!((STRONG_FROM..19).all(|e| bridge_budget(e + 1, 1000) == 2.0 * bridge_budget(e, 1000)));
+        assert!(bridge_budget(9, 1000, &rules) == 0.0 && bridge_budget(20, 1000, &rules) == 0.0);
+        assert!((STRONG_FROM..19).all(|e| bridge_budget(e + 1, 1000, &rules) == 2.0 * bridge_budget(e, 1000, &rules)));
         // A page that decodes to more than BIG_STREAM gets one pass of the near-optimal parse at effort 0, then
         // closer parses as images do, and the top level from STRONG_FROM until the bridge takes it (at 17 in a
         // 1 MB file).
@@ -2246,7 +2349,7 @@ mod effort_tests {
             .collect();
         assert_eq!(big_levels[0], 9);
         assert!(!big_levels.contains(&11), "{big_levels:?}");
-        assert!((0..STRONG_FROM).all(|e| big_levels[e as usize] == big_level(e)), "{big_levels:?}");
+        assert!((0..STRONG_FROM).all(|e| big_levels[e as usize] == big_level(e, &rules)), "{big_levels:?}");
         assert!(big_levels.windows(2).take(16).all(|w| w[0] <= w[1]), "{big_levels:?}");
         assert_eq!(big_levels[STRONG_FROM as usize], flate::fast::LEVELS);
         assert_eq!(big_levels[16..], [flate::fast::LEVELS, 0, 0, 0]);
@@ -2338,6 +2441,7 @@ mod effort_tests {
 
     #[test]
     fn a_stream_over_the_quick_budget_is_kept_as_it_is() {
+        let rules = RewriteRules::default();
         // 8 MB of blank image in a 20 KB file: the quick budget is 16 times the file at effort 0, twice as
         // much every 10 points, and at least 4 MiB. Another stream that takes more room in the file comes
         // first and fits.
@@ -2370,8 +2474,51 @@ mod effort_tests {
         // A bigger file pays for it at effort 0 (16 x 600 KB = 9.6 MB).
         assert_eq!(plan(0, 600_000), vec![Some(0), Some(0)]);
         assert!(
-            quick_budget(0, 1000) >= (4 << 20) as f64 && quick_budget(10, 1 << 20) == 2.0 * quick_budget(0, 1 << 20)
+            quick_budget(0, 1000, &rules) >= (4 << 20) as f64
+                && quick_budget(10, 1 << 20, &rules) == 2.0 * quick_budget(0, 1 << 20, &rules)
         );
+    }
+
+    #[test]
+    fn the_rules_at_their_defaults_give_the_values_that_were_fixed() {
+        // The tables and formulas as they stood before they read the rules.
+        const IMAGE_LEVEL: [u8; 20] = [7, 7, 7, 9, 9, 9, 10, 10, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12];
+        let rules = RewriteRules::default();
+        for e in 0..=100u8 {
+            let level = IMAGE_LEVEL[e.min(19) as usize];
+            assert_eq!(image_level(e, &rules), level, "effort {e}");
+            let big = match level {
+                l if l < 10 => 9,
+                l if l < 12 => 10,
+                _ => flate::fast::LEVELS,
+            };
+            assert_eq!(big_level(e, &rules), big, "effort {e}");
+            assert_eq!(predictor_budget(e, &rules), (64usize << 10) << (e.min(99) as usize / 20), "effort {e}");
+            assert_eq!(work_budget(e, &rules), 2f64.powf((e.max(1) - 1) as f64 / 10.0), "effort {e}");
+            let cost = match e {
+                0..=19 => 1.0,
+                20..=39 => 1.7,
+                40..=59 => 2.0,
+                60..=79 => 3.1,
+                _ => 3.9,
+            };
+            assert_eq!(work_per_byte(e, &rules), cost, "effort {e}");
+            for n in [0usize, 1, 999, 123_457, 5 << 20, 1 << 30] {
+                let quick = (n as f64 * 16.0 * 2f64.powf(e as f64 / 10.0)).max((4u64 << 20) as f64);
+                assert_eq!(quick_budget(e, n, &rules), quick, "effort {e}, {n} bytes");
+                let bridge = if (10..20).contains(&e) { n as f64 * (1u64 << (e - 10)) as f64 / 16.0 } else { 0.0 };
+                assert_eq!(bridge_budget(e, n, &rules), bridge, "effort {e}, {n} bytes");
+            }
+        }
+        // The JPEG's second pass: a tenth off by Flate and a tenth off by the tables, or what the rules say.
+        assert!(second_pass(90, 100, 112, &rules));
+        assert!(!second_pass(91, 100, 112, &rules) && !second_pass(90, 100, 111, &rules));
+        let mut any_flate = RewriteRules::default();
+        assert!(any_flate.set("jpeg_second_pass_flate_gain", 0));
+        assert!(second_pass(100, 100, 112, &any_flate) && !second_pass(101, 100, 112, &any_flate));
+        let mut any_tables = RewriteRules::default();
+        assert!(any_tables.set("jpeg_second_pass_table_gain", 0));
+        assert!(second_pass(90, 100, 100, &any_tables) && !second_pass(90, 100, 99, &any_tables));
     }
 
     #[test]
@@ -2640,7 +2787,8 @@ mod effort_tests {
         opt: &Options,
         resolve: &dyn Fn(&Obj) -> Option<Obj>,
     ) -> Option<(Dict, Vec<u8>)> {
-        let (g, px) = samples(s, data, carried, resolve)?;
+        let rules = RewriteRules::default();
+        let (g, px) = samples(s, data, carried, resolve, &rules)?;
         // (`samples` lends the samples when it can now; this copy holds them as it did.)
         let px = px.into_owned();
         let (row, bpp) = (g.row(), g.bpp());
@@ -2650,14 +2798,16 @@ mod effort_tests {
         // first of equal sizes wins. Only their sizes count, so their outputs are not remembered.
         // On the fast path the candidates are ranked with the level effort 0 gives images, else with the quick
         // settings.
-        let rank =
-            flate::Options { fast: if opt.flate.fast > 0 { image_level(0) } else { 0 }, ..flate::Options::quick() };
+        let rank = flate::Options {
+            fast: if opt.flate.fast > 0 { image_level(0, &rules) } else { 0 },
+            ..flate::Options::quick()
+        };
         let quick = flate::Options {
             shared: opt.flate.shared.as_ref().map(|sh| flate::deflate::Shared::with_pool(sh.pool.clone(), false)),
             ..rank
         };
         let nrows = px.len() / row;
-        let rows = predictor_sample(nrows, row, opt.effort);
+        let rows = predictor_sample(nrows, row, opt.effort, &rules);
         let sampled = rows.as_ref().map_or(nrows, |r| r.iter().map(|&(a, b)| b - a).sum());
         let dict_with = |parms: &Option<Dict>| {
             let mut d = s.dict.clone();
@@ -2708,6 +2858,7 @@ mod effort_tests {
 
     #[test]
     fn repredict_matches_the_one_by_one_loop() {
+        let rules = RewriteRules::default();
         let resolve = |o: &Obj| Some(o.clone());
         let mut r = 0x2545_F491_4F6C_DD1Du64;
         let mut next = move || {
@@ -2771,7 +2922,7 @@ mod effort_tests {
         let (mut some, mut predicted) = (0, 0);
         for (name, s, carried) in &cases {
             // At 15 as on the bridge: the fast encoder's image level, so the fast encoder ranks the candidates.
-            let efforts = [(0u8, 0u8), (15, image_level(15)), (50, 0), (100, 0)];
+            let efforts = [(0u8, 0u8), (15, image_level(15, &rules)), (50, 0), (100, 0)];
             for (effort, fast) in efforts {
                 // The quick settings for the final encode too: only the ranking depends on the effort here.
                 let opt = |pool: &Arc<par::Pool>| Options {

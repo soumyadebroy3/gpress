@@ -45,6 +45,7 @@ use crate::off::pack;
 pub use crate::pdf::lossy::{Lossy, LossyRules};
 use crate::pdf::rewrite;
 pub use crate::pdf::rewrite::Dropped;
+use crate::pdf::rules::RewriteRules;
 use crate::Feature;
 
 /// Library version, from Cargo.
@@ -219,6 +220,11 @@ pub struct Options {
     /// 4096)`). With none set the output is what it always was; any value in a
     /// rule's range gives a correct output, only smaller or larger, sooner or later.
     pub flate_rules: FlateRules,
+    /// Normal PDF: the values the lossless rewrite decides by, each with a name, a default and a range
+    /// (`RewriteRules`); they are the group `rewrite_` of [`Options::set_rule`], as in
+    /// `set_rule("rewrite_jbig2_min_saving", 10)` (or `rewrite_rules.set("jbig2_min_saving", 10)`). With none
+    /// set the output is what it always was; any value in a rule's range gives a correct output.
+    pub rewrite_rules: RewriteRules,
 }
 
 impl Default for Options {
@@ -247,6 +253,7 @@ impl Default for Options {
             time_budget: None,
             archive_rules: ArchiveRules::default(),
             flate_rules: FlateRules::default(),
+            rewrite_rules: RewriteRules::default(),
         }
     }
 }
@@ -438,6 +445,7 @@ impl Options {
             lossy: self.lossy_settings(),
             rules: self.lossy_rules,
             deadline: self.deadline(),
+            rewrite_rules: std::sync::Arc::new(self.rewrite_rules.clone()),
         }
     }
 

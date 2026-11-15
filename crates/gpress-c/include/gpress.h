@@ -119,6 +119,9 @@ typedef struct gpress_options {
                                      the rule's range, or a text without its NUL fails the call with
                                      GPRESS_ERR_BAD_ARGUMENT and a message that says which values the rule
                                      takes */
+  uint64_t store_budget;          /* normal PDF: bytes of encoded outputs one file keeps, so that a stream
+                                     another one repeats is encoded once; 0 = 2 MiB, at most 1 GiB. Never
+                                     changes the output. Last, so that no other field moved */
 } gpress_options;
 
 typedef struct gpress_buffer {

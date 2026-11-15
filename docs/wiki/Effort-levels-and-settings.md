@@ -79,6 +79,6 @@ The project's aim is no hard-coded tuning values: each value that decides whethe
 | `flate_` | the Flate encoders | 181 | on `main` ([#45](https://github.com/soumyadebroy3/gpress/pull/45)) |
 | `archive_` | the archive | 76 | on `main` ([#46](https://github.com/soumyadebroy3/gpress/pull/46)). A change to one of the 51 rules the model shares with `expand` writes a version-10 archive that carries the changed values. |
 | `lossy_` | the lossy image step | 15 | on `main` ([#49](https://github.com/soumyadebroy3/gpress/pull/49)); the photo test's 14 more come with draft [#52](https://github.com/soumyadebroy3/gpress/pull/52) |
-| `rewrite_` | the normal-PDF rewrite | 88 | being built, lands after the mechanism |
+| `rewrite_` | the normal-PDF rewrite | 88 | on `main` ([#55](https://github.com/soumyadebroy3/gpress/pull/55)) |
 
 Any rule is set by name on every surface: `--rule name=value` on the command line (the flag again, or commas between, for more), `Options::set_rule(name, value)` or `set_rules("a=1,b=2")` in Rust, a `name=value,...` text in the C options struct, `gpress_rule` in WebAssembly, and a `rules` option by name in TypeScript. A name that is no rule, or a value outside the rule's range, is an error. The reference's [Rules](https://github.com/soumyadebroy3/gpress/blob/main/docs/reference.md#rules) has one table per group, with each rule's default and range, held equal to the code by a test.

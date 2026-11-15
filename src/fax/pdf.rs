@@ -5,8 +5,8 @@
 //! direct parameters, a DeviceGray image or a stencil mask, the width and height the data describes, a size
 //! every JBIG2 decoder can hold, no byte alignment (readers disagree on it), EOL codes where every reader
 //! expects them, every row decoded and written back bit for bit, the data ending with end codes or only 0
-//! bits, coding work in proportion to the data, and the JBIG2 stream at least 5% smaller and decoding (with
-//! our decoder) to the same pixels. JBIG2Decode gives 1 for white, CCITTFaxDecode gives 0 for black unless
+//! bits, coding work in proportion to the data, and the JBIG2 stream at least 5% smaller (the rewrite's rule
+//! `jbig2_min_saving`) and decoding (with our decoder) to the same pixels. JBIG2Decode gives 1 for white, CCITTFaxDecode gives 0 for black unless
 //! BlackIs1: the JBIG2 bitmap is chosen so the filter's output is the same bits, and every other entry of the
 //! image dictionary (Decode, ImageMask, masks) keeps its meaning.
 //!
@@ -196,21 +196,28 @@ fn clean_parse(data: &[u8], p: &FaxParams, h: usize) -> Result<Parsed, &'static 
     Ok(parsed)
 }
 
-fn decide(s: &Stream, resolve: Resolve) -> Result<(Dict, Vec<u8>), &'static str> {
+/// `min_saving`: the percentage the JBIG2 data must save on the fax data (and it must save a byte).
+fn decide(s: &Stream, resolve: Resolve, min_saving: u64) -> Result<(Dict, Vec<u8>), &'static str> {
     let (p, h) = lone_fax(s, resolve)?;
     let parsed = clean_parse(&s.data, &p, h)?;
     if !affordable(&parsed.image, s.data.len()) {
         return Err("too much work for the size of the data");
     }
-    as_jbig2(s, &parsed.image, p.black_is_1, s.data.len())
+    as_jbig2(s, &parsed.image, p.black_is_1, s.data.len(), min_saving)
 }
 
 /// The image of stream `s` as a JBIG2 stream of the bitmap `img` (its inverse if asked), when that is at least
-/// 5% smaller than `best` bytes: (the new dictionary, the new data).
-fn as_jbig2(s: &Stream, img: &Image, invert: bool, best: usize) -> Result<(Dict, Vec<u8>), &'static str> {
+/// `min_saving` percent (5 by default) and a byte smaller than `best` bytes: (the new dictionary, the new data).
+fn as_jbig2(
+    s: &Stream,
+    img: &Image,
+    invert: bool,
+    best: usize,
+    min_saving: u64,
+) -> Result<(Dict, Vec<u8>), &'static str> {
     let out = jbig2::pdf_stream(img, invert);
-    if out.len() as u64 * 100 > best as u64 * 95 {
-        return Err("JBIG2 not at least 5% smaller");
+    if out.len() as u64 * 100 > best as u64 * 100u64.saturating_sub(min_saving) || out.len() >= best {
+        return Err("JBIG2 not smaller by the percentage asked");
     }
     // Our JBIG2 decoder must give the very same pixels back.
     if jbig2::read_pdf_stream(&out, invert, img.changes.len()).as_ref() != Some(img) {
@@ -227,15 +234,16 @@ fn lone_jbig2(d: &Dict) -> bool {
     matches!(chain(d).as_deref(), Some([st]) if st.name == b"JBIG2Decode" && st.parms.is_none())
 }
 
-/// A lone CCITTFaxDecode image as JBIG2 when that is at least 5% smaller and every check passes: (the new
-/// dictionary, the new data). None leaves the stream to the other candidates.
-pub fn jbig2_candidate(s: &Stream, resolve: Resolve) -> Option<(Dict, Vec<u8>)> {
-    decide(s, resolve).ok()
+/// A lone CCITTFaxDecode image as JBIG2 when that is at least `min_saving` percent smaller (5 by default) and
+/// every check passes: (the new dictionary, the new data). None leaves the stream to the other candidates.
+pub fn jbig2_candidate(s: &Stream, resolve: Resolve, min_saving: u64) -> Option<(Dict, Vec<u8>)> {
+    decide(s, resolve, min_saving).ok()
 }
 
 /// What `jbig2_candidate` does with a stream, in words (for measuring).
 pub fn explain(s: &Stream, resolve: Resolve) -> String {
-    match decide(s, resolve) {
+    use crate::pdf::rules::{RewriteRules, Rule};
+    match decide(s, resolve, RewriteRules::default().at(Rule::jbig2_min_saving)) {
         Ok((_, out)) => format!("JBIG2 {} -> {} bytes", s.data.len(), out.len()),
         Err(why) => format!("kept: {why}"),
     }
@@ -299,13 +307,13 @@ fn bilevel(s: &Stream, bits: &[u8]) -> Option<Image> {
     affordable(&img, s.data.len()).then_some(img)
 }
 
-/// A 1-bit image whose filters are general ones only, as JBIG2, when that is at least 5% smaller than `best`
-/// (the bytes of the best other encoding of the stream) and every check passes: (the new dictionary, the new
+/// A 1-bit image whose filters are general ones only, as JBIG2, when that is at least `min_saving` percent
+/// smaller (5 by default) than `best` (the bytes of the best other encoding of the stream) and every check passes: (the new dictionary, the new
 /// data). `bits`: what the filters give, a predictor undone. JBIG2Decode gives 1 for a 0 of the bitmap, so the
 /// bitmap is the inverse of the bits and the filter gives the same bits back. None leaves the stream to the
 /// other candidates.
-pub fn bilevel_candidate(s: &Stream, bits: &[u8], best: usize) -> Option<(Dict, Vec<u8>)> {
-    as_jbig2(s, &bilevel(s, bits)?, true, best).ok()
+pub fn bilevel_candidate(s: &Stream, bits: &[u8], best: usize, min_saving: u64) -> Option<(Dict, Vec<u8>)> {
+    as_jbig2(s, &bilevel(s, bits)?, true, best, min_saving).ok()
 }
 
 /// For the self-check: `a` is a 1-bit image whose filters, general ones only, give `bits` (a predictor undone),
