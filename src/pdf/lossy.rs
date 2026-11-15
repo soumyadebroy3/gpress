@@ -1,19 +1,22 @@
 //! The lossy image step of a normal PDF: images resampled to the resolution they are shown at, and photos
-//! written as JPEG, within floors that hold at every level (see `Lossy`). Off unless asked for.
+//! written as JPEG, within floors that hold at every level (see `Lossy`, and `LossyRules` for the floors and
+//! the other values the step works by, each a setting with a default). Off unless asked for.
 
 /// What the lossy image step may do to a normal PDF's images. `Lossy::OFF` changes nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Lossy {
-    /// A photo shown at 5/4 of this many pixels per inch or more is resampled down to it (never below 150,
-    /// whatever is asked) on its way to a JPEG, so not while `jpeg_quality` is 0; 0: photos are never resampled.
+    /// A photo shown at 5/4 of this many pixels per inch or more (the rule `lossy_resample_margin`) is resampled
+    /// down to it (never below the rule `lossy_photo_floor`, 150 unless it is set) on its way to a JPEG, so not
+    /// while `jpeg_quality` is 0; 0: photos are never resampled.
     pub photo_ppi: u16,
-    /// Line art (screenshots, charts, diagrams) and scans shown at 5/4 of this or more are resampled down to
-    /// it (never below 300, whatever is asked); 0: never.
+    /// Line art (screenshots, charts, diagrams) and scans shown at 5/4 of this or more are resampled down to it
+    /// (never below the rule `lossy_art_floor`, 300 unless it is set); 0: never.
     pub art_ppi: u16,
-    /// JPEG quality on libjpeg's scale (kept within 50 to 95) for a photo that is resampled or stored without
-    /// JPEG; 0: no image becomes a JPEG.
+    /// JPEG quality on libjpeg's scale (kept within the rules `lossy_quality_min` and `lossy_quality_max`, 50
+    /// and 95) for a photo that is resampled or stored without JPEG; 0: no image becomes a JPEG.
     pub jpeg_quality: u8,
-    /// Also write an existing JPEG photo again at `jpeg_quality` when that is at least a tenth smaller.
+    /// Also write an existing JPEG photo again at `jpeg_quality` when that is at least a tenth smaller (the
+    /// rule `lossy_min_saving`).
     pub rejpeg: bool,
 }
 
@@ -35,11 +38,60 @@ impl Lossy {
     }
 }
 
+crate::rules::rule_group! {
+    /// The rules of the lossy image step that are the same at every level: the group `lossy_` of
+    /// `Options::set_rule` (`lossy_min_pixels` and so on). `LossyRules::default()` is what the step does when no
+    /// rule is set, and `set` takes a value within the rule's range only, so the step never works with one
+    /// outside it. docs/reference.md ("Rules") has the table, with why each range ends where it does.
+    pub struct LossyRules {
+        /// An image of at most this many pixels is never touched (logos, icons). Under 10,000 an image has too
+        /// few samples to tell a photo from line art.
+        min_pixels = 65_536, 10_000, 4_294_967_295;
+        /// The least `photo_ppi` can be, in pixels per inch: a lower one is raised to it.
+        photo_floor = 150, 72, 65_535;
+        /// The same for `art_ppi` (line art and scans).
+        art_floor = 300, 150, 65_535;
+        /// An image is resampled only when it is shown at this percent of its floor or more.
+        resample_margin = 125, 100, 1000;
+        /// A lossy result is kept only when it is this percent smaller than the image's lossless size or more;
+        /// the same for a JPEG written again. That size is a quick encode: the strongest one was measured up to
+        /// 5% smaller on photographs, so under 10 a lossy output could be larger than the lossless one.
+        min_saving = 10, 10, 99;
+        /// The least `jpeg_quality` can be.
+        quality_min = 50, 1, 100;
+        /// The most it can be (it wins over `quality_min`), and where the quality steps stop.
+        quality_max = 95, 1, 100;
+        /// A JPEG that fails the two checks below is coded again this much higher.
+        quality_step = 10, 1, 99;
+        /// How many qualities are tried, the first one counted; 1: none after it.
+        quality_tries = 3, 1, 10;
+        /// The least peak signal-to-noise ratio, in dB, of a new JPEG's luma against the samples it was made
+        /// from, over the whole image.
+        min_psnr = 35, 1, 99;
+        /// The same in its worst block.
+        min_block_psnr = 26, 1, 99;
+        /// The side of those blocks, in pixels.
+        psnr_block = 16, 8, 64;
+        /// An image drawn over this percent of its page or more is a scan: it gets the line-art floor whatever
+        /// it looks like.
+        scan_cover = 70, 1, 100;
+        /// Content operators (and one for every 64 bytes decoded) the page walk may read in one file; over it
+        /// no image of the file is reduced. It bounds the walk's memory and time against a hostile file, so it
+        /// can be lowered but not raised.
+        walk_operators = 20_000_000, 1, 20_000_000;
+        /// Image and form draws the walk may make in one file, a form's counted every time the form is drawn;
+        /// over it no image of the file is reduced. Like `walk_operators`, it can be lowered but not raised.
+        walk_draws = 1_000_000, 1, 1_000_000;
+    }
+}
+
 // ---------------------------------------------------------------- the step
 //
 // It runs on the loaded objects before the lossless pipeline plans its work (`rewrite::rewrite`): an image it
 // reduces gets a new dictionary and new data there, and everything after it (the stream jobs, the writer, the
 // self-check) treats the new image like any other stream.
+//
+// The numbers below are the defaults of `LossyRules`, which holds each of them.
 //
 // Which images: 8-bit grey or RGB image XObjects of more than 65,536 pixels, stored with general filters or as
 // one JPEG (see `eligible`), whose every use in the file the page walk measured (`place::shown`). Anything
@@ -52,7 +104,7 @@ impl Lossy {
 //
 // What is kept: a candidate of at most nine tenths of the image's lossless size (the smaller of its stored
 // bytes and a quick lossless encode of it), whose JPEG, decoded again, stays close to the samples it was made
-// from (`WHOLE_MSE`, `BLOCK_MSE`); a JPEG that does not is first coded again at a higher quality
+// from (`mse_limit`); a JPEG that does not is first coded again at a higher quality
 // (`photo_jpeg`). Any other candidate is dropped.
 
 use super::filters::{self, chain, decode_stage, is_general, Stage};
@@ -65,13 +117,6 @@ use crate::flate;
 use crate::par;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-
-/// An image of at most this many pixels is never touched (logos, icons, small figures).
-const SMALL: u64 = 65_536;
-
-/// The floors no setting goes below, in pixels per inch as shown: photos, and line art or scans.
-const PHOTO_FLOOR: u16 = 150;
-const ART_FLOOR: u16 = 300;
 
 /// What the step did to the images of one file.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -94,7 +139,7 @@ pub fn reduce(objs: &mut BTreeMap<u32, (u16, Obj)>, trailer: &Dict, opt: &Option
     if !objs.values().any(|(_, o)| matches!(o, Obj::Stream(s) if eligible(s, none, objs, opt).is_some())) {
         return Done::default();
     }
-    let shown = place::shown(objs, trailer, opt.max_stream, opt.deadline);
+    let shown = place::shown(objs, trailer, opt.max_stream, opt.deadline, &opt.rules);
     let images: Vec<(u32, Image)> = shown
         .iter()
         .filter_map(|(&n, &shown)| match objs.get(&n) {
@@ -185,7 +230,7 @@ fn channels(cs: &Obj, objs: &BTreeMap<u32, (u16, Obj)>) -> Option<usize> {
 }
 
 /// Whether the step may work on image `s`, from its dictionary: an image XObject with 8 bits per component in
-/// a grey or RGB colour space (`channels`), more than `SMALL` pixels, at most 65,535 each way, decoding within
+/// a grey or RGB colour space (`channels`), more than `min_pixels` pixels, at most 65,535 each way, decoding within
 /// `max_stream`; without /ImageMask, /Decode, /Alternates, /OPI or an external file, and without the short
 /// keys of an inline image (/W, /H and so on: a reader that takes one for the full key would go on reading
 /// the old value); with no colour-key /Mask (those name sample values) and no soft mask that carries /Matte
@@ -214,7 +259,7 @@ fn eligible<'a>(s: &'a Stream, shown: Shown, objs: &BTreeMap<u32, (u16, Obj)>, o
     let (width, height) = (side(b"Width")?, side(b"Height")?);
     let channels = channels(d.get(b"ColorSpace")?, objs)?;
     let pixels = width as u64 * height as u64;
-    if pixels <= SMALL || pixels * channels as u64 > opt.max_stream as u64 {
+    if pixels <= opt.rules.min_pixels || pixels * channels as u64 > opt.max_stream as u64 {
         return None;
     }
     let mut general = chain(d)?;
@@ -241,10 +286,12 @@ struct Candidate {
 const REJPEG: &str = "JPEG again";
 
 /// The pixels an image of `w` by `h` shown at `ppi` is resampled to for `floor`, both in pixels per inch: None
-/// below 5/4 of the floor (resampling by a few percent costs sharpness and saves little); else the size at
-/// which its lower resolution is the floor, each side rounded up.
-fn target(w: usize, h: usize, ppi: f64, floor: f64) -> Option<(usize, usize)> {
-    if ppi * 4.0 < floor * 5.0 {
+/// below `margin` percent of the floor (resampling by a few percent costs sharpness and saves little); else the
+/// size at which its lower resolution is the floor, each side rounded up, and None when that is the size it
+/// has (a margin of 100, or a side of a few pixels). `floor` is a whole number, so the product is exact and the
+/// division rounds the same way on every machine (at 125 it is exact too).
+fn target(w: usize, h: usize, ppi: f64, floor: f64, margin: u64) -> Option<(usize, usize)> {
+    if ppi < floor * margin as f64 / 100.0 {
         return None;
     }
     // The next whole number at or above `x` (which is positive and below the side).
@@ -257,24 +304,27 @@ fn target(w: usize, h: usize, ppi: f64, floor: f64) -> Option<(usize, usize)> {
         }
     };
     let scale = floor / ppi;
-    Some((up(w as f64 * scale).clamp(1, w), up(h as f64 * scale).clamp(1, h)))
+    let to = (up(w as f64 * scale).clamp(1, w), up(h as f64 * scale).clamp(1, h));
+    (to != (w, h)).then_some(to)
 }
 
 /// The candidate for one image, or why it is left alone.
 fn candidate(img: &Image, opt: &Options) -> Result<Candidate, &'static str> {
-    let lossy = opt.lossy;
+    let (lossy, rules) = (opt.lossy, opt.rules);
     let (w, h, stored) = (img.width, img.height, img.s.data.len());
     // The image's resolution as shown: the lower of its two directions at its largest placement.
     if !(img.shown.width > 0.0 && img.shown.height > 0.0) {
         return Err("shown at no size");
     }
     let ppi = (w as f64 / img.shown.width).min(h as f64 / img.shown.height);
-    let floor = |asked: u16, least: u16| (asked > 0).then(|| asked.max(least) as f64);
-    let art_floor = floor(lossy.art_ppi, ART_FLOOR);
+    let floor = |asked: u16, least: u64| (asked > 0).then(|| (asked as u64).max(least) as f64);
+    let art_floor = floor(lossy.art_ppi, rules.art_floor);
     // A scan gets the line-art floor whatever its samples look like.
-    let photo_floor = if img.shown.scan { art_floor } else { floor(lossy.photo_ppi, PHOTO_FLOOR) };
-    let quality = (cfg!(feature = "jpeg") && lossy.jpeg_quality > 0).then(|| lossy.jpeg_quality.clamp(50, 95));
-    let size = |f: Option<f64>| f.and_then(|f| target(w, h, ppi, f));
+    let photo_floor = if img.shown.scan { art_floor } else { floor(lossy.photo_ppi, rules.photo_floor) };
+    // `quality_max` wins when the two cross (`clamp` would panic).
+    let within = |q: u8| (q as u64).max(rules.quality_min).min(rules.quality_max) as u8;
+    let quality = (cfg!(feature = "jpeg") && lossy.jpeg_quality > 0).then(|| within(lossy.jpeg_quality));
+    let size = |f: Option<f64>| f.and_then(|f| target(w, h, ppi, f, rules.resample_margin));
     // Nothing these settings could do to it whatever its samples are: it is not decoded.
     let any = match (img.jpeg, quality) {
         (true, None) => false,
@@ -307,16 +357,18 @@ fn candidate(img: &Image, opt: &Options) -> Result<Candidate, &'static str> {
     let (tw, th) = size(art_floor).ok_or("line art at or near its floor")?;
     let small = resample(px, w, h, img.channels, tw, th, opt.deadline).ok_or("out of time")?;
     let (parms, z) = quick_flate(&small, tw, img.channels, opt);
-    if !worth(z.len(), stored) || !worth(z.len(), quick_flate(px, w, img.channels, opt).1.len()) {
-        return Err("line art: not a tenth smaller");
+    let worth = |old: usize| worth(z.len(), old, rules.min_saving);
+    if !worth(stored) || !worth(quick_flate(px, w, img.channels, opt).1.len()) {
+        return Err("line art: not smaller by `min_saving`");
     }
     let dict = new_dict(&img.s.dict, tw, th, b"FlateDecode", parms, z.len());
     Ok(Candidate { dict, data: z, resampled: true, to_jpeg: false, what: "line art resampled" })
 }
 
-/// Whether a candidate of `new` bytes is worth it against `old`: at most nine tenths of it.
-fn worth(new: usize, old: usize) -> bool {
-    new as u64 * 10 <= old as u64 * 9
+/// Whether a candidate of `new` bytes is worth it against `old`: smaller by `saving` percent or more (10: at
+/// most nine tenths of it).
+fn worth(new: usize, old: usize, saving: u64) -> bool {
+    new as u64 * 100 <= old as u64 * (100 - saving.min(100))
 }
 
 /// The image's dictionary for new data: every entry kept but the size, the filter entries, the length and
@@ -347,7 +399,7 @@ fn quick_flate(px: &[u8], w: usize, ch: usize, opt: &Options) -> (Option<Dict>, 
         fast: image_level(0),
         shared: opt.flate.shared.clone(),
         deadline: opt.deadline,
-        ..flate::Options::effort(0)
+        ..flate::Options::effort_with(0, &opt.flate.rules)
     };
     match images::estimate_choice(px, row, bpp, 8, &bands) {
         Some(how) => (Some(png_parms(&g)), flate::deflate_zlib(&images::png_filter(px, row, bpp, how), &settings)),
@@ -497,35 +549,40 @@ fn resample(src: &[u8], sw: usize, sh: usize, ch: usize, dw: usize, dh: usize, d
 #[cfg(feature = "jpeg")]
 use crate::jpeg::{self, Plane};
 
-/// The most luma error a JPEG candidate may have against the samples it was made from, as mean squared error
-/// in hundredths: 20.56 over the whole image (a PSNR of 35 dB) and 163.34 in its worst block of 16 by 16
-/// (26 dB). A smooth photo is well inside both at quality 75; one with much fine detail needs 85 or more for
-/// the first (two landscapes of the test corpus: 32.8 and 35.9 dB at 75, 35.7 and 38.4 dB at 85). A JPEG with
-/// ringing around hard edges (line art taken for a photo) falls out on the block floor.
+/// The most luma error a JPEG candidate may have against the samples it was made from to keep a peak
+/// signal-to-noise ratio of `db` dB, as mean squared error in hundredths: 255 squared, times 100, over 10 to
+/// the power of a tenth of `db`, in whole numbers (the ten powers below are times a million), so that every
+/// machine gets the same limit. The defaults: 2056 over the whole image (35 dB) and 16334 in its worst block of
+/// 16 by 16 (26 dB). A smooth photo is well inside both at quality 75; one with much fine detail needs 85 or
+/// more for the first (two landscapes of the test corpus: 32.8 and 35.9 dB at 75, 35.7 and 38.4 dB at 85). A
+/// JPEG with ringing around hard edges (line art taken for a photo) falls out on the block floor.
 #[cfg(feature = "jpeg")]
-const WHOLE_MSE: u64 = 2056;
-#[cfg(feature = "jpeg")]
-const BLOCK_MSE: u64 = 16334;
+fn mse_limit(db: u64) -> u64 {
+    const TENTHS: [u64; 10] =
+        [1_000_000, 1_258_925, 1_584_893, 1_995_262, 2_511_886, 3_162_278, 3_981_072, 5_011_872, 6_309_573, 7_943_282];
+    let over = 10u64.pow((db.min(99) / 10) as u32) * TENTHS[(db % 10) as usize];
+    (6_502_500 * 1_000_000 + over / 2) / over
+}
 
 /// The luma error of `b` against `a` (both `w` by `h`), as mean squared error in hundredths: over the whole
-/// image, and in the worst of its blocks of 16 by 16 (the last block of a row or column takes the samples left
-/// over, so every block has at least 16 each way where the image does).
+/// image, and in the worst of its blocks of `side` by `side` (the last block of a row or column takes the
+/// samples left over, so every block has at least `side` each way where the image does).
 #[cfg(feature = "jpeg")]
-fn errors(a: &[u8], b: &[u8], w: usize, h: usize) -> (u64, u64) {
-    let (across, down) = ((w / 16).max(1), (h / 16).max(1));
+fn errors(a: &[u8], b: &[u8], w: usize, h: usize, side: usize) -> (u64, u64) {
+    let (across, down) = ((w / side).max(1), (h / side).max(1));
     let (mut whole, mut worst) = (0u64, 0u64);
     for by in 0..down {
-        let (y0, y1) = (by * 16, if by + 1 == down { h } else { (by + 1) * 16 });
+        let (y0, y1) = (by * side, if by + 1 == down { h } else { (by + 1) * side });
         let mut blocks = vec![0u64; across];
         for y in y0..y1 {
             let (ra, rb) = (&a[y * w..(y + 1) * w], &b[y * w..(y + 1) * w]);
             for x in 0..w {
                 let d = ra[x].abs_diff(rb[x]) as u64;
-                blocks[(x / 16).min(across - 1)] += d * d;
+                blocks[(x / side).min(across - 1)] += d * d;
             }
         }
         for (bx, &sum) in blocks.iter().enumerate() {
-            let width = if bx + 1 == across { w - bx * 16 } else { 16 };
+            let width = if bx + 1 == across { w - bx * side } else { side };
             worst = worst.max(sum * 100 / (width * (y1 - y0)) as u64);
             whole += sum;
         }
@@ -538,8 +595,9 @@ fn errors(a: &[u8], b: &[u8], w: usize, h: usize) -> (u64, u64) {
 /// plane smaller than that is not enlarged, the photo is left alone), coded at `quality`, and given optimal
 /// Huffman tables. The JPEG must be worth it against `stored` and `lossless()` (the image's stored bytes and
 /// its quick lossless size), and decode close to the planes it was made from: when it does not, it is coded
-/// again 10 and then 20 higher (at most 95), so that a photo with much fine detail is still written, with
-/// more bits, instead of staying as large as it was.
+/// again `quality_step` higher, `quality_tries` times in all and at most at `quality_max` (10 and then 20
+/// higher, at most 95), so that a photo with much fine detail is still written, with more bits, instead of
+/// staying as large as it was.
 #[cfg(feature = "jpeg")]
 fn photo_jpeg(
     mut planes: Vec<Plane>,
@@ -562,21 +620,24 @@ fn photo_jpeg(
     }
     let (mut lossless, mut limit) = (Some(lossless), stored);
     let mut why = "";
-    for step in [0, 10, 20] {
-        let q = quality.saturating_add(step).min(95);
-        if step > 0 && q == quality.saturating_add(step - 10).min(95) {
+    let rules = opt.rules;
+    // The quality of each try; `quality` is within `quality_max` already.
+    let at = |t: u64| (quality as u64 + t * rules.quality_step).min(rules.quality_max.max(quality as u64)) as u8;
+    for t in 0..rules.quality_tries {
+        let q = at(t);
+        if t > 0 && q == at(t - 1) {
             break;
         }
         let coded = jpeg::encode(&planes, q, opt.deadline).ok_or("the JPEG encoder refused it")?;
         let coded = jpeg::optimize(&coded).unwrap_or(coded);
         // The quick lossless size is worked out once, and only for a JPEG that beats the stored bytes.
-        if worth(coded.len(), limit) {
+        if worth(coded.len(), limit, rules.min_saving) {
             if let Some(f) = lossless.take() {
                 limit = limit.min(f());
             }
         }
-        if !worth(coded.len(), limit) {
-            return Err("not a tenth smaller as a JPEG");
+        if !worth(coded.len(), limit, rules.min_saving) {
+            return Err("not smaller by `min_saving` as a JPEG");
         }
         match close(&coded, &planes[0], opt) {
             Ok(()) => return Ok((coded, (w, h))),
@@ -591,11 +652,11 @@ fn photo_jpeg(
 fn close(coded: &[u8], y: &Plane, opt: &Options) -> Result<(), &'static str> {
     let back = jpeg::decode(coded, opt.max_stream, opt.deadline).map_err(|_| "the new JPEG does not decode")?;
     let luma = back.planes.first().filter(|p| (p.w, p.h) == (y.w, y.h)).ok_or("the new JPEG has another size")?;
-    let (whole, worst) = errors(&y.px, &luma.px, y.w, y.h);
-    if whole > WHOLE_MSE {
+    let (whole, worst) = errors(&y.px, &luma.px, y.w, y.h, opt.rules.psnr_block as usize);
+    if whole > mse_limit(opt.rules.min_psnr) {
         return Err("quality: the whole image");
     }
-    if worst > BLOCK_MSE {
+    if worst > mse_limit(opt.rules.min_block_psnr) {
         return Err("quality: its worst block");
     }
     Ok(())
@@ -767,13 +828,48 @@ mod tests {
     #[test]
     fn the_target_size_keeps_the_floor() {
         // 600 pixels over an inch, floor 300: half the size. Below 5/4 of the floor: left alone.
-        assert_eq!(target(600, 300, 600.0, 300.0), Some((300, 150)));
-        assert_eq!(target(600, 600, 374.0, 300.0), None);
-        assert_eq!(target(600, 600, 375.0, 300.0), Some((480, 480)));
+        assert_eq!(target(600, 300, 600.0, 300.0, 125), Some((300, 150)));
+        assert_eq!(target(600, 600, 374.0, 300.0, 125), None);
+        assert_eq!(target(600, 600, 375.0, 300.0, 125), Some((480, 480)));
         // Sides are rounded up, so the resolution never goes under the floor.
-        let (w, h) = target(1001, 333, 451.0, 150.0).unwrap();
+        let (w, h) = target(1001, 333, 451.0, 150.0, 125).unwrap();
         assert!(w as f64 * 451.0 / 1001.0 >= 150.0 && h as f64 * 451.0 / 333.0 >= 150.0);
-        assert_eq!(target(3, 3, 1e9, 150.0), Some((1, 1)));
+        assert_eq!(target(3, 3, 1e9, 150.0, 125), Some((1, 1)));
+        // A margin of 100 takes anything over the floor, but never gives an image its own size back.
+        assert_eq!(target(600, 600, 300.0, 300.0, 100), None);
+        assert_eq!(target(600, 600, 300.1, 300.0, 100), None);
+        assert_eq!(target(600, 600, 301.0, 300.0, 100), Some((599, 599)));
+        assert_eq!(target(4, 4, 187.5, 150.0, 125), None);
+    }
+
+    #[test]
+    fn the_rules_default_to_the_values_that_were_fixed() {
+        let was = [65_536, 150, 300, 125, 10, 50, 95, 10, 3, 35, 26, 16, 70, 20_000_000, 1_000_000];
+        let d = LossyRules::default();
+        assert_eq!(LossyRules::RULES.len(), was.len());
+        for (&(name, default, lowest, highest), was) in LossyRules::RULES.iter().zip(was) {
+            assert_eq!((default, d.get(name)), (was, Some(was)), "{name}");
+            assert!(lowest <= default && default <= highest, "{name}");
+        }
+        // Where the ranges end: no saving under the default (a lossy output could pass the lossless one), the
+        // floors at 72 and 150 pixels per inch, no image of under 10,000 pixels.
+        let mut r = d;
+        assert!(!r.set("min_saving", 9) && !r.set("photo_floor", 71) && !r.set("art_floor", 149));
+        assert!(!r.set("min_pixels", 9_999) && !r.set("no_such_rule", 5) && r == d && r.get("no_such_rule").is_none());
+        assert!(r.set("photo_floor", 72) && r.set("art_floor", 150) && r.set("min_pixels", 10_000) && r != d);
+    }
+
+    #[cfg(feature = "jpeg")]
+    #[test]
+    fn decibels_become_the_error_limits_in_whole_numbers() {
+        // The two limits that were fixed: 35 dB over the image, 26 dB in the worst block.
+        assert_eq!((mse_limit(35), mse_limit(26)), (2056, 16334));
+        // 6,502,500 over ten to the power of a tenth of the decibels, to the nearest.
+        assert_eq!((mse_limit(10), mse_limit(20), mse_limit(30), mse_limit(40)), (650_250, 65_025, 6503, 650));
+        assert_eq!((mse_limit(1), mse_limit(99)), (5_165_121, 0));
+        assert!(
+            (1..99).all(|db| mse_limit(db) >= mse_limit(db + 1)) && (1..60).all(|db| mse_limit(db) > mse_limit(db + 1))
+        );
     }
 
     #[cfg(feature = "jpeg")]
@@ -781,14 +877,36 @@ mod tests {
     fn errors_are_counted_whole_and_by_block() {
         let (w, h) = (40, 33);
         let a = vec![100u8; w * h];
-        assert_eq!(errors(&a, &a, w, h), (0, 0));
+        assert_eq!(errors(&a, &a, w, h, 16), (0, 0));
         // One sample off by 16 in the last block (24 wide, 17 high): 256 over 40 x 33, and over 24 x 17.
         let mut b = a.clone();
         b[w * h - 1] = 116;
-        assert_eq!(errors(&a, &b, w, h), (25600 / (40 * 33), 25600 / (24 * 17)));
+        assert_eq!(errors(&a, &b, w, h, 16), (25600 / (40 * 33), 25600 / (24 * 17)));
         // Every sample off by 5: 25 everywhere.
         let c = vec![105u8; w * h];
-        assert_eq!(errors(&a, &c, w, h), (2500, 2500));
+        assert_eq!(errors(&a, &c, w, h, 16), (2500, 2500));
+    }
+
+    /// `lossy_psnr_block` decides what a local flaw weighs: 8 by 8 samples 20 off (on a JPEG block, so the JPEG
+    /// keeps them) are an error of 400 in a block of 8, over the 163 that 26 dB allows, and a quarter of that in a
+    /// block of 16. Over the whole image they are 6.25, within the 20.6 of 35 dB.
+    #[cfg(feature = "jpeg")]
+    #[test]
+    fn the_block_side_decides_what_a_local_flaw_weighs() {
+        let (w, h) = (64, 64);
+        let y = Plane { w, h, px: vec![100; w * h] };
+        let mut flawed = y.clone();
+        for row in 8..16 {
+            flawed.px[row * w + 8..row * w + 16].fill(120);
+        }
+        let coded = jpeg::encode(std::slice::from_ref(&flawed), 95, Deadline::NONE).unwrap();
+        let side = |s: u64| {
+            let mut opt = Options::default();
+            assert!(opt.rules.set("psnr_block", s));
+            close(&coded, &y, &opt)
+        };
+        assert_eq!(side(8), Err("quality: its worst block"));
+        assert!(side(16).is_ok() && side(64).is_ok());
     }
 
     #[cfg(feature = "jpeg")]
@@ -809,11 +927,27 @@ mod tests {
         let low = photo_jpeg(vec![y.clone()], None, 50, 1 << 30, || 1 << 30, &opt);
         assert!(low.unwrap_err().starts_with("quality"));
         let big = photo_jpeg(vec![y.clone()], None, 75, 1 << 30, || 10, &opt);
-        assert_eq!(big.unwrap_err(), "not a tenth smaller as a JPEG");
+        assert_eq!(big.unwrap_err(), "not smaller by `min_saving` as a JPEG");
+        // The rules of the ladder: a second try 45 higher gets from 50 to 95, steps of 20 from 55 to 95; one try
+        // is the first quality only, and a step past `quality_max` stops there.
+        let with = |rules: &[(&str, u64)], q: u8| {
+            let mut opt = Options::default();
+            assert!(rules.iter().all(|(name, v)| opt.rules.set(name, *v)));
+            photo_jpeg(vec![y.clone()], None, q, 1 << 30, || 1 << 30, &opt).map(|(coded, _)| coded)
+        };
+        let at95 = with(&[], 95).unwrap();
+        assert!(with(&[("quality_step", 45), ("quality_tries", 2)], 50).unwrap() == at95);
+        assert!(with(&[("quality_step", 20)], 55).unwrap() == at95);
+        assert!(with(&[("quality_step", 99)], 50).unwrap() == at95);
+        assert!(with(&[("quality_tries", 1)], 75).unwrap_err().starts_with("quality"));
+        assert!(with(&[("quality_step", 99), ("quality_max", 60)], 50).unwrap_err().starts_with("quality"));
+        // A looser floor takes the first quality; a block of another side still lines up.
+        assert!(with(&[("min_psnr", 20), ("min_block_psnr", 10)], 50).is_ok());
+        assert!(with(&[("psnr_block", 8)], 95).is_ok() && with(&[("psnr_block", 64)], 95).is_ok());
     }
 
     #[test]
     fn worth_is_a_tenth() {
-        assert!(worth(90, 100) && !worth(91, 100) && worth(0, 0) && !worth(1, 1));
+        assert!(worth(90, 100, 10) && !worth(91, 100, 10) && worth(0, 0, 10) && !worth(1, 1, 10));
     }
 }

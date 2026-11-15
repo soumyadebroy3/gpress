@@ -6,9 +6,10 @@ the benchmark and check scripts.
 
 ## Options
 
-Everything a caller can tune is a field of `Options` (the C struct has every field but `store_budget`, `flate_rules` and `archive_rules`, with `engine_effort` and `lossy` in the shapes their rows give, and
-the TypeScript options most of them; those three stay at their defaults in both), with `Options::check`
-saying whether the engine accepts a set; nothing is read from the environment except
+Everything a caller can tune is a field of `Options` (the C struct has every field but `store_budget`, with
+`engine_effort` and `lossy` in the shapes their rows give and the groups of rules as one text, `rules`; the
+TypeScript options have most of them, the rules by name too; `store_budget` stays at its default in both), with
+`Options::check` saying whether the engine accepts a set; nothing is read from the environment except
 `PDFE_DEBUG`, which only prints timings and figures to standard error. For a normal PDF that includes one
 summary line per file, which `bench/p5.py` reads:
 
@@ -37,11 +38,12 @@ the encoding time its answers saved, roughly), and the segments written from an 
 | `jbig2` | on | Normal PDF: CCITT fax images become JBIG2 when that is at least 5% smaller (the same pixels), and so do 1-bit images stored without an image codec (a DeviceGray image or a stencil mask under Flate, LZW, RunLength, the ASCII filters or none) when JBIG2 is at least 5% smaller than the best other encoding of the stream. |
 | `palette` | on | Normal PDF: an 8-bit DeviceGray or DeviceRGB image that uses few colours becomes an Indexed image over its own colour space (the same colour for every pixel) when the whole stream, its colour table counted, comes out smaller. |
 | `rewrite_encrypted` | on | Normal PDF: files the empty user password opens are rewritten with their encryption kept exactly. Off, every encrypted file is left untouched. |
-| `lossy` | none | Normal PDF: the lossy image step. `None`: what the effort means (efforts 60, 80 and 100 turn it on). `Some`: exactly these settings whatever the effort, and `Some(Lossy::OFF)` keeps any effort lossless. The settings are `photo_ppi` and `art_ppi` (photos, and line art and scans, shown at 5/4 of this many pixels per inch or more are resampled down to it; never below 150 and 300, whatever is asked; 0: never resampled; a photo is resampled only on its way to a JPEG, so `photo_ppi` does nothing while `jpeg_quality` is 0), `jpeg_quality` (kept within 50 to 95, for a photo that is resampled or stored without JPEG; 0: no image becomes a JPEG) and `rejpeg` (an existing JPEG photo is written again at that quality when that is at least a tenth smaller); `Lossy::level(1)`, `(2)` and `(3)` are what efforts 60, 80 and 100 mean. Command line: `--photo-ppi N`, `--art-ppi N` and `--jpeg-quality N` change one setting each, over the effort's (0: as it is); a run that changed an image adds `resampled=`, `to_jpeg=` and `rejpeg=` to its output line. `Report` counts the same (`images_resampled`, `images_to_jpeg`, `jpegs_rewritten`). A build without the `jpeg` feature resamples line art only. C (`photo_ppi`, `art_ppi`, `jpeg_quality`) and TypeScript (`photoPpi`, `artPpi`, `jpegQuality`) have those three overrides, where 0 or absent means what the effort says. On every surface `art_ppi` or `jpeg_quality` set makes the output lossy at any effort, and `photo_ppi` alone changes nothing below effort 60, where no JPEG quality is set. |
+| `lossy` | none | Normal PDF: the lossy image step. `None`: what the effort means (efforts 60, 80 and 100 turn it on). `Some`: exactly these settings whatever the effort, and `Some(Lossy::OFF)` keeps any effort lossless. The settings are `photo_ppi` and `art_ppi` (photos, and line art and scans, shown at 5/4 of this many pixels per inch or more (the rule `lossy_resample_margin`) are resampled down to it; never below the rules `lossy_photo_floor` and `lossy_art_floor`, 150 and 300 unless they are set; 0: never resampled; a photo is resampled only on its way to a JPEG, so `photo_ppi` does nothing while `jpeg_quality` is 0), `jpeg_quality` (kept within the rules `lossy_quality_min` and `lossy_quality_max`, 50 to 95, for a photo that is resampled or stored without JPEG; 0: no image becomes a JPEG) and `rejpeg` (an existing JPEG photo is written again at that quality when that is at least a tenth smaller); `Lossy::level(1)`, `(2)` and `(3)` are what efforts 60, 80 and 100 mean. Command line: `--photo-ppi N`, `--art-ppi N` and `--jpeg-quality N` change one setting each, over the effort's (0: as it is); a run that changed an image adds `resampled=`, `to_jpeg=` and `rejpeg=` to its output line. `Report` counts the same (`images_resampled`, `images_to_jpeg`, `jpegs_rewritten`). A build without the `jpeg` feature resamples line art only. C (`photo_ppi`, `art_ppi`, `jpeg_quality`) and TypeScript (`photoPpi`, `artPpi`, `jpegQuality`) have those three overrides, where 0 or absent means what the effort says. On every surface `art_ppi` or `jpeg_quality` set makes the output lossy at any effort, and `photo_ppi` alone changes nothing below effort 60, where no JPEG quality is set. |
+| rules (`set_rule`, `set_rules`, `rule`, `Options::rules()`; the fields `lossy_rules`, `flate_rules` and `archive_rules` hold the groups) | each rule's own | The engine's tuning values by name, each with a default, a lowest and a highest value: `set_rule("lossy_photo_floor", 100)`, `set_rule("flate_e100_depth", 4096)`. A rule that is not set has its default; a name that is no rule or a value outside the range is an error. See [Rules](#rules) for the tables and for the command line, C and TypeScript. |
 | `decrypt` | on | Archive: the streams of such files are stored decrypted (so they get the zlib rebuild, Lepton and the model) and encrypted again on expand. |
 | `use_existing_libraries` | on | Use Lepton for JPEG streams in the archive when the build has it (`--features existing`). An archive with parts Lepton made expands only with such a build (the error says so). |
 | `time_budget` | none | Give up after this much wall time: `Error::TimeBudget` and no output, the input unchanged. Checked between streams, Flate segments and archive parts (every 64 KiB of model work) in all three operations, so it can be overshot by a little (on expand by one part's zlib re-creation). A call that finishes in time gives the same bytes as one without a budget. |
-| `archive_rules` | defaults | Archive: the archive's tuning values (`ArchiveRules`, `src/pack/rules.rs`), each with a name, a default (what the archive did when it was a constant), a lowest and a highest value; `set` refuses a name it does not know or a value out of range. Most are choices of compress alone. The first 51 are the model's, which expand must share: with any of them changed the archive is version 10 and carries them in its header (see the gpress archive below), and expand takes them from there, never from its caller (of these options it reads `deadline_step` only). Not in the C struct or the TypeScript options yet. |
+| `archive_rules` | defaults | Archive: the archive's tuning values (`ArchiveRules`, `src/pack/rules.rs`), each with a name, a default (what the archive did when it was a constant), a lowest and a highest value; `set` refuses a name it does not know or a value out of range. Most are choices of compress alone. The first 51 are the model's, which expand must share: with any of them changed the archive is version 10 and carries them in its header (see the gpress archive below), and expand takes them from there, never from its caller (of these options it reads `deadline_step` only). They are the rules `archive_`, set by name everywhere (see [Rules](#rules)). |
 
 Memory while expanding follows these three: at most about `max_len` for the output, `max_len + max_decoded` for
 the model's history (one byte per byte it codes, and while an image part is coded a ring of its residuals: about a
@@ -88,28 +90,388 @@ effort (40 and above all mean its strongest setting) and nothing else.
 | 80 | lossy | 100 | `Lossy::level(2)`: as 60, with photos down to 150 pixels per inch (those shown at 187.5 or more). |
 | 100 | lossy | 100 | `Lossy::level(3)`: as 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
 
-Floors that hold at every lossy level:
+What holds at every lossy level. The numbers are defaults: each is a rule with a name and a range, and a
+setting can move it within that range ([Rules](#rules), below):
 
-- photos are never taken below 150 pixels per inch at their displayed size, and line art (screenshots, charts,
-  diagrams) and scans (an image that covers most of a page) never below 300; an image is resampled only when
-  it is shown at 5/4 of its floor or more, and line art never becomes a JPEG;
-- the step works only on 8-bit grey and RGB images of more than 65,536 pixels whose every use on a page it
-  could measure: 1-bit, indexed, CMYK and 16-bit images, image masks, images with a colour-key mask, a `/Decode`
-  array or a soft mask with `/Matte`, and small images (logos, icons) are never touched, and neither is a JPEG
-  that looks like line art;
-- a lossy result is kept only when it is at most nine tenths of the image's lossless size and, for a JPEG, only
-  when it decodes close to the samples it was made from (one that does not is first coded again at a higher
+- photos are never taken below 150 pixels per inch at their displayed size (`lossy_photo_floor`, which can go
+  down to 72), and line art (screenshots, charts, diagrams) and scans (an image that covers 70% of a page or
+  more, `lossy_scan_cover`) never below 300 (`lossy_art_floor`, down to 150); an image is resampled only when
+  it is shown at 5/4 of its floor or more (`lossy_resample_margin`), and line art never becomes a JPEG;
+- the step works only on 8-bit grey and RGB images of more than 65,536 pixels (`lossy_min_pixels`) whose every
+  use on a page it could measure: 1-bit, indexed, CMYK and 16-bit images, image masks, images with a
+  colour-key mask, a `/Decode` array or a soft mask with `/Matte`, and small images (logos, icons) are never
+  touched, and neither is a JPEG that looks like line art;
+- a lossy result is kept only when it is at most nine tenths of the image's lossless size (`lossy_min_saving`,
+  which a setting can raise but not lower) and, for a JPEG, only when it decodes close to the samples it was
+  made from (`lossy_min_psnr`, `lossy_min_block_psnr`; one that does not is first coded again at a higher
   quality); otherwise the image goes through the lossless path as before;
 - a file the safety gate leaves untouched (signed, PDF/A, PDF/X, needing a password...) stays untouched, and an
   encrypted file keeps its encryption; a file that keeps earlier saves (incremental updates) is written as its
   newest save alone, which the step works on; a file whose object numbers are too high for the shorter lossy
-  output (qpdf 12 reads an object only when its number is below a third of the file's length) gets the lossless
-  one.
+  output (qpdf 12 reads an object only when its number is below a third of the file's length) gets that of the
+  strongest lossy level below that is long enough (so 80 and 100 can give a lower level's output), or else the
+  lossless one (at once when `photo_ppi`, `art_ppi` or `jpeg_quality` make the lossy settings none of the
+  levels'). No setting changes this.
 
 What the six efforts make of the 907 test files and of a set of photographs is in the README's table
 ("Effort levels") and, with a row per file of the photo set, in bench/RESULTS.md ("Sizes at the six efforts").
 What decides that an image is a photo is cautious: an image in doubt counts as line art, and on that set none
 of the three scikit-image photographs was taken for a photo. A progressive JPEG is left alone at every level.
+
+## Rules
+
+A rule is one of the engine's tuning values as a setting: a whole number with a name, a default (the value
+that was fixed in the code before), a lowest and a highest value. A rule that is not set has its default. The
+rules come in groups, one for each part of the engine; a rule's full name is its group's prefix and its own name.
+
+| Where | How rules are set |
+| --- | --- |
+| Rust | `options.set_rule("lossy_photo_floor", 100)?`, or several from text with `options.set_rules("lossy_photo_floor=100,lossy_min_saving=20")?`; `options.rule(name)` reads one, and `Options::rules()` lists every rule with its default, lowest and highest value |
+| Command line | `--rule lossy_photo_floor=100`, with commas between for more, or the flag again |
+| C | `strcpy(options.rules, "lossy_photo_floor=100,lossy_min_saving=20");` (the text lies in the options themselves, `char rules[GPRESS_RULES_TEXT]`, 16,384 bytes with its closing NUL, which every rule at once fits; empty for none) |
+| TypeScript | `{ rules: { lossy_photo_floor: 100, lossy_min_saving: 20 } }` |
+
+A name that is no rule, or a value outside the rule's range, is an error everywhere (`InvalidOptions`, code 5;
+the command line exits with 5), with a message that says which values the rule takes. Nothing is moved to the
+nearest allowed value silently. `optimize_to_size` takes rules too.
+
+### `lossy_`: the lossy image step
+
+These are the same at every lossy effort, and they change nothing at a lossless one.
+
+| Rule | Default | Lowest | Highest | What it decides |
+| --- | ---: | ---: | ---: | --- |
+| `lossy_min_pixels` | 65,536 | 10,000 | 4,294,967,295 | An image of at most this many pixels is never touched (logos, icons). |
+| `lossy_photo_floor` | 150 | 72 | 65,535 | The least `photo_ppi` can be, in pixels per inch at the displayed size: a lower one is raised to it. The efforts ask for 300 or 150, so a lower floor changes nothing until `photo_ppi` asks for less. |
+| `lossy_art_floor` | 300 | 150 | 65,535 | The same for `art_ppi`: line art and scans. |
+| `lossy_resample_margin` | 125 | 100 | 1,000 | An image is resampled only when it is shown at this percent of its floor or more (125: at 5/4 of it). An image is never given its own size back. |
+| `lossy_min_saving` | 10 | 10 | 99 | A lossy result is kept only when it is this percent smaller than the image's lossless size or more (10: at most nine tenths of it); the same for a JPEG written again. |
+| `lossy_quality_min` | 50 | 1 | 100 | The least `jpeg_quality` can be. |
+| `lossy_quality_max` | 95 | 1 | 100 | The most it can be, and where the steps of `lossy_quality_step` stop. When it is under `lossy_quality_min`, it wins. |
+| `lossy_quality_step` | 10 | 1 | 99 | A new JPEG that fails the two checks below is coded again this much higher. |
+| `lossy_quality_tries` | 3 | 1 | 10 | How many qualities are tried, the first one counted (1: only the first). Each is a full encode and decode of the image. |
+| `lossy_min_psnr` | 35 | 1 | 99 | The least peak signal-to-noise ratio, in dB, of a new JPEG's luma against the samples it was made from, over the whole image. |
+| `lossy_min_block_psnr` | 26 | 1 | 99 | The same in the image's worst block. |
+| `lossy_psnr_block` | 16 | 8 | 64 | The side of those blocks, in pixels. |
+| `lossy_scan_cover` | 70 | 1 | 100 | An image drawn over this percent of its page or more is a scan: it gets the line-art floor whatever it looks like. |
+| `lossy_walk_operators` | 20,000,000 | 1 | 20,000,000 | Content operators the step may read in one file to measure where images are shown (decoding is charged to it too). Over it no image of the file is changed. |
+| `lossy_walk_draws` | 1,000,000 | 1 | 1,000,000 | Image and form draws it may follow in one file, a form's counted every time the form is drawn. Over it no image of the file is changed. |
+
+Why the ranges end where they do:
+
+- `lossy_photo_floor` and `lossy_art_floor` are a guard against images that can no longer be read, so they are
+  the defaults, and no setting goes under 72 and 150 pixels per inch.
+- `lossy_min_saving` cannot go under its default. The lossless size a result is compared with is a quick
+  encode; the strongest lossless encode of the photographs in the photo set is up to 5% smaller, so with a
+  saving under that a lossy output could be larger than the lossless one.
+- `lossy_min_pixels` cannot go under 10,000: a smaller image has too few samples to tell a photo from line
+  art, and a few bytes decide whether its file grows.
+- `lossy_walk_operators` and `lossy_walk_draws` bound the memory and time a hostile file can make the step
+  take (the walk keeps every form's draws it has read, one for every 17 operators), so their highest values
+  are their defaults: a setting can lower them but not raise them.
+- `lossy_resample_margin` ends at 1,000 (an image shown at ten times its floor) and `lossy_quality_tries` at
+  10 (each try is a full encode and decode of the image): both are choices, not limits of the number.
+- The other lowest and highest values are where the number stops meaning anything (a percent, a JPEG quality,
+  a block that is smaller than a JPEG's own or larger than a small image).
+
+What is not a rule: the test that tells a photo from line art (its values were measured together and are
+being measured again), which images the step can read at all (8-bit grey and RGB, sides up to 65,535), the
+limits of its content reader, which are those other readers have, and what the JPEG format fixes (the standard's
+tables, colour at half resolution, baseline coding).
+
+### `flate_`: the Flate encoders
+
+The values the two Flate encoders of the normal PDF work by (`FlateRules`, `src/flate/rules.rs`; the field
+`flate_rules`; the archive does not use them). With none set every stream is encoded as it always was, and any
+value in a rule's range gives a valid stream, only larger or smaller, sooner or later. The strong encoder has a row of
+settings, the rules `flate_quick_` to `flate_e100_`, for its quick settings and for each band of the engine's
+lossless levels: 20 to 39, 40 to 59, 60 to 79, 80 to 99 and 100. Efforts 0 and 20 are the engine's levels 0
+and 20, efforts 40 and above its level 100, so the efforts use the rows `flate_e20_` and `flate_e100_`, and
+`flate_e40_` to `flate_e80_` matter only with `engine_effort`. From level 20 the PDF path ranks an image's
+predictor candidates with the quick settings and, below level 100, gives them to the streams outside its
+budget. The engine's levels 0 to 19 (effort 0) are the fast encoder:
+`flate_fast_level`, its twelve levels `flate_level1_` to `flate_level12_`, and the rules `flate_fast_`.
+
+| Rule | Default | Lowest | Highest | What it decides |
+| --- | ---: | ---: | ---: | --- |
+| `flate_quick_rounds` | 2 | 0 | 16 | Pricing rounds of the parse (0: none; at most twice the strongest row's default). |
+| `flate_quick_exact_rounds` | 1 | 0 | 8 | Exact rounds after them (0: none; at most twice the strongest row's default). |
+| `flate_quick_depth` | 128 | 0 | 32,768 | How many earlier positions the match finder compares (0: no matches; 32,768: the whole window). |
+| `flate_quick_segment` | 1,048,576 | 4,096 | 1,048,576 | The bytes optimised together (at least 4,096, so that the match finder's tables are not made anew every few bytes; at most the 1 MiB it always was, which bounds the memory of a thread). |
+| `flate_quick_split` | 1 | 0 | 1 | Block splitting: 1 on, 0 off. |
+| `flate_quick_alternatives` | 0 | 0 | 1 | Farther-match alternatives: 1 on, 0 off. |
+| `flate_quick_second_start` | 0 | 0 | 1,048,576 | The size up to which a segment is also started a second way (0: never). |
+| `flate_quick_nice` | 64 | 3 | 259 | The length from which a match is taken at once (259: never). |
+| `flate_quick_polish` | 0 | 0 | 1 | Block polishing: 1 on, 0 off. |
+| `flate_e20_rounds` | 2 | 0 | 16 | As `flate_quick_rounds`, for the engine's levels 20 to 39. |
+| `flate_e20_exact_rounds` | 1 | 0 | 8 | As `flate_quick_exact_rounds`, for the engine's levels 20 to 39. |
+| `flate_e20_depth` | 1,024 | 0 | 32,768 | As `flate_quick_depth`, for the engine's levels 20 to 39. |
+| `flate_e20_segment` | 1,048,576 | 4,096 | 1,048,576 | As `flate_quick_segment`, for the engine's levels 20 to 39. |
+| `flate_e20_split` | 1 | 0 | 1 | As `flate_quick_split`, for the engine's levels 20 to 39. |
+| `flate_e20_alternatives` | 0 | 0 | 1 | As `flate_quick_alternatives`, for the engine's levels 20 to 39. |
+| `flate_e20_second_start` | 0 | 0 | 1,048,576 | As `flate_quick_second_start`, for the engine's levels 20 to 39. |
+| `flate_e20_nice` | 259 | 3 | 259 | As `flate_quick_nice`, for the engine's levels 20 to 39. |
+| `flate_e20_polish` | 0 | 0 | 1 | As `flate_quick_polish`, for the engine's levels 20 to 39. |
+| `flate_e40_rounds` | 3 | 0 | 16 | As `flate_quick_rounds`, for levels 40 to 59. |
+| `flate_e40_exact_rounds` | 1 | 0 | 8 | As `flate_quick_exact_rounds`, for levels 40 to 59. |
+| `flate_e40_depth` | 1,024 | 0 | 32,768 | As `flate_quick_depth`, for levels 40 to 59. |
+| `flate_e40_segment` | 1,048,576 | 4,096 | 1,048,576 | As `flate_quick_segment`, for levels 40 to 59. |
+| `flate_e40_split` | 1 | 0 | 1 | As `flate_quick_split`, for levels 40 to 59. |
+| `flate_e40_alternatives` | 0 | 0 | 1 | As `flate_quick_alternatives`, for levels 40 to 59. |
+| `flate_e40_second_start` | 0 | 0 | 1,048,576 | As `flate_quick_second_start`, for levels 40 to 59. |
+| `flate_e40_nice` | 259 | 3 | 259 | As `flate_quick_nice`, for levels 40 to 59. |
+| `flate_e40_polish` | 0 | 0 | 1 | As `flate_quick_polish`, for levels 40 to 59. |
+| `flate_e60_rounds` | 4 | 0 | 16 | As `flate_quick_rounds`, for levels 60 to 79. |
+| `flate_e60_exact_rounds` | 2 | 0 | 8 | As `flate_quick_exact_rounds`, for levels 60 to 79. |
+| `flate_e60_depth` | 2,048 | 0 | 32,768 | As `flate_quick_depth`, for levels 60 to 79. |
+| `flate_e60_segment` | 1,048,576 | 4,096 | 1,048,576 | As `flate_quick_segment`, for levels 60 to 79. |
+| `flate_e60_split` | 1 | 0 | 1 | As `flate_quick_split`, for levels 60 to 79. |
+| `flate_e60_alternatives` | 1 | 0 | 1 | As `flate_quick_alternatives`, for levels 60 to 79. |
+| `flate_e60_second_start` | 0 | 0 | 1,048,576 | As `flate_quick_second_start`, for levels 60 to 79. |
+| `flate_e60_nice` | 259 | 3 | 259 | As `flate_quick_nice`, for levels 60 to 79. |
+| `flate_e60_polish` | 1 | 0 | 1 | As `flate_quick_polish`, for levels 60 to 79. |
+| `flate_e80_rounds` | 6 | 0 | 16 | As `flate_quick_rounds`, for levels 80 to 99. |
+| `flate_e80_exact_rounds` | 3 | 0 | 8 | As `flate_quick_exact_rounds`, for levels 80 to 99. |
+| `flate_e80_depth` | 4,096 | 0 | 32,768 | As `flate_quick_depth`, for levels 80 to 99. |
+| `flate_e80_segment` | 1,048,576 | 4,096 | 1,048,576 | As `flate_quick_segment`, for levels 80 to 99. |
+| `flate_e80_split` | 1 | 0 | 1 | As `flate_quick_split`, for levels 80 to 99. |
+| `flate_e80_alternatives` | 1 | 0 | 1 | As `flate_quick_alternatives`, for levels 80 to 99. |
+| `flate_e80_second_start` | 0 | 0 | 1,048,576 | As `flate_quick_second_start`, for levels 80 to 99. |
+| `flate_e80_nice` | 259 | 3 | 259 | As `flate_quick_nice`, for levels 80 to 99. |
+| `flate_e80_polish` | 1 | 0 | 1 | As `flate_quick_polish`, for levels 80 to 99. |
+| `flate_e100_rounds` | 8 | 0 | 16 | As `flate_quick_rounds`, for level 100. |
+| `flate_e100_exact_rounds` | 4 | 0 | 8 | As `flate_quick_exact_rounds`, for level 100. |
+| `flate_e100_depth` | 8,192 | 0 | 32,768 | As `flate_quick_depth`, for level 100. |
+| `flate_e100_segment` | 1,048,576 | 4,096 | 1,048,576 | As `flate_quick_segment`, for level 100. |
+| `flate_e100_split` | 1 | 0 | 1 | As `flate_quick_split`, for level 100. |
+| `flate_e100_alternatives` | 1 | 0 | 1 | As `flate_quick_alternatives`, for level 100. |
+| `flate_e100_second_start` | 262,144 | 0 | 1,048,576 | As `flate_quick_second_start`, for level 100. |
+| `flate_e100_nice` | 259 | 3 | 259 | As `flate_quick_nice`, for level 100. |
+| `flate_e100_polish` | 1 | 0 | 1 | As `flate_quick_polish`, for level 100. |
+| `flate_fast_level` | 12 | 1 | 12 | The fast encoder's level at the engine's levels 0 to 19 (effort 0), one of the twelve below; images, and streams that decode to more than 4 MiB, can get faster levels. |
+| `flate_level1_mode` | 0 | 0 | 3 | How the level chooses: 0 the longest match at once, 1 looking one position ahead, 2 looking two ahead, 3 the cheapest path. |
+| `flate_level1_depth` | 2 | 1 | 400 | How many earlier positions it compares (at most four times the deepest level's default). |
+| `flate_level1_nice` | 16 | 3 | 258 | From what length a match is taken at once. |
+| `flate_level1_passes` | 0 | 0 | 8 | The parses per block of the cheapest path (0 and 1 are both one parse; at most four times the top level's default). |
+| `flate_level1_short` | 0 | 0 | 1 | Whether hash chains also look for 3-byte matches: 1 yes, 0 no. |
+| `flate_level2_mode` | 1 | 0 | 3 | As `flate_level1_mode`, for level 2. |
+| `flate_level2_depth` | 3 | 1 | 400 | As `flate_level1_depth`, for level 2. |
+| `flate_level2_nice` | 16 | 3 | 258 | As `flate_level1_nice`, for level 2. |
+| `flate_level2_passes` | 0 | 0 | 8 | As `flate_level1_passes`, for level 2. |
+| `flate_level2_short` | 0 | 0 | 1 | As `flate_level1_short`, for level 2. |
+| `flate_level3_mode` | 1 | 0 | 3 | As `flate_level1_mode`, for level 3. |
+| `flate_level3_depth` | 6 | 1 | 400 | As `flate_level1_depth`, for level 3. |
+| `flate_level3_nice` | 16 | 3 | 258 | As `flate_level1_nice`, for level 3. |
+| `flate_level3_passes` | 0 | 0 | 8 | As `flate_level1_passes`, for level 3. |
+| `flate_level3_short` | 1 | 0 | 1 | As `flate_level1_short`, for level 3. |
+| `flate_level4_mode` | 1 | 0 | 3 | As `flate_level1_mode`, for level 4. |
+| `flate_level4_depth` | 12 | 1 | 400 | As `flate_level1_depth`, for level 4. |
+| `flate_level4_nice` | 32 | 3 | 258 | As `flate_level1_nice`, for level 4. |
+| `flate_level4_passes` | 0 | 0 | 8 | As `flate_level1_passes`, for level 4. |
+| `flate_level4_short` | 1 | 0 | 1 | As `flate_level1_short`, for level 4. |
+| `flate_level5_mode` | 1 | 0 | 3 | As `flate_level1_mode`, for level 5. |
+| `flate_level5_depth` | 24 | 1 | 400 | As `flate_level1_depth`, for level 5. |
+| `flate_level5_nice` | 48 | 3 | 258 | As `flate_level1_nice`, for level 5. |
+| `flate_level5_passes` | 0 | 0 | 8 | As `flate_level1_passes`, for level 5. |
+| `flate_level5_short` | 1 | 0 | 1 | As `flate_level1_short`, for level 5. |
+| `flate_level6_mode` | 1 | 0 | 3 | As `flate_level1_mode`, for level 6. |
+| `flate_level6_depth` | 64 | 1 | 400 | As `flate_level1_depth`, for level 6. |
+| `flate_level6_nice` | 96 | 3 | 258 | As `flate_level1_nice`, for level 6. |
+| `flate_level6_passes` | 0 | 0 | 8 | As `flate_level1_passes`, for level 6. |
+| `flate_level6_short` | 1 | 0 | 1 | As `flate_level1_short`, for level 6. |
+| `flate_level7_mode` | 2 | 0 | 3 | As `flate_level1_mode`, for level 7. |
+| `flate_level7_depth` | 100 | 1 | 400 | As `flate_level1_depth`, for level 7. |
+| `flate_level7_nice` | 258 | 3 | 258 | As `flate_level1_nice`, for level 7. |
+| `flate_level7_passes` | 0 | 0 | 8 | As `flate_level1_passes`, for level 7. |
+| `flate_level7_short` | 1 | 0 | 1 | As `flate_level1_short`, for level 7. |
+| `flate_level8_mode` | 3 | 0 | 3 | As `flate_level1_mode`, for level 8. |
+| `flate_level8_depth` | 6 | 1 | 400 | As `flate_level1_depth`, for level 8. |
+| `flate_level8_nice` | 24 | 3 | 258 | As `flate_level1_nice`, for level 8. |
+| `flate_level8_passes` | 1 | 0 | 8 | As `flate_level1_passes`, for level 8. |
+| `flate_level8_short` | 1 | 0 | 1 | As `flate_level1_short`, for level 8. |
+| `flate_level9_mode` | 3 | 0 | 3 | As `flate_level1_mode`, for level 9. |
+| `flate_level9_depth` | 12 | 1 | 400 | As `flate_level1_depth`, for level 9. |
+| `flate_level9_nice` | 32 | 3 | 258 | As `flate_level1_nice`, for level 9. |
+| `flate_level9_passes` | 1 | 0 | 8 | As `flate_level1_passes`, for level 9. |
+| `flate_level9_short` | 1 | 0 | 1 | As `flate_level1_short`, for level 9. |
+| `flate_level10_mode` | 3 | 0 | 3 | As `flate_level1_mode`, for level 10. |
+| `flate_level10_depth` | 12 | 1 | 400 | As `flate_level1_depth`, for level 10. |
+| `flate_level10_nice` | 32 | 3 | 258 | As `flate_level1_nice`, for level 10. |
+| `flate_level10_passes` | 2 | 0 | 8 | As `flate_level1_passes`, for level 10. |
+| `flate_level10_short` | 1 | 0 | 1 | As `flate_level1_short`, for level 10. |
+| `flate_level11_mode` | 3 | 0 | 3 | As `flate_level1_mode`, for level 11. |
+| `flate_level11_depth` | 24 | 1 | 400 | As `flate_level1_depth`, for level 11. |
+| `flate_level11_nice` | 64 | 3 | 258 | As `flate_level1_nice`, for level 11. |
+| `flate_level11_passes` | 2 | 0 | 8 | As `flate_level1_passes`, for level 11. |
+| `flate_level11_short` | 1 | 0 | 1 | As `flate_level1_short`, for level 11. |
+| `flate_level12_mode` | 3 | 0 | 3 | As `flate_level1_mode`, for level 12. |
+| `flate_level12_depth` | 35 | 1 | 400 | As `flate_level1_depth`, for level 12. |
+| `flate_level12_nice` | 100 | 3 | 258 | As `flate_level1_nice`, for level 12. |
+| `flate_level12_passes` | 2 | 0 | 8 | As `flate_level1_passes`, for level 12. |
+| `flate_level12_short` | 1 | 0 | 1 | As `flate_level1_short`, for level 12. |
+| `flate_exact_price_below` | 65,536 | 0 | 1,048,577 | A block below this many bytes is priced with a real code search when parses are compared, a larger one with an estimate (0: always the estimate; 1 MiB and one byte: every block, since a segment is at most 1 MiB). |
+| `flate_block_tie` | 0 | 0 | 2 | Both encoders: the block type written when two cost the same. 0: fixed, then dynamic, then stored; 1: dynamic before fixed; 2: stored before both. |
+| `flate_polish_passes` | 2 | 0 | 8 | Polishing: its passes (0: none; at most four times the default). |
+| `flate_polish_merge_percent` | 2 | 0 | 100 | How much larger the joined estimate of two blocks may be for a merge to be tried, as a percentage of their bits ... |
+| `flate_polish_merge_bits` | 400 | 0 | 1,048,576 | ... and at most this many bits. |
+| `flate_polish_min_block` | 64 | 0 | 1,048,576 | The smallest block tried for a split, in symbols. |
+| `flate_polish_step_div` | 64 | 1 | 256 | The step of the search for a cut: the block's symbols divided by this ... |
+| `flate_polish_step_min` | 4 | 1 | 65,536 | ... and at least this many (at least 1, or the search would not move). |
+| `flate_polish_min_gain` | 6 | 0 | 1,048,576 | The bits a cut must be estimated to save. |
+| `flate_stuck_rounds` | 4 | 1 | 16 | Pricing rounds stop after this many rounds in a row without a gain. |
+| `flate_blend_old_div` | 2 | 1 | 1,024 | After a round without a gain the new counts are mixed with the old ones divided by this ... |
+| `flate_blend_noise_div` | 8 | 1 | 1,024 | ... and for half the literals and lengths (chosen with a fixed seed) with the new ones divided by this. |
+| `flate_exact_tries` | 7 | 1 | 7 | Exact rounds: which of the three tries of a round are made, as bits: 1 the first, 2 the second, 4 the third, which also offers the farther matches. |
+| `flate_exact_try1_missing` | 1 | 0 | 16 | The bits the first try charges, over the longest code, for a symbol that has no code. |
+| `flate_exact_try2_missing` | 4 | 0 | 16 | The same for the second try. |
+| `flate_exact_try3_missing` | 1 | 0 | 16 | The same for the third try. |
+| `flate_split_min_symbols` | 64 | 2 | 1,048,576 | Block splitting: the fewest symbols of a segment that is split at all. |
+| `flate_split_step_div` | 160 | 1 | 640 | The distance between candidate boundaries: the segment's symbols divided by this ... |
+| `flate_split_step_min` | 32 | 1 | 65,536 | ... and at least this many. |
+| `flate_split_span` | 96 | 1 | 192 | The most candidates one block may span. |
+| `flate_split_stored_extra_bits` | 40 | 0 | 4,096 | The bits an uncompressed block is priced at over 8 a byte. |
+| `flate_split_tune_reach` | 1 | 0 | 2 | How far each chosen boundary is fine-tuned, in candidate distances either side (0: not at all). |
+| `flate_split_tune_div` | 8 | 1 | 16 | The steps of that tuning: the candidate distance divided by this. |
+| `flate_hash_bits` | 16 | 8 | 16 | The match finder's search trees are 2 to this power (at most the 65,536 it always had, which bound its memory). |
+| `flate_alt_candidates` | 32 | 1 | 32 | With farther-match alternatives: how many of a position's matches the parse weighs (at most 32, the room the parse has for them). |
+| `flate_alt_keep` | 24 | 0 | 24 | How many matches a position may have before no more alternatives are kept (0: none are; at most the 24 it always was, each being three bytes per position). |
+| `flate_run_shortcut` | 1 | 0 | 1 | Deep inside a run of one byte the parse takes the longest match without pricing (1) or prices every position (0). |
+| `flate_first_literal_bits` | 8 | 1 | 15 | The price, in bits, the first pass over a segment starts from for a literal byte below 144 (the defaults of these five are the fixed code's lengths; a code is at most 15 bits long). |
+| `flate_first_high_literal_bits` | 9 | 1 | 15 | The same for a literal byte from 144. |
+| `flate_first_length_bits` | 7 | 1 | 15 | The same for a match length up to 114. |
+| `flate_first_long_length_bits` | 8 | 1 | 15 | The same for a match length from 115. |
+| `flate_first_distance_bits` | 5 | 1 | 15 | The same for a distance. |
+| `flate_unused_symbol_bits` | 1 | 0 | 16 | In the pricing rounds a symbol the last parse never used costs the bits of one used once, plus this. |
+| `flate_smooth_min_run` | 4 | 1 | 287 | Block codes: count smoothing evens out runs of at least this many symbols (287: never, an alphabet has at most 286). |
+| `flate_code_variants` | 63 | 1 | 63 | Which of the six code variants are tried for a block that is written, as bits (1 for the first to 32 for the sixth, tried in that order): plain counts, counts smoothed by a quarter, by a half, codes of at most 12 bits, of at most 10 bits, counts smoothed fully. |
+| `flate_price_code_variants` | 3 | 1 | 63 | The same for a block that is only priced. |
+| `flate_header_starts` | 255 | 1 | 255 | The search for the cheapest block header of a block that is written: which of its eight starting strategies are used, as bits, tried from the lowest bit up. |
+| `flate_header_rounds` | 4 | 1 | 16 | Its rounds from each start (at most four times the default). |
+| `flate_price_header_starts` | 192 | 1 | 255 | The same for a block that is only priced, tried from the highest bit down. |
+| `flate_price_header_rounds` | 2 | 1 | 16 | Its rounds from each start. |
+| `flate_header_unused_bits` | 8 | 1 | 15 | The bits a header symbol costs in that search while the header does not use it (a header code is at most 7 bits long, so the default is one more). |
+| `flate_fast_segment` | 1,048,576 | 65,536 | 1,048,576 | The fast encoder cuts the input into segments of this many bytes, each encoded on its own (at most the 1 MiB it always was). |
+| `flate_fast_dict` | 32,768 | 0 | 32,768 | Each segment's match finder is primed with this much input before it (more than the 32 KiB window is no use). |
+| `flate_fast_batch` | 512 | 64 | 65,536 | Where its blocks end: the symbols gathered before each check (at least 64, so that the check stays rare). |
+| `flate_fast_min_block` | 2,000 | 0 | 1,048,576 | The fewest bytes of a block ended on a change of statistics. |
+| `flate_fast_max_block` | 300,000 | 1,000 | 300,000 | The most bytes of a block of the levels that do not search for the cheapest path (at most the 300,000 it always was, which bound the symbols held). |
+| `flate_fast_end_threshold` | 10 | 0 | 64 | How different the latest symbols must be for a block to end there, in 32nds. |
+| `flate_fast_young_block` | 8,192 | 0 | 1,048,576 | The symbols below which a block needs a larger difference. |
+| `flate_fast_age_step` | 2,048 | 1 | 1,048,576 | The bytes of a block that each lower the difference needed. |
+| `flate_fast_hash4_bits` | 16 | 8 | 16 | Its table of 4-byte hashes has at most 2 to this power entries (at most what it always had). |
+| `flate_fast_hash3_bits` | 15 | 8 | 15 | The same for its table of 3-byte hashes. |
+| `flate_fast_gain_per_byte` | 4 | 0 | 64 | Lazy matching: the units a later match gains per byte it is longer ... |
+| `flate_fast_gain_per_halving` | 1 | 0 | 64 | ... and per halving of the distance. |
+| `flate_fast_lazy_gain` | 1 | 0 | 1,024 | The gain over which the match one position ahead replaces the current one. |
+| `flate_fast_lazy2_gain` | 4 | 0 | 1,024 | The same for the match two positions ahead. |
+| `flate_fast_far3_distance` | 1,024 | 0 | 32,768 | The cheapest-path levels: how far back the first pass still counts a 3-byte match. |
+| `flate_fast_max_candidates` | 64 | 1 | 255 | The candidate matches kept per position (their count is kept in a byte). |
+| `flate_fast_max_opt_block` | 262,144 | 4,096 | 262,144 | The positions of one block (at most the 262,144 it always was, which bound the memory of a segment). |
+| `flate_fast_unused_literal_bits` | 11 | 1 | 30 | The bits charged for a literal the statistics do not have. |
+| `flate_fast_unused_length_bits` | 13 | 1 | 30 | The same for a length. |
+| `flate_fast_unused_distance_bits` | 10 | 1 | 30 | The same for a distance. |
+| `flate_fast_blend_percent` | 100 | 0 | 400 | The weight of the block before in a block's first prices, as a percentage of the block's own. |
+| `flate_fast_repeat_distances` | 2 | 0 | 2 | How many of the last distances are tried again at every position. |
+| `flate_remember_up_to` | 262,144 | 0 | 1,048,576 | Speed and memory only, never the output: the largest input whose output a store remembers (at most 1 MiB, the bound it always had). |
+| `flate_segments_at_once` | 8 | 1 | 8 | Speed and memory only: the segments the strong encoder plans as one group (at most the 8 it always was, which bound the plans held). |
+| `flate_fast_group` | 16 | 1 | 16 | Speed and memory only: the segments the fast encoder hands to the threads at once (at most the 16 it always was, which bound the finished output held before it is written). |
+
+What is not a rule: the facts of the format, the seed of the strong encoder's blend (the output must be the
+same on every run), the edges of the engine's bands (20, 40, 60, 80, 100), the number of fast levels, the
+limits that keep memory bounded, which are the highest values above, and what is code rather than a number.
+
+### `archive_`: the gpress archive
+
+The values the archive works by (`ArchiveRules`, `src/pack/rules.rs`; the field `archive_rules`). Any value in
+a rule's range is safe: every archive is restored and compared before it is returned, and memory and time stay
+bounded. The first 51, the model's, are shared with `expand`: an archive made with all of them at their
+defaults is version 9, and with any of them changed it is version 10, whose header carries the changed values;
+`expand` takes them from there, never from its caller.
+
+| Rule | Default | Lowest | Highest | What it decides |
+| --- | ---: | ---: | ---: | --- |
+| `archive_mixer_rate` | 6 | 1 | 8 | How strongly the mixer changes its weights after each bit. Highest 8: the error times the rate must fit in 16 bits. Lowest 1: at 0 the mixer would never learn. |
+| `archive_mixer_shift` | 12 | 4 | 20 | The scale of each weight change (a shift; larger is slower): an input (at most 2047) times the error (at most 4095 times the rate, 8 at most) is below 2^26, shifted right by this, in 1/65536 of a whole weight. Lowest 4: one bit can then move a weight by up to 64 whole; highest 20: by at most 64/65536, where the mixer barely learns. |
+| `archive_mixer_start` | 16,384 | 0 | 65,536 | The weight every prediction starts with, in 1/65536: from 0 (the prediction is not used) to 65536 (a whole weight). |
+| `archive_mixer_bias` | 256 | 0 | 2,047 | The constant input the mixer can weigh. Lowest 0: none; highest 2047, the largest input a prediction gives. |
+| `archive_apm_bits` | 5 | 3 | 5 | The resolution of each final correction map: 2^bits + 1 points (33 at 5). Lowest 3 (9 points), the coarsest map the code builds (it shifts the map's input right by at most 2 bits); highest 5, what a map has room for (more would cost every archive memory and time). |
+| `archive_apm_round` | 1 | 1 | 4 | From what part of a step a map's point moves, in quarters of a step. Lowest 1 and highest 4 (a whole step): only within them does a point never pass the end of the scale. |
+| `archive_apm1_rate` | 7 | 3 | 16 | How fast the first final correction (by kind and partial byte) learns: steps of 1/2^(rate - 1). Lowest 3, a step of 1/4, the largest that `archive_apm_round` (quarters of a step) works with; highest 16, a step of 1/32768, the smallest that still moves a 16-bit point. |
+| `archive_apm2_rate` | 7 | 3 | 16 | The same for the second final correction (by the last byte and partial byte), with the same range. |
+| `archive_blend_apm1` | 4 | 0 | 8 | The share of the first correction in the final probability, in sixteenths. Lowest 0: not used; with `archive_blend_apm2` at most the whole (8 each); the mixer's own result gets the rest. |
+| `archive_blend_apm2` | 8 | 0 | 8 | The share of the second correction in the final probability, in sixteenths, as `archive_blend_apm1`. |
+| `archive_state_count` | 7 | 1 | 7 | The highest count a context's bit history keeps. Lowest 1: at 0 no bit is counted, and a 0 bit sends a context back to state 0, "nothing seen"; highest 7, what a 3-bit count holds (a state holds two of them). |
+| `archive_state_discount` | 2 | 0 | 7 | The opposite count is halved when it is above this: 0 (always) to 7 (never). |
+| `archive_state_limit` | 1,023 | 0 | 1,023 | How long the per-state probabilities keep slowing down. Lowest 0: every update moves half the way; highest 1023, the most the 10-bit count holds. |
+| `archive_match_min` | 5 | 1 | 8 | The shortest repeat the long-match model follows, in bytes. 1 to 8: the model keeps the last 8 bytes. |
+| `archive_match_check` | 64 | 1 | 256 | How far back a new match is checked, in bytes. Lowest 1, the byte before; highest 256, so that the work per byte stays bounded. |
+| `archive_match_bits` | 20 | 8 | 22 | The match table has 2^bits positions of 4 bytes. Lowest 8: 256 positions, as many as one byte has values; highest 22 (16 MiB), the size of the fax model's largest tables. |
+| `archive_match_cap` | 63 | 0 | 63 | The match length up to which every length has its own probability. Lowest 0: one for all lengths; highest 63: the table has 128. |
+| `archive_match_long` | 24 | 1 | 2,147,483,648 | From this match length the mixer uses its weights for long matches. Lowest 1: every match is long; highest 2^31 (2 GiB, the largest part): as good as none is. |
+| `archive_match_limit` | 1,023 | 0 | 1,023 | The count cap of the match probabilities. Lowest 0: every update moves half the way; highest 1023, the most the 10-bit count holds. |
+| `archive_repeat_min` | 128 | 1 | 2,147,483,648 | A match at least this long codes the next byte with one decision instead of eight. Lowest 1: only a running match has a byte to offer. At the highest it never happens within a part. |
+| `archive_repeat_limit` | 1,023 | 0 | 1,023 | The count cap of the long-repeat decision, with the range of `archive_match_limit`. |
+| `archive_expect_cap` | 15 | 0 | 15 | The number of expected bytes that came true up to which every count has its own probability. Lowest 0: one for all counts; highest 15: the table has 128. |
+| `archive_expect_limit` | 1,023 | 0 | 1,023 | The count cap of the expected-text probabilities, with the range of `archive_match_limit`. |
+| `archive_table_bits_min` | 14 | 8 | 20 | The model's ten tables have at least 2^bits buckets of 16 bytes each (2.5 MiB in all at 14). Lowest 8: 256 buckets, as many as one byte has values; highest 20, as `archive_table_bits_max`. |
+| `archive_table_bits_max` | 20 | 8 | 20 | ... and at most 2^bits buckets (160 MiB in all at 20, the highest: the bound it always had). Lowest 8, as `archive_table_bits_min`. When the least is above the most, the least counts. |
+| `archive_table_shift` | 3 | 0 | 16 | Between the two, a table grows until it has the file's length / 2^shift buckets. Lowest 0: a bucket for every byte; highest 16: one for every 64 KiB, so that from the default least (14) the tables grow only for files over 1 GiB, the default `max_len`. |
+| `archive_prime_rounds` | 2 | 0 | 8 | How often the two built-in texts run through the model before a file's first byte; 0: not at all. Highest 8: each round costs about 2 ms a model (expanding a 4 KB file at effort 100: 30 ms with none, 34 ms with 2, 45 ms with 8). |
+| `archive_hash_bytes` | 16 | 16 | 32 | Bytes of the original's SHA-256 an archive stores and checks. Lowest 16, what it always was (fewer would weaken "never a wrong file"); highest 32, all of it. |
+| `archive_font_window` | 4,096 | 0 | 65,536 | How far before a stream stored without a filter the mark of a Type 1 font is looked for, in bytes; 0: such a font is coded as raw data. Highest 65536, as far back as a stream's dictionary is looked for. |
+| `archive_fax_bits_min` | 12 | 8 | 22 | The two hashed tables of the fax model have at least 2^bits counters of 4 bytes. Lowest 8, as the general model's tables; highest 22, as `archive_fax_bits_max`. |
+| `archive_fax_bits_max` | 22 | 8 | 22 | ... and at most 2^bits (16 MiB each at 22, the highest: the bound it always had). Lowest 8, as `archive_fax_bits_min`. When the least is above the most, the least counts. |
+| `archive_fax_bits_add` | 4 | 0 | 16 | Between the two, 2^bits is the smallest power of two above the file's length, times 2^this. Lowest 0: that power alone; highest 16: then a file of 64 bytes, the least a fax stream is coded from by default (`archive_fax_min_bytes`), already gets 2^23, more than the most. |
+| `archive_fax_small_limit` | 255 | 0 | 1,023 | The count cap of the small counters for the original encoder's layout choices, with the range of `archive_match_limit`. |
+| `archive_fax_mixer_shift` | 15 | 4 | 24 | The learning rate of the fax model's two mixers (a shift; larger is slower): a stretched input (at most 2840) times the error (at most 65535) is below 2^28, shifted right by this, in 1/65536 of a whole weight. Lowest 4: one pixel can then move a weight by up to 177.5 whole (weights stay within 256 either way); highest 24: by at most 11/65536. |
+| `archive_fax_mixer_start` | 19,660 | 0 | 65,536 | The weight every prediction of the fax model starts with, in 1/65536, with the range of `archive_mixer_start`. |
+| `archive_fax_apm_bits` | 5 | 3 | 6 | The resolution of the fax model's two correction maps: 2^bits + 1 points. Lowest 3 (9 points), as `archive_apm_bits`; highest 6 (65 points: 8.125 MiB for the larger map, 1.016 MiB for the smaller). |
+| `archive_fax_apm_shift` | 6 | 1 | 15 | The learning rate of those maps (a shift). Lowest 1: a point moves half the way; highest 15: 1/32768 of it, the smallest step that still moves a 16-bit point. |
+| `archive_fax_limit` | 1,023 | 0 | 1,023 | The count cap of the fax model's direct tables, its white-area counters and its same-row counters, with the range of `archive_match_limit`. |
+| `archive_fax_hashed_limit` | 1,023 | 0 | 1,023 | The count cap of the fax model's hashed tables, with the range of `archive_match_limit`. |
+| `archive_fax_blend_apm1` | 4 | 0 | 8 | The share of the first correction map in a pixel's final probability, in sixteenths (as `archive_blend_apm1`). |
+| `archive_fax_blend_apm2` | 8 | 0 | 8 | The share of the second correction map, in sixteenths (as `archive_blend_apm1`). |
+| `archive_image_step_1` | 0 | 0 | 255 | Differences between the pixels of a photo-like image are told apart in 8 classes: a difference's class is the number of these seven limits it is above (0, 1, 2, 4, 8, 16, 32). Each from 0 to 255, the sizes a difference between two bytes can have; no order is asked for. |
+| `archive_image_step_2` | 1 | 0 | 255 | As `archive_image_step_1`. |
+| `archive_image_step_3` | 2 | 0 | 255 | As `archive_image_step_1`. |
+| `archive_image_step_4` | 4 | 0 | 255 | As `archive_image_step_1`. |
+| `archive_image_step_5` | 8 | 0 | 255 | As `archive_image_step_1`. |
+| `archive_image_step_6` | 16 | 0 | 255 | As `archive_image_step_1`. |
+| `archive_image_step_7` | 32 | 0 | 255 | As `archive_image_step_1`. |
+| `archive_word_bytes` | 0 | 0 | 2 | What counts as a word: 0 letters and digits with the letters lower-cased, 1 letters and digits as they are, 2 letters only, lower-cased. |
+| `archive_expect_text` | 1 | 0 | 1 | The expected-text model (the next object header, cross-reference rows, the operand at the same place as in the last group): 1 on, 0 off. |
+| `archive_fax_white_shortcut` | 1 | 0 | 1 | A pixel whose whole neighbourhood is white is coded with one small counter instead of the full fax model: 1 on, 0 off. Off, on the 17 files of the test set with a fax image (effort 100, one thread): from 0.37% smaller to 27.2% larger (1.0% larger in all), and compress and expand up to 3.7 times as slow (1.7 times in all). The most time a file can take stays what it was, as a page of noise goes through the full model at every pixel either way. |
+
+The rest are choices of the packing side only: the archive stores their outcome, so they never change its
+version, and of them `expand` reads `archive_deadline_step` only.
+
+| Rule | Default | Lowest | Highest | What it decides |
+| --- | ---: | ---: | ---: | --- |
+| `archive_plain_below` | 50 | 0 | 101 | Below this level of the engine (`PackOptions::effort`: efforts 0 and 20 are its levels 0 and 20, 40 and above its 100), data that looks compressed is coded plainly (faster, about 1% larger). 0: never; 101: at every level. |
+| `archive_plain_entropy` | 790 | 0 | 800 | How random bytes must look to be coded plainly, in hundredths of a bit per byte. Lowest 0: not at all; highest 800, the most a byte holds. |
+| `archive_plain_min_bytes` | 1,024 | 0 | 2,147,483,648 | Data smaller than this is never coded plainly. Up to the largest part an archive holds (2 GiB). |
+| `archive_plain_windows` | 16 | 2 | 65,536 | Larger data is judged on this many windows spread over it. Lowest 2: the first and the last; highest 65536: at the default window of 64 KiB that is 4 GiB, more than a part holds (2 GiB). |
+| `archive_plain_window_bytes` | 65,536 | 1 | 2,147,483,648 | The length of each window in bytes: from 1 to 2^31, the largest part. |
+| `archive_plain_distances` | 4 | 0 | 8 | The differences between bytes 1 to this many apart must look random too. Lowest 0: the bytes alone decide; highest 8: the test keeps a count table for each of 8 distances (each adds a count per byte). |
+| `archive_lepton_min_saving` | 10 | 0 | 100 | A JPEG inside a Flate stream goes to Lepton when Lepton's data is this many percent smaller than the Flate bytes: from 0 (smaller at all) to 100 (never). Only in builds with Lepton, as the next four. |
+| `archive_lepton_min_bytes` | 1,024 | 0 | 2,147,483,648 | A JPEG smaller than this is not tried with Lepton: from 0 (every one) to 2^31, the largest part (none). |
+| `archive_lepton_min_gain` | 1 | 0 | 2,147,483,648 | Lepton's data is kept when it is at least this many bytes smaller than the JPEG. Lowest 0: it is never larger than the JPEG it restores; highest 2^31, the largest part (it is never kept). |
+| `archive_lepton_plain` | 1 | 0 | 1 | Lepton's data that looks compressed is coded plainly: 1 yes, 0 never. |
+| `archive_lepton_partitions` | 8 | 1 | 8 | Lepton codes a large JPEG in up to this many pieces (fewer: a little smaller). Lowest 1, one piece; highest 8, the most the Lepton readers before this one take. |
+| `archive_decrypt_recheck` | 98 | 0 | 100 | A second pack without decryption is made when the pack is above this many percent of the encrypted bytes, and the smaller kept. 0: always; 100: only when the pack is larger than those bytes. |
+| `archive_decrypt_tie` | 0 | 0 | 1 | When the two packs are equally long: 0 keeps the one without decryption, 1 the one with. |
+| `archive_min_saving` | 0 | 0 | 2,147,483,648 | A coded archive is kept only when it is at least this many bytes smaller than the file stored as it is. Lowest 0: when it is not larger; highest 2^31: only a file that shrinks by 2 GiB is coded. |
+| `archive_fax_min_bytes` | 64 | 0 | 2,147,483,648 | A fax stream smaller than this is stored as it is, not as an image: from 0 to 2^31, the largest part (no fax stream is then coded as an image). |
+| `archive_fax_max_leftover` | 25 | 0 | 100 | A fax stream is stored as an image when at most this many percent of it is left undecoded: from 0 (only one decoded to its end) to 100 (any). |
+| `archive_content_sample` | 4,096 | 1 | 16,777,216 | A stream with no type is taken for page content when, of its first this many bytes (from 1 to 2^24: at most 16 MiB of each such stream is read for it) ... |
+| `archive_content_printable` | 90 | 0 | 100 | ... at least this many percent are printable. |
+| `archive_font_min_text` | 32 | 0 | 4,096 | How many decrypted bytes must be text before a font's encrypted part counts as found. A wrong guess costs nothing but time: a font is opened only if it closes back to the same bytes. Highest 4096: each try then decrypts at most 4 KiB and 4 bytes. |
+| `archive_font_text_bytes` | 0 | 0 | 1 | The bytes that count as text there: 0 tab, line ends and 32 to 126; 1 also 160 to 255 (Latin-1). |
+| `archive_font_tries` | 4 | 0 | 64 | At how many places the word "eexec" appears the encrypted part of a font is looked for. Highest 64, so that the search stays short. |
+| `archive_zlib_levels` | 511 | 0 | 511 | The zlib levels tried to rebuild a stream byte for byte, as bits (1 is level 1, 256 is level 9). 0: no stream is rebuilt. |
+| `archive_zlib_mem_levels` | 511 | 0 | 511 | The zlib memory levels tried, as bits (1 is memory level 1, 256 is 9). |
+| `archive_zlib_filtered` | 1 | 0 | 1 | zlib's "filtered" strategy is tried too: 1 yes, 0 no. |
+| `archive_deadline_step` | 65,536 | 1 | 2,147,483,648 | Bytes coded between two looks at the time budget, in `compress` and `expand` (a look comes at the next 4 KiB of a part). Never changes the output. Lowest 1: a look every 4 KiB; highest 2^31 (2 GiB, the largest part): in effect a look only where a run of coded bytes starts. |
 
 ## Building only what a product needs
 

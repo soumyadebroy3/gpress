@@ -28,7 +28,9 @@ The sizes are all outputs together in bytes and their share of the input, one th
 - A lossy result is kept only when it is at most nine tenths of the image's lossless size and, for a JPEG, only when it decodes close to the samples it was made from. Otherwise the image goes through the lossless path.
 - A file the safety gate leaves untouched (signed, certified, PDF/A, PDF/X, needing a password...) stays untouched, and an encrypted file keeps its encryption.
 - A file that keeps earlier saves keeps them all, written losslessly (with `--drop-history` the step works on the newest save, which then goes on alone).
-- A file whose object numbers are too high for the shorter lossy output (qpdf 12 reads an object only when its number is below a third of the file's length) gets the lossless one.
+- A file whose object numbers are too high for the shorter lossy output (qpdf 12 reads an object only when its number is below a third of the file's length) gets that of the strongest lossy level below that is long enough (so 80 and 100 can give a lower level's output), or else the lossless one (at once when `--photo-ppi`, `--art-ppi` or `--jpeg-quality` make the lossy settings none of the levels').
+
+The floors, the 5/4, the 65,536 pixels and the nine tenths above are defaults: the rules `lossy_photo_floor` (down to 72), `lossy_art_floor` (down to 150), `lossy_resample_margin`, `lossy_min_pixels` and `lossy_min_saving` move them (see [Settings](#settings-every-tuning-value-by-name) below).
 
 ## Target size
 
@@ -49,7 +51,7 @@ From Rust it is `gpress::optimize_to_size`, from C `gpress_optimize_to_size`, an
 | `--art-ppi N` | The same for line art and scans (never below 300). Set, it makes the output lossy at any effort. |
 | `--jpeg-quality N` | The JPEG quality, kept within 50 to 95. Set, it makes the output lossy at any effort. |
 
-The library takes all of them at once as `lossy` (`Lossy::level(1)`, `(2)` and `(3)` are what efforts 60, 80 and 100 mean, and `Lossy::OFF` keeps any effort lossless). In TypeScript they are `photoPpi`, `artPpi` and `jpegQuality`.
+The library takes all of them at once as `lossy` (`Lossy::level(1)`, `(2)` and `(3)` are what efforts 60, 80 and 100 mean, and `Lossy::OFF` keeps any effort lossless). In TypeScript they are `photoPpi`, `artPpi` and `jpegQuality`. The limits in the table are the defaults of the rules `lossy_photo_floor`, `lossy_art_floor`, `lossy_quality_min` and `lossy_quality_max`.
 
 ## Other options
 
@@ -75,9 +77,9 @@ The project's aim is no hard-coded tuning values: each value that decides whethe
 
 | Group | Part of the engine | Rules | State |
 | --- | --- | ---: | --- |
-| `flate_` | the Flate encoders | 181 | on `main` ([#45](https://github.com/soumyadebroy3/gpress/pull/45)), from Rust: `Options::flate_rules` |
-| `archive_` | the archive | 76 | on `main` ([#46](https://github.com/soumyadebroy3/gpress/pull/46)), from Rust: `Options::archive_rules`. A change to one of the 51 rules the model shares with `expand` writes a version-10 archive that carries the changed values. |
-| `lossy_` | the lossy image step | 15 | being built, with the mechanism (draft [#49](https://github.com/soumyadebroy3/gpress/pull/49)); the photo test's 14 more come with draft [#52](https://github.com/soumyadebroy3/gpress/pull/52) |
+| `flate_` | the Flate encoders | 181 | on `main` ([#45](https://github.com/soumyadebroy3/gpress/pull/45)) |
+| `archive_` | the archive | 76 | on `main` ([#46](https://github.com/soumyadebroy3/gpress/pull/46)). A change to one of the 51 rules the model shares with `expand` writes a version-10 archive that carries the changed values. |
+| `lossy_` | the lossy image step | 15 | on `main` ([#49](https://github.com/soumyadebroy3/gpress/pull/49)); the photo test's 14 more come with draft [#52](https://github.com/soumyadebroy3/gpress/pull/52) |
 | `rewrite_` | the normal-PDF rewrite | 88 | being built, lands after the mechanism |
 
-The mechanism being built in draft [#49](https://github.com/soumyadebroy3/gpress/pull/49) sets any rule by name on every surface: `--rule name=value` (repeatable) on the command line, `Options::set_rule(name, value)` in Rust, a `name=value,...` text in the C options struct, calls in WebAssembly, and a `rules` option by name in TypeScript. The reference will get one table per group, held equal to the code by a test.
+Any rule is set by name on every surface: `--rule name=value` on the command line (the flag again, or commas between, for more), `Options::set_rule(name, value)` or `set_rules("a=1,b=2")` in Rust, a `name=value,...` text in the C options struct, `gpress_rule` in WebAssembly, and a `rules` option by name in TypeScript. A name that is no rule, or a value outside the rule's range, is an error. The reference's [Rules](https://github.com/soumyadebroy3/gpress/blob/main/docs/reference.md#rules) has one table per group, with each rule's default and range, held equal to the code by a test.
