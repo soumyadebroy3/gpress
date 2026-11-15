@@ -6,8 +6,8 @@ the benchmark and check scripts.
 
 ## Options
 
-Everything a caller can tune is a field of `Options` (the C struct has every field but `store_budget`, with `engine_effort` and `lossy` in the shapes their rows give, and
-the TypeScript options most of them; `store_budget` stays at its default in both), with `Options::check`
+Everything a caller can tune is a field of `Options` (the C struct has every field but `store_budget`, `flate_rules` and `archive_rules`, with `engine_effort` and `lossy` in the shapes their rows give, and
+the TypeScript options most of them; those three stay at their defaults in both), with `Options::check`
 saying whether the engine accepts a set; nothing is read from the environment except
 `PDFE_DEBUG`, which only prints timings and figures to standard error. For a normal PDF that includes one
 summary line per file, which `bench/p5.py` reads:
@@ -139,8 +139,8 @@ with 10 (`pack` and `unpack` without `archive`, or a measuring command of a part
 only a build with the part can tell the two apart, as with Lepton's parts and `NeedsExistingLibrary`. Neither
 ever gives a wrong file.
 
-The npm package has two modules: `dist/gpress.wasm` with every part (474,284 bytes of gzip), and
-`dist/gpress-web.wasm`, the `web` set (357,709 bytes of gzip, 25% less). Both have the same wrapper; in the web
+The npm package has two modules: `dist/gpress.wasm` with every part (482,899 bytes of gzip), and
+`dist/gpress-web.wasm`, the `web` set (359,089 bytes of gzip, 26% less). Both have the same wrapper; in the web
 module `compress` and `expand` throw a `GpressFeatureError` whose `feature` is `"archive"`, and `g.features`
 lists the parts a module has.
 

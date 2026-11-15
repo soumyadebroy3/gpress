@@ -574,30 +574,30 @@ to each build: 3,961 bytes to the module and 6,498 to the tool. The web module i
 smaller than the whole one, 115,366 bytes (30.1%) of gzip; the next section says where the bytes go.
 
 Recorded again on 2026-11-15 for the lossy image step (efforts 60, 80 and 100), which brings a JPEG decoder
-and encoder into the `jpeg` part, with main 369f1b8 merged in, with rustc 1.100.0 and wasm-opt 108. "Before" is
+and encoder into the `jpeg` part, with main 0e3e252 merged in, with rustc 1.100.0 and wasm-opt 108. "Before" is
 the record above (rustc 1.99.1, 2026-10-22). The other two sets were not measured again. Main's own record of the
-web set at 369f1b8 is 813,911 bytes, 311,102 of gzip (rustc 1.100.0, wasm-opt 120): this work adds about 46,600
-bytes of gzip to it (15.0%). CI builds with wasm-opt 120, which on 8d75f98 made the web module 84 bytes of gzip
+web set at 0e3e252 is 817,192 bytes, 312,475 of gzip (rustc 1.100.0, wasm-opt 120): this work adds about 46,600
+bytes of gzip to it (14.9%). CI builds with wasm-opt 120, which on 8d75f98 made the web module 84 bytes of gzip
 larger than wasm-opt 108 does here.
 
 | Build | Feature set | Raw bytes | Gzip bytes | Before: raw, gzip | Gzip change |
 | --- | --- | ---: | ---: | ---: | ---: |
-| WebAssembly module | web | 933,175 | 357,709 | 710,751, 267,937 | +33.5% |
-| WebAssembly module | default | 1,266,959 | 474,284 | 1,038,544, 383,303 | +23.7% |
-| Native tool `gpress` | web | 1,864,256 | 837,995 | 1,508,088, 675,533 | +24.0% |
-| Native tool `gpress` | default | 2,476,504 | 1,099,848 | 2,112,816, 936,953 | +17.4% |
-| C library, shared (`libgpress_c.so`) | web | 1,730,208 | 778,486 | 1,379,032, 617,707 | +26.0% |
-| C library, shared (`libgpress_c.so`) | default | 2,285,904 | 1,012,497 | 1,927,608, 853,947 | +18.6% |
-| C library, static (`libgpress_c.a`) | web | 10,968,172 | 2,399,432 | 9,846,120, 2,095,285 | +14.5% |
-| C library, static (`libgpress_c.a`) | default | 11,803,804 | 2,658,572 | 10,769,696, 2,367,811 | +12.3% |
+| WebAssembly module | web | 936,595 | 359,089 | 710,751, 267,937 | +34.0% |
+| WebAssembly module | default | 1,282,155 | 482,899 | 1,038,544, 383,303 | +26.0% |
+| Native tool `gpress` | web | 1,870,368 | 839,665 | 1,508,088, 675,533 | +24.3% |
+| Native tool `gpress` | default | 2,501,088 | 1,109,400 | 2,112,816, 936,953 | +18.4% |
+| C library, shared (`libgpress_c.so`) | web | 1,736,384 | 779,786 | 1,379,032, 617,707 | +26.2% |
+| C library, shared (`libgpress_c.so`) | default | 2,309,008 | 1,024,563 | 1,927,608, 853,947 | +20.0% |
+| C library, static (`libgpress_c.a`) | web | 10,984,796 | 2,402,158 | 9,846,120, 2,095,285 | +14.6% |
+| C library, static (`libgpress_c.a`) | default | 11,842,628 | 2,669,464 | 10,769,696, 2,367,811 | +12.7% |
 
 Main at 2bca97c, the code this step was added to, built the same day with the same tools: the web module is
 714,485 bytes, 270,187 of gzip, and the whole module 1,046,990, 385,927 of gzip. So the step costs the web
 module 45,488 bytes of gzip (16.8%) and the whole module 46,527 (12.1%).
 
-The target for the web module is 400 KB gzip (400,000 bytes): at 357,709 bytes it is 42,291 bytes (11%) under
-it (267,937 bytes and 132,063 under in the record above). The whole module has no budget; at 474,284 bytes it
-is 74,284 over that number (383,303 in the record above). Built at opt-level "s", before the choice below, the web
+The target for the web module is 400 KB gzip (400,000 bytes): at 359,089 bytes it is 40,911 bytes (10%) under
+it (267,937 bytes and 132,063 under in the record above). The whole module has no budget; at 482,899 bytes it
+is 82,899 over that number (383,303 in the record above). Built at opt-level "s", before the choice below, the web
 module was 185,288 bytes of gzip (on f34ba33, before main's later changes): opt-level 3 added 24% there.
 Lepton adds 135,910 bytes of gzip to the module with every part. The static library carries Rust's standard
 library whole, so it is far larger than what a program linked with it gets. The module grows with main: the
@@ -606,9 +606,9 @@ whole module was 305,524 bytes of gzip at d093ab4, the archive model (#3) added 
 with main's normal-PDF code the same way: it was 229,312 bytes of gzip on main at dcd8a8b with this work.
 
 The budget: CI's WebAssembly job runs `python3 -I bench/sizes.py check`, which builds the web module as the
-package does and fails when its gzip size is more than 5% over the recorded one (331,458 bytes today) or over
+package does and fails when its gzip size is more than 5% over the recorded one (377,043 bytes today) or over
 400,000 bytes. A growth that is wanted is recorded with `measure --features web`. When the module is more than
-5% under the record (under 299,891 bytes today), the check passes with a warning to record the new size, since
+5% under the record (under 341,134 bytes today), the check passes with a warning to record the new size, since
 the 5% is counted from the record and would otherwise allow more. The whole module (`dist/gpress.wasm`) has no
 budget of its own; `measure --features default` records it with the other sets.
 
