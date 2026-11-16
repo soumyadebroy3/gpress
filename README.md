@@ -28,7 +28,7 @@
   <strong>Archives about 20% smaller than the best of xz, Brotli and Zstandard</strong><br>
   <strong>Normal PDFs: the smallest total of six tools on the 730 files gpress rewrites, second on all 907</strong><br>
   <strong>Efforts 0 to 40 lossless &middot; 353 KB gzipped in the browser for normal PDFs, 476 KB with the archive</strong><br>
-  <sub>Archive: 907 public test PDFs, format 9, effort 100, built with Lepton. Normal PDF: the same 907 files, build 2d3bf64 at its default effort, one thread, against qpdf 12.4.2, mutool 1.28.6, cpdf 2.9.3, pdfsizeopt 2023-04-18 and Ghostscript 10.08.0, every output checked in PDFium, Poppler and pdf.js: 73.3% of the input against 77.7% for qpdf with zopfli on the 730 files (all but the 173 gpress declines and the 4 where it keeps a stream over 64 MiB as it is), 81.4% against 79.6% on all 907. Browser: the gzip sizes of the two WebAssembly modules, as recorded in bench/sizes.json on 2026-11-15. <a href="#benchmarks">Details</a>.</sub>
+  <sub>Archive: 907 public test PDFs, format 9, effort 100, built with Lepton. Normal PDF: the same 907 files, build 2d3bf64 at its default effort, one thread, against qpdf 12.4.2, mutool 1.28.6, cpdf 2.9.3, pdfsizeopt 2023-04-18 and Ghostscript 10.08.0, an output counting only when PDFium, Poppler and pdf.js draw it the same: 73.3% of the input against 77.7% for qpdf with zopfli on the 730 files (all but the 173 gpress declines and the 4 where it keeps a stream over 64 MiB as it is), 81.4% against 79.6% on all 907. Browser: the gzip sizes of the two WebAssembly modules, as recorded in bench/sizes.json on 2026-11-15. <a href="#benchmarks">Details</a>.</sub>
 </p>
 
 <p align="center">
@@ -429,10 +429,10 @@ deliberately broken or unusual), fetched and pinned by `bench/fetch_corpus.sh`, 
 ### Normal PDF
 
 <p align="center">
-  <img src="docs/assets/normal-pdf.svg" width="880" alt="Normal PDF size as a share of the input on the 730 of 907 test PDFs gpress rewrites: gpress effort 40 (default) 73.3%, effort 0 75.0%; qpdf 12.4.2 with zopfli 77.7%, cpdf 2.9.3 80.5%, qpdf at zlib level 9 80.7%, pdfsizeopt 86.7%, mutool 1.28.6 90.2%, Ghostscript 10.08.0 91.7%.">
+  <img src="docs/assets/normal-pdf.svg" width="880" alt="Normal PDF size as a share of the input on the 730 of 907 test PDFs gpress rewrites: gpress effort 40 (default) 73.3%, effort 0 75.0%; qpdf 12.4.2 with zopfli 77.7%, cpdf 2.9.3 with JBIG2 80.5%, qpdf at zlib level 9 80.7%, pdfsizeopt 86.7%, mutool 1.28.6 90.2%, Ghostscript 10.08.0 91.7%.">
 </p>
 
-| Tool and setting | All 907 files | The 730 files gpress rewrites | Median file | CPU s, the 695 same files | Errors and timeouts | Wrong outputs |
+| Tool and setting | All 907 files | The 730 files gpress rewrites | Median file, all 907 | CPU s, the 695 same files | Errors and timeouts | Wrong outputs |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | gpress, effort 40 (default) | 81.36% | 73.26% | 88.7% | 625 | 0 | 0 |
 | gpress, effort 0 (`--quick`) | 82.62% | 74.99% | 90.4% | 25 | 0 | 0 |
@@ -445,8 +445,8 @@ deliberately broken or unusual), fetched and pinned by `bench/fetch_corpus.sh`, 
 
 Sizes are the total output as a share of the input. An output counts only when it is smaller, opens, qpdf finds it
 no worse than the original, each of PDFium, Poppler and pdf.js that reads the original draws every page the same,
-and no content or security is lost (one renderer may differ on at most 0.5% of a page's pixels: 149 outputs of the
-other tools counted that way, none of gpress's); any other output, and a file a tool fails on, counts at the
+and no content or security is lost (one renderer may differ on at most 0.5% of a page's pixels: 73 outputs in this
+table counted that way, none of gpress's); any other output, and a file a tool fails on, counts at the
 original's size. "Wrong outputs" are those that came out broken, look different, or lost content or security. The
 median file is the middle of the files' own output-to-input ratios, so small files weigh as much as large ones.
 
@@ -466,7 +466,8 @@ median memory is the lowest, 5 MiB, and its peak is 76 MiB on one thread and 240
 
 gpress is build 2d3bf64; the one engine change since (#58) gives the same bytes on these files at efforts 0, 20,
 40 and 100. Each tool ran one command at a time on a 4-core 2.1 GHz Xeon cloud machine in November 2026. The
-command lines and the details are in [bench/RESULTS.md](bench/RESULTS.md#head-to-head-november-2026).
+command lines, the tools' other settings and the details are in
+[bench/RESULTS.md](bench/RESULTS.md#head-to-head-november-2026).
 
 ### Archive
 

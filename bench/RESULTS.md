@@ -368,9 +368,9 @@ NEW has not measured every file of BASE (an unfinished run compares only the fil
 
 ## Effort levels
 
-The README's engine-level table: two runs of `bench/benchmark.py time` on the 120-file sample, normal PDF, one
-thread. CPU time is summed over the files; output is the total size as a share of the input on the 90 files
-the engine rewrites.
+The README's engine-level table (the README no longer shows its qpdf row): two runs of `bench/benchmark.py time`
+on the 120-file sample, normal PDF, one thread. CPU time is summed over the files; output is the total size as a
+share of the input on the 90 files the engine rewrites.
 
 | Effort | CPU s, first measured | CPU s, current code | Output |
 | ---: | ---: | ---: | ---: |
@@ -497,7 +497,8 @@ The README's normal-PDF benchmark: gpress `main` at 2d3bf64 against qpdf, MuPDF'
 Ghostscript on the 907 test files (`bench/sets/all.txt`, 130,469,001 bytes). Timed from 2026-11-15 19:05 to
 2026-11-16 02:07 UTC on a cloud machine with 4 cores (Intel Xeon, 2.1 GHz) and 15.7 GiB: one command at a
 time, the settings in a new random order for each file, each command with a 30-minute limit and an 8 GiB memory
-cap. Four commands hit the time limit, none of them gpress's. The harness that ran it is not in `bench/`.
+cap. The run had 24 settings (gpress 7, qpdf 2, mutool 5, cpdf 4, pdfsizeopt 2, Ghostscript 1); the table shows
+nine. Four commands hit the time limit, none of them gpress's. The harness that ran it is not in `bench/`.
 
 The settings (`IN` and `OUT` are the input and output files):
 
@@ -516,7 +517,7 @@ gs -q -dNOPAUSE -dBATCH -dSAFER -sDEVICE=pdfwrite -dDownsampleColorImages=false 
 Versions: qpdf 12.4.2 (zlib 1.3, zopfli 1.0.3), mutool 1.28.6, cpdf 2.9.3 with jbig2enc 0.29, pdfsizeopt
 2023-04-18, Ghostscript 10.08.0.
 
-| Tool and setting | All 907 files | The 730 files gpress rewrites | Median file | Made smaller | Errors and timeouts | Wrong outputs | CPU s, the 695 same files | Peak MiB, the 695 same files |
+| Tool and setting | All 907 files | The 730 files gpress rewrites | Median file, all 907 | Made smaller | Errors and timeouts | Wrong outputs | CPU s, the 695 same files | Peak MiB, the 695 same files |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | gpress, effort 40 (default) | 81.36% | 73.26% | 88.7% | 729 | 0 | 0 | 625 | 76 |
 | gpress, effort 40, `--max-stream 1073741824` | 78.31% | 73.26% | 88.5% | 729 | 0 | 0 | 621 | 76 |
@@ -533,8 +534,8 @@ Versions: qpdf 12.4.2 (zlib 1.3, zopfli 1.0.3), mutool 1.28.6, cpdf 2.9.3 with j
   in qpdf than the original, each of the three renderers that reads the original draws every page with the same
   pixels and text, and no content or security is lost; every other output, and every file a tool failed on,
   counts at the original's size. One allowance: a page that one renderer alone draws differently counts as the
-  same when at most 0.5% of its pixels differ, no channel by more than 96 of 255, on at most 24 pages (149 credited
-  outputs of the other tools, none of gpress's). "Wrong outputs" came out broken, look different, or lost
+  same when at most 0.5% of its pixels differ, no channel by more than 96 of 255, on at most 24 pages (73 credited
+  outputs in the table, 149 over the other tools' 14 settings, none of gpress's). "Wrong outputs" came out broken, look different, or lost
   content or security. The median file is the middle of the files' own output-to-input ratios.
 - The 730 files are all 907 but the 173 gpress declines (106 damaged or unusual, 40 PDF/A, PDF/X or signed, 17
   whose earlier saves it cannot safely drop, 10 encrypted) and the 4 where it keeps a stream that decodes to more
