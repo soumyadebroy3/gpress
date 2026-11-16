@@ -8,7 +8,7 @@ pub struct BitWriter {
     /// The furthest bit a reader may have fetched that loads a Huffman table's longest code length before each
     /// code (Poppler's FlateStream does): the largest start of a Huffman code plus that length. `write_stored`
     /// keeps a stored block's length out of those bits.
-    pub reach: u64,
+    pub(crate) reach: u64,
 }
 
 impl BitWriter {

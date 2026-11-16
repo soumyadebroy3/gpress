@@ -1385,10 +1385,9 @@ mod tests {
     #[test]
     fn a_spliced_block_keeps_poppler_from_misreading_the_stored_block_after_it() {
         let (syms, code, bytes) = crate::flate::block::tests::short_end_of_block();
-        let mut seg = BitWriter::new();
-        write_dynamic(&mut seg, &syms, &code, false);
-        let (n, reach) = (seg.bit_len(), seg.reach);
-        let piece = seg.finish();
+        let mut seg = Out::new(64, 0);
+        write_dynamic(&mut seg.w, &syms, &code, false);
+        let Some(Piece::Bits(piece, n, reach)) = seg.finish().pop() else { panic!() };
         let mut padded = 0;
         for lead in 0..8 {
             let mut s = Stream { w: BitWriter::new(), pending: None };

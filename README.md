@@ -464,8 +464,8 @@ effort 0 is close to those two (25 s against 18 and 17), and mutool is the faste
 median memory is the lowest, 5 MiB, and its peak is 76 MiB on one thread and 240 MiB on all four cores, its default
 (the same output).
 
-gpress is build 2d3bf64; the one engine change since (#58) gives the same bytes on these files at efforts 0, 20,
-40 and 100. Each tool ran one command at a time on a 4-core 2.1 GHz Xeon cloud machine in November 2026. The
+gpress is build 2d3bf64. Of the two engine changes since, #58 gives the same bytes on these files at efforts 0,
+20, 40 and 100, and #61 at 0, 40 and 100; at 20 it changes one file by 2 bytes, so that Poppler reads it. Each tool ran one command at a time on a 4-core 2.1 GHz Xeon cloud machine in November 2026. The
 command lines, how many settings each tool ran and the details are in
 [bench/RESULTS.md](bench/RESULTS.md#head-to-head-november-2026).
 

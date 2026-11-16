@@ -220,8 +220,8 @@ mod tests {
 
     #[test]
     fn poppler_reads_what_the_encoders_write() {
-        // Text and random bytes in turn, so that stored blocks follow Huffman-coded ones. (Their end-of-block
-        // codes are long, so none of these needs the empty fixed block; the block and fast tests make one.)
+        // Text and random bytes in turn, so that stored blocks can follow Huffman-coded ones. None of these needs
+        // the empty fixed block: the block and fast tests make streams that do.
         let mut s = 7u64;
         let text = b"BT /F1 12 Tf 72 712 Td [(Hello)-250(World)]TJ ET q 0.5 0 0 0.5 0 0 cm /Im1 Do Q\n";
         for n in 0..40 {

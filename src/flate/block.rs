@@ -1091,9 +1091,10 @@ fn write_symbols(w: &mut BitWriter, syms: &[Sym], ll: &[u8], d: &[u8]) {
 
 pub fn write_stored(w: &mut BitWriter, bytes: &[u8], last: bool) {
     // Poppler's FlateStream reads a stored block's length straight from the input and drops the bits it had
-    // fetched ahead (`reach`), so a whole byte fetched past the 3-bit header would be lost and the length read
-    // a byte late. An empty fixed block (10 bits) moves the header on; its own end-of-block code reaches 9 bits,
-    // which the header's 3 bits and padding cover, so at most two are needed (`reach` is at most 14 bits on).
+    // fetched ahead (`reach`), so the whole bytes fetched past the 3-bit header (one or two) would be lost and
+    // the length read that many bytes late. An empty fixed block (10 bits) moves the header on; its own
+    // end-of-block code reaches 9 bits, which the header's 3 bits and padding cover, so at most two are needed
+    // (`reach` is at most 14 bits on).
     while w.reach.div_ceil(8) > (w.bit_len() + 3).div_ceil(8) {
         write_fixed(w, &[], false);
     }
@@ -1136,26 +1137,43 @@ pub(crate) mod tests {
         (syms, code, bytes)
     }
 
+    /// A dynamic block whose last distance code (1 bit, no extra bits, right before the end-of-block code) is
+    /// in a table whose longest code is at least 4 bits past what the end-of-block code reaches, and its input:
+    /// a literal and a match, with all 30 distance codes counted, each half as often as the one before.
+    fn short_last_distance() -> (Vec<Sym>, DynCode, Vec<u8>) {
+        let syms = vec![Sym::lit(b'a'), Sym::mat(3, 1)];
+        let mut h = Hist::of(&syms);
+        for (k, f) in h.d.iter_mut().enumerate() {
+            *f = 1 << (29 - k);
+        }
+        let code = best_dynamic(&h, &FlateRules::default());
+        let (ll_longest, d_longest) = (*code.ll.iter().max().unwrap(), *code.d.iter().max().unwrap());
+        assert!(d_longest >= code.d[0] + ll_longest + 4);
+        (syms, code, b"aaaa".to_vec())
+    }
+
     #[test]
     fn poppler_reads_a_stored_block_after_a_huffman_block_at_every_bit_position() {
-        let (syms, code, bytes) = short_end_of_block();
-        let mut padded = 0;
-        // 0 to 7 literals of 9 bits in a fixed block first put the end-of-block code at every bit position.
-        for lead in 0..8 {
-            let first = vec![Sym { litlen: 200, dist: 0 }; lead];
-            let mut w = BitWriter::new();
-            write_fixed(&mut w, &first, false);
-            write_dynamic(&mut w, &syms, &code, false);
-            write_stored(&mut w, b"stored", true);
-            let z = w.finish();
-            let want = [vec![200; lead], bytes.clone(), b"stored".to_vec()].concat();
-            assert_eq!(super::super::inflate(&z, 1000).unwrap().data, want, "{lead}");
-            let (back, empty) = super::super::poppler::read(&z).unwrap_or_else(|| panic!("{lead}"));
-            assert_eq!(back, want, "{lead}");
-            padded += empty;
+        // How many empty fixed blocks the 8 positions need in all: where Poppler would have fetched the stored
+        // block's length, and only there.
+        for (case, (syms, code, bytes), want) in [(0, short_end_of_block(), 1), (1, short_last_distance(), 8)] {
+            let mut padded = 0;
+            // 0 to 7 literals of 9 bits in a fixed block first put the block's end at every bit position.
+            for lead in 0..8 {
+                let first = vec![Sym { litlen: 200, dist: 0 }; lead];
+                let mut w = BitWriter::new();
+                write_fixed(&mut w, &first, false);
+                write_dynamic(&mut w, &syms, &code, false);
+                write_stored(&mut w, b"stored", true);
+                let z = w.finish();
+                let want = [vec![200; lead], bytes.clone(), b"stored".to_vec()].concat();
+                assert_eq!(super::super::inflate(&z, 1000).unwrap().data, want, "case {case}, {lead}");
+                let (back, empty) = super::super::poppler::read(&z).unwrap_or_else(|| panic!("case {case}, {lead}"));
+                assert_eq!(back, want, "case {case}, {lead}");
+                padded += empty;
+            }
+            assert_eq!(padded, want, "case {case}");
         }
-        // Where Poppler would have fetched the stored block's length, and only there.
-        assert_eq!(padded, 1);
     }
 
     /// The header search as it was before it worked in fixed buffers and skipped repeated work (a518968), on the
