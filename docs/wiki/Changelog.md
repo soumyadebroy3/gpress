@@ -1,9 +1,16 @@
 Every pull request merged into `main` (or into a branch that reached it), newest first, with its title as it stands on GitHub. Dates are UTC. What the recent ones give is on [Status and roadmap](Status-and-roadmap).
 
+## 2026-11-16
+
+| Pull request | Change |
+| --- | --- |
+| [#58](https://github.com/soumyadebroy3/gpress/pull/58) | Same bits on every machine: log2 and exp2 from basic arithmetic |
+
 ## 2026-11-15
 
 | Pull request | Change |
 | --- | --- |
+| [#57](https://github.com/soumyadebroy3/gpress/pull/57) | Wiki: #55, #52 and #54 done; the lossy_ row, the photo set's lossy sizes and the sharp-photo floor follow #52 |
 | [#55](https://github.com/soumyadebroy3/gpress/pull/55) | Rewrite rules: the lossless rewrite's 88 tuning values as the group rewrite_ |
 | [#52](https://github.com/soumyadebroy3/gpress/pull/52) | Lossy image step: sharp photographs become JPEGs, and the photo test is fourteen rules |
 | [#54](https://github.com/soumyadebroy3/gpress/pull/54) | Wiki: #49, #51, #50 and #53 done; the earlier-saves and drop_history lines follow #51 |

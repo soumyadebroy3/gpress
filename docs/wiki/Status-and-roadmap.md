@@ -1,13 +1,15 @@
-_Last updated 2026-11-15, `main` at [2d3bf64](https://github.com/soumyadebroy3/gpress/commit/2d3bf64)._
+_Last updated 2026-11-16, `main` at [d3d7f3a](https://github.com/soumyadebroy3/gpress/commit/d3d7f3a)._
 
 Every pull request merged into `main` is listed in the [Changelog](Changelog). This page says what each recent one gives, what is being built now and what comes next.
 
-## Done: the build of 2026-11-14 and 2026-11-15
+## Done: the build of 2026-11-14 to 2026-11-16
 
 All figures are from each pull request's description, on the 907 public test PDFs (130.5 MB) with one thread unless it says otherwise. "Byte-identical" means every output is the same bytes as `main` gave before, at the efforts named.
 
 | Pull request | Merged (UTC) | What it gives |
 | --- | --- | --- |
+| [#58](https://github.com/soumyadebroy3/gpress/pull/58) Same bits on every machine | 2026-11-16 | The Flate cost model, the archive's plain-coding test and the rewrite's work budgets take `log2` and `exp2` from gpress's own code (`src/math.rs`, built from `+`, `-`, `*`, `/` and exact steps), not from the platform's maths library, whose last bit differs between platforms: glibc 2.39 and Rust's WebAssembly libm disagree on `log2` of 22 of the integers 1 to 20,000. Byte-identical on the 907 files at efforts 0, 20, 40 and 100 (`optimize`) and 0 and 40 (`pack`), and the native tool and the web module give the same bytes on all of them. Instructions +0.37% at effort 40 on 31 small files; the web module is 496 bytes of gzip smaller. |
+| [#57](https://github.com/soumyadebroy3/gpress/pull/57) Wiki update | 2026-11-15 | These pages brought up to date for #52, #54 and #55. |
 | [#55](https://github.com/soumyadebroy3/gpress/pull/55) Rewrite settings | 2026-11-15 | The normal-PDF rewrite's 88 tuning values are named settings (group `rewrite_`), set by name on every surface. Four of them bound what a hostile file can cost, so, like #49's walk rules, they can be lowered but not raised. Also: the store budget in C, WebAssembly and TypeScript (`storeBudgetMiB`), the archive's stream limit as a TypeScript option of its own (`maxStreamArchiveMiB`), and in TypeScript a size in MiB with a fraction is rounded up, so 0.5 no longer becomes 0 (which meant the option's default). With no rule set, byte-identical on the 907 files at efforts 0, 20, 40, 60, 80 and 100 (`optimize`) and 0 and 40 (`pack`). The web module's recorded size went from 347,887 to 353,062 bytes of gzip (1.5%, #52's growth included). |
 | [#52](https://github.com/soumyadebroy3/gpress/pull/52) Sharp photographs | 2026-11-15 | The lossy step's photo test gives a third answer, a sharp photo (such as grass, gravel or coins: more hard edges than a photo may have, but at most an eighth flat, among other tests). It keeps the line-art floor of 300 pixels per inch and may become a JPEG within the same two quality checks. Small print makes a picture line art only when a tile's hard edges are more than 1.5 times its soft ones (was more than 1). The test's 14 values are rules of `lossy_`: `lossy_sharp_floor=1` gives a sharp photo the photo floor, and `lossy_print_edges=100` the old tile rule. On the 23-file photo set, 18,255,139 to 16,452,936 bytes at effort 60, 17,737,195 to 15,934,992 at 80 and 17,703,925 to 15,795,015 at 100; only its astronaut and coffee files change. Byte-identical on the 907 files at efforts 0, 60, 80 and 100. The web module grew by 1,230 bytes of gzip in its own build. |
 | [#54](https://github.com/soumyadebroy3/gpress/pull/54) Wiki update | 2026-11-15 | These pages brought up to date for #49, #50, #51 and #53. |
@@ -33,7 +35,7 @@ Earlier pull requests are in the [Changelog](Changelog).
 
 | Work | What it will give |
 | --- | --- |
-| A fresh head-to-head on `main` at 2d3bf64 | All 907 files against qpdf, MuPDF, cpdf, pdfsizeopt and Ghostscript, and the six efforts' sizes on the 907 files measured again: the README's and these pages' figures predate #51. |
+| A fresh head-to-head on `main` at 2d3bf64 | All 907 files against qpdf, MuPDF, cpdf, pdfsizeopt and Ghostscript. Its first part, the six efforts' sizes on the 907 files, is in [Effort levels and settings](Effort-levels-and-settings). |
 
 Paused: the "Deep check" workflow, draft [#36](https://github.com/soumyadebroy3/gpress/pull/36), which would run both builds over the test files and the readers on every pull request.
 

@@ -174,16 +174,16 @@ strongest setting. The output is the same for any thread count.
 | Effort | | 907 test files | Photo set | What it does to a normal PDF |
 | ---: | --- | ---: | ---: | --- |
 | the input | | 130,469,001 | 22,715,581 | |
-| 0 (`--quick`) | lossless | 115,335,908 (88.4%) | 20,900,294 (92.0%) | The fast path: our fast Flate encoder and the cheap steps. |
-| 20 | lossless | 113,692,951 (87.1%) | 20,585,289 (90.6%) | The strong encoder's first step. |
-| 40 (default) | lossless | 113,347,672 (86.9%) | 20,510,774 (90.3%) | The smallest lossless output: everything the engine knows how to do. |
-| 60 | lossy | 111,788,415 (85.7%) | 16,452,936 (72.4%) | The work of 40, after the lossy image step: an image shown at 375 pixels per inch or more is resampled down to 300, and a photo that was resampled, or is not a JPEG, is written as a JPEG at quality 85 (line art stays samples behind Flate). |
-| 80 | lossy | 111,270,471 (85.3%) | 15,934,992 (70.2%) | As 60, with photos down to 150 pixels per inch (those shown at 187.5 or more; a sharp photo stays at 300). |
-| 100 | lossy | 111,237,201 (85.3%) | 15,795,015 (69.5%) | As 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
+| 0 (`--quick`) | lossless | 107,790,202 (82.6%) | 20,900,294 (92.0%) | The fast path: our fast Flate encoder and the cheap steps. |
+| 20 | lossless | 106,454,744 (81.6%) | 20,585,289 (90.6%) | The strong encoder's first step. |
+| 40 (default) | lossless | 106,154,895 (81.4%) | 20,510,774 (90.3%) | The smallest lossless output: everything the engine knows how to do. |
+| 60 | lossy | 104,595,638 (80.2%) | 16,452,936 (72.4%) | The work of 40, after the lossy image step: an image shown at 375 pixels per inch or more is resampled down to 300, and a photo that was resampled, or is not a JPEG, is written as a JPEG at quality 85 (line art stays samples behind Flate). |
+| 80 | lossy | 104,077,694 (79.8%) | 15,934,992 (70.2%) | As 60, with photos down to 150 pixels per inch (those shown at 187.5 or more; a sharp photo stays at 300). |
+| 100 | lossy | 104,044,424 (79.7%) | 15,795,015 (69.5%) | As 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
 
 The two size columns are the bytes of all the outputs together and their share of the input, one thread
 (`bench/effort_table.py`; bench/RESULTS.md, "Sizes at the six efforts", has a row per file of the photo set and
-how close its pages stay to the input's). A file gpress leaves untouched counts with its own size: 171 of the
+how close its pages stay to the input's). A file gpress leaves untouched counts with its own size: 177 of the
 907 public test files. The lossy efforts change 4 of the 907. The photo
 set is 23 files that `bench/photo_set.py` puts together to show the lossy step: two of the test files, three
 photographs from scikit-image's sample data (two by NASA in the public domain, one under CC0), each on a page
