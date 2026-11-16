@@ -21,14 +21,14 @@
 </p>
 
 <p align="center">
-  <a href="#benchmarks"><img src="docs/assets/hero.svg" width="880" alt="gpress archive: 60.9% of the original size on 907 public test PDFs, against 76.3% for the best of xz, Brotli and Zstandard. Normal PDF: 85.0% of the input on the 90 files gpress rewrites from a hard 120-file sample, against 87.2% for qpdf 11.9.0 at its strongest lossless setting. Web module: 316 KB of gzipped WebAssembly for normal PDFs, 432 KB with the archive, the same output as the native library."></a>
+  <a href="#benchmarks"><img src="docs/assets/hero.svg" width="880" alt="gpress archive: 60.9% of the original size on 907 public test PDFs, against 76.3% for the best of xz, Brotli and Zstandard. Normal PDF: 73.3% of the input on the 730 of those files gpress rewrites, against 77.7% for qpdf 12.4.2 with zopfli, the smallest of the other tools; on all 907 files, 81.4% against 79.6% for qpdf with zopfli. Web module: 353 KB of gzipped WebAssembly for normal PDFs, 476 KB with the archive, the same output as the native library."></a>
 </p>
 
 <p align="center">
   <strong>Archives about 20% smaller than the best of xz, Brotli and Zstandard</strong><br>
-  <strong>Normal PDFs 2.5% smaller in total than qpdf 11.9.0's strongest lossless output, on the files gpress rewrites</strong><br>
-  <strong>Efforts 0 to 40 lossless &middot; 316 KB gzipped in the browser for normal PDFs, 432 KB with the archive</strong><br>
-  <sub>Archive: 907 public test PDFs, format 9, effort 100, built with Lepton. Normal PDF: totals on the 90 files gpress rewrites from a hard 120-file sample, default effort. One thread. Browser: the gzip sizes of the two WebAssembly modules, as recorded in bench/sizes.json on 2026-11-14. <a href="#benchmarks">Details</a>.</sub>
+  <strong>Normal PDFs: the smallest total of six tools on the 730 files gpress rewrites, second on all 907</strong><br>
+  <strong>Efforts 0 to 40 lossless &middot; 353 KB gzipped in the browser for normal PDFs, 476 KB with the archive</strong><br>
+  <sub>Archive: 907 public test PDFs, format 9, effort 100, built with Lepton. Normal PDF: the same 907 files, build 2d3bf64 at its default effort, one thread, against qpdf 12.4.2, mutool 1.28.6, cpdf 2.9.3, pdfsizeopt 2023-04-18 and Ghostscript 10.08.0, every output checked in PDFium, Poppler and pdf.js: 73.3% of the input against 77.7% for qpdf with zopfli on the 730 files (all but the 173 gpress declines and the 4 where it keeps a stream over 64 MiB as it is), 81.4% against 79.6% on all 907. Browser: the gzip sizes of the two WebAssembly modules, as recorded in bench/sizes.json on 2026-11-15. <a href="#benchmarks">Details</a>.</sub>
 </p>
 
 <p align="center">
@@ -234,10 +234,6 @@ The engine has a finer lossless scale of its own, 0 to 100: efforts 0 and 20 are
 efforts 40 and above its level 100. `--engine-effort N` (the `engine_effort` option) sets that level directly,
 for measuring, and then nothing is lossy unless `lossy` is set too. The figures below were measured on that scale.
 
-<p align="center">
-  <img src="docs/assets/normal-pdf.svg" width="880" alt="Normal PDF, bytes saved on the 90 files gpress rewrites from a hard 120-file sample: gpress effort 40 15.0%, engine level 50 14.8%, effort 0 13.0%; qpdf 11.9.0 at its strongest lossless setting 12.8%.">
-</p>
-
 | Engine level | What runs (normal PDF) | CPU time, first measured | CPU time, build 37bd3f3 | Output |
 | --- | --- | ---: | ---: | ---: |
 | 0 (effort 0, `--quick`) | The fast path: our fast Flate encoder, image predictors chosen from an estimate, and the cheap steps (object streams, the cross-reference stream, JPEG tables, JBIG2) | 16.1 s | 16.8 s | 87.02% |
@@ -248,21 +244,14 @@ for measuring, and then nothing is lossy unless `lossy` is set too. The figures 
 | 20 (effort 20) | The strong encoder, its settings in steps of 20, the strongest that fits a work budget proportional to the file's size | 244 s | | 85.43% |
 | 50 | | 334 s | 176 s | 85.17% |
 | 100 (effort 40, the default) | The strong encoder at its strongest | 983 s | 512 s | 85.01% |
-| qpdf 11.9.0, strongest lossless setting | For comparison | 25.3 s | | 87.23% |
 
 <details>
 <summary><b>How these were measured</b></summary>
 
 CPU time is for the whole 120-file sample (`bench/sets/sample120.txt`, 78.3 MB, a deliberately hard mix of the
 slowest, the largest and random files) on one thread; output is the total size as a share of the input on the 90
-files the engine rewrites. For qpdf it counts the 85 outputs `bench/verify_pdf.py` finds the same as their input
-apart from the trailer's /ID, and the other 5 files at their input size; its setting is `--object-streams=generate
---compress-streams=y --recompress-flate --compression-level=9 --decode-level=specialized`. On the 118 files qpdf can open
-(it refused 2 encrypted files) the comparison turns around: qpdf rewrites each of them, dropping earlier
-revisions, unreferenced objects and whatever it cannot read, while gpress returns the files it can't safely touch
-unchanged. Counting those as they are, an
-earlier build (ca8fa92) gave 90.2% of the input at effort 40 on those 118 files, against 74.7% for qpdf with
-object streams and Flate at level 9. The first
+files the engine rewrites. [Benchmarks](#benchmarks) compares efforts 0 and 40 with other tools on all 907
+files. The first
 measurement (builds 52a91f0 and 20f8e69) was made in October 2026 for the change that added the fast path, on a
 4-core 2.1 GHz Xeon virtual machine. Later changes made the strong encoder faster. Build 37bd3f3 was measured
 again at engine levels 0, 50 and 100, and at each level its outputs total exactly the first run's bytes. It ran on a
@@ -437,6 +426,50 @@ Measured on 907 public test PDFs (130.5 MB: the pdf.js, pypdf, OCRmyPDF and pike
 deliberately broken or unusual), fetched and pinned by `bench/fetch_corpus.sh`, and on a deliberately hard
 120-file sample of them (`bench/sets/sample120.txt`, 78.3 MB).
 
+### Normal PDF
+
+<p align="center">
+  <img src="docs/assets/normal-pdf.svg" width="880" alt="Normal PDF size as a share of the input on the 730 of 907 test PDFs gpress rewrites: gpress effort 40 (default) 73.3%, effort 0 75.0%; qpdf 12.4.2 with zopfli 77.7%, cpdf 2.9.3 80.5%, qpdf at zlib level 9 80.7%, pdfsizeopt 86.7%, mutool 1.28.6 90.2%, Ghostscript 10.08.0 91.7%.">
+</p>
+
+| Tool and setting | All 907 files | The 730 files gpress rewrites | Median file | CPU s, the 695 same files | Errors and timeouts | Wrong outputs |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| gpress, effort 40 (default) | 81.36% | 73.26% | 88.7% | 625 | 0 | 0 |
+| gpress, effort 0 (`--quick`) | 82.62% | 74.99% | 90.4% | 25 | 0 | 0 |
+| qpdf 12.4.2 with zopfli | 79.61% | 77.74% | 89.9% | 1,899 | 12 | 13 |
+| qpdf 12.4.2, zlib level 9 | 82.30% | 80.68% | 94.3% | 18 | 12 | 13 |
+| cpdf 2.9.3 squeeze, no page data, JBIG2 | 81.99% | 80.54% | 89.0% | 17 | 14 | 17 |
+| pdfsizeopt 2023-04-18 | 84.88% | 86.71% | 81.0% | 1,789 | 39 | 78 |
+| mutool 1.28.6 clean, all options | 91.21% | 90.16% | 94.6% | 7.5 | 1 | 30 |
+| Ghostscript 10.08.0 pdfwrite | 89.52% | 91.66% | 100.0% | 68 | 2 | 643 |
+
+Sizes are the total output as a share of the input. An output counts only when it is smaller, opens, qpdf finds it
+no worse than the original, each of PDFium, Poppler and pdf.js that reads the original draws every page the same,
+and no content or security is lost (one renderer may differ on at most 0.5% of a page's pixels: 149 outputs of the
+other tools counted that way, none of gpress's); any other output, and a file a tool fails on, counts at the
+original's size. "Wrong outputs" are those that came out broken, look different, or lost content or security. The
+median file is the middle of the files' own output-to-input ratios, so small files weigh as much as large ones.
+
+The 730 files are all 907 but the 173 gpress declines (106 damaged or unusual, 40 PDF/A, PDF/X or signed, 17
+whose earlier saves it cannot safely drop, 10 encrypted) and the 4 where it keeps a stream that decodes to more
+than 64 MiB as it is. On them gpress gives the smallest total of any tool and setting. On all 907 it is second:
+qpdf with zopfli saves 2.9 MB more on the files gpress declines and 3.5 MB more on those 4, against gpress's
+4.1 MB lead on the rest. Raising the stream limit (`--max-stream 1073741824`) gives 78.31% on all 907, the
+smallest of any setting, at a peak of 439 MiB on one file; the default limit is 64 MiB. pdfsizeopt has the
+smallest median file.
+
+Speed is compared on the 695 files every tool finished and gpress rewrote, one thread each: effort 40 uses a third
+of the CPU time of qpdf with zopfli and of pdfsizeopt, and about 35 times that of qpdf at zlib level 9 and of cpdf;
+effort 0 is close to those two (25 s against 18 and 17), and mutool is the fastest (7.5 s). On those files gpress's
+median memory is the lowest, 5 MiB, and its peak is 76 MiB on one thread and 240 MiB on all four cores, its default
+(the same output).
+
+gpress is build 2d3bf64; the one engine change since (#58) gives the same bytes on these files at efforts 0, 20,
+40 and 100. Each tool ran one command at a time on a 4-core 2.1 GHz Xeon cloud machine in November 2026. The
+command lines and the details are in [bench/RESULTS.md](bench/RESULTS.md#head-to-head-november-2026).
+
+### Archive
+
 <p align="center">
   <img src="docs/assets/archive.svg" width="880" alt="Archive size as a share of the original on 907 public test PDFs: gpress 60.9%; the best of Brotli 11, xz -9e and Zstandard 19 file by file 76.3%; Brotli 11 76.5%; xz -9e 76.8%; Zstandard 19 --long 77.0%.">
 </p>
@@ -445,12 +478,9 @@ deliberately broken or unusual), fetched and pinned by `bench/fetch_corpus.sh`, 
 | --- | --- | --- |
 | Archive, 907 files, effort 100, built with `--features existing` (Lepton) | 60.9% of the original size | the best of xz -9e, Brotli 11 and Zstandard 19 --long, file by file: 76.3% |
 | Archive, the 120-file sample, effort 100, default build (no Lepton) | 60.0% | the best of the three, file by file: 74.5% |
-| Normal PDF, the 90 files gpress rewrites from the sample, default effort | 85.01% of the input | qpdf 11.9.0, strongest lossless setting: 87.23% |
 
-Every archive in those runs was restored by a separate process and compared byte for byte, and the competitors ran on the same files. All three
-rows are the current code: the archive rows are format 9, and the current code's normal-PDF outputs total exactly
-the bytes behind its row (see [Engine levels](#engine-levels), which also says how qpdf does when every file it opens is
-counted).
+Every archive in those runs was restored by a separate process and compared byte for byte, and the competitors
+ran on the same files. Both rows are format 9, the current format.
 
 <details>
 <summary><b>Earlier measurements</b></summary>

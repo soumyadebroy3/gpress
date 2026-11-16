@@ -1,4 +1,4 @@
-_Last updated 2026-11-16, `main` at [d3d7f3a](https://github.com/soumyadebroy3/gpress/commit/d3d7f3a)._
+_Last updated 2026-11-16, `main` at [56feb5a](https://github.com/soumyadebroy3/gpress/commit/56feb5a)._
 
 Every pull request merged into `main` is listed in the [Changelog](Changelog). This page says what each recent one gives, what is being built now and what comes next.
 
@@ -6,8 +6,11 @@ Every pull request merged into `main` is listed in the [Changelog](Changelog). T
 
 All figures are from each pull request's description, on the 907 public test PDFs (130.5 MB) with one thread unless it says otherwise. "Byte-identical" means every output is the same bytes as `main` gave before, at the efforts named.
 
+The head-to-head on `main` at 2d3bf64 is done too (a measurement, not a pull request; its figures are in the [README's Benchmarks section](https://github.com/soumyadebroy3/gpress#benchmarks)). Against qpdf 12.4.2, MuPDF's mutool 1.28.6, cpdf 2.9.3, pdfsizeopt 2023-04-18 and Ghostscript 10.08.0, every output checked in PDFium, Poppler and pdf.js: on the 730 files gpress rewrites (all but the 173 it declines and the 4 with a stream over 64 MiB), effort 40 gives 73.3% of the input, the smallest total of any tool (qpdf with zopfli 77.7%); on all 907 it gives 81.4%, second to qpdf with zopfli's 79.6%, which also shrinks files gpress declines. On the 695 files every tool rewrote, effort 40 used a third of the CPU time of qpdf with zopfli.
+
 | Pull request | Merged (UTC) | What it gives |
 | --- | --- | --- |
+| [#59](https://github.com/soumyadebroy3/gpress/pull/59) Effort table | 2026-11-16 | The six efforts' sizes measured again on `main` at 2d3bf64 (they predated #51): 82.62% of the input at effort 0, 81.36% at 40 and 79.75% at 100 on the 907 files, with 177 files untouched (was 171). These pages brought up to date for #57 and #58. |
 | [#58](https://github.com/soumyadebroy3/gpress/pull/58) Same bits on every machine | 2026-11-16 | The Flate cost model, the archive's plain-coding test and the rewrite's work budgets take `log2` and `exp2` from gpress's own code (`src/math.rs`, built from `+`, `-`, `*`, `/` and exact steps), not from the platform's maths library, whose last bit differs between platforms: glibc 2.39 and Rust's WebAssembly libm disagree on `log2` of 22 of the integers 1 to 20,000. Byte-identical on the 907 files at efforts 0, 20, 40 and 100 (`optimize`) and 0 and 40 (`pack`), and the native tool and the web module give the same bytes on all of them. Instructions +0.37% at effort 40 on 31 small files; the web module is 496 bytes of gzip smaller. |
 | [#57](https://github.com/soumyadebroy3/gpress/pull/57) Wiki update | 2026-11-15 | These pages brought up to date for #52, #54 and #55. |
 | [#55](https://github.com/soumyadebroy3/gpress/pull/55) Rewrite settings | 2026-11-15 | The normal-PDF rewrite's 88 tuning values are named settings (group `rewrite_`), set by name on every surface. Four of them bound what a hostile file can cost, so, like #49's walk rules, they can be lowered but not raised. Also: the store budget in C, WebAssembly and TypeScript (`storeBudgetMiB`), the archive's stream limit as a TypeScript option of its own (`maxStreamArchiveMiB`), and in TypeScript a size in MiB with a fraction is rounded up, so 0.5 no longer becomes 0 (which meant the option's default). With no rule set, byte-identical on the 907 files at efforts 0, 20, 40, 60, 80 and 100 (`optimize`) and 0 and 40 (`pack`). The web module's recorded size went from 347,887 to 353,062 bytes of gzip (1.5%, #52's growth included). |
@@ -32,10 +35,6 @@ All figures are from each pull request's description, on the 907 public test PDF
 Earlier pull requests are in the [Changelog](Changelog).
 
 ## In progress
-
-| Work | What it will give |
-| --- | --- |
-| A fresh head-to-head on `main` at 2d3bf64 | All 907 files against qpdf, MuPDF, cpdf, pdfsizeopt and Ghostscript. Its first part, the six efforts' sizes on the 907 files, is in [Effort levels and settings](Effort-levels-and-settings). |
 
 Paused: the "Deep check" workflow, draft [#36](https://github.com/soumyadebroy3/gpress/pull/36), which would run both builds over the test files and the readers on every pull request.
 

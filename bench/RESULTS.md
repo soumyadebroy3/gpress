@@ -5,8 +5,8 @@ pikepdf test resources). Many of them are deliberately broken or unusual. Measur
 in October 2026. Every number below comes from the scripts in this folder.
 
 Every "effort" in this file is the engine's own level, 0 to 100 (`--engine-effort` today), measured before
-the public effort got its six steps: the public effort 40, the default, is the engine's 100. The one
-exception is the section "Sizes at the six efforts", whose efforts are the public ones.
+the public effort got its six steps: the public effort 40, the default, is the engine's 100. The exceptions
+are the sections "Sizes at the six efforts" and "Head-to-head, November 2026", whose efforts are the public ones.
 
 Which build: sections 1 to 5 are the phase-1 engine (commit d85cd7a) at maximum effort. Sections 6 and 7
 (time and space) and the Security section are the `speed` build (branch `speed`, commit ca8fa92:
@@ -490,6 +490,66 @@ What the lossy efforts did with this set's pictures (`PDFE_DEBUG=1` prints the s
   coffee.png written as one by Pillow, on a page at 600 pixels per inch, which is not in the set.
 - `scan` is at its floor (300 pixels per inch), so nothing is resampled, and at effort 100 its JPEG is left
   alone as one that looks like line art.
+
+## Head-to-head, November 2026
+
+The README's normal-PDF benchmark: gpress `main` at 2d3bf64 against qpdf, MuPDF's mutool, cpdf, pdfsizeopt and
+Ghostscript on the 907 test files (`bench/sets/all.txt`, 130,469,001 bytes). Timed from 2026-11-15 19:05 to
+2026-11-16 02:07 UTC on a cloud machine with 4 cores (Intel Xeon, 2.1 GHz) and 15.7 GiB: one command at a
+time, the settings in a new random order for each file, each command with a 30-minute limit and an 8 GiB memory
+cap. Four commands hit the time limit, none of them gpress's. The harness that ran it is not in `bench/`.
+
+The settings (`IN` and `OUT` are the input and output files):
+
+```
+gpress optimize IN OUT --effort 40 --threads 1          # gpress, effort 40 (default); with no flags, all four cores
+gpress optimize IN OUT --effort 0 --threads 1           # gpress, effort 0
+gpress optimize IN OUT --effort 40 --threads 1 --max-stream 1073741824
+QPDF_ZOPFLI=force qpdf --object-streams=generate --compress-streams=y --recompress-flate --compression-level=9 --decode-level=specialized IN OUT
+QPDF_ZOPFLI=disabled qpdf ...                            # the same, zlib level 9
+cpdf -process-images -1bpp-method JBIG2 -jbig2enc jbig2 IN -squeeze -squeeze-no-pagedata -create-objstm -no-preserve-objstm -recrypt -o OUT
+pdfsizeopt --quiet IN OUT
+mutool clean -gggg -Z -e 100 -d -z -f -i -m -t IN OUT
+gs -q -dNOPAUSE -dBATCH -dSAFER -sDEVICE=pdfwrite -dDownsampleColorImages=false -dDownsampleGrayImages=false -dDownsampleMonoImages=false -dAutoFilterColorImages=false -dAutoFilterGrayImages=false -dColorImageFilter=/FlateEncode -dGrayImageFilter=/FlateEncode -dPassThroughJPEGImages=true -dPassThroughJPXImages=true -sColorConversionStrategy=LeaveColorUnchanged -dAutoRotatePages=/None -dEmbedSubstituteFonts=false -sOutputFile=OUT IN
+```
+
+Versions: qpdf 12.4.2 (zlib 1.3, zopfli 1.0.3), mutool 1.28.6, cpdf 2.9.3 with jbig2enc 0.29, pdfsizeopt
+2023-04-18, Ghostscript 10.08.0.
+
+| Tool and setting | All 907 files | The 730 files gpress rewrites | Median file | Made smaller | Errors and timeouts | Wrong outputs | CPU s, the 695 same files | Peak MiB, the 695 same files |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| gpress, effort 40 (default) | 81.36% | 73.26% | 88.7% | 729 | 0 | 0 | 625 | 76 |
+| gpress, effort 40, `--max-stream 1073741824` | 78.31% | 73.26% | 88.5% | 729 | 0 | 0 | 621 | 76 |
+| gpress, effort 0 | 82.62% | 74.99% | 90.4% | 729 | 0 | 0 | 25 | 52 |
+| qpdf with zopfli | 79.61% | 77.74% | 89.9% | 721 | 12 | 13 | 1,899 | 106 |
+| qpdf, zlib level 9 | 82.30% | 80.68% | 94.3% | 695 | 12 | 13 | 18 | 23 |
+| cpdf | 81.99% | 80.54% | 89.0% | 857 | 14 | 17 | 17 | 748 |
+| pdfsizeopt | 84.88% | 86.71% | 81.0% | 772 | 39 | 78 | 1,789 | 469 |
+| mutool | 91.21% | 90.16% | 94.6% | 821 | 1 | 30 | 7.5 | 14 |
+| Ghostscript | 89.52% | 91.66% | 100.0% | 114 | 2 | 643 | 68 | 77 |
+
+- Every output was checked against its original by qpdf 12.4.2, object by object, and by drawing every page in
+  PDFium, Poppler 24.02 and pdf.js. An output counts as made smaller when it is smaller, opens, checks no worse
+  in qpdf than the original, each of the three renderers that reads the original draws every page with the same
+  pixels and text, and no content or security is lost; every other output, and every file a tool failed on,
+  counts at the original's size. One allowance: a page that one renderer alone draws differently counts as the
+  same when at most 0.5% of its pixels differ, no channel by more than 96 of 255, on at most 24 pages (149 credited
+  outputs of the other tools, none of gpress's). "Wrong outputs" came out broken, look different, or lost
+  content or security. The median file is the middle of the files' own output-to-input ratios.
+- The 730 files are all 907 but the 173 gpress declines (106 damaged or unusual, 40 PDF/A, PDF/X or signed, 17
+  whose earlier saves it cannot safely drop, 10 encrypted) and the 4 where it keeps a stream that decodes to more
+  than 64 MiB as it is. The 695 files are those every other tool finished and every gpress setting made smaller
+  or found nothing to gain in; competitors' times on all the files they finished include work gpress skips.
+- On all four cores, its default, gpress at effort 40 gives the same outputs; on the 695 files it took 635 s of
+  CPU and 232 s of wall time, at a peak of 240 MiB. With `--max-stream 1073741824` its peak on all 907 files is
+  439 MiB (pdfjs/issue19517.pdf).
+- The machine's speed drifted by up to 42% during the run (calibrations of `xz -9e` on 4 MiB from 2.098 to 2.988
+  s); every setting was timed on a file before the next file, so all were affected about alike.
+- pdfjs/bomb_giant.pdf makes Poppler write over 1 GB of messages, and the check stops a renderer at 1 GiB: the
+  outputs that keep its large stream (gpress's, qpdf's, cpdf's and three of mutool's five settings') count
+  unchecked, at the original's size.
+- The one engine change on `main` since 2d3bf64 (#58) gives the same bytes on the 907 files at efforts 0, 20, 40
+  and 100.
 
 ## Archive format version 9
 
