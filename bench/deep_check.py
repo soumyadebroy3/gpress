@@ -2,8 +2,9 @@
 """Deep check: what a change does to the engine's outputs, measured on two builds of the tool side by side.
 
 BASE is the build the change starts from (main's), HEAD the build with the change. The "Deep check" workflow
-(.github/workflows/deep-check.yml) runs these commands on every pull request and posts the reports as one
-comment; nothing here needs GitHub, so the same commands work on any machine with both binaries.
+(.github/workflows/deep-check.yml) runs these commands for a pull request into main whose build of the tool
+is not main's, and posts the reports as one comment; nothing here needs GitHub, so the same commands work on
+any machine with both binaries.
 
     python3 -I bench/deep_check.py pdf      --base BIN --head BIN --out DIR
     python3 -I bench/deep_check.py archive  --base BIN --head BIN --out DIR
@@ -16,7 +17,8 @@ pdf      Both builds over every corpus file as a normal PDF: `benchmark.py time`
          thread, the two builds at the same time. Then head once more with 4 threads (levels 0 and 50):
          the bytes must be the same. Then every reader (qpdf --check, the object graph by value and PDFium in
          verify_pdf.py; Poppler and pdf.js in verify_render.py) on head's rewritten outputs whose bytes are not
-         base's: the output is made again, must have the measured sha256, and is compared with the original.
+         base's, one per file and output bytes, at most 200 (--verify-cap): the output is made again, must have
+         the measured sha256, and is compared with its original.
 archive  Both builds over the 120-file sample as archives, engine levels 0, 50 and 100, one thread: each archive is
          unpacked and compared with its input byte for byte (benchmark.py does that for every row).
 hostile  bench/security.py on head: the damaged archives, the hostile PDFs (one thread, then the default
@@ -30,9 +32,10 @@ Each part writes DIR/<part>.md (the report) and DIR/<part>.json (every row behin
 A finding is something a script can decide and that does not depend on the machine: an output larger than
 base's, a file base rewrites that head leaves untouched or the other way round, an output that is no longer
 exact (it does not open, an untouched file is not the input, an archive does not restore), a file that
-fails on head only or fails another way, a setting in which no file works on head, other bytes with other
-thread counts, a reader that shows a changed output differently from the original, a failure in the hostile
-suite, a checking tool that is missing or does not work, a step that failed. Each needs a reviewer: some are
+fails on head only or fails another way, a file not measured on head, a setting in which no file works on
+both builds, other bytes with other thread counts, a reader that shows a changed output differently from the
+original, a failure in the hostile suite, a checking tool that is missing or does not work on the control
+file, a step that failed. Each needs a reviewer: some are
 the point of the change (a new refusal is a file "newly left untouched").
 Outputs that merely differ from base's are counted and listed, not findings. CPU time and peak memory are
 printed as `benchmark.py compare` gives them; on a shared machine they are an indication, not a verdict.
@@ -45,7 +48,8 @@ timing out or failing counts the same way: on the output only, it is a problem; 
 
 Needs what the benchmark needs (docs/tasks/README.md, step 2): the corpus ($CORPUS, bench/fetch_corpus.sh),
 qpdf, xz, brotli, zstd, a C compiler, jpegtran, Poppler, pikepdf, pypdfium2, Pillow, and pdf.js with
-@napi-rs/canvas ($PDFJS_MODULES); bench/checkers/ pins the versions the workflow installs. And jbig2dec: without
+@napi-rs/canvas ($PDFJS_MODULES); bench/checkers/ pins the Python and npm packages the workflow installs (the
+programs come from the runner's apt). And jbig2dec: without
 it verify_pdf.py finds a JBIG2 image's pixels different in a file compared with itself. Run with python3 -I: the
 corpus is untrusted.
 """
@@ -139,7 +143,7 @@ def judge(base, head):
         if x.get('exact') and not y.get('exact'):
             g['not_exact'].append(entry('not_exact', f, x, y))
     both = [f for f in b if f in h and b[f].get('status') in WORKS and h[f].get('status') in WORKS]
-    return {'files': len(b), 'works': sum(1 for r in h.values() if r.get('status') in WORKS), 'groups': g,
+    return {'files': len(b), 'compared': len(both), 'groups': g,
             'same': sum(1 for f in both if b[f].get('sha256') == h[f].get('sha256')),
             'counts': [dict(collections.Counter(r.get('status') for r in rows.values())) for rows in (b, h)],
             'bytes_out': [sum(rows[f].get('bytes_out', 0) for f in both) for rows in (b, h)]}
@@ -198,14 +202,15 @@ def settle(first, again):
 
 
 def reader_targets(settings, cap):
-    """Head's rewritten outputs whose bytes are not base's, one per distinct output: outcome changes and
-    growths first, then the rest spread evenly up to `cap`. -> (targets, how many there were)"""
+    """Head's rewritten outputs whose bytes are not base's, one per file and output bytes (each is read against
+    its own original): the outcome changes (newly rewritten, works on head only) and growths first, in list
+    order, then the rest spread evenly up to `cap`. -> (targets, how many there were)"""
     first, rest, seen = [], [], set()
     for name, s in settings.items():
-        urgent = {e['file'] for k in ('rewritten', 'larger') for e in s['groups'][k]}
+        urgent = {e['file'] for k in ('rewritten', 'fixed', 'larger') for e in s['groups'][k]}
         for e in s['groups']['changed']:
-            if e['head'][0] == 'SMALLER' and e['sha256'] not in seen:
-                seen.add(e['sha256'])
+            if e['head'][0] == 'SMALLER' and (e['file'], e['sha256']) not in seen:
+                seen.add((e['file'], e['sha256']))
                 (first if e['file'] in urgent else rest).append({'file': e['file'], 'effort': s['effort'], 'sha256': e['sha256']})
     room = max(0, cap - len(first))
     if len(rest) > room:
@@ -215,7 +220,7 @@ def reader_targets(settings, cap):
 
 def read_one(engine, corpus, tmp, t):
     """Make one of head's outputs again and put it before every reader."""
-    src, out = os.path.join(corpus, t['file']), os.path.join(tmp, t['sha256'] + '.pdf')
+    src, out = os.path.join(corpus, t['file']), os.path.join(tempfile.mkdtemp(dir=tmp), 'out.pdf')  # two files can share bytes
     try:
         subprocess.run(bm.fill(bm.DEFAULTS['ours']['pdf'], engine=engine, **{'in': src}, out=out, effort=t['effort'], threads=1),
                        capture_output=True, timeout=bm.DEFAULTS['timeout'])
@@ -374,7 +379,7 @@ def part_hostile(a):
         bad = [r for r in rows if r.get('result') == 'FAIL' or r.get('ok') == 'BAD']
         tables[name] = {'rows': len(rows), 'failures': [[r.get('file') or r.get('check') or r.get('seed'), r.get('op') or r.get('kind') or '', r.get('verdict') or r.get('outcome') or ''] for r in bad],
                         'skipped': rows[0].get('detail') if rows and rows[0].get('status') == 'skipped' else None}
-    cost = [c for name in ('pdfs', 'threads0-pdfs') for c in costlier(read_tsv(os.path.join(runs['base'], name + '.tsv')), read_tsv(os.path.join(runs['head'], name + '.tsv')))]
+    cost = [[name] + c for name in ('pdfs', 'threads0-pdfs') for c in costlier(read_tsv(os.path.join(runs['base'], name + '.tsv')), read_tsv(os.path.join(runs['head'], name + '.tsv')))]
     return {'part': 'hostile', 'errors': [f'security.py {m} on head ended with exit {rc}: see hostile.log' for m, side, rc in failed if side == 'head'],
             'base_failed': [m for m, side, _ in failed if side == 'base'], 'base_rows': len(read_tsv(os.path.join(runs['base'], 'pdfs.tsv'))),
             'tables': tables, 'costlier': cost, 'seconds': round(time.time() - t0)}
@@ -386,7 +391,7 @@ def part_hostile(a):
 def red(res):
     """The findings of a part, as short phrases; empty when there are none."""
     out = list(res.get('errors') or [])
-    if any(not s['works'] for s in (res.get('settings') or {}).values()) or any(not t['rows'] for t in (res.get('tables') or {}).values()):
+    if any(not s['compared'] for s in (res.get('settings') or {}).values()) or any(not t['rows'] for t in (res.get('tables') or {}).values()):
         out.append('a setting or a suite measured nothing')  # silence must not read as "no finding"
     names = dict((k, title) for k, title, _ in GROUPS)
     for k, n in findings(res.get('settings') or {}).items():
@@ -479,7 +484,7 @@ def render_pdf(res):
     else:
         r = rd['results']
         pages = {k: sum(x['pages'].get(k, 0) for x in r) for k in ('PDFium', 'Poppler', 'pdf.js')}
-        L.append(f"Readers (qpdf --check, object graph, PDFium, Poppler, pdf.js) on {len(r)} of the {rd['changed']} distinct rewritten outputs that differ from base's: "
+        L.append(f"Readers (qpdf --check, object graph, PDFium, Poppler, pdf.js) on {len(r)} of the {rd['changed']} rewritten outputs that differ from base's (one per file and output bytes): "
                  f"{sum(1 for x in r if not x['problems'] and not x['unverified'])} read the same as their originals by every reader, "
                  f"{sum(1 for x in r if x['problems'])} differently, {sum(1 for x in r if x['unverified'] and not x['problems'])} not by every reader (below). "
                  f"Pages compared: {', '.join(f'{k} {v:,}' for k, v in pages.items())} (at most 30 per file). Outputs with base's bytes are not read again here.")
@@ -509,13 +514,15 @@ def render_hostile(res):
     if bad:
         L += table(['Part', 'Case', 'Step', 'Verdict'], bad[:LIST_CAP]) + ['']
     if res['base_failed']:
-        L += ['`security.py pdfs` ended with an error on base as well (base is not checked here, only its costs are read).', '']
-    if not res['base_rows']:
-        L += ['Costs not compared: base wrote no table of the hostile PDFs.', '']
+        L += ['`security.py pdfs` ended with an error on base (base is not checked here, only its costs are read).', '']
+    floors = f'counting only what costs head at least {COST_CPU_S:g} s of CPU or {COST_MIB} MiB'
+    if not res['base_rows'] or not t['pdfs']['rows']:
+        L += ['Costs not compared: base or head wrote no table of the hostile PDFs.', '']
     elif res['costlier']:
-        L += [f'#### Costs head over {COST_FACTOR}x what it costs base (a look, not a finding)', ''] + table(['File', 'Step', 'Base -> head'], res['costlier'][:LIST_CAP]) + ['']
+        L += [f'#### Costs head over {COST_FACTOR}x what it costs base, {floors} (a look, not a finding)', ''] + \
+            table(['Pass', 'File', 'Step', 'Base -> head'], res['costlier'][:LIST_CAP]) + ['']
     else:
-        L += [f'No hostile PDF costs head over {COST_FACTOR}x base\'s CPU time or peak memory.', '']
+        L += [f'No hostile PDF costs head over {COST_FACTOR}x base\'s CPU time or peak memory, {floors}.', '']
     return '\n'.join(L + [f"Not run here: the suite's fuzzing, its C library pass and its supply-chain part. Took {res['seconds']} s.", ''])
 
 
@@ -553,7 +560,7 @@ def selftest():
             'fails_otherwise': ['kind'], 'missing': ['gone'], 'reason': ['reason'], 'fixed': ['mended', 'patched'],
             'changed': ['smaller', 'larger', 'refused', 'accepted', 'opens', 'mended', 'patched']}
     assert got == want, got
-    assert s['same'] == 2 and s['files'] == 12 and s['works'] == 9, s
+    assert s['same'] == 2 and s['files'] == 12 and s['compared'] == 7, s
     assert not any(findings({'x': judge(base, base)}).values()), 'a build against itself has a finding'
     assert not any(findings({'x': judge(base[:2], head[:2])}).values()), 'a smaller output is a finding'
     assert threads_differ([row('a'), row('b')], [row('a'), row('b', sha='x')]) == ['b']
@@ -575,11 +582,19 @@ def selftest():
             raise subprocess.TimeoutExpired('verify_pdf.py', VERIFY_TIMEOUT)
         subprocess.run, vr.compare = hang, lambda orig, out: {'problems': [], 'notes': [], 'poppler_pages': 1, 'pdfjs_pages': 1}
         assert readers('a', 'b')['problems'] == hung['problems'], 'verify_pdf.py timing out is a problem until the original does the same'
+        # A reader that draws nothing of the control file (pdf.js without its canvas) stops the readers.
+        drew = json.dumps({'qpdf_check': 0, 'qpdf_check_input': 0, 'object_problems': [], 'render_problems': [], 'pages_checked': 14})
+        shutil.which = lambda t: '/usr/bin/' + t
+        subprocess.run = lambda *args, **kw: subprocess.CompletedProcess(args, 0, stdout=drew + '\n', stderr='')
+        vr.compare = lambda orig, out: {'problems': [], 'notes': [], 'poppler_pages': 14, 'pdfjs_pages': 0}
+        assert control('/nonexistent') == ['pdf.js drew no page'], control('/nonexistent')
     finally:
         shutil.which, subprocess.run, vr.compare = which, run, compare
-    # Which outputs are read: one per distinct output, outcome changes and growths first, at most the cap.
+    # Which outputs are read: one per file and output bytes, outcome changes and growths first, at most the cap.
     targets, n = reader_targets({'a': dict(s, effort=0), 'b': dict(s, effort=50)}, 3)
-    assert n == 6 and [t['file'] for t in targets[:2]] == ['larger', 'accepted'] and len(targets) == 3, (targets, n)
+    assert n == 6 and [t['file'] for t in targets] == ['larger', 'accepted', 'mended'], (targets, n)
+    targets, n = reader_targets({'a': dict(judge([row('p'), row('q')], [row('p', sha='same'), row('q', sha='same')]), effort=0)}, 5)
+    assert n == 2 and [t['file'] for t in targets] == ['p', 'q'], 'an output is read against each original it was made from'
     assert costlier([{'file': 'f', 'op': 'pack', 'cpu_s': '2.0', 'maxrss_mib': '100'}], [{'file': 'f', 'op': 'pack', 'cpu_s': '2.6', 'maxrss_mib': '120'}]) == [['f', 'pack', '2 -> 2.6 s of CPU']]
     assert cell('x <!-- @y | z') == 'x &lt;!-- @y \\| z', cell('x <!-- @y | z')
     # A report from planted results says what it must.
@@ -614,6 +629,8 @@ def selftest():
         assert word in text, word
     clean = dict(hostile, base_rows=3, tables=dict(hostile['tables'], pdfs=ok))
     assert not red(clean) and '**No finding.**' in render_hostile(clean) and 'No hostile PDF costs head' in render_hostile(clean)
+    text = render_hostile(dict(clean, costlier=[['threads0-pdfs', 'f.pdf', 'optimize', '2 -> 2.6 s of CPU']]))
+    assert '| threads0-pdfs | f.pdf | optimize | 2 -> 2.6 s of CPU |' in text and 'at least 1 s of CPU or 64 MiB' in text, text
     print('deep check selftest: every planted finding is caught, and a clean run has none')
 
 

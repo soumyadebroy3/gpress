@@ -147,8 +147,8 @@ jobs:
   # it puts the parts' reports, as text, under a heading of its own in one comment, which it finds again by its
   # first line and its author. A pull request from a fork gets no comment (its token cannot write): its reports
   # are on the run's page. The build job's outputs come from a job that ran the pull request's build scripts,
-  # like the reports, so they are text from the pull request too: `base` is used only when it is a short sha,
-  # and the comment says whose word "nothing to measure" is.
+  # like the reports, so they are text from the pull request too: `base` is used only when it is a sha (hex, at
+  # most 40 characters), and the comment says whose word "nothing to measure" is.
   comment:
     name: Report on the pull request
     needs: [build, check]
@@ -177,6 +177,7 @@ jobs:
           mkdir -p "$dir"
           gh run download "$GITHUB_RUN_ID" --pattern 'deep-check-report-*' --dir "$dir" || true
           case "$BASE" in '' | *[!0-9a-f]*) BASE='?' ;; esac
+          [ "${#BASE}" -le 40 ] || BASE='?'
           {
             echo "$mark"
             echo "## Deep check of \`$PR_HEAD\`"
@@ -198,8 +199,9 @@ jobs:
             {
               echo "The reports below were written by the pull request's own code (its build of the tool and its \`bench/\` scripts)."
               echo
-              # A name after an @ would notify its owner, and a report can hold any text.
-              sed 's/@/@<!-- -->/g' "$parts"
+              # A name after an @ would notify its owner, and a report can hold any text (an @ spelt as an HTML
+              # entity is made a plain @ first, so that it is broken too).
+              sed -e 's/&\(#0*64\|#[xX]0*40\|commat\);\?/@/g' -e 's/@/@<!-- -->/g' "$parts"
             } >> "$body"
           fi
           if [ "$(wc -c < "$body")" -gt 60000 ]; then
@@ -213,8 +215,10 @@ jobs:
             echo "The pull request's head is now $now: this report of $PR_HEAD is not posted."
             exit 0
           fi
-          id=$(gh api --paginate "repos/$GH_REPO/issues/$PR/comments" \
-            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- gpress-deep-check -->"))) | .id' | head -n 1)
+          # No pipe: a failed lookup must fail the job, not post a second comment.
+          ids=$(gh api --paginate "repos/$GH_REPO/issues/$PR/comments" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- gpress-deep-check -->"))) | .id')
+          id=${ids%%$'\n'*}
           if [ -n "$id" ]; then
             gh api --method PATCH "repos/$GH_REPO/issues/comments/$id" -F body=@"$body" --silent
           else

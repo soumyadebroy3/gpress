@@ -855,19 +855,22 @@ crates.io. A default build depends on `aes`, `md-5` and `sha2` (RustCrypto, MIT 
   change starts from, and head, the build with it). `pdf` runs both over all 907 files as normal PDFs at engine
   levels 0, 50 and 100 (lossless: `benchmark.py` passes `--engine-effort`, so the lossy image step of efforts 60
   to 100 is not measured), head again with 4 threads, and puts head's rewritten outputs whose bytes are not
-  base's before every reader (`verify_pdf.py`, `verify_render.py`); `archive` runs both over the 120-file sample
-  as archives; `hostile` runs `security.py`'s damaged archives, hostile PDFs and self-check on head, and the
-  hostile PDFs on base for their cost. A part ends with a finding (exit 1) for what a script can decide on any
-  machine: an output larger than base's, a file one build rewrites and the other leaves untouched, lost
-  exactness, a file failing on head only or failing another way, a setting in which no file works on head, other
-  bytes with other thread counts, a reader that shows a changed output differently from its original, a failing
-  hostile case, a checking tool that is missing, a step that failed; a part that could not start (no build, no
+  base's before every reader (`verify_pdf.py`, `verify_render.py`), one per file and output bytes, at most 200;
+  `archive` runs both over the 120-file sample as archives; `hostile` runs `security.py`'s damaged archives,
+  hostile PDFs and self-check on head, and the hostile PDFs on base for their cost. A part ends with a finding
+  (exit 1) for what a script can decide on any machine: an output larger than base's, a file one build rewrites
+  and the other leaves untouched, lost exactness, a file failing on head only or failing another way, a file not
+  measured on head, a setting in which no file works on both builds, other bytes with other thread counts, a
+  reader that shows a changed output differently from its original, a failing hostile case, a checking tool that
+  is missing or does not work on the control file, a step that failed; a part that could not start (no build, no
   corpus, a bad argument) exits 2. Other bytes than base's are listed, not findings; CPU time and peak memory
   are printed as `benchmark.py compare` gives them, as an indication. `selftest` plants each finding in made-up
-  results (CI runs it). The "Deep check" workflow (`.github/workflows/deep-check.yml`) builds both tools for
-  every pull request into main, runs the three parts and posts their reports as one comment; `checkers/` pins
-  the readers it installs (pikepdf, pypdfium2 and Pillow in `requirements.txt`, pdf.js and its canvas in
-  `package.json`).
+  results (CI runs it). The "Deep check" workflow (`.github/workflows/deep-check.yml`) builds the tool from
+  every pull request into main and from main; when the two files differ, it runs the three parts and posts their
+  reports as one comment (for a pull request from a fork, on the run's page), and when they are the same,
+  nothing runs, also when only `bench/` changed. `checkers/` pins the Python and npm packages of the readers it
+  installs (pikepdf, pypdfium2, Pillow and pikepdf's own requirements in `requirements.txt`, pdf.js and its
+  canvas in `package.json`); the programs (qpdf, Poppler, jbig2dec) come from the runner's apt.
 - `p5.py`: what the threads and the store do for a normal PDF, file by file. `run NAME --engine BIN`
   optimizes each file of a list (`--set`, `--files`; `--limit N` takes the N smallest) at each engine level and
   thread count, one process at a time with `PDFE_DEBUG` set, and keeps the child's wall and CPU time, peak
