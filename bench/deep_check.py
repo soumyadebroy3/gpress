@@ -600,9 +600,11 @@ def selftest():
     assert n == 2 and [t['file'] for t in targets] == ['p', 'q'], 'an output is read against each original it was made from'
     # The same bytes at two levels, larger than base's at the second only: still read first.
     rs = [row(f'r{i}') for i in range(4)]
-    targets, n = reader_targets({'a': dict(judge(rs + [row('z', n=200)], [row(f'r{i}', sha=f'R{i}') for i in range(4)] + [row('z', n=150, sha='Z')]), effort=0),
-                                 'b': dict(judge(rs + [row('z', n=120)], [row(f'r{i}', sha=f'R{i}') for i in range(4)] + [row('z', n=150, sha='Z')]), effort=50)}, 1)
-    assert n == 5 and [t['file'] for t in targets] == ['z'], (targets, n)
+    plain = dict(judge(rs + [row('z', n=200)], [row(f'r{i}', sha=f'R{i}') for i in range(4)] + [row('z', n=150, sha='Z')]), effort=0)
+    grown = dict(judge(rs + [row('z', n=120)], [row(f'r{i}', sha=f'R{i}') for i in range(4)] + [row('z', n=150, sha='Z')]), effort=50)
+    for settings in ({'a': plain, 'b': grown}, {'b': grown, 'a': plain}):
+        targets, n = reader_targets(settings, 1)
+        assert n == 5 and [t['file'] for t in targets] == ['z'], (targets, n)
     assert costlier([{'file': 'f', 'op': 'pack', 'cpu_s': '2.0', 'maxrss_mib': '100'}], [{'file': 'f', 'op': 'pack', 'cpu_s': '2.6', 'maxrss_mib': '120'}]) == [['f', 'pack', '2 -> 2.6 s of CPU']]
     assert cell('x <!-- @y | z') == 'x &lt;!-- @y \\| z', cell('x <!-- @y | z')
     # A report from planted results says what it must.
