@@ -39,12 +39,12 @@ Figures from the README and `bench/` on `main` (907 public test PDFs, 130.5 MB, 
 | What | gpress | Compared with |
 | --- | --- | --- |
 | Archive, 907 files, effort 100, built with Lepton | 60.9% of the original size | the best of xz -9e, Brotli 11 and Zstandard 19 --long, file by file: 76.3% |
-| Normal PDF, the 90 files gpress rewrites from a hard 120-file sample, default effort (build 37bd3f3, before #41 and #42) | 85.01% of the input | qpdf 11.9.0 at its strongest lossless setting: 87.23% |
-| Normal PDF, all 907 files, default effort 40 (lossless) | 81.4% of the input | |
+| Normal PDF, the 730 files gpress rewrites, default effort 40 (lossless) | 73.3% of the input | qpdf 12.4.2 with zopfli: 77.7%, the smallest of the other tools |
+| Normal PDF, all 907 files, default effort 40 (lossless) | 81.4% of the input | qpdf 12.4.2 with zopfli: 79.6% |
 | Normal PDF, all 907 files, effort 100 (lossy) | 79.7% of the input | |
 | Web module (normal PDFs only), gzip | 352,596 bytes | CI fails it when it grows more than 5% over the recorded size, or passes 1,000,000 bytes ([#47](https://github.com/soumyadebroy3/gpress/pull/47)) |
 
-The normal-PDF rows on all 907 files are one thread, measured on `main` at 2d3bf64; the 177 files gpress leaves untouched count at their own size, and the lossy efforts change 4 of the 907. The qpdf row counts only the files gpress rewrites: on the 118 files qpdf can open, counting the files gpress leaves untouched as they are, qpdf comes out smaller (74.7% against 90.2% for gpress at effort 40, an earlier build), because it drops earlier revisions, unreferenced objects and whatever it cannot read; the README's Engine levels section has the details. The web module figure is from `bench/sizes.json`, recorded on 2026-11-15. A fresh head-to-head against qpdf, MuPDF, cpdf, pdfsizeopt and Ghostscript is running on `main` at 2d3bf64 (see [Status and roadmap](Status-and-roadmap)).
+The normal-PDF rows are one thread, measured on `main` at 2d3bf64; a file gpress leaves untouched counts at its own size, and the lossy efforts change 4 of the 907. The comparison ran against qpdf 12.4.2, MuPDF's mutool 1.28.6, cpdf 2.9.3, pdfsizeopt 2023-04-18 and Ghostscript 10.08.0, and an output counted only when PDFium, Poppler and pdf.js draw every page the same as the original's (a few edge pixels allowed in one renderer) and nothing is lost. The 730 files are all 907 but the 173 gpress declines (damaged, PDF/A or signed, encrypted and so on) and the 4 where it keeps a stream that decodes to more than 64 MiB as it is. On them gpress gives the smallest total of any tool; on all 907 it comes second, because qpdf with zopfli also shrinks those files. Raising the stream limit to 1 GiB (`--max-stream 1073741824`) gives 78.3% on all 907, at a peak of 439 MiB on one file; the default limit is 64 MiB. The [README's Benchmarks section](https://github.com/soumyadebroy3/gpress#benchmarks) has the speed and memory figures. The web module figure is from `bench/sizes.json`, recorded on 2026-11-15.
 
 ## Quick start
 
