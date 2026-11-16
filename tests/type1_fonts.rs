@@ -193,7 +193,9 @@ fn refuses_earlier_format_versions() {
     let (packed, _) = pack(&pdf);
     assert_eq!(packed[4], gpress::pack::VERSION);
     assert_eq!(gpress::pack::VERSION, 9);
-    for v in [1u8, 3, 4, 5, 6, 7, 8, 10] {
+    // Version 10 is version 9 with a profile in its header (`ArchiveRules`): read, not refused.
+    assert_eq!(gpress::pack::VERSION_PROFILE, 10);
+    for v in [1u8, 3, 4, 5, 6, 7, 8, 11] {
         let mut bad = packed.clone();
         bad[4] = v;
         assert!(unpack(&bad).is_err(), "version {v}");

@@ -8,7 +8,7 @@
 <h1 align="center">gpress</h1>
 
 <p align="center">
-  <em>Lossless PDF compression: smaller PDFs that standard readers open,<br>and an archive that restores byte for byte.</em>
+  <em>PDF compression, lossless by default: smaller PDFs that standard readers open,<br>and an archive that restores byte for byte.</em>
 </p>
 
 <p align="center">
@@ -21,14 +21,14 @@
 </p>
 
 <p align="center">
-  <a href="#benchmarks"><img src="docs/assets/hero.svg" width="880" alt="gpress archive: 60.9% of the original size on 907 public test PDFs, against 76.3% for the best of xz, Brotli and Zstandard. Normal PDF: 85.0% of the input on the 90 files gpress rewrites from a hard 120-file sample, against 87.2% for qpdf 11.9.0 at its strongest lossless setting. Web module: 268 KB of gzipped WebAssembly for normal PDFs, 383 KB with the archive, the same output as the native library."></a>
+  <a href="#benchmarks"><img src="docs/assets/hero.svg" width="880" alt="gpress archive: 60.9% of the original size on 907 public test PDFs, against 76.3% for the best of xz, Brotli and Zstandard. Normal PDF: 73.3% of the input on the 730 of those files gpress rewrites, against 77.7% for qpdf 12.4.2 with zopfli, the smallest of the other tools; on all 907 files, 81.4% against 79.6% for qpdf with zopfli. Web module: 353 KB of gzipped WebAssembly for normal PDFs, 476 KB with the archive, the same output as the native library."></a>
 </p>
 
 <p align="center">
   <strong>Archives about 20% smaller than the best of xz, Brotli and Zstandard</strong><br>
-  <strong>Normal PDFs 2.5% smaller in total than qpdf 11.9.0's strongest lossless output, on the files gpress rewrites</strong><br>
-  <strong>Every effort level lossless &middot; 268 KB gzipped in the browser for normal PDFs, 383 KB with the archive</strong><br>
-  <sub>Archive: 907 public test PDFs, format 9, effort 100, built with Lepton. Normal PDF: totals on the 90 files gpress rewrites from a hard 120-file sample, default effort. One thread. Browser: the gzip sizes of the two WebAssembly modules, as recorded in bench/sizes.json on 2026-10-22, before archive format 9. <a href="#benchmarks">Details</a>.</sub>
+  <strong>Normal PDFs: the smallest total of six tools on the 730 files gpress rewrites, second on all 907</strong><br>
+  <strong>Efforts 0 to 40 lossless &middot; 353 KB gzipped in the browser for normal PDFs, 476 KB with the archive</strong><br>
+  <sub>Archive: 907 public test PDFs, format 9, effort 100, built with Lepton. Normal PDF: the same 907 files, build 2d3bf64 at its default effort, one thread, against qpdf 12.4.2, mutool 1.28.6, cpdf 2.9.3, pdfsizeopt 2023-04-18 and Ghostscript 10.08.0, an output counting only when PDFium, Poppler and pdf.js draw it the same: 73.3% of the input against 77.7% for qpdf with zopfli on the 730 files (all but the 173 gpress declines and the 4 where it keeps a stream over 64 MiB as it is), 81.4% against 79.6% on all 907. Browser: the gzip sizes of the two WebAssembly modules, as recorded in bench/sizes.json on 2026-11-15. <a href="#benchmarks">Details</a>.</sub>
 </p>
 
 <p align="center">
@@ -51,7 +51,7 @@ of output, and checks each one before it returns it, except the archive's rare f
 | --- | --- | --- |
 | **Call** | `optimize` | `compress` / `expand` (`pack` / `unpack` on the command line) |
 | **Takes** | a PDF | any file, a PDF above all |
-| **Gives** | a smaller PDF that standard readers open, with every reachable object's value preserved (objects the trailer can't reach, directly or through other objects, are dropped) | an archive that restores the original byte for byte |
+| **Gives** | a smaller PDF that standard readers open, with every reachable object's value preserved (objects the trailer can't reach, directly or through other objects, are dropped); at efforts 60 and above images may change, within the floors of the [effort levels](#effort-levels) | an archive that restores the original byte for byte |
 | **How** | streams compressed again with gpress's Flate encoders, a better PNG predictor for images, optimal Huffman tables for JPEGs (the same coefficients), CCITT fax images as JBIG2 (the same pixels), objects in compressed object streams | a PDF-aware context-mixing model |
 | **Checked** | the output is read back and compared with the input before it is returned; anything uncertain is left as it was | the archive is restored and compared before it is returned; if that check ever fails, gpress writes a simpler model-only archive instead (not checked again). Either way the file is stored as it is when that is smaller. `expand` checks every archive's restored length and a 128-bit SHA-256 prefix against its header |
 | **On bad input** | a file it can't safely touch comes back unchanged, with the reason | a damaged archive is refused with an error, or restored exactly when the damage misses what it needs; it is never restored wrongly |
@@ -61,22 +61,25 @@ of output, and checks each one before it returns it, except the archive's rare f
 ```sh
 gpress optimize in.pdf out.pdf            # a smaller PDF that standard readers open
 gpress optimize in.pdf out.pdf --quick    # the same at effort 0, the fast path
+gpress optimize in.pdf out.pdf --target-size 500k   # the lowest effort that gives at most 500 KiB (60 and above are lossy)
 gpress pack in.pdf in.gpz                 # the gpress archive (works on any file)
 gpress unpack in.gpz back.pdf             # the original, byte for byte
 ```
 
 `optimize` prints one tab-separated line: the input, `SMALLER` or `UNTOUCHED`, bytes in, bytes out, seconds and
-the details. `pack` prints the input, bytes in, bytes out, seconds, then `PACKED` or `STORED` with the archive's
+the details (a lossy run that changed an image adds `resampled=`, `to_jpeg=` and `rejpeg=`, the images it
+resampled, wrote as JPEG, and wrote as JPEG again). `pack` prints the input, bytes in, bytes out, seconds, then `PACKED` or `STORED` with the archive's
 statistics. For `tests/data/format-v9.pdf`, copied to `in.pdf`:
 
 ```
-in.pdf	SMALLER	8791	4955	0.15	objects=6 streams=2 reencoded=2 kept=0 objstms=1 dropped=1 jpegs_retabled=0 fax_to_jbig2=0
+in.pdf	SMALLER	8791	4955	0.15	objects=6 streams=2 reencoded=2 kept=0 objstms=1 dropped=1 jpegs_retabled=0 fax_to_jbig2=0 bilevel_to_jbig2=0 images_indexed=0
 in.pdf	8791	6963	0.10	PACKED streams=3 rebuilt=3 rebuilt_bytes=7909 lepton=0 type1=0 fax=0 decrypted=0 decoded_bytes=54664
 ```
 
-A file `optimize` can't make smaller or can't safely touch (a signed file, PDF/A, a file with earlier revisions,
-an encrypted file that needs a password, a damaged one) is written to `out.pdf` unchanged, with `UNTOUCHED` and
-the reason.
+A file `optimize` can't make smaller or can't safely touch (a signed file, PDF/A, an encrypted file that needs a
+password, a damaged one) is written to `out.pdf` unchanged, with `UNTOUCHED` and the reason. A file that keeps
+earlier saves (incremental updates) is written as its newest save alone; each dropped save is listed on standard
+error.
 
 <details>
 <summary><b>Every command, and the exit status</b></summary>
@@ -162,48 +165,104 @@ modules.
 
 ## Effort levels
 
-`--effort N` (the `effort` option) runs from 0, the fastest, to 100, the smallest; the default is 100.
-**Every level is lossless**: they differ only in how hard the engine searches, and every level's output is
-checked the same way. The output is the same for any thread count.
+`--effort N` (the `effort` option) goes from 0 to 100 in steps of 20, and a value in between counts as the step
+below it (59 is 40). The default is 40. **Efforts 0, 20 and 40 are lossless**: they differ only in how hard the
+engine searches, and their outputs are checked the same way. Efforts 60, 80 and 100 are lossy: the work of 40,
+after a step that changes images only. The archive is lossless at every effort: there 40 and above all mean its
+strongest setting. The output is the same for any thread count.
 
-<p align="center">
-  <img src="docs/assets/normal-pdf.svg" width="880" alt="Normal PDF, bytes saved on the 90 files gpress rewrites from a hard 120-file sample: gpress effort 100 15.0%, effort 50 14.8%, effort 0 13.0%; qpdf 11.9.0 at its strongest lossless setting 12.8%.">
-</p>
+| Effort | | 907 test files | Photo set | What it does to a normal PDF |
+| ---: | --- | ---: | ---: | --- |
+| the input | | 130,469,001 | 22,715,581 | |
+| 0 (`--quick`) | lossless | 107,790,202 (82.6%) | 20,900,294 (92.0%) | The fast path: our fast Flate encoder and the cheap steps. |
+| 20 | lossless | 106,454,744 (81.6%) | 20,585,289 (90.6%) | The strong encoder's first step. |
+| 40 (default) | lossless | 106,154,895 (81.4%) | 20,510,774 (90.3%) | The smallest lossless output: everything the engine knows how to do. |
+| 60 | lossy | 104,595,638 (80.2%) | 16,452,936 (72.4%) | The work of 40, after the lossy image step: an image shown at 375 pixels per inch or more is resampled down to 300, and a photo that was resampled, or is not a JPEG, is written as a JPEG at quality 85 (line art stays samples behind Flate). |
+| 80 | lossy | 104,077,694 (79.8%) | 15,934,992 (70.2%) | As 60, with photos down to 150 pixels per inch (those shown at 187.5 or more; a sharp photo stays at 300). |
+| 100 | lossy | 104,044,424 (79.7%) | 15,795,015 (69.5%) | As 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
 
-| Effort | What runs (normal PDF) | CPU time, first measured | CPU time, build 37bd3f3 | Output |
+The two size columns are the bytes of all the outputs together and their share of the input, one thread, on
+build 2d3bf64 (`bench/effort_table.py`; bench/RESULTS.md, "Sizes at the six efforts", has a row per file of the
+photo set and how close its pages stay to the input's). The two engine changes since, #58 and #61, give the same
+outputs on the 907 files at efforts 0, 40 and 100, and at 20 #61 makes one 2 bytes larger; efforts 60 and 80 and
+the photo set were not measured again. A file gpress leaves untouched counts with its own size: 177 of the
+907 public test files. The lossy efforts change 4 of the 907. The photo
+set is 23 files that `bench/photo_set.py` puts together to show the lossy step: two of the test files, three
+photographs from scikit-image's sample data (two by NASA in the public domain, one under CC0), each on a page
+at 150, 300 and 600 pixels per inch as samples and as a JPEG, a camera photograph at 754 pixels per inch and a
+scanned page at 300.
+
+What holds at every lossy level. The numbers are defaults: each is a rule with a name and a range, and a
+setting can move it within that range ([Rules](docs/reference.md#rules) in the reference):
+
+- photos are never taken below 150 pixels per inch at their displayed size (`lossy_photo_floor`, which can go
+  down to 72), and line art (screenshots, charts, diagrams) and scans (an image that covers 70% of a page or
+  more, `lossy_scan_cover`) never below 300 (`lossy_art_floor`, down to 150); an image is resampled only when
+  it is shown at 5/4 of its floor or more (`lossy_resample_margin`), and line art never becomes a JPEG;
+- the step works only on 8-bit grey and RGB images of more than 65,536 pixels (`lossy_min_pixels`) whose every
+  use on a page it could measure: 1-bit, indexed, CMYK and 16-bit images, image masks, images with a
+  colour-key mask, a `/Decode` array or a soft mask with `/Matte`, and small images (logos, icons) are never
+  touched, and neither is a JPEG that looks like line art;
+- a lossy result is kept only when it is at most nine tenths of the image's lossless size (`lossy_min_saving`,
+  which a setting can raise but not lower) and, for a JPEG, only when it decodes close to the samples it was
+  made from (`lossy_min_psnr`, `lossy_min_block_psnr`; one that does not is first coded again at a higher
+  quality); otherwise the image goes through the lossless path as before;
+- a file the safety gate leaves untouched (signed, PDF/A, PDF/X, needing a password...) stays untouched, and an
+  encrypted file keeps its encryption; a file that keeps earlier saves (incremental updates) is written as its
+  newest save alone, which the step works on; a file whose object numbers are too high for the shorter lossy
+  output (qpdf 12 reads an object only when its number is below a third of the file's length) gets that of the
+  strongest lossy level below that is long enough (so 80 and 100 can give a lower level's output), or else the
+  lossless one (at once when `photo_ppi`, `art_ppi` or `jpeg_quality` make the lossy settings none of the
+  levels'). No setting changes this.
+
+Small print on a picture makes it line art only where the print's edges step 64 levels of brightness or more
+from the picture around it: black 6 and 8 point labels on a dark part of a photograph (a blue sky, dark rock)
+may not be seen, and such a picture can be taken for a photo: written as a JPEG at every lossy effort, and at 80
+and 100 resampled to 150 pixels per inch, its labels blurred. Nor are a word or two, print that is soft
+itself (a photographed note), or print whose tiles have at most 1.5 times as many hard edges as soft ones
+(`lossy_print_edges`).
+
+What the photo set shows. An image in doubt counts as line art. Of the three scikit-image photographs, the
+astronaut and the coffee cup are sharp photos (edges as hard as text's, see `lossy_flat_run` and the rules
+after it), which keep the line-art floor of 300 pixels per inch: their pages of samples become JPEGs (resampled
+to 300 first when shown at 600), their JPEG pages shown at 600 are resampled to 300, and at effort 100 their
+other JPEG pages are written again. The Hubble deep field, mostly black sky, stays line art: only its copy
+stored as samples and shown at 600 pixels per inch is resampled (to 300). A progressive JPEG is left alone at
+every level; so is the set's camera photograph, a JPEG whose scan header is not as the standard writes it.
+
+## Engine levels
+
+The engine has a finer lossless scale of its own, 0 to 100: efforts 0 and 20 are its levels 0 and 20, and
+efforts 40 and above its level 100. `--engine-effort N` (the `engine_effort` option) sets that level directly,
+for measuring, and then nothing is lossy unless `lossy` is set too. The figures below were measured on that scale.
+
+| Engine level | What runs (normal PDF) | CPU time, first measured | CPU time, build 37bd3f3 | Output |
 | --- | --- | ---: | ---: | ---: |
-| 0 (`--quick`) | The fast path: our fast Flate encoder, image predictors chosen from an estimate, and the cheap steps (object streams, the cross-reference stream, JPEG tables, JBIG2) | 16.1 s | 16.8 s | 87.02% |
+| 0 (effort 0, `--quick`) | The fast path: our fast Flate encoder, image predictors chosen from an estimate, and the cheap steps (object streams, the cross-reference stream, JPEG tables, JBIG2) | 16.1 s | 16.8 s | 87.02% |
 | 5 | The bridge: closer parses for images | 23.0 s | | 86.70% |
 | 10 | The bridge, plus the strong encoder's quick settings for the streams that take the most room, within a budget that doubles every point | 40.7 s | | 86.11% |
 | 15 | | 111 s | | 85.74% |
 | 19 | | 183 s | | 85.59% |
-| 20 | The strong encoder, its settings in steps of 20, the strongest that fits a work budget proportional to the file's size | 244 s | | 85.43% |
+| 20 (effort 20) | The strong encoder, its settings in steps of 20, the strongest that fits a work budget proportional to the file's size | 244 s | | 85.43% |
 | 50 | | 334 s | 176 s | 85.17% |
-| 100 (default) | The strong encoder at its strongest | 983 s | 512 s | 85.01% |
-| qpdf 11.9.0, strongest lossless setting | For comparison | 25.3 s | | 87.23% |
+| 100 (effort 40, the default) | The strong encoder at its strongest | 983 s | 512 s | 85.01% |
 
 <details>
 <summary><b>How these were measured</b></summary>
 
 CPU time is for the whole 120-file sample (`bench/sets/sample120.txt`, 78.3 MB, a deliberately hard mix of the
 slowest, the largest and random files) on one thread; output is the total size as a share of the input on the 90
-files the engine rewrites. For qpdf it counts the 85 outputs `bench/verify_pdf.py` finds the same as their input
-apart from the trailer's /ID, and the other 5 files at their input size; its setting is `--object-streams=generate
---compress-streams=y --recompress-flate --compression-level=9 --decode-level=specialized`. On the 118 files qpdf can open
-(it refused 2 encrypted files) the comparison turns around: qpdf rewrites each of them, dropping earlier
-revisions, unreferenced objects and whatever it cannot read, while gpress returns the files it can't safely touch
-unchanged. Counting those as they are, an
-earlier build (ca8fa92) gave 90.2% of the input at effort 100 on those 118 files, against 74.7% for qpdf with
-object streams and Flate at level 9. The first
+files the engine rewrites. [Benchmarks](#benchmarks) compares efforts 0, 20 and 40 with other tools on all 907
+files. The first
 measurement (builds 52a91f0 and 20f8e69) was made in October 2026 for the change that added the fast path, on a
 4-core 2.1 GHz Xeon virtual machine. Later changes made the strong encoder faster. Build 37bd3f3 was measured
-again at efforts 0, 50 and 100, and at each effort its outputs total exactly the first run's bytes. It ran on a
+again at engine levels 0, 50 and 100, and at each level its outputs total exactly the first run's bytes. It ran on a
 machine about 1.2 times slower by the benchmark's calibration, so the two time columns compare only roughly.
-At those three efforts the current code gives the same outputs; its one later change on this path, the JBIG2
+At those three levels the current code gives the same outputs; its one later change on this path, the JBIG2
 decoder that reads fax images back (717bf45), was not timed. The other levels were not measured again: their
 times and outputs are the first run's. Both runs, with their builds and calibrations,
 are in [bench/RESULTS.md](bench/RESULTS.md#effort-levels). In the archive, data that already looks compressed
-is coded plainly below effort 50. The [reference](docs/reference.md#options) has the details.
+is coded plainly below engine level 50 (efforts 0 and 20). The [reference](docs/reference.md#options) has the details.
 
 </details>
 
@@ -214,7 +273,7 @@ is coded plainly below effort 50. The [reference](docs/reference.md#options) has
 ```rust
 use gpress::{Options, Outcome};
 
-let opt = Options::new().effort(80).threads(4);
+let opt = Options::new().effort(20).threads(4);
 
 // A smaller PDF that standard readers open.
 let r = gpress::optimize(&pdf_bytes, &opt)?;
@@ -222,6 +281,9 @@ match r.outcome {
     Outcome::Smaller(_report) => std::fs::write("out.pdf", &r.data)?,
     Outcome::Untouched(why) => println!("left as it was: {why}"),
 }
+
+// A PDF of at most 500 KiB, at the lowest effort that reaches it (up to six runs; 60 and above are lossy).
+let p = gpress::optimize_to_size(&pdf_bytes, 500 << 10, &opt)?;   // p.result, p.effort, p.reached
 
 // The gpress archive, and the original back from it.
 let archive = gpress::compress(&pdf_bytes, &opt)?;
@@ -248,7 +310,8 @@ Errors are a plain `Error` enum with a stable numeric code and a message without
 | 5 | invalid options | 10 | needs a part this build leaves out ([building only what a product needs](docs/reference.md#building-only-what-a-product-needs)) |
 
 `Optimized.outcome` says what happened: `Smaller` with a `Report` (objects, streams re-encoded and kept, object
-streams, JPEGs given new tables, fax images written as JBIG2, how the file is encrypted), or `Untouched` with
+streams, JPEGs given new tables, fax and other 1-bit images written as JBIG2, images written as Indexed, how the
+file is encrypted), or `Untouched` with
 the reason. `Compressed` carries the archive's statistics (streams rebuilt, through Lepton, Type 1 fonts opened,
 fax images, streams stored decrypted, decoded bytes, and `stored` when nothing could be made smaller).
 
@@ -258,7 +321,7 @@ fax images, streams stored decrypted, decoded bytes, and `stored` when nothing c
 <summary><b>C, and everything that binds to C</b></summary>
 
 ```c
-gpress_options opt; gpress_options_default(&opt); opt.effort = 70;
+gpress_options opt; gpress_options_default(&opt); opt.effort = 20;
 gpress_result r = gpress_optimize(pdf, pdf_len, &opt);
 if (r.code == GPRESS_OK) fwrite(r.output.data, 1, r.output.len, out);
 else fprintf(stderr, "%s\n", r.message);
@@ -273,8 +336,11 @@ the size limits to what the host can afford. Every buffer it hands out is freed 
 `gpress_free` / `gpress_free_message`, each given the field's address), which are safe on null and on a result
 already freed: a free clears what it freed, so freeing the same result twice, or a part before the whole
 result, is harmless by construction. An empty output is a null pointer with length 0. The options struct has the same
-fields as the Rust `Options` but `store_budget`, which stays at its default (fill it with
-`gpress_options_default` first; a size left at 0 means its default).
+fields as the Rust `Options` (fill it with `gpress_options_default` first; a size left at 0 means its
+default); the groups of rules (`lossy_rules`, `flate_rules`, `archive_rules`, `rewrite_rules`) are the text
+`rules`, by name (see [Rules](docs/reference.md#rules)); `engine_effort` is the switch
+`effort_is_engine_level`, and `lossy` the three overrides `photo_ppi`, `art_ppi` and `jpeg_quality` (0: what the
+effort says). `gpress_optimize_to_size` takes a target size as well and picks the effort (see [Options](#options)).
 [`crates/gpress-c/examples/roundtrip.c`](crates/gpress-c/examples/roundtrip.c) is a complete program, and
 `bench/gpress_harness.c` sends the security suite's hostile inputs through this API.
 
@@ -291,13 +357,31 @@ import { Gpress } from "./dist/gpress.js";                         // built in c
 const g = await Gpress.load(fetch("/gpress.wasm"));                 // or gpress-web.wasm: no archive, smaller
 // In Node, pass a file URL (or a path from the working directory) instead:
 // await Gpress.load(new URL("./dist/gpress.wasm", import.meta.url))
-const smaller = g.optimize(bytes, { effort: 70, jbig2: false });   // { data, outcome, reason? }
+const smaller = g.optimize(bytes, { effort: 20, jbig2: false });   // { data, outcome, reason? }
+const fits = g.optimizeToSize(bytes, 500 * 1024);                  // the same, with effort and reached
 const archive = g.compress(bytes);
 const original = g.expand(archive.data, { maxLenMiB: 512 });       // throws GpressError on a damaged archive
 ```
 
+In a page, the same calls work on the file a visitor picks. A call blocks its thread until it returns, so a
+page that must stay responsive makes it in a Web Worker (the caller's choice; the module needs none):
+
+```ts
+const g = await Gpress.load(fetch("/gpress-web.wasm"));
+input.onchange = async () => {                                      // <input type="file" accept="application/pdf">
+  const bytes = new Uint8Array(await input.files[0].arrayBuffer());
+  const r = g.optimizeToSize(bytes, bytes.length / 2);              // half the size, or the smallest of the six efforts
+  note.textContent = `${bytes.length} to ${r.data.length} bytes, effort ${r.effort}${r.reached ? "" : ", target missed"}`;
+  link.href = URL.createObjectURL(new Blob([r.data], { type: "application/pdf" }));
+};
+g.optimize(bytes, { effort: 60 });                                  // one effort: 60 is the first lossy one
+g.optimize(bytes, { effort: 100, photoPpi: 200 });                  // effort 100 with photos kept at 200 pixels per inch
+```
+
 The module gives the same bytes as the native library (the web module too, for `optimize`; see
-[Building only what a product needs](docs/reference.md#building-only-what-a-product-needs)), is
+[Building only what a product needs](docs/reference.md#building-only-what-a-product-needs)); the choices
+made in floating point use a log2 and an exp2 of our own (`src/math.rs`), built only from +, -, *, / and exact
+steps, which IEEE 754 makes the same everywhere, so no platform's maths library changes a byte. It is
 single-threaded and has no clock (so no time budget: run it in a Web Worker to keep a page responsive and to
 end it when it has taken too long). It is built with `panic = "abort"` (`wasm32-unknown-unknown` aborts on a
 panic anyway), so the panic guard that turns a bug into `Error::Internal` natively catches nothing there: a bug,
@@ -322,14 +406,17 @@ ones most callers need:
 
 | Option | Flag | Default | What it does |
 | --- | --- | --- | --- |
-| `effort` | `--effort N`, `--quick` | 100 | 0 (fastest) to 100 (smallest), see above. |
+| `effort` | `--effort N`, `--quick` | 40 | 0 to 100 in steps of 20: 0, 20 and 40 lossless (fastest to smallest), 60, 80 and 100 lossy. See [Effort levels](#effort-levels). |
+| `lossy` | `--photo-ppi N`, `--art-ppi N`, `--jpeg-quality N` | none | Normal PDF: the lossy image step's settings, in place of what the effort means. The library takes all of them at once (`Lossy::level(1)`, `(2)` and `(3)` are what efforts 60, 80 and 100 mean, and `Lossy::OFF` keeps any effort lossless); the three flags change one setting each, over the effort's. `--art-ppi` or `--jpeg-quality` set makes the output lossy at any effort. `--photo-ppi` alone changes nothing below effort 60: a photo is resampled only on its way to a JPEG, so it needs a JPEG quality, the effort's or `--jpeg-quality`. |
+| rules (`set_rule`, `set_rules`) | `--rule NAME=VALUE` | each rule's own | The engine's tuning values by name, each with a default and a range, such as `lossy_min_saving=20` (keep a lossy result only when it is 20% smaller), `lossy_photo_floor=100`, `flate_e100_depth=4096` (the strongest Flate searches less) or `archive_plain_below=0` (the archive never codes data that looks compressed plainly). The groups are `lossy_` (the lossy image step), `flate_` (the Flate encoders) and `archive_` (the archive). A rule that is not set has its default; a name that is no rule or a value outside the range is an error. [Rules](docs/reference.md#rules) in the reference lists them. |
+| `optimize_to_size` (a call, not a field) | `--target-size V` | none | Normal PDF: the lowest of the six efforts whose output is at most V (bytes, with `k` or `m` for KiB or MiB, or `N%` of the input), so up to six runs of the engine; the output line then ends with `effort=E target=reached` or `missed`. Efforts 60 and above are lossy, so a target can turn a lossless run into a lossy one. A target no effort reaches within the floors is missed rather than forced: the smallest of the six comes back, marked as missed. |
 | `threads` | `--threads N` | 0 | 0: every core the machine offers, at most 8; at most 64. The output is the same for any count. |
 | `time_budget` | `--time-budget MS` | none | Give up after this much wall time: an error and no output, the input unchanged. |
 | `max_input` | `--max-input BYTES` | 1 GiB | Larger inputs are refused at once. |
 | `max_len` | `--max-len BYTES` | 1 GiB | Expand: an archive declaring a larger original is refused before anything is decoded. |
 | `max_decoded` | `--max-decoded BYTES` | 256 MiB | Archive: the most decoded bytes the parts of one archive may claim, both ways. |
 | `respect_conformance` | `--ignore-conformance` | on | Normal PDF: leave PDF/A, PDF/X, signed, certified and usage-rights files untouched. |
-| `jpeg_tables`, `jbig2`, `flate_over_jpeg` | `--no-jpeg-tables`, `--no-jbig2`, `--no-flate-over-jpeg` | on | Normal PDF: turn single steps off. |
+| `jpeg_tables`, `jbig2`, `palette`, `flate_over_jpeg` | `--no-jpeg-tables`, `--no-jbig2`, `--no-palette`, `--no-flate-over-jpeg` | on | Normal PDF: turn single steps off. |
 
 Every other option, the memory each limit bounds, the parts of the engine a build can leave out
 (`--no-default-features --features ...`, for example the smaller `web` build without the archive), how
@@ -341,6 +428,53 @@ Measured on 907 public test PDFs (130.5 MB: the pdf.js, pypdf, OCRmyPDF and pike
 deliberately broken or unusual), fetched and pinned by `bench/fetch_corpus.sh`, and on a deliberately hard
 120-file sample of them (`bench/sets/sample120.txt`, 78.3 MB).
 
+### Normal PDF
+
+<p align="center">
+  <img src="docs/assets/normal-pdf.svg" width="880" alt="Normal PDF size as a share of the input on the 730 of 907 test PDFs gpress rewrites: gpress effort 40 (default) 73.3%, effort 0 75.0%; qpdf 12.4.2 with zopfli 77.7%, cpdf 2.9.3 with no page data and JBIG2 80.5%, qpdf at zlib level 9 80.7%, pdfsizeopt 86.7%, mutool 1.28.6 90.2%, Ghostscript 10.08.0 91.7%.">
+</p>
+
+| Tool and setting | All 907 files | The 730 files gpress rewrites | Median file, all 907 | CPU s, the 695 same files | Errors and timeouts | Wrong outputs |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| gpress, effort 40 (default) | 81.36% | 73.26% | 88.7% | 625 | 0 | 0 |
+| gpress, effort 20 | 81.60% | 73.59% | 89.3% | 190 | 0 | 1 |
+| gpress, effort 0 (`--quick`) | 82.62% | 74.99% | 90.4% | 25 | 0 | 0 |
+| qpdf 12.4.2 with zopfli | 79.61% | 77.74% | 89.9% | 1,899 | 12 | 13 |
+| qpdf 12.4.2, zlib level 9 | 82.30% | 80.68% | 94.3% | 18 | 12 | 13 |
+| cpdf 2.9.3 squeeze, no page data, JBIG2 | 81.99% | 80.54% | 89.0% | 17 | 14 | 17 |
+| pdfsizeopt 2023-04-18 | 84.88% | 86.71% | 81.0% | 1,789 | 39 | 78 |
+| mutool 1.28.6 clean, all options | 91.21% | 90.16% | 94.6% | 7.5 | 1 | 30 |
+| Ghostscript 10.08.0 pdfwrite | 89.52% | 91.66% | 100.0% | 68 | 2 | 643 |
+
+Sizes are the total output as a share of the input. An output counts only when it is smaller, opens, qpdf finds it
+no worse than the original, each of PDFium, Poppler and pdf.js that reads the original draws every page the same,
+and no content or security is lost (one renderer may differ on at most 0.5% of a page's pixels: 73 outputs in this
+table counted that way, none of gpress's); any other output, and a file a tool fails on, counts at the
+original's size. "Wrong outputs" are those that came out broken, look different, or lost content or security. The
+median file is the middle of the files' own output-to-input ratios, so small files weigh as much as large ones.
+
+The 730 files are all 907 but the 173 gpress declines (106 damaged or unusual, 40 PDF/A, PDF/X or signed, 17
+whose earlier saves it cannot safely drop, 10 encrypted) and the 4 where it keeps a stream that decodes to more
+than 64 MiB as it is. On them gpress gives the smallest total of any tool and setting. On all 907 it is second:
+qpdf with zopfli saves 2.9 MB more on the files gpress declines and 3.5 MB more on those 4, against gpress's
+4.1 MB lead on the rest. Raising the stream limit (`--max-stream 1073741824`) gives 78.31% on all 907, the
+smallest of any setting, at a peak of 439 MiB on one file; the default limit is 64 MiB. pdfsizeopt has the
+smallest median file.
+
+Speed is compared on the 695 files every tool finished and gpress rewrote, one thread each: effort 40 uses a third
+of the CPU time of qpdf with zopfli and of pdfsizeopt, and about 35 times that of qpdf at zlib level 9 and of cpdf;
+effort 0 is close to those two (25 s against 18 and 17), and mutool is the fastest (7.5 s). On those files gpress's
+median memory is the lowest, 5 MiB, and its peak is 76 MiB on one thread and 240 MiB on all four cores, its default
+(the same output).
+
+gpress is build 2d3bf64. Of the two engine changes since, #58 gives the same bytes on these files at efforts 0,
+20, 40 and 100, and #61 at 0, 40 and 100. Effort 20's one wrong output was an image that Poppler 24.02 misread;
+#61 fixed it: that file's output is 2 bytes larger, and Poppler draws it as it draws the original. Each tool ran
+one command at a time on a 4-core 2.1 GHz Xeon cloud machine in November 2026. The command lines, how many
+settings each tool ran and the details are in [bench/RESULTS.md](bench/RESULTS.md#head-to-head-november-2026).
+
+### Archive
+
 <p align="center">
   <img src="docs/assets/archive.svg" width="880" alt="Archive size as a share of the original on 907 public test PDFs: gpress 60.9%; the best of Brotli 11, xz -9e and Zstandard 19 file by file 76.3%; Brotli 11 76.5%; xz -9e 76.8%; Zstandard 19 --long 77.0%.">
 </p>
@@ -349,12 +483,9 @@ deliberately broken or unusual), fetched and pinned by `bench/fetch_corpus.sh`, 
 | --- | --- | --- |
 | Archive, 907 files, effort 100, built with `--features existing` (Lepton) | 60.9% of the original size | the best of xz -9e, Brotli 11 and Zstandard 19 --long, file by file: 76.3% |
 | Archive, the 120-file sample, effort 100, default build (no Lepton) | 60.0% | the best of the three, file by file: 74.5% |
-| Normal PDF, the 90 files gpress rewrites from the sample, default effort | 85.01% of the input | qpdf 11.9.0, strongest lossless setting: 87.23% |
 
-Every archive in those runs was restored by a separate process and compared byte for byte, and the competitors ran on the same files. All three
-rows are the current code: the archive rows are format 9, and the current code's normal-PDF outputs total exactly
-the bytes behind its row (see [Effort levels](#effort-levels), which also says how qpdf does when every file it opens is
-counted).
+Every archive in those runs was restored by a separate process and compared byte for byte, and the competitors
+ran on the same files. Both rows are format 9, the current format.
 
 <details>
 <summary><b>Earlier measurements</b></summary>
@@ -363,10 +494,10 @@ These come from the first full run (build d85cd7a), and [bench/RESULTS.md](bench
 and machine each figure comes from. Later builds changed the normal-PDF output and the archive format, so they
 are not figures for the current code.
 
-- **Normal PDF on all 907 files, maximum effort:** 16.0% smaller on the 697 files it rewrote; qpdf (object
+- **Normal PDF on all 907 files, the smallest lossless setting (effort 40 today):** 16.0% smaller on the 697 files it rewrote; qpdf (object
   streams, Flate at level 9) made the same files 9.3% smaller. Every one of those 697 outputs was compared with
   its original by tools we didn't write: qpdf, pikepdf, PDFium, Poppler and pdf.js.
-- **Flate streams on their own, maximum effort (7,280 distinct streams from the test files, each decoding to at
+- **Flate streams on their own, the same setting (7,280 distinct streams from the test files, each decoding to at
   most 4 MiB):** gpress 41.05 MB; Zopfli (15 iterations) 0.67% larger, libdeflate 12 1.40% larger, zlib 9 6.95%
   larger.
 
@@ -376,8 +507,9 @@ are not figures for the current code.
 
 ## Safety
 
-- **No data loss.** Every transformation of a normal PDF is checked before it is used, and anything uncertain
-  leaves that stream or file untouched. A damaged archive is refused with an error, or restored exactly when the damage misses what it needs; it is never
+- **No data loss by default.** Every transformation of a normal PDF is checked before it is used, and anything uncertain
+  leaves that stream or file untouched. Efforts 60 and above change images on purpose, within the floors of the
+  [effort levels](#effort-levels), and nothing else. A damaged archive is refused with an error, or restored exactly when the damage misses what it needs; it is never
   restored wrongly.
 - **Untrusted input.** Sizes are bounded by `Options`, by the file's own size or by a fixed limit, decoding stops
   when data runs out, nothing a file claims sizes memory on its own, and no call to `optimize`, `compress` or
@@ -426,7 +558,7 @@ cargo deny check                                  # and python3 -I bench/check_d
 cargo build --profile wasm -p gpress-wasm --target wasm32-unknown-unknown   # needs: rustup target add wasm32-unknown-unknown
 (cd crates/gpress-wasm/js && npm ci && npm run build && npm test)      # the npm package into js/dist/ (with wasm-opt if on PATH)
 (cd crates/gpress-wasm/js && npm run test:web)    # the same tests on the web module
-python3 -I bench/sizes.py check                   # fails if the web module's gzip size is over 400 KB or more than 5% over bench/sizes.json; needs wasm-opt
+python3 -I bench/sizes.py check                   # fails if the web module's gzip size is over 1 MB or more than 5% over bench/sizes.json; needs wasm-opt
 (cd fuzz && cargo +nightly fuzz run expand -- -max_total_time=600)    # needs cargo-fuzz; also inflate, pdf_optimize
 ```
 
@@ -458,7 +590,7 @@ The benchmark suite, the security suite and the independent checks are in `bench
 
 Pull requests are welcome. Every pull request runs the CI and CodeQL above and is merged only once they pass; the
 pull request template lists what to run locally first. A change must keep outputs exact (the archive restores byte for byte, a normal PDF
-keeps every reachable object's value), and any speed, size or memory figure in a pull request must be measured,
+keeps every reachable object's value at efforts 0 to 40), and any speed, size or memory figure in a pull request must be measured,
 saying how and on which files. New dependencies must come from crates.io under a licence on `deny.toml`'s list. Dependabot proposes dependency and action updates every week. To report a vulnerability, see
 [SECURITY.md](SECURITY.md) rather than opening an issue.
 

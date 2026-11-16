@@ -8,14 +8,20 @@ use std::ffi::{c_char, c_int, CString};
 use std::ptr;
 use std::time::Duration;
 
-/// Options, laid out for C (the fields of `gpress::Options` but `store_budget`, which stays at its default;
-/// `include/gpress.h` describes each).
+/// The room for the rules text in the options, its closing NUL counted: every rule there is fits at once
+/// (a test holds that).
+pub const GPRESS_RULES_TEXT: usize = 16384;
+
+/// Options, laid out for C (the fields of `gpress::Options` but the groups of rules, `lossy_rules`,
+/// `flate_rules`, `archive_rules` and `rewrite_rules`, which the `rules` text sets by name; `include/gpress.h`
+/// describes each).
 /// Fill one with `gpress_options_default` and change what you need: a zeroed struct is not the defaults
 /// (it means effort 0 and every switch off), though every size field left at 0 means its default.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct GpressOptions {
-    /// 0..=100
+    /// 0..=100 in steps of 20 (a value in between counts as the step below): 0, 20 and 40 are lossless, 60, 80
+    /// and 100 lossy.
     pub effort: u8,
     /// Worker threads (0 = every core the machine offers, at most 8; at most 64).
     pub threads: u32,
@@ -39,7 +45,8 @@ pub struct GpressOptions {
     pub flate_over_jpeg: u8,
     /// 1 = give JPEG images optimal Huffman tables.
     pub jpeg_tables: u8,
-    /// 1 = write CCITT fax images as JBIG2 when that is clearly smaller.
+    /// 1 = write CCITT fax images, and 1-bit images stored without an image codec, as JBIG2 when that is
+    /// clearly smaller.
     pub jbig2: u8,
     /// 1 = rewrite files the empty password opens, keeping their encryption.
     pub rewrite_encrypted: u8,
@@ -47,6 +54,26 @@ pub struct GpressOptions {
     pub decrypt: u8,
     /// 1 = use the optional existing library (Lepton) when the build has it.
     pub use_existing_libraries: u8,
+    /// 1 = write an 8-bit image of few colours as an Indexed image when that is smaller. (A byte that was
+    /// padding: no other field moved when it came.)
+    pub palette: u8,
+    /// 1 = for measuring: `effort` is the engine's own lossless level (0..=100), and nothing is lossy unless
+    /// an override below is set.
+    pub effort_is_engine_level: u8,
+    /// Lossy overrides, each 0 = what the effort says: photos shown at 5/4 of this many pixels per inch or more
+    /// are resampled down to it on their way to a JPEG (so alone it changes nothing below effort 60),
+    pub photo_ppi: u16,
+    /// line art and scans likewise, without the JPEG,
+    pub art_ppi: u16,
+    /// and the JPEG quality for a photo that is resampled or stored without JPEG.
+    pub jpeg_quality: u8,
+    /// Rules by name, as text that ends with a NUL inside the array: "name=value,name=value"
+    /// (`gpress::Options::set_rules`). Empty (a first byte of 0, as in a zeroed struct): none. A name that is
+    /// no rule, a value outside the rule's range, or a text without its NUL fails the call with code 5.
+    pub rules: [c_char; GPRESS_RULES_TEXT],
+    /// Normal PDF: bytes of encoded outputs one file keeps, so that a stream another one repeats is encoded
+    /// once (0 = 2 MiB; at most 1 GiB). Never changes the output. (Last, so that no other field moved.)
+    pub store_budget: u64,
 }
 
 /// A buffer gpress allocated. Free it with `gpress_free`; never with `free()`.
@@ -57,7 +84,7 @@ pub struct GpressBuffer {
     cap: usize,
 }
 
-/// What `gpress_optimize` did (the `outcome` field of `GpressResult`).
+/// What `gpress_optimize` and `gpress_optimize_to_size` did (the `outcome` field of `GpressResult`).
 pub const GPRESS_OUTCOME_SMALLER: c_int = 1;
 pub const GPRESS_OUTCOME_UNTOUCHED: c_int = 2;
 
@@ -69,6 +96,10 @@ pub struct GpressResult {
     pub outcome: c_int,
     pub output: GpressBuffer,
     pub message: *mut c_char,
+    /// `gpress_optimize_to_size` only: the effort that made the output, and 1 when the output is at most the
+    /// target (0: no effort reaches it, and the output is the smallest of the six). 0 from every other call.
+    pub effort: u8,
+    pub reached: u8,
 }
 
 fn empty_buffer() -> GpressBuffer {
@@ -100,14 +131,19 @@ fn size(v: u64, default: usize) -> usize {
     }
 }
 
-fn options_from(o: Option<&GpressOptions>) -> gpress::Options {
+/// The library's options from C's, or why they are refused.
+fn options_from(o: Option<&GpressOptions>) -> Result<gpress::Options, gpress::Error> {
     let mut opt = gpress::Options::default();
     if let Some(o) = o {
         opt.effort = gpress::Effort::new(o.effort);
+        if o.effort_is_engine_level != 0 {
+            opt.engine_effort = Some(o.effort);
+        }
         opt.threads = o.threads as usize;
         opt.max_input = size(o.max_input, opt.max_input);
         opt.max_stream = size(o.max_stream, opt.max_stream);
         opt.max_stream_archive = size(o.max_stream_archive, opt.max_stream_archive);
+        opt.store_budget = size(o.store_budget, opt.store_budget);
         if o.max_decoded > 0 {
             opt.max_decoded = o.max_decoded;
         }
@@ -122,11 +158,18 @@ fn options_from(o: Option<&GpressOptions>) -> gpress::Options {
         opt.flate_over_jpeg = o.flate_over_jpeg != 0;
         opt.jpeg_tables = o.jpeg_tables != 0;
         opt.jbig2 = o.jbig2 != 0;
+        opt.palette = o.palette != 0;
         opt.rewrite_encrypted = o.rewrite_encrypted != 0;
         opt.decrypt = o.decrypt != 0;
         opt.use_existing_libraries = o.use_existing_libraries != 0;
+        opt = opt.lossy_overrides(o.photo_ppi, o.art_ppi, o.jpeg_quality);
+        // The text ends at its NUL, which must be inside the array: nothing outside the struct is read.
+        let text: Vec<u8> = o.rules.iter().map(|&c| c as u8).take_while(|&c| c != 0).collect();
+        let text = String::from_utf8(text).ok().filter(|t| t.len() < o.rules.len());
+        let bad = || gpress::Error::InvalidOptions("rules is not UTF-8 text with a NUL at its end".into());
+        opt.set_rules(&text.ok_or_else(bad)?)?;
     }
-    opt
+    Ok(opt)
 }
 
 /// # Safety
@@ -143,7 +186,11 @@ unsafe fn input_slice<'a>(input: *const u8, len: usize) -> Option<&'a [u8]> {
 }
 
 fn failure(code: c_int, msg: &str) -> GpressResult {
-    GpressResult { code, outcome: 0, output: empty_buffer(), message: message(msg) }
+    GpressResult { code, outcome: 0, output: empty_buffer(), message: message(msg), effort: 0, reached: 0 }
+}
+
+fn success(outcome: c_int, data: Vec<u8>, message: *mut c_char) -> GpressResult {
+    GpressResult { code: 0, outcome, output: buffer_from(data), message, effort: 0, reached: 0 }
 }
 
 /// A null input with a length: nothing to read, so refused (GPRESS_ERR_BAD_ARGUMENT).
@@ -187,6 +234,13 @@ pub unsafe extern "C" fn gpress_options_default(out: *mut GpressOptions) {
         rewrite_encrypted: d.rewrite_encrypted as u8,
         decrypt: d.decrypt as u8,
         use_existing_libraries: d.use_existing_libraries as u8,
+        palette: d.palette as u8,
+        effort_is_engine_level: 0,
+        photo_ppi: 0,
+        art_ppi: 0,
+        jpeg_quality: 0,
+        rules: [0; GPRESS_RULES_TEXT],
+        store_budget: d.store_budget as u64,
     };
     // SAFETY: `out` is non-null and the caller owns the struct it points to.
     unsafe { ptr::write(out, o) };
@@ -199,19 +253,45 @@ pub unsafe extern "C" fn gpress_options_default(out: *mut GpressOptions) {
 #[no_mangle]
 pub unsafe extern "C" fn gpress_optimize(input: *const u8, len: usize, options: *const GpressOptions) -> GpressResult {
     let Some(data) = input_slice(input, len) else { return failure(BAD_ARGUMENT, "null input with a non-zero length") };
-    let opt = options_from(options.as_ref());
+    let opt = match options_from(options.as_ref()) {
+        Ok(opt) => opt,
+        Err(e) => return from_error(e),
+    };
     match gpress::optimize(data, &opt) {
-        Ok(r) => {
-            let outcome = match r.outcome {
-                gpress::Outcome::Smaller(_) => GPRESS_OUTCOME_SMALLER,
-                gpress::Outcome::Untouched(_) => GPRESS_OUTCOME_UNTOUCHED,
-            };
-            let msg = match &r.outcome {
-                gpress::Outcome::Untouched(why) => message(why),
-                _ => ptr::null_mut(),
-            };
-            GpressResult { code: 0, outcome, output: buffer_from(r.data), message: msg }
-        }
+        Ok(r) => optimized(r),
+        Err(e) => from_error(e),
+    }
+}
+
+/// An optimize result for C: the output, the outcome and, for an untouched file, why.
+fn optimized(r: gpress::Optimized) -> GpressResult {
+    let (outcome, msg) = match &r.outcome {
+        gpress::Outcome::Smaller(_) => (GPRESS_OUTCOME_SMALLER, ptr::null_mut()),
+        gpress::Outcome::Untouched(why) => (GPRESS_OUTCOME_UNTOUCHED, message(why)),
+    };
+    success(outcome, r.data, msg)
+}
+
+/// A PDF of at most `target` bytes at the lowest effort that reaches it, or the smallest of the six efforts
+/// (`gpress::optimize_to_size`): the result's `effort` and `reached` say which. `options.effort` is not used;
+/// `effort_is_engine_level` or a lossy override set is refused (code 5).
+///
+/// # Safety
+/// `input` must point to `len` readable bytes; `options` may be null for defaults.
+#[no_mangle]
+pub unsafe extern "C" fn gpress_optimize_to_size(
+    input: *const u8,
+    len: usize,
+    target: u64,
+    options: *const GpressOptions,
+) -> GpressResult {
+    let Some(data) = input_slice(input, len) else { return failure(BAD_ARGUMENT, "null input with a non-zero length") };
+    let opt = match options_from(options.as_ref()) {
+        Ok(opt) => opt,
+        Err(e) => return from_error(e),
+    };
+    match gpress::optimize_to_size(data, target, &opt) {
+        Ok(p) => GpressResult { effort: p.effort.level(), reached: p.reached as u8, ..optimized(p.result) },
         Err(e) => from_error(e),
     }
 }
@@ -223,14 +303,14 @@ pub unsafe extern "C" fn gpress_optimize(input: *const u8, len: usize, options: 
 #[no_mangle]
 pub unsafe extern "C" fn gpress_compress(input: *const u8, len: usize, options: *const GpressOptions) -> GpressResult {
     let Some(data) = input_slice(input, len) else { return failure(BAD_ARGUMENT, "null input with a non-zero length") };
-    let opt = options_from(options.as_ref());
+    let opt = match options_from(options.as_ref()) {
+        Ok(opt) => opt,
+        Err(e) => return from_error(e),
+    };
     match gpress::compress(data, &opt) {
-        Ok(c) => GpressResult {
-            code: 0,
-            outcome: if c.stored { GPRESS_OUTCOME_UNTOUCHED } else { GPRESS_OUTCOME_SMALLER },
-            output: buffer_from(c.data),
-            message: ptr::null_mut(),
-        },
+        Ok(c) => {
+            success(if c.stored { GPRESS_OUTCOME_UNTOUCHED } else { GPRESS_OUTCOME_SMALLER }, c.data, ptr::null_mut())
+        }
         Err(e) => from_error(e),
     }
 }
@@ -242,9 +322,12 @@ pub unsafe extern "C" fn gpress_compress(input: *const u8, len: usize, options: 
 #[no_mangle]
 pub unsafe extern "C" fn gpress_expand(input: *const u8, len: usize, options: *const GpressOptions) -> GpressResult {
     let Some(data) = input_slice(input, len) else { return failure(BAD_ARGUMENT, "null input with a non-zero length") };
-    let opt = options_from(options.as_ref());
+    let opt = match options_from(options.as_ref()) {
+        Ok(opt) => opt,
+        Err(e) => return from_error(e),
+    };
     match gpress::expand(data, &opt) {
-        Ok(v) => GpressResult { code: 0, outcome: 0, output: buffer_from(v), message: ptr::null_mut() },
+        Ok(v) => success(0, v, ptr::null_mut()),
         Err(e) => from_error(e),
     }
 }
@@ -299,6 +382,8 @@ pub unsafe extern "C" fn gpress_result_free(res: *mut GpressResult) {
     gpress_free_message(&mut r.message);
     r.code = 0;
     r.outcome = 0;
+    r.effort = 0;
+    r.reached = 0;
 }
 
 #[cfg(test)]
@@ -324,6 +409,91 @@ mod tests {
         unreachable!("used only with the archive")
     }
 
+    /// The effort fields reach the library: the defaults are its defaults, a zeroed struct is valid (effort 0,
+    /// nothing lossy), the engine's level and each lossy override arrive, and a target size picks an effort.
+    #[test]
+    fn the_effort_fields_and_the_target_size() {
+        use gpress::Lossy;
+        // SAFETY: zeroed options are plain data, and gpress_options_default fills the struct it is given.
+        let (zero, mut o): (GpressOptions, GpressOptions) = unsafe { (std::mem::zeroed(), std::mem::zeroed()) };
+        unsafe { gpress_options_default(&mut o) };
+        let from = options_from;
+        // `o` with `text` as its rules, without a NUL when the text fills the array.
+        let ruled = |text: &[u8]| {
+            let mut with = o;
+            with.rules.iter_mut().zip(text).for_each(|(c, &b)| *c = b as c_char);
+            with
+        };
+        assert_eq!(from(Some(&o)), Ok(gpress::Options::default()));
+        assert_eq!(from(None), Ok(gpress::Options::default()));
+        let z = from(Some(&zero)).unwrap();
+        assert_eq!((z.effort.level(), z.engine_effort, z.lossy, z.check()), (0, None, None, Ok(())));
+        assert_eq!(z.store_budget, gpress::Options::default().store_budget, "0 is the default");
+        assert_eq!(from(Some(&GpressOptions { store_budget: 4096, ..o })).unwrap().store_budget, 4096);
+        let engine = from(Some(&GpressOptions { effort: 50, effort_is_engine_level: 1, ..o })).unwrap();
+        assert_eq!((engine.engine_effort, engine.rewrite().effort, engine.rewrite().lossy), (Some(50), 50, Lossy::OFF));
+        let photos = from(Some(&GpressOptions { effort: 80, photo_ppi: 200, ..o })).unwrap();
+        assert_eq!(photos.lossy, Some(Lossy { photo_ppi: 200, ..Lossy::level(2) }));
+        let quality = from(Some(&GpressOptions { art_ppi: 400, jpeg_quality: 60, ..o })).unwrap();
+        assert_eq!(quality.lossy, Some(Lossy { art_ppi: 400, jpeg_quality: 60, ..Lossy::OFF }));
+        // Rules arrive by name, as text: the empty text sets none, and a bad one is refused.
+        let all = gpress::Options::rules();
+        let (a, b) = (&all[0], &all[1]);
+        let text = ruled(format!("{}={},{}={}", a.0, a.3, b.0, b.2).as_bytes());
+        let set = from(Some(&text)).unwrap();
+        assert_eq!((set.rule(&a.0), set.rule(&b.0)), (Some(a.3), Some(b.2)));
+        let bad = ruled(b"no_such_rule=1");
+        for refused in [bad, ruled(b"\xff=1"), ruled(&[b' '; GPRESS_RULES_TEXT])] {
+            assert!(matches!(from(Some(&refused)), Err(gpress::Error::InvalidOptions(_))));
+        }
+        // Every rule at once, each at its highest value, fits the array with its NUL.
+        let every: Vec<String> = all.iter().map(|r| format!("{}={}", r.0, r.3)).collect();
+        let every = every.join(",");
+        assert!(every.len() < GPRESS_RULES_TEXT, "{} bytes of rules", every.len());
+        let highest = from(Some(&ruled(every.as_bytes()))).unwrap();
+        assert!(all.iter().all(|r| highest.rule(&r.0) == Some(r.3)));
+
+        let input = b"%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n";
+        unsafe {
+            // A bad rule fails every call with code 5, a message and no output.
+            for call in [gpress_optimize, gpress_compress, gpress_expand] {
+                let mut r = call(input.as_ptr(), input.len(), &bad);
+                assert_eq!(r.code, 5);
+                assert!(r.output.data.is_null() && !r.message.is_null());
+                let msg = std::ffi::CStr::from_ptr(r.message).to_string_lossy().into_owned();
+                assert!(msg.contains("no_such_rule"), "{msg}");
+                gpress_result_free(&mut r);
+            }
+            let mut r = gpress_optimize(input.as_ptr(), input.len(), &text);
+            assert_eq!(r.code, 0);
+            gpress_result_free(&mut r);
+            // Any output fits the largest target, so the first effort tried is the one picked.
+            let mut fits = gpress_optimize_to_size(input.as_ptr(), input.len(), u64::MAX, &o);
+            assert_eq!((fits.code, fits.effort, fits.reached), (0, 0, 1));
+            assert!(fits.output.len <= input.len());
+            gpress_result_free(&mut fits);
+            assert_eq!((fits.effort, fits.reached), (0, 0));
+            // Nothing fits in no bytes: the smallest of the six, marked as missed.
+            let mut missed = gpress_optimize_to_size(input.as_ptr(), input.len(), 0, ptr::null());
+            assert_eq!((missed.code, missed.reached), (0, 0));
+            assert!(missed.output.len > 0 && missed.output.len <= input.len());
+            gpress_result_free(&mut missed);
+            // The picker sets the effort itself: the engine's level or a lossy override is refused, and so is a
+            // bad rule.
+            for bad in [GpressOptions { effort_is_engine_level: 1, ..o }, GpressOptions { jpeg_quality: 80, ..o }, bad]
+            {
+                let mut r = gpress_optimize_to_size(input.as_ptr(), input.len(), 0, &bad);
+                assert_eq!(r.code, 5);
+                assert!(r.output.data.is_null() && !r.message.is_null());
+                gpress_result_free(&mut r);
+            }
+            // Every other call leaves the two fields at 0.
+            let mut plain = gpress_optimize(input.as_ptr(), input.len(), &o);
+            assert_eq!((plain.code, plain.effort, plain.reached), (0, 0, 0));
+            gpress_result_free(&mut plain);
+        }
+    }
+
     #[test]
     fn round_trip_through_the_c_surface() {
         let input = b"%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n".to_vec();
@@ -331,7 +501,10 @@ mod tests {
         let mut o: GpressOptions = unsafe { std::mem::zeroed() };
         unsafe {
             gpress_options_default(&mut o);
-            assert_eq!((o.effort, o.jbig2, o.decrypt, o.max_len, o.max_decoded), (100, 1, 1, 1 << 30, 256 << 20));
+            assert_eq!(
+                (o.effort, o.jbig2, o.palette, o.decrypt, o.max_len, o.max_decoded),
+                (40, 1, 1, 1, 1 << 30, 256 << 20)
+            );
             // Without the archive: compress and expand give GPRESS_ERR_NEEDS_FEATURE, a message that names the
             // feature and no output; optimize works.
             if !cfg!(feature = "archive") {

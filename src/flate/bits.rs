@@ -5,15 +5,19 @@ pub struct BitWriter {
     pub out: Vec<u8>,
     acc: u64,
     n: u32,
+    /// The furthest bit a reader may have fetched that loads a Huffman table's longest code length before each
+    /// code (Poppler's FlateStream does): the largest start of a Huffman code plus that length. `write_stored`
+    /// keeps a stored block's length out of those bits.
+    pub(crate) reach: u64,
 }
 
 impl BitWriter {
     pub fn new() -> Self {
-        BitWriter { out: Vec::new(), acc: 0, n: 0 }
+        BitWriter { out: Vec::new(), acc: 0, n: 0, reach: 0 }
     }
 
     pub fn with_capacity(cap: usize) -> Self {
-        BitWriter { out: Vec::with_capacity(cap), acc: 0, n: 0 }
+        BitWriter { out: Vec::with_capacity(cap), acc: 0, n: 0, reach: 0 }
     }
 
     /// Writes the low `count` bits of `value` (count <= 32).

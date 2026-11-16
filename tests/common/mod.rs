@@ -163,6 +163,12 @@ pub fn hex(b: &[u8]) -> String {
 /// AESV2, else /R 3 with 128-bit RC4. The strings (the title) and every stream are encrypted with the
 /// engine's primitives; the key derivation is the one checked against qpdf in the crypt tests.
 pub fn encrypted_pdf(aes: bool) -> Vec<u8> {
+    encrypted_of(aes, objects())
+}
+
+/// Objects numbered 1 to 9 as `objects()` gives them, encrypted as `encrypted_pdf` does it (10 is the
+/// encryption dictionary, 11 the information dictionary).
+pub fn encrypted_of(aes: bool, objects: Vec<(u32, String, Option<Vec<u8>>)>) -> Vec<u8> {
     let (r, method) = if aes { (4, Method::Aes128) } else { (3, Method::Rc4) };
     let o = [0x11u8; 32];
     let id0 = [0x42u8; 16];
@@ -174,7 +180,7 @@ pub fn encrypted_pdf(aes: bool) -> Vec<u8> {
     let iv = |n: u32| [n as u8; 16];
     let title = crypt::seal(&key, method, 11, 0, &iv(11), b"Mixed test").unwrap();
     let mut objs: Vec<(u32, Vec<u8>)> = Vec::new();
-    for (n, dict, data) in objects() {
+    for (n, dict, data) in objects {
         let body = match data {
             Some(d) => {
                 let sealed = crypt::seal(&key, method, n, 0, &iv(n), &d).unwrap();
@@ -267,7 +273,7 @@ pub fn plain_pdf() -> Vec<u8> {
         };
         objs.push((n, body));
     }
-    objs.push((11, b"<< /Title (Mixed test) /Producer (gpress tests) >>".to_vec()));
+    objs.push((10, b"<< /Title (Mixed test) /Producer (gpress tests) >>".to_vec()));
     let mut d = b"%PDF-1.6\n%\xE2\xE3\xCF\xD3\n".to_vec();
     let mut offs = Vec::new();
     for (n, body) in &objs {
@@ -282,7 +288,7 @@ pub fn plain_pdf() -> Vec<u8> {
         d.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
     }
     d.extend_from_slice(
-        format!("trailer\n<< /Size {} /Root 1 0 R /Info 11 0 R >>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes(),
+        format!("trailer\n<< /Size {} /Root 1 0 R /Info 10 0 R >>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes(),
     );
     d
 }

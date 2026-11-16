@@ -421,16 +421,15 @@ fn archive_reads_eols_that_end_on_a_byte_boundary() {
     let mut lay = layout(&img, Scheme::G31D, true);
     let mut wr = ccitt::Writer::new();
     let mut enc = ccitt::RowEncoder::new(img.width, Scheme::G31D, Rule::Standard);
-    for r in 0..img.rows() {
-        lay.gaps[r].fill = ((16 - (wr.bit_pos() + 12) % 8) % 8) as u32;
-        let g = lay.gaps[r];
-        enc.row(&mut wr, &g, img.row(r));
+    for (r, g) in lay.gaps.iter_mut().enumerate().take(img.rows()) {
+        g.fill = ((16 - (wr.bit_pos() + 12) % 8) % 8) as u32;
+        enc.row(&mut wr, g, img.row(r));
     }
     let data = ccitt::encode(&img, &lay);
     // Read with the alignment the parameters give, an EOL that starts before a byte boundary is not found.
     let aligned = ccitt::parse(&data, Scheme::G31D, 613, true, ccitt::Limits::default()).unwrap();
     assert!(aligned.image.rows() < img.rows());
-    let p = gpress::fax::part::prepare(&data, Scheme::G31D, 613, true).unwrap();
+    let p = gpress::fax::part::prepare(&data, Scheme::G31D, 613, true, 25).unwrap();
     assert_eq!(p.image, img);
     let d = pdf("/Width 613 /Height 401 /BitsPerComponent 1 /ColorSpace /DeviceGray /Filter /CCITTFaxDecode /DecodeParms << /K 0 /Columns 613 /EncodedByteAlign true /EndOfLine true >>", &data);
     let (packed, stats) = pack(&d);

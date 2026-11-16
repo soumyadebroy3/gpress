@@ -150,8 +150,7 @@ pub fn aes_open(key: &[u8], data: &[u8]) -> Result<Vec<u8>, &'static str> {
     if data.len() < 32 || !data.len().is_multiple_of(16) {
         return Err("AES data is not whole blocks");
     }
-    let mut iv = [0u8; 16];
-    iv.copy_from_slice(&data[..16]);
+    let iv: [u8; 16] = data[..16].try_into().expect("16 bytes");
     let mut out = cbc_decrypt(&c, &iv, &data[16..]);
     let pad = *out.last().unwrap() as usize;
     if !(1..=16).contains(&pad) || out[out.len() - pad..].iter().any(|&b| b as usize != pad) {
@@ -231,8 +230,7 @@ pub fn hash_r6(r: i64, password: &[u8], salt: &[u8], udata: &[u8]) -> [u8; 32] {
         one.extend_from_slice(udata);
         let k1 = one.repeat(64);
         let c = Aes::new(&k[..16]).expect("16-byte key");
-        let mut iv = [0u8; 16];
-        iv.copy_from_slice(&k[16..32]);
+        let iv: [u8; 16] = k[16..32].try_into().expect("16 bytes");
         let e = cbc_encrypt(&c, &iv, &k1);
         // The first 16 bytes as a big-endian number, modulo 3 (256 is 1 modulo 3, so the byte sum will do).
         let m = e[..16].iter().map(|&b| b as u32).sum::<u32>() % 3;
@@ -246,9 +244,7 @@ pub fn hash_r6(r: i64, password: &[u8], salt: &[u8], udata: &[u8]) -> [u8; 32] {
             break;
         }
     }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&k[..32]);
-    out
+    k[..32].try_into().expect("32 bytes")
 }
 
 /// The key for one object's strings and streams (algorithm 1; AES-256 uses the file key itself).
@@ -562,9 +558,8 @@ impl Crypt {
     /// derived from the file key, so the output is the same on every run.
     fn iv(&self, num: u32, gen: u16, counter: u32) -> [u8; 16] {
         let h = sha256(&[&self.key, &num.to_le_bytes(), &gen.to_le_bytes(), &counter.to_le_bytes(), b"iv"]);
-        let mut iv = [0u8; 16];
-        iv.copy_from_slice(&h[..16]);
-        iv
+        // The first 16 bytes of the hash, built from it alone: no constant is ever the vector.
+        std::array::from_fn(|i| h[i])
     }
 
     /// A non-stream object with its strings encrypted for object `num gen`.

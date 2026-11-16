@@ -1,10 +1,10 @@
-/* gpress: lossless PDF compression. C API.
+/* gpress: PDF compression, lossless unless a lossy effort is asked for. C API.
  *
  * Link with libgpress_c (shared or static). Every function is thread-safe and never aborts the process:
  * a problem comes back as a non-zero code and a message. Every buffer or message gpress hands out is
  * freed with the matching gpress_free* function, never with free().
  *
- *   gpress_options opt; gpress_options_default(&opt); opt.effort = 70;
+ *   gpress_options opt; gpress_options_default(&opt); opt.effort = 20;
  *   gpress_result r = gpress_optimize(pdf, pdf_len, &opt);
  *   if (r.code == 0) { fwrite(r.output.data, 1, r.output.len, out); }
  *   else            { fprintf(stderr, "%s\n", r.message); }
@@ -32,7 +32,8 @@ enum {
   GPRESS_ERR_INTERNAL = 4,               /* a bug in gpress; the input is unchanged. Please report it. */
   GPRESS_ERR_BAD_ARGUMENT = 5,           /* null input with a non-zero length, or options the engine refuses
                                             (threads over 64, a zero time budget, max_input or
-                                            objects_per_stream of 0) */
+                                            objects_per_stream of 0; for gpress_optimize_to_size also
+                                            effort_is_engine_level or a lossy override) */
   GPRESS_ERR_TIME_BUDGET = 6,            /* the time budget ran out; the input is unchanged */
   GPRESS_ERR_DECLARED_TOO_LARGE = 7,     /* expand: the archive declares more than options.max_len bytes */
   GPRESS_ERR_NEEDS_EXISTING_LIBRARY = 8, /* expand: the archive has parts made with the existing library
@@ -51,16 +52,25 @@ enum {
 
 /* Outcomes in gpress_result.outcome (optimize and compress). */
 enum {
-  GPRESS_OUTCOME_SMALLER = 1,  /* output is smaller than the input, content preserved */
+  GPRESS_OUTCOME_SMALLER = 1,  /* output is smaller than the input, content preserved (but for the images a
+                                  lossy effort changed) */
   GPRESS_OUTCOME_UNTOUCHED = 2 /* output is the input as it was (optimize: message says why; compress: the
                                   archive stores the input as it is) */
 };
+
+/* The room for the rules text in the options, its closing NUL counted: every rule at once fits. */
+#define GPRESS_RULES_TEXT 16384
 
 /* The options, the same as the library's. Fill with gpress_options_default and change what you need: a
  * zeroed struct is not the defaults (it means effort 0 and every switch off), though a size left at 0
  * means its default. */
 typedef struct gpress_options {
-  uint8_t effort;                 /* 0..100: 0 fastest, 100 everything the engine knows (default 100) */
+  uint8_t effort;                 /* 0..100 in steps of 20; a value in between counts as the step below.
+                                     0, 20 and 40 are lossless: 0 fastest, 40 the smallest lossless output
+                                     (default 40). 60, 80 and 100 are lossy: the work of 40 after a step
+                                     that changes images only, stronger each step, within floors (see
+                                     docs/reference.md, "Effort levels"). The archive is lossless at every
+                                     effort: 40 and above all mean its strongest setting */
   uint32_t threads;               /* worker threads; 0 = every core the machine offers, at most 8;
                                      at most 64. The output never depends on it */
   uint64_t max_input;             /* largest accepted input in bytes; 0 = 1 GiB */
@@ -79,11 +89,39 @@ typedef struct gpress_options {
   uint8_t respect_conformance;    /* 1: leave PDF/A, PDF/X, signed and certified files untouched */
   uint8_t flate_over_jpeg;        /* 1: also try Flate in front of JPEG images */
   uint8_t jpeg_tables;            /* 1: give JPEG images optimal Huffman tables (same coefficients) */
-  uint8_t jbig2;                  /* 1: write CCITT fax images as JBIG2 when clearly smaller (same pixels) */
+  uint8_t jbig2;                  /* 1: write CCITT fax images, and 1-bit images stored without an image
+                                     codec, as JBIG2 when clearly smaller (same pixels) */
   uint8_t rewrite_encrypted;      /* 1: rewrite files the empty password opens, keeping their encryption */
   uint8_t decrypt;                /* 1: archive: store such files' streams decrypted (encrypted again on
                                      expand) */
   uint8_t use_existing_libraries; /* 1: use the optional existing library (Lepton) when built in */
+  uint8_t palette;                /* 1: write an 8-bit image of few colours as an Indexed image when smaller
+                                     (same colours). A byte that was padding: no other field moved */
+  uint8_t effort_is_engine_level; /* 1: for measuring: effort is the engine's own lossless level, 0..100,
+                                     and nothing is lossy unless an override below is set */
+  uint16_t photo_ppi;             /* lossy overrides, each 0 = what the effort says: photos shown at 5/4 of
+                                     this many pixels per inch or more (the rule lossy_resample_margin) are
+                                     resampled down to it (never below the rule lossy_photo_floor, 150
+                                     unless it is set) on their way to a JPEG, */
+  uint16_t art_ppi;               /* line art and scans likewise, without the JPEG (never below
+                                     lossy_art_floor, 300), */
+  uint8_t jpeg_quality;           /* and the JPEG quality, kept within the rules lossy_quality_min and
+                                     lossy_quality_max (50 and 95), for a photo that is resampled or stored
+                                     without JPEG. art_ppi or jpeg_quality set makes the output lossy at any
+                                     effort; photo_ppi alone changes nothing below effort 60, where no JPEG
+                                     quality is set */
+  char rules[GPRESS_RULES_TEXT];  /* rules by name: the engine's tuning values, as text of the form
+                                     "name=value,name=value" with its closing NUL, such as
+                                     "lossy_min_saving=20" (strcpy or snprintf it in; every rule at once
+                                     fits). Empty for none, as gpress_options_default leaves it: every rule
+                                     then has its default. docs/reference.md ("Rules") lists the names with
+                                     their defaults and ranges. A name that is no rule, a value outside
+                                     the rule's range, or a text without its NUL fails the call with
+                                     GPRESS_ERR_BAD_ARGUMENT and a message that says which values the rule
+                                     takes */
+  uint64_t store_budget;          /* normal PDF: bytes of encoded outputs one file keeps, so that a stream
+                                     another one repeats is encoded once; 0 = 2 MiB, at most 1 GiB. Never
+                                     changes the output. Last, so that no other field moved */
 } gpress_options;
 
 typedef struct gpress_buffer {
@@ -97,16 +135,27 @@ typedef struct gpress_result {
   int outcome;          /* GPRESS_OUTCOME_* for optimize/compress; 0 for expand */
   gpress_buffer output; /* the result bytes on success; empty on error */
   char *message;        /* error text, or the reason a file was left untouched; may be NULL */
+  uint8_t effort;       /* gpress_optimize_to_size only: the effort that made the output */
+  uint8_t reached;      /* gpress_optimize_to_size only: 1 when the output is at most the target */
 } gpress_result;
 
 /* Version string, e.g. "0.1.0". Static; do not free. */
 const char *gpress_version(void);
 
-/* Fills *out with the defaults (effort 100, every step on). */
+/* Fills *out with the defaults (effort 40, the smallest lossless output; every step on). */
 void gpress_options_default(gpress_options *out);
 
-/* A smaller PDF that any reader opens, every object's value preserved; or the input untouched. */
+/* A smaller PDF that any reader opens, or the input untouched. Every object's value is preserved at efforts
+ * 0 to 40; from 60 images may be changed, within the floors of the effort levels. */
 gpress_result gpress_optimize(const uint8_t *input, size_t len, const gpress_options *options);
+
+/* A PDF of at most target bytes: gpress_optimize at efforts 0, 20, 40, 60, 80 and 100 in turn (so up to six
+ * runs of the engine, and one time budget for them all), returning the first output that is small enough,
+ * with result.effort the effort that made it and result.reached 1. When none is, the smallest of the six
+ * with result.reached 0. Efforts 60 and above are lossy. options.effort is not used, and
+ * effort_is_engine_level or a lossy override set gives GPRESS_ERR_BAD_ARGUMENT. */
+gpress_result gpress_optimize_to_size(const uint8_t *input, size_t len, uint64_t target,
+                                      const gpress_options *options);
 
 /* The gpress archive of any input. gpress_expand restores it byte for byte. */
 gpress_result gpress_compress(const uint8_t *input, size_t len, const gpress_options *options);

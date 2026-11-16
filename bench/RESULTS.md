@@ -4,6 +4,10 @@ Test set: 907 public test PDFs, 130.47 MB (the pdf.js test suite, pypdf's sample
 pikepdf test resources). Many of them are deliberately broken or unusual. Measured on a 2-core cloud machine
 in October 2026. Every number below comes from the scripts in this folder.
 
+Every "effort" in this file is the engine's own level, 0 to 100 (`--engine-effort` today), measured before
+the public effort got its six steps: the public effort 40, the default, is the engine's 100. The exceptions
+are the sections "Sizes at the six efforts" and "Head-to-head, November 2026", whose efforts are the public ones.
+
 Which build: sections 1 to 5 are the phase-1 engine (commit d85cd7a) at maximum effort. Sections 6 and 7
 (time and space) and the Security section are the `speed` build (branch `speed`, commit ca8fa92:
 `--effort 0..100`, `--threads N`, the work budget), measured with `bench/benchmark.py` (parts 1 and 2) and
@@ -364,9 +368,9 @@ NEW has not measured every file of BASE (an unfinished run compares only the fil
 
 ## Effort levels
 
-The README's effort table: two runs of `bench/benchmark.py time` on the 120-file sample, normal PDF, one
-thread. CPU time is summed over the files; output is the total size as a share of the input on the 90 files
-the engine rewrites.
+The README's engine-level table (the README no longer shows its qpdf row): two runs of `bench/benchmark.py time`
+on the 120-file sample, normal PDF, one thread. CPU time is summed over the files; output is the total size as a
+share of the input on the 90 files the engine rewrites.
 
 | Effort | CPU s, first measured | CPU s, current code | Output |
 | ---: | ---: | ---: | ---: |
@@ -394,6 +398,168 @@ the engine rewrites.
   70,408,873), and the 120 outputs are byte-identical to c8e9f1a's.
 - Calibration is the CPU time of `xz -9e` on 4 MiB of fixed text, the smallest of three, taken at the start of
   each run (section 6).
+
+## Sizes at the six efforts
+
+The README's effort table. `python3 -I bench/effort_table.py NAME --set SET` runs `gpress optimize --effort E
+--threads 1` on every file of a set at each effort and adds up the outputs; a file gpress leaves untouched
+counts with its own size. Measured on 2026-11-16 on `main` at 2d3bf64, on a cloud machine. Sizes only: nothing
+here was timed. The two engine changes since, #58 and #61, give the same outputs on the 907 files at efforts 0, 40
+and 100, and at 20 #61 makes one file 2 bytes larger (pypdf-samples/007-imagemagick-images__imagemagick-images.pdf,
+7,966); efforts 60 and 80 and the photo set were not measured again.
+
+| Effort | | 907 test files | Photo set, 23 files |
+| ---: | --- | ---: | ---: |
+| the input | | 130,469,001 | 22,715,581 |
+| 0 | lossless | 107,790,202 (82.62%) | 20,900,294 (92.01%) |
+| 20 | lossless | 106,454,744 (81.59%) | 20,585,289 (90.62%) |
+| 40 | lossless | 106,154,895 (81.36%) | 20,510,774 (90.29%) |
+| 60 | lossy | 104,595,638 (80.17%) | 16,452,936 (72.43%) |
+| 80 | lossy | 104,077,694 (79.77%) | 15,934,992 (70.15%) |
+| 100 | lossy | 104,044,424 (79.75%) | 15,795,015 (69.53%) |
+
+- The 907 files are `bench/sets/all.txt`; `bench/results/effort-levels/files.tsv` has a row per file. 177 are
+  untouched at every effort and no run failed. The lossy efforts change 4 files:
+  ocrmypdf/tests__resources__2400dpi.pdf (107,144 bytes at effort 40, 25,086 at 60, 80 and 100),
+  pdfjs/bug1815476.pdf (103,311, then 75,033), pdfjs/issue19971.pdf (1,641,084, then 1,272,661, 754,717 and
+  721,447) and pypdf-samples/009-pdflatex-geotopo__GeoTopo.pdf (4,167,654, then 3,087,156). No output at 60, 80
+  or 100 is larger than the same file's at the effort below.
+- The photo set is `bench/sets/photos.txt`: `python3 -I bench/photo_set.py` makes its pages under
+  `bench/corpus/photos/`, and nothing of it is in the repository. It is two files of the corpus as they are
+  (pdfjs/issue19971.pdf and pdfjs/issue14200.pdf); three photographs of scikit-image's sample data (release
+  v0.24.0, fetched from raw.githubusercontent.com and checked against a SHA-256), each on a Letter page at 150,
+  300 and 600 pixels per inch, once as samples behind Flate and once as a JPEG; `room`, the camera photograph
+  of pdfjs/issue12841_reduced.pdf (5280 by 3792 pixels) laid 7 inches wide on a Letter page;
+  and `scan`, the scanned page of ocrmypdf/tests__resources__poster.pdf (2550 by 3300 pixels) over a whole
+  Letter page, as its JPEG and as samples. The licences, as scikit-image's `skimage/data/_fetchers.py` states
+  them: astronaut.png, "No known copyright restrictions, released into the public domain" (NASA);
+  coffee.png, "No copyright restrictions. CC0 by the photographer (Rachel Michetti)"; hubble_deep_field.jpg,
+  "captured by NASA and may be freely used in the public domain".
+
+Each file of the photo set (`--psnr`; `bench/results/photo-set/files.tsv`): bytes at each effort and, in
+brackets at the lossy efforts, how close the output's pages are to the input's. PDFium draws both at 150 pixels
+per inch, and the number is the peak signal-to-noise ratio in dB over the whole page that differs most ("same":
+no pixel differs). The page around a small image is white in both, which raises the number of the 600 pixels
+per inch pages.
+
+| File | Input | 0 | 20 | 40 | 60 | 80 | 100 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| pdfjs/issue19971.pdf | 1,729,186 | 1,670,373 | 1,647,711 | 1,641,084 | 1,272,661 (48.5) | 754,717 (40.2) | 721,447 (40.2) |
+| pdfjs/issue14200.pdf | 679,384 | 430,425 | 410,605 | 409,826 | 409,826 (same) | 409,826 (same) | 409,826 (same) |
+| photos/astronaut-150-flate.pdf | 628,726 | 446,170 | 433,482 | 423,852 | 53,559 (47.1) | 53,559 (47.1) | 40,277 (45.5) |
+| photos/astronaut-150-jpeg.pdf | 68,853 | 67,167 | 67,164 | 67,164 | 67,164 (same) | 67,164 (same) | 38,786 (47.6) |
+| photos/astronaut-300-flate.pdf | 628,726 | 446,172 | 433,484 | 423,854 | 53,561 (55.1) | 53,561 (55.1) | 40,279 (53.5) |
+| photos/astronaut-300-jpeg.pdf | 68,853 | 67,167 | 67,164 | 67,164 | 67,164 (same) | 67,164 (same) | 38,786 (55.7) |
+| photos/astronaut-600-flate.pdf | 628,724 | 446,167 | 433,480 | 423,851 | 18,651 (57.2) | 18,651 (57.2) | 14,530 (55.9) |
+| photos/astronaut-600-jpeg.pdf | 68,851 | 67,165 | 67,162 | 67,162 | 18,712 (58.2) | 18,712 (58.2) | 14,558 (56.7) |
+| photos/coffee-150-flate.pdf | 614,597 | 456,803 | 447,558 | 441,778 | 56,853 (46.0) | 56,853 (46.0) | 56,853 (46.0) |
+| photos/coffee-150-jpeg.pdf | 73,122 | 72,000 | 71,998 | 71,998 | 71,998 (same) | 71,998 (same) | 64,442 (51.1) |
+| photos/coffee-300-flate.pdf | 614,597 | 456,801 | 447,556 | 441,776 | 56,851 (54.9) | 56,851 (54.9) | 56,851 (54.9) |
+| photos/coffee-300-jpeg.pdf | 73,122 | 72,000 | 71,998 | 71,998 | 71,998 (same) | 71,998 (same) | 64,442 (60.3) |
+| photos/coffee-600-flate.pdf | 614,597 | 456,801 | 447,556 | 441,776 | 17,642 (58.3) | 17,642 (58.3) | 17,642 (58.3) |
+| photos/coffee-600-jpeg.pdf | 73,122 | 72,000 | 71,998 | 71,998 | 17,709 (59.3) | 17,709 (59.3) | 17,709 (59.3) |
+| photos/hubble-150-flate.pdf | 1,688,584 | 1,681,371 | 1,645,372 | 1,644,599 | 1,644,599 (same) | 1,644,599 (same) | 1,644,599 (same) |
+| photos/hubble-150-jpeg.pdf | 528,746 | 517,549 | 517,302 | 517,197 | 517,197 (same) | 517,197 (same) | 517,197 (same) |
+| photos/hubble-300-flate.pdf | 1,688,584 | 1,681,371 | 1,645,372 | 1,644,599 | 1,644,599 (same) | 1,644,599 (same) | 1,644,599 (same) |
+| photos/hubble-300-jpeg.pdf | 528,746 | 517,547 | 517,300 | 517,195 | 517,195 (same) | 517,195 (same) | 517,195 (same) |
+| photos/hubble-600-flate.pdf | 1,688,584 | 1,681,371 | 1,645,372 | 1,644,599 | 397,693 (60.0) | 397,693 (60.0) | 397,693 (60.0) |
+| photos/hubble-600-jpeg.pdf | 528,746 | 517,549 | 517,302 | 517,197 | 517,197 (same) | 517,197 (same) | 517,197 (same) |
+| photos/room-754-jpeg.pdf | 5,852,227 | 5,852,132 | 5,852,131 | 5,852,131 | 5,852,131 (same) | 5,852,131 (same) | 5,852,131 (same) |
+| photos/scan-300-jpeg.pdf | 694,517 | 641,655 | 641,064 | 641,033 | 641,033 (same) | 641,033 (same) | 641,033 (same) |
+| photos/scan-300-flate.pdf | 2,952,387 | 2,582,538 | 2,485,158 | 2,466,943 | 2,466,943 (same) | 2,466,943 (same) | 2,466,943 (same) |
+
+What the lossy efforts did with this set's pictures (`PDFE_DEBUG=1` prints the step's reason for each image):
+
+- None of the three scikit-image photographs passes for a photo: 2.16% of astronaut's samples, 1.99% of
+  coffee's and 0.93% of hubble's are hard edges (64 levels or more from a neighbour), where a photo has at most
+  1/128, 0.78% (`look` in src/pdf/lossy.rs, rules `lossy_hard_step` and `lossy_photo_hard`). Astronaut and
+  coffee are sharp photos, which keep the line-art floor (`lossy_sharp_floor`): at every lossy level their
+  pages of samples become JPEGs ("photo to JPEG"; at 600 pixels per inch "photo resampled, to JPEG", 512 by
+  512 to 256 by 256 for astronaut) and their JPEG pages at 600 are resampled ("JPEG resampled"); at 80 the
+  JPEG page at 300 is left alone ("a JPEG at or near its floor") where a photo would go down to 150; at 100
+  the JPEG pages at 150 and 300 are written again ("JPEG again"), astronaut's at quality 75 and coffee's at
+  85: at 75 coffee does not pass the quality check, so it is coded 10 higher (`lossy_quality_step`), and its
+  pages of samples are the same JPEGs as at 60 and 80. Hubble stays line art, as its 8 most frequent
+  levels hold 52.6% of the samples (a sharp photo may have 25%, `lossy_sharp_ground`): "line art at or near
+  its floor" at 150 and 300, "line art resampled" at 600 (still samples behind Flate), and its JPEG pages are
+  left alone.
+- The rows of astronaut and coffee and the photo set's totals at 60, 80 and 100 were measured with the
+  three-way photo test (#52), which writes the 907 test files exactly as the commit before it at efforts 0, 60,
+  80 and 100; the rest as above.
+- `room` is left alone at every level: "not a sequential scan". It is a baseline JPEG whose scan header gives
+  0 as its last coefficient where the standard says 63, and gpress's JPEG parser (src/jpeg/parse.rs, as on
+  main) takes the standard's values only. A progressive JPEG is left alone too ("progressive"): checked on
+  coffee.png written as one by Pillow, on a page at 600 pixels per inch, which is not in the set.
+- `scan` is at its floor (300 pixels per inch), so nothing is resampled, and at effort 100 its JPEG is left
+  alone as one that looks like line art.
+
+## Head-to-head, November 2026
+
+The README's normal-PDF benchmark: gpress `main` at 2d3bf64 against qpdf, MuPDF's mutool, cpdf, pdfsizeopt and
+Ghostscript on the 907 test files (`bench/sets/all.txt`, 130,469,001 bytes). Timed from 2026-11-15 19:05 to
+2026-11-16 02:07 UTC on a cloud machine with 4 cores (Intel Xeon, 2.1 GHz) and 15.7 GiB: one command at a time,
+the settings in a new random order for each file, each command with a 30-minute limit and an 8 GiB memory cap.
+The run had 24 settings (gpress 10, three of them its lossy efforts 60, 80 and 100; qpdf 2, mutool 5, cpdf 4,
+pdfsizeopt 2, Ghostscript 1); the table shows ten lossless ones. Four commands hit the time limit, none of them
+gpress's. The harness that ran it is not in `bench/`.
+
+The settings (`IN` and `OUT` are the input and output files):
+
+```
+gpress optimize IN OUT --effort 40 --threads 1          # gpress, effort 40 (default); with no flags, all four cores
+gpress optimize IN OUT --effort 20 --threads 1          # gpress, effort 20
+gpress optimize IN OUT --effort 0 --threads 1           # gpress, effort 0
+gpress optimize IN OUT --effort 40 --threads 1 --max-stream 1073741824
+QPDF_ZOPFLI=force qpdf --object-streams=generate --compress-streams=y --recompress-flate --compression-level=9 --decode-level=specialized IN OUT
+QPDF_ZOPFLI=disabled qpdf ...                            # the same, zlib level 9
+cpdf -process-images -1bpp-method JBIG2 -jbig2enc jbig2 IN -squeeze -squeeze-no-pagedata -create-objstm -no-preserve-objstm -recrypt -o OUT
+pdfsizeopt --quiet IN OUT
+mutool clean -gggg -Z -e 100 -d -z -f -i -m -t IN OUT
+gs -q -dNOPAUSE -dBATCH -dSAFER -sDEVICE=pdfwrite -dDownsampleColorImages=false -dDownsampleGrayImages=false -dDownsampleMonoImages=false -dAutoFilterColorImages=false -dAutoFilterGrayImages=false -dColorImageFilter=/FlateEncode -dGrayImageFilter=/FlateEncode -dPassThroughJPEGImages=true -dPassThroughJPXImages=true -sColorConversionStrategy=LeaveColorUnchanged -dAutoRotatePages=/None -dEmbedSubstituteFonts=false -sOutputFile=OUT IN
+```
+
+Versions: qpdf 12.4.2 (zlib 1.3, zopfli 1.0.3), mutool 1.28.6, cpdf 2.9.3 with jbig2enc 0.29, pdfsizeopt
+2023-04-18, Ghostscript 10.08.0.
+
+| Tool and setting | All 907 files | The 730 files gpress rewrites | Median file, all 907 | Made smaller | Errors and timeouts | Wrong outputs | CPU s, the 695 same files | Peak MiB, the 695 same files |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| gpress, effort 40 (default) | 81.36% | 73.26% | 88.7% | 729 | 0 | 0 | 625 | 76 |
+| gpress, effort 40, `--max-stream 1073741824` | 78.31% | 73.26% | 88.5% | 729 | 0 | 0 | 621 | 76 |
+| gpress, effort 20 | 81.60% | 73.59% | 89.3% | 728 | 0 | 1 | 190 | 70 |
+| gpress, effort 0 | 82.62% | 74.99% | 90.4% | 729 | 0 | 0 | 25 | 52 |
+| qpdf with zopfli | 79.61% | 77.74% | 89.9% | 721 | 12 | 13 | 1,899 | 106 |
+| qpdf, zlib level 9 | 82.30% | 80.68% | 94.3% | 695 | 12 | 13 | 18 | 23 |
+| cpdf | 81.99% | 80.54% | 89.0% | 857 | 14 | 17 | 17 | 748 |
+| pdfsizeopt | 84.88% | 86.71% | 81.0% | 772 | 39 | 78 | 1,789 | 469 |
+| mutool | 91.21% | 90.16% | 94.6% | 821 | 1 | 30 | 7.5 | 14 |
+| Ghostscript | 89.52% | 91.66% | 100.0% | 114 | 2 | 643 | 68 | 77 |
+
+- Every output was compared with its original by qpdf 12.4.2, object by object, and by drawing every page in
+  PDFium, Poppler 24.02 and pdf.js (one file's check could not finish, below). An output counts as made smaller
+  when it is smaller, opens, checks no worse in qpdf than the original, each of the three renderers that reads the
+  original draws every page with the same pixels and text, and no content or security is lost; every other output,
+  and every file a tool failed on, counts at the original's size. One allowance: a page that one renderer alone
+  draws differently counts as the same when at most 0.5% of its pixels differ, no channel by more than 96 of 255,
+  on at most 24 pages (73 credited outputs in the table, 149 over the other tools' 14 settings, none of gpress's).
+  "Wrong outputs" came out broken, look different, or lost content or security. The median file is the middle of
+  the files' own output-to-input ratios.
+- The 730 files are all 907 but the 173 gpress declines (106 damaged or unusual, 40 PDF/A, PDF/X or signed, 17
+  whose earlier saves it cannot safely drop, 10 encrypted) and the 4 where it keeps a stream that decodes to more
+  than 64 MiB as it is. The 695 files are those every other tool finished and every gpress setting made smaller
+  or found nothing to gain in; competitors' times on all the files they finished include work gpress skips.
+- On all four cores, its default, gpress at effort 40 gives the same outputs; on the 695 files it took 635 s of
+  CPU and 232 s of wall time, at a peak of 240 MiB. With `--max-stream 1073741824` its peak on all 907 files is
+  439 MiB (pdfjs/issue19517.pdf).
+- The machine's speed drifted by up to 42% during the run (calibrations of `xz -9e` on 4 MiB from 2.098 to 2.988
+  s); every setting was timed on a file before the next file, so all were affected about alike.
+- pdfjs/bomb_giant.pdf makes Poppler write over 1 GB of messages, and the check stops a renderer at 1 GiB: the
+  outputs that keep its large stream (gpress's, qpdf's, cpdf's and three of mutool's five settings') count
+  unchecked, at the original's size.
+- Of the two engine changes on `main` since 2d3bf64, #58 gives the same bytes on the 907 files at efforts 0, 20,
+  40 and 100, and #61 at 0, 40 and 100. At 20, #61 changes one file,
+  pypdf-samples/007-imagemagick-images__imagemagick-images.pdf: effort 20's one wrong output in the table, an
+  image Poppler 24.02 misread. Its output is now 7,966 bytes (7,964 before), and Poppler draws it as it draws the
+  original.
 
 ## Archive format version 9
 
@@ -486,8 +652,31 @@ With every part built in, this work (the features, and the memory changes of L3)
 to each build: 3,961 bytes to the module and 6,498 to the tool. The web module is 327,793 bytes (31.6%)
 smaller than the whole one, 115,366 bytes (30.1%) of gzip; the next section says where the bytes go.
 
-The target for the web module is 400 KB gzip (400,000 bytes): at 267,937 bytes it is 132,063 bytes (33%) under
-it, and the whole module is 16,697 bytes under it. Built at opt-level "s", before the choice below, the web
+Recorded again on 2026-11-15 for the lossy image step (efforts 60, 80 and 100), which brings a JPEG decoder
+and encoder into the `jpeg` part, with main 0e3e252 merged in, with rustc 1.100.0 and wasm-opt 108. "Before" is
+the record above (rustc 1.99.1, 2026-10-22). The other two sets were not measured again. Main's own record of the
+web set at 0e3e252 is 817,192 bytes, 312,475 of gzip (rustc 1.100.0, wasm-opt 120): this work adds about 46,600
+bytes of gzip to it (14.9%). CI builds with wasm-opt 120, which on 8d75f98 made the web module 84 bytes of gzip
+larger than wasm-opt 108 does here.
+
+| Build | Feature set | Raw bytes | Gzip bytes | Before: raw, gzip | Gzip change |
+| --- | --- | ---: | ---: | ---: | ---: |
+| WebAssembly module | web | 936,595 | 359,089 | 710,751, 267,937 | +34.0% |
+| WebAssembly module | default | 1,282,155 | 482,899 | 1,038,544, 383,303 | +26.0% |
+| Native tool `gpress` | web | 1,870,368 | 839,665 | 1,508,088, 675,533 | +24.3% |
+| Native tool `gpress` | default | 2,501,088 | 1,109,400 | 2,112,816, 936,953 | +18.4% |
+| C library, shared (`libgpress_c.so`) | web | 1,736,384 | 779,786 | 1,379,032, 617,707 | +26.2% |
+| C library, shared (`libgpress_c.so`) | default | 2,309,008 | 1,024,563 | 1,927,608, 853,947 | +20.0% |
+| C library, static (`libgpress_c.a`) | web | 10,984,796 | 2,402,158 | 9,846,120, 2,095,285 | +14.6% |
+| C library, static (`libgpress_c.a`) | default | 11,842,628 | 2,669,464 | 10,769,696, 2,367,811 | +12.7% |
+
+Main at 2bca97c, the code this step was added to, built the same day with the same tools: the web module is
+714,485 bytes, 270,187 of gzip, and the whole module 1,046,990, 385,927 of gzip. So the step costs the web
+module 45,488 bytes of gzip (16.8%) and the whole module 46,527 (12.1%).
+
+The target for the web module is 1 MB gzip (1,000,000 bytes; 400,000 until 2026-11-15): at 359,089 bytes it is
+640,911 bytes (64%) under it (267,937 bytes and 732,063 under in the record above). The whole module has no
+budget (482,899 bytes; 383,303 in the record above). Built at opt-level "s", before the choice below, the web
 module was 185,288 bytes of gzip (on f34ba33, before main's later changes): opt-level 3 added 24% there.
 Lepton adds 135,910 bytes of gzip to the module with every part. The static library carries Rust's standard
 library whole, so it is far larger than what a program linked with it gets. The module grows with main: the
@@ -496,16 +685,17 @@ whole module was 305,524 bytes of gzip at d093ab4, the archive model (#3) added 
 with main's normal-PDF code the same way: it was 229,312 bytes of gzip on main at dcd8a8b with this work.
 
 The budget: CI's WebAssembly job runs `python3 -I bench/sizes.py check`, which builds the web module as the
-package does and fails when its gzip size is more than 5% over the recorded one (281,333 bytes today) or over
-400,000 bytes. A growth that is wanted is recorded with `measure --features web`. When the module is more than
-5% under the record (under 254,540 bytes today), the check passes with a warning to record the new size, since
+package does and fails when its gzip size is more than 5% over the recorded one (377,043 bytes today) or over
+1,000,000 bytes. A growth that is wanted is recorded with `measure --features web`. When the module is more than
+5% under the record (under 341,134 bytes today), the check passes with a warning to record the new size, since
 the 5% is counted from the record and would otherwise allow more. The whole module (`dist/gpress.wasm`) has no
 budget of its own; `measure --features default` records it with the other sets.
 
 ### What each feature costs
 
 The builds of the Sizes table (the module as the package builds it, the native tool with the release profile;
-gzip level 9) for each set of parts:
+gzip level 9) for each set of parts, as recorded on 2026-10-22: before the lossy image step, whose JPEG decoder
+and encoder are in the `jpeg` part, so that part costs more today than this table says.
 
 | Build | Module raw | Module gzip | Tool raw | Tool gzip |
 | --- | ---: | ---: | ---: | ---: |
@@ -549,7 +739,7 @@ some code is there only with two parts: the archive's fax parts and its decrypte
   the other two are left untouched in every build (one needs a password, one has a handler the engine doesn't
   take). On this sample it costs far more than it saves. It stays in the default and in `web`: without it an
   encrypted file the engine can rewrite is left untouched, so the web compressor would give a different
-  answer from the native tool for those files, and the web module is 33% under its budget with it.
+  answer from the native tool for those files, and the web module is 73% under its budget with it.
 - `archive` is most of the difference between the two modules (115,366 bytes of gzip), and Lepton (`existing`,
   135,910 bytes) would cost more than the three normal-PDF parts together (94,407); neither is in `web`.
 

@@ -10,6 +10,7 @@ pub mod inflate;
 pub mod lz;
 pub mod matcher;
 pub mod parse;
+pub mod rules;
 pub mod tables;
 pub mod zlib;
 // The exact re-creation of zlib's own streams, which only the archive uses.
@@ -18,6 +19,142 @@ pub mod zlibexact;
 
 pub use deflate::{deflate, deflate_zlib, Options};
 pub use inflate::{inflate, InflateError};
+pub use rules::FlateRules;
+
+#[cfg(test)]
+pub(crate) mod poppler {
+    use super::{huffman, tables};
+
+    /// Raw Deflate data read as Poppler 24.02's FlateStream reads it: before each Huffman code it fetches whole
+    /// bytes until it holds the table's longest code length, and a stored block's length comes straight from the
+    /// input, after the bits it holds are dropped. Also the number of empty fixed blocks just before a stored
+    /// one. None where Poppler would fail or read other data.
+    pub fn read(src: &[u8]) -> Option<(Vec<u8>, usize)> {
+        struct R<'a> {
+            src: &'a [u8],
+            pos: usize,
+            buf: u64,
+            size: u32,
+        }
+        impl R<'_> {
+            fn byte(&mut self) -> Option<u8> {
+                let b = *self.src.get(self.pos)?;
+                self.pos += 1;
+                Some(b)
+            }
+            fn bits(&mut self, n: u32) -> Option<u32> {
+                while self.size < n {
+                    let c = self.byte()?;
+                    self.buf |= (c as u64) << self.size;
+                    self.size += 8;
+                }
+                let v = (self.buf & ((1 << n) - 1)) as u32;
+                self.buf >>= n;
+                self.size -= n;
+                Some(v)
+            }
+            fn code(&mut self, t: &Table) -> Option<usize> {
+                let longest = t.0;
+                while self.size < longest {
+                    match self.byte() {
+                        Some(c) => {
+                            self.buf |= (c as u64) << self.size;
+                            self.size += 8;
+                        }
+                        None => break,
+                    }
+                }
+                // `canonical_codes` gives the codes bit-reversed, as they lie in the input.
+                for len in 1..=longest.min(self.size) {
+                    if let Some(&sym) = t.1.get(&(len, (self.buf & ((1 << len) - 1)) as u32)) {
+                        self.buf >>= len;
+                        self.size -= len;
+                        return Some(sym);
+                    }
+                }
+                None
+            }
+        }
+        /// The longest code length, and each symbol by its (length, code).
+        struct Table(u32, std::collections::HashMap<(u32, u32), usize>);
+        fn table(lengths: &[u8]) -> Table {
+            let codes = huffman::canonical_codes(lengths);
+            let map = (0..lengths.len())
+                .filter(|&s| lengths[s] > 0)
+                .map(|s| ((lengths[s] as u32, codes[s] as u32), s))
+                .collect();
+            Table(lengths.iter().copied().max().unwrap_or(0) as u32, map)
+        }
+        let mut r = R { src, pos: 0, buf: 0, size: 0 };
+        let (mut out, mut empty_fixed, mut run) = (Vec::new(), 0, 0);
+        loop {
+            let last = r.bits(1)?;
+            let kind = r.bits(2)?;
+            let (ll, d) = match kind {
+                0 => {
+                    let mut len = [0u16; 2];
+                    for v in &mut len {
+                        *v = r.byte()? as u16 | (r.byte()? as u16) << 8;
+                    }
+                    if len[1] != !len[0] {
+                        return None;
+                    }
+                    r.buf = 0;
+                    r.size = 0;
+                    for _ in 0..len[0] {
+                        out.push(r.byte()?);
+                    }
+                    empty_fixed += run;
+                    run = 0;
+                    if last == 1 {
+                        return Some((out, empty_fixed));
+                    }
+                    continue;
+                }
+                1 => (table(&tables::fixed_litlen_lengths()), table(&tables::fixed_dist_lengths())),
+                2 => {
+                    let (hlit, hdist, hclen) = (r.bits(5)? as usize + 257, r.bits(5)? as usize + 1, r.bits(4)? + 4);
+                    let mut cl = [0u8; 19];
+                    for &s in tables::CL_ORDER.iter().take(hclen as usize) {
+                        cl[s] = r.bits(3)? as u8;
+                    }
+                    let cl = table(&cl);
+                    let mut l = Vec::new();
+                    while l.len() < hlit + hdist {
+                        match r.code(&cl)? {
+                            s @ 0..=15 => l.push(s as u8),
+                            16 => l.extend(std::iter::repeat_n(*l.last()?, 3 + r.bits(2)? as usize)),
+                            17 => l.extend(std::iter::repeat_n(0, 3 + r.bits(3)? as usize)),
+                            _ => l.extend(std::iter::repeat_n(0, 11 + r.bits(7)? as usize)),
+                        }
+                    }
+                    (table(&l[..hlit]), table(&l[hlit..hlit + hdist]))
+                }
+                _ => return None,
+            };
+            let start = out.len();
+            loop {
+                match r.code(&ll)? {
+                    s @ 0..=255 => out.push(s as u8),
+                    256 => break,
+                    s => {
+                        let c = s - 257;
+                        let len = tables::LEN_BASE[c] as usize + r.bits(tables::LEN_EXTRA[c] as u32)? as usize;
+                        let k = r.code(&d)?;
+                        let dist = tables::DIST_BASE[k] as usize + r.bits(tables::DIST_EXTRA[k] as u32)? as usize;
+                        for _ in 0..len {
+                            out.push(out[out.len().checked_sub(dist)?]);
+                        }
+                    }
+                }
+            }
+            run = if out.len() == start && kind == 1 { run + 1 } else { 0 };
+            if last == 1 {
+                return Some((out, empty_fixed));
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -69,6 +206,7 @@ mod tests {
                 shared: None,
                 deadline: crate::clock::Deadline::NONE,
                 fast: 0,
+                rules: FlateRules::default(),
             },
         ] {
             for d in samples() {
@@ -76,6 +214,30 @@ mod tests {
                 let back = inflate(&z, 1 << 30).expect("decodes");
                 assert_eq!(back.data, d, "length {}", d.len());
                 assert_eq!(back.consumed, z.len());
+            }
+        }
+    }
+
+    #[test]
+    fn poppler_reads_what_the_encoders_write() {
+        // Text and random bytes in turn, so that stored blocks can follow Huffman-coded ones. None of these needs
+        // the empty fixed block: the block and fast tests make streams that do.
+        let mut s = 7u64;
+        let text = b"BT /F1 12 Tf 72 712 Td [(Hello)-250(World)]TJ ET q 0.5 0 0 0.5 0 0 cm /Im1 Do Q\n";
+        for n in 0..40 {
+            let mut d = Vec::new();
+            while d.len() < 30_000 {
+                let len = 200 + (rng(&mut s) % 3000) as usize;
+                if rng(&mut s).is_multiple_of(2) {
+                    d.extend(text.iter().cycle().take(len));
+                } else {
+                    d.extend((0..len).map(|_| (rng(&mut s) >> 11) as u8));
+                }
+            }
+            for effort in [0, 20, 40] {
+                let z = deflate(&d, &Options::effort(effort));
+                let (back, _) = poppler::read(&z).unwrap_or_else(|| panic!("sample {n}, effort {effort}"));
+                assert!(back == d, "sample {n}, effort {effort}: other data");
             }
         }
     }
@@ -97,6 +259,9 @@ mod threads {
     use super::*;
     use crate::par::{self, Pool};
     use std::time::Duration;
+
+    /// The default of the rule `remember_up_to`.
+    const REMEMBER_UP_TO: usize = FlateRules::RULES[FlateRules::at("remember_up_to")].1 as usize;
 
     #[test]
     fn segments_in_parallel_give_the_same_bytes() {
@@ -237,7 +402,7 @@ mod threads {
     #[test]
     fn big_inputs_skip_the_store() {
         let mut s = 11u64;
-        let noise: Vec<u8> = (0..deflate::REMEMBER_UP_TO + 1)
+        let noise: Vec<u8> = (0..REMEMBER_UP_TO + 1)
             .map(|_| {
                 s ^= s << 13;
                 s ^= s >> 7;
@@ -252,7 +417,7 @@ mod threads {
         }
         assert_eq!(store.stats(), deflate::StoreStats::default());
         // An input of REMEMBER_UP_TO bytes is remembered, unless it is more than one segment.
-        let last = &noise[..deflate::REMEMBER_UP_TO];
+        let last = &noise[..REMEMBER_UP_TO];
         assert!(deflate_zlib(last, &o) == deflate_zlib(last, &o));
         assert_eq!((store.stats().hits, store.stats().computed), (1, 1));
         let o = Options { segment: 100_000, ..o };

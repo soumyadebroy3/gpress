@@ -6,13 +6,19 @@
 //! an operation, reads the output through `gpress_out_ptr()` / `gpress_out_len()` (the module keeps one
 //! result at a time), then frees both with `gpress_free_input` / `gpress_clear_out`. Operations return
 //! 0 on success or a gpress error code; `gpress_message_*` give the text (also the "untouched because"
-//! reason). The engine reads no clock here (so there is no time budget: the host bounds the work by
-//! running it in a worker).
+//! reason). After `gpress_optimize_to_size`, `gpress_outcome()` also carries the effort that made the output
+//! (bits 8 to 15) and whether it reached the target (bit 16). The engine reads no clock here (so there is no
+//! time budget: the host bounds the work by running it in a worker).
 //!
 //! Features: the module may be built without parts of the engine (the crate's Cargo features; the npm
 //! package ships the whole module and the web one, without the archive). `gpress_features` gives the parts it
 //! has as bits, and after a call that returned 10 (a part it leaves out) `gpress_needed_feature` gives that
 //! part's bit; the wrapper turns the pair into a `GpressFeatureError` naming the part.
+//!
+//! Rules (the engine's tuning values, `gpress::Options::set_rule`) are not arguments: `gpress_rule` sets one
+//! for the calls that follow, by its place in the list of all rules (`gpress_rule_count`, `gpress_rule_name`
+//! and `gpress_rule_name_len` give that list), and `gpress_rules_reset` gives every rule its default again.
+//! The wrapper reads the names once and sets a call's rules before each operation.
 //!
 //! Panics: `wasm32-unknown-unknown` builds with `panic = "abort"`, so there is no unwinding and the panic
 //! guards here and in the library catch nothing. A bug in the engine therefore traps the module
@@ -34,6 +40,10 @@ thread_local! {
     static MSG: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static OUTCOME: RefCell<i32> = const { RefCell::new(0) };
     static NEEDED: RefCell<u32> = const { RefCell::new(0) };
+    /// Every rule's full name, in the order of `gpress::Options::rules()`: a rule's index is its place here.
+    static NAMES: Vec<String> = gpress::Options::rules().into_iter().map(|r| r.0).collect();
+    /// The rules `gpress_rule` set, index and value: only values the library takes.
+    static RULES: RefCell<Vec<(u32, u64)>> = const { RefCell::new(Vec::new()) };
 }
 
 fn set_out(v: Vec<u8>) {
@@ -49,7 +59,8 @@ fn set_needed(bit: u32) {
     NEEDED.with(|n| *n.borrow_mut() = bit);
 }
 
-/// Switches in the `flags` argument: a set bit turns the step off (the defaults are all on).
+/// Switches in the `flags` argument: a set bit turns the step off (the defaults are all on), except
+/// `FLAG_ENGINE_EFFORT`, which makes `effort` the engine's own level.
 pub const FLAG_IGNORE_CONFORMANCE: u32 = 1;
 pub const FLAG_NO_FLATE_OVER_JPEG: u32 = 2;
 pub const FLAG_NO_EXISTING_LIBRARIES: u32 = 4;
@@ -57,6 +68,10 @@ pub const FLAG_NO_JPEG_TABLES: u32 = 8;
 pub const FLAG_NO_JBIG2: u32 = 16;
 pub const FLAG_KEEP_ENCRYPTED: u32 = 32;
 pub const FLAG_NO_DECRYPT: u32 = 64;
+pub const FLAG_NO_PALETTE: u32 = 128;
+/// For measuring: the `effort` argument is the engine's own lossless level, and nothing is lossy unless a
+/// lossy override is set.
+pub const FLAG_ENGINE_EFFORT: u32 = 256;
 
 /// A size given in MiB, or the default for 0, clamped to what this module can address.
 fn mib(v: u32, default: usize) -> usize {
@@ -68,7 +83,11 @@ fn mib(v: u32, default: usize) -> usize {
 }
 
 fn options(effort: u32, max_input_mb: u32, max_stream_mb: u32, objects_per_stream: u32, flags: u32) -> gpress::Options {
-    let mut o = gpress::Options::default().effort(effort.min(100) as u8).threads(1);
+    let level = effort.min(100) as u8;
+    let mut o = gpress::Options::default().effort(level).threads(1);
+    if flags & FLAG_ENGINE_EFFORT != 0 {
+        o.engine_effort = Some(level);
+    }
     o.max_input = mib(max_input_mb, o.max_input);
     o.max_stream = mib(max_stream_mb, o.max_stream);
     o.max_stream_archive = mib(max_stream_mb, o.max_stream_archive);
@@ -80,8 +99,13 @@ fn options(effort: u32, max_input_mb: u32, max_stream_mb: u32, objects_per_strea
     o.use_existing_libraries = flags & FLAG_NO_EXISTING_LIBRARIES == 0;
     o.jpeg_tables = flags & FLAG_NO_JPEG_TABLES == 0;
     o.jbig2 = flags & FLAG_NO_JBIG2 == 0;
+    o.palette = flags & FLAG_NO_PALETTE == 0;
     o.rewrite_encrypted = flags & FLAG_KEEP_ENCRYPTED == 0;
     o.decrypt = flags & FLAG_NO_DECRYPT == 0;
+    // `gpress_rule` kept only what the library takes, so every one of these is set.
+    for &(index, value) in RULES.with(|r| r.borrow().clone()).iter() {
+        let _ = NAMES.with(|n| o.set_rule(&n[index as usize], value));
+    }
     o
 }
 
@@ -121,6 +145,50 @@ fn run(f: impl FnOnce() -> Result<(Vec<u8>, i32, String), gpress::Error>) -> i32
     }
 }
 
+/// How many rules there are. A rule's index is its place in `gpress::Options::rules()`.
+#[no_mangle]
+pub extern "C" fn gpress_rule_count() -> u32 {
+    NAMES.with(|n| n.len() as u32)
+}
+
+/// Where the full name of rule `index` is, in the module's own memory for as long as the module lives
+/// (`gpress_rule_name_len` bytes of UTF-8); null past the last rule.
+#[no_mangle]
+pub extern "C" fn gpress_rule_name(index: u32) -> *const u8 {
+    NAMES.with(|n| n.get(index as usize).map_or(std::ptr::null(), |name| name.as_ptr()))
+}
+
+/// The length of the name of rule `index` in bytes; 0 past the last rule.
+#[no_mangle]
+pub extern "C" fn gpress_rule_name_len(index: u32) -> usize {
+    NAMES.with(|n| n.get(index as usize).map_or(0, |name| name.len()))
+}
+
+/// Sets rule `index` for every call after it, until `gpress_rules_reset`, to the value `low + high * 2^32` (a
+/// value comes in halves because the host's numbers are not 64-bit integers). Returns 0, or 5 with a message
+/// for an index past the last rule or a value outside the rule's range; the rule keeps what it had then.
+#[no_mangle]
+pub extern "C" fn gpress_rule(index: u32, low: u32, high: u32) -> i32 {
+    let value = (high as u64) << 32 | low as u64;
+    let checked = match NAMES.with(|n| n.get(index as usize).cloned()) {
+        Some(name) => gpress::Options::default().set_rule(&name, value),
+        None => Err(gpress::Error::InvalidOptions(format!("there is no rule number {index}"))),
+    };
+    if checked.is_ok() {
+        RULES.with(|r| {
+            r.borrow_mut().retain(|set| set.0 != index);
+            r.borrow_mut().push((index, value));
+        });
+    }
+    run(|| checked.map(|()| (Vec::new(), 0, String::new())))
+}
+
+/// Gives every rule its default again.
+#[no_mangle]
+pub extern "C" fn gpress_rules_reset() {
+    RULES.with(|r| r.borrow_mut().clear());
+}
+
 /// Allocates `len` bytes for the host to write the input into. Returns null when the allocation fails.
 #[no_mangle]
 pub extern "C" fn gpress_alloc(len: usize) -> *mut u8 {
@@ -145,10 +213,23 @@ pub unsafe extern "C" fn gpress_free_input(ptr: *mut u8, len: usize) {
     }
 }
 
-/// A smaller PDF (outcome 1) or the input untouched (outcome 2, message says why).
+/// An optimize result as `run` takes it: outcome 1 for a smaller PDF, 2 for the input untouched (the message
+/// says why).
+fn optimized(r: gpress::Optimized) -> (Vec<u8>, i32, String) {
+    match r.outcome {
+        gpress::Outcome::Smaller(_) => (r.data, 1, String::new()),
+        gpress::Outcome::Untouched(why) => (r.data, 2, why),
+    }
+}
+
+/// A smaller PDF (outcome 1) or the input untouched (outcome 2, message says why). `photo_ppi`, `art_ppi`
+/// and `jpeg_quality` are the lossy overrides: 0 (or left out by a JavaScript caller) is what the effort says.
+/// `store_budget_mb` is `store_budget` in MiB (0 or left out: the library's default).
 ///
 /// # Safety
 /// See `input`.
+// The flat argument list is the module's calling convention: a JavaScript caller leaves the last ones out.
+#[allow(clippy::too_many_arguments)]
 #[no_mangle]
 pub unsafe extern "C" fn gpress_optimize(
     ptr: *const u8,
@@ -158,15 +239,47 @@ pub unsafe extern "C" fn gpress_optimize(
     max_stream_mb: u32,
     objects_per_stream: u32,
     flags: u32,
+    photo_ppi: u32,
+    art_ppi: u32,
+    jpeg_quality: u32,
+    store_budget_mb: u32,
 ) -> i32 {
     let data = input(ptr, len);
-    let opt = options(effort, max_input_mb, max_stream_mb, objects_per_stream, flags);
+    let mut opt = options(effort, max_input_mb, max_stream_mb, objects_per_stream, flags).lossy_overrides(
+        photo_ppi.min(u16::MAX as u32) as u16,
+        art_ppi.min(u16::MAX as u32) as u16,
+        jpeg_quality.min(u8::MAX as u32) as u8,
+    );
+    opt.store_budget = mib(store_budget_mb, opt.store_budget);
+    run(|| Ok(optimized(gpress::optimize(data, &opt)?)))
+}
+
+/// A PDF of at most `target` bytes at the lowest effort that reaches it, or the smallest of the six efforts
+/// (`gpress::optimize_to_size`). The outcome is `gpress_optimize`'s (1 or 2) with the effort that made the
+/// output in bits 8 to 15 and bit 16 set when it reached the target. `FLAG_ENGINE_EFFORT` is refused (code 5).
+/// `store_budget_mb` as in `gpress_optimize`.
+///
+/// # Safety
+/// See `input`.
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn gpress_optimize_to_size(
+    ptr: *const u8,
+    len: usize,
+    target: u32,
+    max_input_mb: u32,
+    max_stream_mb: u32,
+    objects_per_stream: u32,
+    flags: u32,
+    store_budget_mb: u32,
+) -> i32 {
+    let data = input(ptr, len);
+    let mut opt = options(0, max_input_mb, max_stream_mb, objects_per_stream, flags);
+    opt.store_budget = mib(store_budget_mb, opt.store_budget);
     run(|| {
-        let r = gpress::optimize(data, &opt)?;
-        Ok(match r.outcome {
-            gpress::Outcome::Smaller(_) => (r.data, 1, String::new()),
-            gpress::Outcome::Untouched(why) => (r.data, 2, why),
-        })
+        let p = gpress::optimize_to_size(data, target as u64, &opt)?;
+        let (data, outcome, msg) = optimized(p.result);
+        Ok((data, outcome | (p.effort.level() as i32) << 8 | (p.reached as i32) << 16, msg))
     })
 }
 
@@ -179,8 +292,9 @@ fn budget(v: u32, default: u64) -> u64 {
     }
 }
 
-/// The gpress archive (outcome 1, or 2 when it had to be stored as it was). `max_decoded_mb` is the
-/// archive's decoded-bytes budget (0 = the library's default): streams past it are stored as they are.
+/// The gpress archive (outcome 1, or 2 when it had to be stored as it was). `max_stream_mb` is the archive's
+/// stream limit (`max_stream_archive`) and `max_decoded_mb` its decoded-bytes budget (0 = the library's
+/// default for either): streams past them are stored as they are.
 ///
 /// # Safety
 /// See `input`.
@@ -257,7 +371,8 @@ pub extern "C" fn gpress_version_number() -> u32 {
     let (a, b, c) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0));
     a * 1_000_000 + b * 1000 + c
 }
-/// The archive format version this module writes and reads, 0 for a module without the archive.
+/// The archive format version this module writes and reads (it reads the next one too, which carries changed
+/// archive rules), 0 for a module without the archive.
 #[no_mangle]
 pub extern "C" fn gpress_archive_version() -> u32 {
     if gpress::Feature::Archive.enabled() {
@@ -327,9 +442,16 @@ mod tests {
             // Not a PDF: untouched with a reason.
             let r = gpress_alloc(5);
             std::ptr::copy_nonoverlapping(b"hello".as_ptr(), r, 5);
-            assert_eq!(gpress_optimize(r, 5, 100, 0, 0, 0, FLAG_NO_JBIG2 | FLAG_IGNORE_CONFORMANCE), 0);
+            assert_eq!(gpress_optimize(r, 5, 100, 0, 0, 0, FLAG_NO_JBIG2 | FLAG_IGNORE_CONFORMANCE, 0, 0, 0, 0), 0);
             assert_eq!(gpress_outcome(), 2);
             assert!(gpress_message_len() > 0);
+            // A target size: the outcome also carries the effort picked and whether the target was reached.
+            // Five bytes fit in five (effort 0, the first tried) and never in four (the smallest of the six).
+            assert_eq!(gpress_optimize_to_size(r, 5, 5, 0, 0, 0, 0, 0), 0);
+            assert_eq!(gpress_outcome(), 2 | 1 << 16);
+            assert_eq!(gpress_optimize_to_size(r, 5, 4, 0, 0, 0, 0, 0), 0);
+            assert_eq!((gpress_outcome() & 0xff, gpress_outcome() >> 16, gpress_out_len()), (2, 0, 5));
+            assert_eq!(gpress_optimize_to_size(r, 5, 5, 0, 0, 0, FLAG_ENGINE_EFFORT, 0), 5);
             gpress_free_input(r, 5);
         }
         assert_eq!(gpress_archive_version(), 9);
@@ -339,16 +461,44 @@ mod tests {
 
     #[test]
     fn the_flags_and_sizes_reach_the_options() {
-        let o = options(30, 3, 5, 9, FLAG_NO_JPEG_TABLES | FLAG_KEEP_ENCRYPTED | FLAG_NO_DECRYPT);
+        let o = options(30, 3, 5, 9, FLAG_NO_JPEG_TABLES | FLAG_KEEP_ENCRYPTED | FLAG_NO_DECRYPT | FLAG_NO_PALETTE);
         assert_eq!(
-            (o.effort.level(), o.max_input, o.max_stream, o.max_stream_archive),
-            (30, 3 << 20, 5 << 20, 5 << 20)
+            (o.effort.level(), o.engine_effort, o.max_input, o.max_stream, o.max_stream_archive),
+            (30, None, 3 << 20, 5 << 20, 5 << 20)
         );
+        assert_eq!(options(30, 0, 0, 0, FLAG_ENGINE_EFFORT).engine_effort, Some(30));
         assert_eq!(o.objects_per_stream, 9);
-        assert!(!o.jpeg_tables && !o.rewrite_encrypted && !o.decrypt);
+        assert!(!o.jpeg_tables && !o.rewrite_encrypted && !o.decrypt && !o.palette);
         assert!(o.jbig2 && o.respect_conformance && o.flate_over_jpeg && o.use_existing_libraries);
-        let d = options(100, 0, 0, 0, 0);
+        let default = gpress::Effort::default().level();
+        let d = options(default as u32, 0, 0, 0, 0);
         assert_eq!(d, gpress::Options::default().threads(1));
+        // The wrapper's copies of the default effort and of the flag are the module's.
+        let ts = include_str!("../js/gpress.ts");
+        assert!(ts.contains(&format!("options.effort ?? {default},")));
+        assert!(ts.contains(&format!("const FLAG_ENGINE_EFFORT = {FLAG_ENGINE_EFFORT};")));
+        // The module lists every rule, by the library's names in the library's order.
+        let all = gpress::Options::rules();
+        assert_eq!(gpress_rule_count() as usize, all.len());
+        for (i, r) in all.iter().enumerate() {
+            assert!(!gpress_rule_name(i as u32).is_null() && gpress_rule_name_len(i as u32) == r.0.len(), "{}", r.0);
+        }
+        assert!(gpress_rule_name(all.len() as u32).is_null() && gpress_rule_name_len(all.len() as u32) == 0);
+        // A rule set by its place reaches the options and stays until the reset; what the library refuses
+        // (a value outside the range, here one that needs the high half; an index past the end) gives 5 and
+        // changes nothing.
+        let (a, b) = (&all[0], &all[1]);
+        let set = |index: usize, value: u64| gpress_rule(index as u32, value as u32, (value >> 32) as u32);
+        assert_eq!((set(0, a.2), set(0, a.3), set(1, b.2)), (0, 0, 0));
+        let o = options(60, 0, 0, 0, 0);
+        assert_eq!((o.rule(&a.0), o.rule(&b.0), options(60, 0, 0, 0, 0) == o), (Some(a.3), Some(b.2), true));
+        for (index, value) in [(0, a.3 + (1 << 32)), (1, b.3 + 1), (all.len(), 1)] {
+            assert_eq!(set(index, value), 5);
+            assert!(gpress_message_len() > 0);
+            assert_eq!(options(60, 0, 0, 0, 0), o);
+        }
+        gpress_rules_reset();
+        assert_eq!(options(default as u32, 0, 0, 0, 0), d);
         // A size past the module's address space is clamped, never wrapped; a budget is a u64 everywhere.
         assert_eq!(mib(u32::MAX, 0), usize::try_from((u32::MAX as u64) << 20).unwrap_or(usize::MAX));
         assert_eq!(budget(u32::MAX, 0), (u32::MAX as u64) << 20);

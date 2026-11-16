@@ -306,3 +306,58 @@ fn unencrypted_files_with_a_raw_carriage_return_in_a_string_are_left_untouched()
         assert_eq!(matches!(r.outcome, Outcome::Untouched(_)), untouched, "{}", String::from_utf8_lossy(title));
     }
 }
+
+/// The fixture `name` with an update that writes object `n` again as `body`. Returns the first save's length too.
+fn updated(name: &str, n: u32, body: &[u8]) -> (Vec<u8>, usize) {
+    let mut input = file(name);
+    let first = input.len();
+    let t = find(&input, b"trailer << ").unwrap() + 11;
+    let trailer = String::from_utf8(input[t..t + find(&input[t..], b" >>\nstartxref\n").unwrap()].to_vec()).unwrap();
+    let p = find(&input, b"startxref\n").unwrap() + 10;
+    let prev = String::from_utf8(input[p..p + find(&input[p..], b"\n").unwrap()].to_vec()).unwrap();
+    let at = input.len();
+    input.extend_from_slice(&[format!("{n} 0 obj\n").as_bytes(), body, b"\nendobj\n"].concat());
+    let x = input.len();
+    let table =
+        format!("xref\n{n} 1\n{at:010} 00000 n \ntrailer << {trailer} /Prev {prev} >>\nstartxref\n{x}\n%%EOF\n");
+    input.extend_from_slice(table.as_bytes());
+    (input, first)
+}
+
+#[test]
+fn an_update_to_an_encrypted_file_is_written_as_its_newest_save_with_the_same_encryption() {
+    // The update writes the pages object (4) again with one more entry: no string or stream, so nothing of it
+    // is encrypted.
+    for name in ["r3_rc4_128", "r4_aes_128"] {
+        let (input, _) = updated(name, 4, b"<< /Count 1 /Kids [ 5 0 R ] /Type /Pages /Rotate 0 >>");
+        newest_alone(&input, name);
+    }
+}
+
+/// `input`, a file of two saves, is written as its newest save alone: it opens with the input's encryption and gives
+/// the input's objects, decrypted, and the same bytes on every run.
+fn newest_alone(input: &[u8], name: &str) {
+    let r = optimize(input, &opts());
+    let Outcome::Smaller(s) = &r.outcome else { panic!("{name}: {:?}", r.outcome) };
+    assert_eq!(s.history_dropped.len(), 1, "{name}");
+    assert_eq!(xref::saves(&r.data).unwrap().len(), 1, "{name}");
+    let (a, b) = (xref::open(input).unwrap(), xref::open(&r.data).unwrap());
+    assert!(matches!((&a.crypt, &b.crypt), (Some(Ok(ca)), Some(Ok(cb))) if ca == cb), "{name}");
+    assert_eq!(values(&a), values(&b), "{name}");
+    assert_eq!(optimize(input, &opts()).data, r.data, "{name}");
+}
+
+#[test]
+fn saves_that_differ_in_their_encryption_are_written_as_the_newest() {
+    // The update writes the encryption dictionary (10) again as object 11, and its trailer names that one.
+    let input = file("r4_aes_128");
+    let at = find(&input, b"\n10 0 obj\n").unwrap() + 10;
+    let dict = input[at..at + find(&input[at..], b"\nendobj").unwrap()].to_vec();
+    let (mut input, first) = updated("r4_aes_128", 11, &dict);
+    for (old, new) in [(&b"/Encrypt 10 0 R"[..], &b"/Encrypt 11 0 R"[..]), (b"/Size 11", b"/Size 12")] {
+        let at = first + find(&input[first..], old).unwrap();
+        input[at..at + old.len()].copy_from_slice(new);
+    }
+    // The earlier save is dropped: the output has the newest save's encryption alone.
+    newest_alone(&input, "r4_aes_128");
+}

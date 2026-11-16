@@ -3,7 +3,7 @@
 use crate::Feature;
 
 /// Never a new JPEG.
-pub fn optimize(_jpeg: &[u8]) -> Result<Vec<u8>, Feature> {
+pub fn optimize_with(_jpeg: &[u8], _min_saving: u64, _orders: u8) -> Result<Vec<u8>, Feature> {
     Err(Feature::Jpeg)
 }
 
