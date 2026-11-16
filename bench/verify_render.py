@@ -101,7 +101,8 @@ def compare(orig, out):
             problems.append(f'pdf.js pages differ {diff[:5]}')
         if x['text'] != y['text']:
             problems.append('pdf.js text differs')
-    return {'file': orig, 'poppler_pages': len(a['pages']), 'pdfjs_pages': len(x.get('pages') or []),
+    # Pages pdf.js drew: one it could not draw (no canvas, say) is 'failed: ...' on both sides and compares equal.
+    return {'file': orig, 'poppler_pages': len(a['pages']), 'pdfjs_pages': sum(1 for p in x.get('pages') or [] if not p.startswith('failed')),
             'problems': problems, 'notes': notes, 'identical': not problems}
 
 def main():

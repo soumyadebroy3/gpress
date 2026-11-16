@@ -11,33 +11,37 @@ comment; nothing here needs GitHub, so the same commands work on any machine wit
     python3 -I bench/deep_check.py all      --base BIN --head BIN --out DIR   the three, then DIR/report.md
     python3 -I bench/deep_check.py selftest                                   plant each finding; it must be caught
 
-pdf      Both builds over every corpus file as a normal PDF: `benchmark.py time` at efforts 0, 50 and 100 with
-         one thread, the two builds at the same time. Then head once more with 4 threads (efforts 0 and 50):
+pdf      Both builds over every corpus file as a normal PDF: `benchmark.py time` at engine levels 0, 50 and 100
+         (lossless: benchmark.py passes --engine-effort, which leaves the lossy image step off) with one
+         thread, the two builds at the same time. Then head once more with 4 threads (levels 0 and 50):
          the bytes must be the same. Then every reader (qpdf --check, the object graph by value and PDFium in
          verify_pdf.py; Poppler and pdf.js in verify_render.py) on head's rewritten outputs whose bytes are not
          base's: the output is made again, must have the measured sha256, and is compared with the original.
-archive  Both builds over the 120-file sample as archives, efforts 0, 50 and 100, one thread: each archive is
+archive  Both builds over the 120-file sample as archives, engine levels 0, 50 and 100, one thread: each archive is
          unpacked and compared with its input byte for byte (benchmark.py does that for every row).
 hostile  bench/security.py on head: the damaged archives, the hostile PDFs (one thread, then the default
          thread count) and the suite's check of itself. The hostile PDFs also on base, for the cost of each
          file on both builds.
 
 Each part writes DIR/<part>.md (the report) and DIR/<part>.json (every row behind it, also printed as one line
-`DEEP-CHECK-JSON <part> {...}`), and exits 1 when it has a finding, 0 when it has none, 2 when it could not run.
+`DEEP-CHECK-JSON <part> {...}`), and exits 1 when it has a finding, 0 when it has none, 2 when it could not start
+(a missing build or corpus, a bad argument). A step that fails once started is a finding.
 
 A finding is something a script can decide and that does not depend on the machine: an output larger than
 base's, a file base rewrites that head leaves untouched or the other way round, an output that is no longer
 exact (it does not open, an untouched file is not the input, an archive does not restore), a file that
-fails on head only, other bytes with other thread counts, a reader that shows a changed output differently
-from the original, a failure in the hostile suite, a checking tool that is missing or does not work. Each
-needs a reviewer: some are the point of the change (a new refusal is a file "newly left untouched").
+fails on head only or fails another way, a setting in which no file works on head, other bytes with other
+thread counts, a reader that shows a changed output differently from the original, a failure in the hostile
+suite, a checking tool that is missing or does not work, a step that failed. Each needs a reviewer: some are
+the point of the change (a new refusal is a file "newly left untouched").
 Outputs that merely differ from base's are counted and listed, not findings. CPU time and peak memory are
 printed as `benchmark.py compare` gives them; on a shared machine they are an indication, not a verdict.
 
 A reader counts for a file only when it drew at least one page of the original. When a reader disagrees, the
 original is compared with itself once: what a reader says of the original against itself too is not about the
-output and is dropped, and the file is "unverified by" that reader; anything else it says stands. A reader that
-timed out or could not open the original leaves the file "unverified by" it as well.
+output and is dropped, and the file is "unverified by" that reader; anything else it says stands. verify_pdf.py
+timing out or failing counts the same way: on the output only, it is a problem; on the original too, the file is
+"unverified by" it.
 
 Needs what the benchmark needs (docs/tasks/README.md, step 2): the corpus ($CORPUS, bench/fetch_corpus.sh),
 qpdf, xz, brotli, zstd, a C compiler, jpegtran, Poppler, pikepdf, pypdfium2, Pillow, and pdf.js with
@@ -70,6 +74,7 @@ GROUPS = [
     ('rewritten', 'Newly rewritten (base leaves it untouched)', True),
     ('not_exact', 'No longer exact', True),
     ('failing', 'Fails on head only', True),
+    ('fails_otherwise', 'Fails on both, another way on head', True),
     ('missing', 'Not measured on head', True),
     ('reason', 'Untouched on both, for another reason', False),
     ('fixed', 'Works on head only', False),
@@ -78,9 +83,10 @@ GROUPS = [
 NOT_CHECKED = """#### Not checked here
 
 Files of shapes the corpus does not hold (new parsing code needs hand-built files), new hostile shapes beyond
-the suite's, the fuzzing in `bench/security.py`, the C library and the WebAssembly module (CI builds and tests
-both; their outputs are not compared with base's), archives of the files outside the 120-file sample, the cost
-of threads (CPU time with N threads against one), and whether the description's sentences are true."""
+the suite's, the lossy image step (efforts 60 to 100; the engine levels measured here are lossless), the
+fuzzing in `bench/security.py`, the C library and the WebAssembly module (CI builds and tests both; their
+outputs are not compared with base's), archives of the files outside the 120-file sample, the cost of threads
+(CPU time with N threads against one), and whether the description's sentences are true."""
 
 
 def say(msg):
@@ -93,6 +99,7 @@ def say(msg):
 def entry(group, f, x, y):
     why = {'left_untouched': y.get('details', ''), 'rewritten': 'base: ' + x.get('details', ''), 'not_exact': y.get('check', ''),
            'failing': f"{y.get('status')} {y.get('stderr', '')}"[:160].strip(),
+           'fails_otherwise': f"{x.get('status')} -> {y.get('status')} {y.get('stderr', '')}"[:160].strip(),
            'reason': f"{x.get('details', '')} -> {y.get('details', '')}"}.get(group, '')
     e = {'file': f, 'base': [x.get('status'), x.get('bytes_out')], 'head': [y.get('status'), y.get('bytes_out')], 'why': why}
     return dict(e, sha256=y.get('sha256')) if group == 'changed' else e
@@ -111,10 +118,14 @@ def judge(base, head):
         if not ok_y:
             if ok_x:
                 g['failing'].append(entry('failing', f, x, y))
+            elif x.get('status') != y.get('status'):
+                g['fails_otherwise'].append(entry('fails_otherwise', f, x, y))
             continue
         if not ok_x:
             g['fixed'].append(entry('fixed', f, x, y))
             g['changed'].append(entry('changed', f, x, y))
+            if not y.get('exact'):
+                g['not_exact'].append(entry('not_exact', f, x, y))
             continue
         if x.get('sha256') != y.get('sha256'):
             g['changed'].append(entry('changed', f, x, y))
@@ -128,7 +139,7 @@ def judge(base, head):
         if x.get('exact') and not y.get('exact'):
             g['not_exact'].append(entry('not_exact', f, x, y))
     both = [f for f in b if f in h and b[f].get('status') in WORKS and h[f].get('status') in WORKS]
-    return {'files': len(b), 'groups': g,
+    return {'files': len(b), 'works': sum(1 for r in h.values() if r.get('status') in WORKS), 'groups': g,
             'same': sum(1 for f in both if b[f].get('sha256') == h[f].get('sha256')),
             'counts': [dict(collections.Counter(r.get('status') for r in rows.values())) for rows in (b, h)],
             'bytes_out': [sum(rows[f].get('bytes_out', 0) for f in both) for rows in (b, h)]}
@@ -159,8 +170,9 @@ def readers(orig, out):
         p = subprocess.run([sys.executable, '-I', VERIFY_PDF, orig, out, '--pages', '30'], capture_output=True, text=True,
                            timeout=VERIFY_TIMEOUT, preexec_fn=limit_memory)
         v = json.loads(p.stdout.strip().splitlines()[-1])
-    except (subprocess.TimeoutExpired, ValueError, IndexError):
+    except (subprocess.TimeoutExpired, ValueError, IndexError):  # settle() drops it when the original does the same
         v = None
+        problems.append(['verify_pdf.py', 'timed out or gave no result'])
         unverified.update(('qpdf', 'objects', 'PDFium'))
     if v:
         if not (v['qpdf_check'] in (0, 3) or v['qpdf_check'] == v['qpdf_check_input']):
@@ -222,6 +234,9 @@ def read_one(engine, corpus, tmp, t):
 
 def control(corpus):
     """The readers must work before their silence means anything: each draws the control file and agrees with itself."""
+    missing = [t for t in ('qpdf', 'pdftoppm', 'pdftotext', 'node') if not shutil.which(t)]
+    if missing:
+        return [f'{t} is missing' for t in missing]
     src = os.path.join(corpus, CONTROL)
     res = readers(src, src)
     bad = [f'{k}: {s}' for k, s in res['problems']] + [f'{k} drew no page' for k in res['unverified']]
@@ -361,7 +376,8 @@ def part_hostile(a):
                         'skipped': rows[0].get('detail') if rows and rows[0].get('status') == 'skipped' else None}
     cost = [c for name in ('pdfs', 'threads0-pdfs') for c in costlier(read_tsv(os.path.join(runs['base'], name + '.tsv')), read_tsv(os.path.join(runs['head'], name + '.tsv')))]
     return {'part': 'hostile', 'errors': [f'security.py {m} on head ended with exit {rc}: see hostile.log' for m, side, rc in failed if side == 'head'],
-            'base_failed': [m for m, side, _ in failed if side == 'base'], 'tables': tables, 'costlier': cost, 'seconds': round(time.time() - t0)}
+            'base_failed': [m for m, side, _ in failed if side == 'base'], 'base_rows': len(read_tsv(os.path.join(runs['base'], 'pdfs.tsv'))),
+            'tables': tables, 'costlier': cost, 'seconds': round(time.time() - t0)}
 
 
 # ----------------------------------------------------------------------------------------------------
@@ -370,12 +386,13 @@ def part_hostile(a):
 def red(res):
     """The findings of a part, as short phrases; empty when there are none."""
     out = list(res.get('errors') or [])
-    if any(not s['files'] for s in (res.get('settings') or {}).values()) or any(not t['rows'] for t in (res.get('tables') or {}).values()):
+    if any(not s['works'] for s in (res.get('settings') or {}).values()) or any(not t['rows'] for t in (res.get('tables') or {}).values()):
         out.append('a setting or a suite measured nothing')  # silence must not read as "no finding"
     names = dict((k, title) for k, title, _ in GROUPS)
     for k, n in findings(res.get('settings') or {}).items():
         if n:
             out.append(f'{n} x {names[k].lower()}')
+    out += [f'{len(t["failures"])} x failing in the hostile suite ({name})' for name, t in (res.get('tables') or {}).items() if t['failures']]
     out += [f'{len(t["differ"])} outputs differ with {THREADS_AGAIN} threads ({e})' for e, t in (res.get('threads') or {}).items() if t['differ']]
     if 'machine' in res and res['machine']['missing_tools']:
         out.append('checking tools missing: ' + ', '.join(res['machine']['missing_tools']))
@@ -390,7 +407,7 @@ def red(res):
 
 
 def cell(s):
-    return str(s).replace('|', '\\|').replace('\n', ' ')
+    return str(s).replace('|', '\\|').replace('\n', ' ').replace('<', '&lt;')  # text the build printed: no HTML
 
 
 def table(head, rows):
@@ -463,7 +480,8 @@ def render_pdf(res):
         r = rd['results']
         pages = {k: sum(x['pages'].get(k, 0) for x in r) for k in ('PDFium', 'Poppler', 'pdf.js')}
         L.append(f"Readers (qpdf --check, object graph, PDFium, Poppler, pdf.js) on {len(r)} of the {rd['changed']} distinct rewritten outputs that differ from base's: "
-                 f"{sum(1 for x in r if not x['problems'])} read the same as their originals, {sum(1 for x in r if x['problems'])} differently. "
+                 f"{sum(1 for x in r if not x['problems'] and not x['unverified'])} read the same as their originals by every reader, "
+                 f"{sum(1 for x in r if x['problems'])} differently, {sum(1 for x in r if x['unverified'] and not x['problems'])} not by every reader (below). "
                  f"Pages compared: {', '.join(f'{k} {v:,}' for k, v in pages.items())} (at most 30 per file). Outputs with base's bytes are not read again here.")
         bad = [x for x in r if x['problems']]
         if bad:
@@ -491,8 +509,10 @@ def render_hostile(res):
     if bad:
         L += table(['Part', 'Case', 'Step', 'Verdict'], bad[:LIST_CAP]) + ['']
     if res['base_failed']:
-        L += ['The hostile PDFs fail on base too (not counted here).', '']
-    if res['costlier']:
+        L += ['`security.py pdfs` ended with an error on base as well (base is not checked here, only its costs are read).', '']
+    if not res['base_rows']:
+        L += ['Costs not compared: base wrote no table of the hostile PDFs.', '']
+    elif res['costlier']:
         L += [f'#### Costs head over {COST_FACTOR}x what it costs base (a look, not a finding)', ''] + table(['File', 'Step', 'Base -> head'], res['costlier'][:LIST_CAP]) + ['']
     else:
         L += [f'No hostile PDF costs head over {COST_FACTOR}x base\'s CPU time or peak memory.', '']
@@ -522,16 +542,18 @@ def selftest():
     def row(f, status='SMALLER', n=100, sha=None, exact=True, details=''):
         return {'file': f, 'status': status, 'bytes_out': n, 'sha256': sha or f'{f}-{status}-{n}', 'exact': exact, 'details': details}
     base = [row('same'), row('smaller'), row('larger'), row('refused'), row('accepted', 'UNTOUCHED', details='PDF/A'), row('opens'),
-            row('breaks'), row('gone'), row('reason', 'UNTOUCHED', sha='r', details='PDF/A'), row('mended', 'ERROR')]
+            row('breaks'), row('gone'), row('reason', 'UNTOUCHED', sha='r', details='PDF/A'), row('mended', 'ERROR'), row('kind', 'ERROR'),
+            row('patched', 'ERROR')]
     head = [row('same'), row('smaller', n=90), row('larger', n=101), row('refused', 'UNTOUCHED', 120, details='keeps earlier revisions'),
             row('accepted', 'SMALLER', 80), row('opens', sha='other', exact=False), row('breaks', 'PANIC'),
-            row('reason', 'UNTOUCHED', sha='r', details='PDF/X'), row('mended')]
+            row('reason', 'UNTOUCHED', sha='r', details='PDF/X'), row('mended'), row('kind', 'PANIC'), row('patched', exact=False)]
     s = judge(base, head)
     got = {k: [e['file'] for e in v] for k, v in s['groups'].items()}
-    want = {'larger': ['larger'], 'left_untouched': ['refused'], 'rewritten': ['accepted'], 'not_exact': ['opens'], 'failing': ['breaks'],
-            'missing': ['gone'], 'reason': ['reason'], 'fixed': ['mended'], 'changed': ['smaller', 'larger', 'refused', 'accepted', 'opens', 'mended']}
+    want = {'larger': ['larger'], 'left_untouched': ['refused'], 'rewritten': ['accepted'], 'not_exact': ['opens', 'patched'], 'failing': ['breaks'],
+            'fails_otherwise': ['kind'], 'missing': ['gone'], 'reason': ['reason'], 'fixed': ['mended', 'patched'],
+            'changed': ['smaller', 'larger', 'refused', 'accepted', 'opens', 'mended', 'patched']}
     assert got == want, got
-    assert s['same'] == 2 and s['files'] == 10, s
+    assert s['same'] == 2 and s['files'] == 12 and s['works'] == 9, s
     assert not any(findings({'x': judge(base, base)}).values()), 'a build against itself has a finding'
     assert not any(findings({'x': judge(base[:2], head[:2])}).values()), 'a smaller output is a finding'
     assert threads_differ([row('a'), row('b')], [row('a'), row('b', sha='x')]) == ['b']
@@ -541,24 +563,57 @@ def selftest():
     assert settled['problems'] == [['PDFium', 'page 1 renders differently']] and settled['unstable'] == {'Poppler': 'poppler pages differ'}, settled
     assert settle(first, {'problems': []})['problems'] == first['problems']
     assert settle(first, {'problems': [['Poppler', 'poppler text differs']]})['problems'] == first['problems'], 'another problem of the same reader stands'
+    hung = {'problems': [['verify_pdf.py', 'timed out or gave no result']], 'unverified': ['PDFium', 'objects', 'qpdf'], 'pages': {}}
+    assert settle(hung, {'problems': []})['problems'] == hung['problems'], 'verify_pdf.py failing on the output only stands'
+    assert settle(hung, hung)['problems'] == [] and 'verify_pdf.py' in settle(hung, hung)['unverified']
+    which, run, compare = shutil.which, subprocess.run, vr.compare
+    try:
+        shutil.which = lambda t: None if t == 'node' else '/usr/bin/' + t
+        assert control('/nonexistent') == ['node is missing'], 'a missing reader program must stop the readers'
+
+        def hang(*args, **kw):
+            raise subprocess.TimeoutExpired('verify_pdf.py', VERIFY_TIMEOUT)
+        subprocess.run, vr.compare = hang, lambda orig, out: {'problems': [], 'notes': [], 'poppler_pages': 1, 'pdfjs_pages': 1}
+        assert readers('a', 'b')['problems'] == hung['problems'], 'verify_pdf.py timing out is a problem until the original does the same'
+    finally:
+        shutil.which, subprocess.run, vr.compare = which, run, compare
     # Which outputs are read: one per distinct output, outcome changes and growths first, at most the cap.
     targets, n = reader_targets({'a': dict(s, effort=0), 'b': dict(s, effort=50)}, 3)
-    assert n == 5 and [t['file'] for t in targets[:2]] == ['larger', 'accepted'] and len(targets) == 3, (targets, n)
+    assert n == 6 and [t['file'] for t in targets[:2]] == ['larger', 'accepted'] and len(targets) == 3, (targets, n)
     assert costlier([{'file': 'f', 'op': 'pack', 'cpu_s': '2.0', 'maxrss_mib': '100'}], [{'file': 'f', 'op': 'pack', 'cpu_s': '2.6', 'maxrss_mib': '120'}]) == [['f', 'pack', '2 -> 2.6 s of CPU']]
+    assert cell('x <!-- @y | z') == 'x &lt;!-- @y \\| z', cell('x <!-- @y | z')
     # A report from planted results says what it must.
-    res = {'part': 'pdf', 'errors': [], 'settings': {'a': dict(s, effort=0)}, 'threads': {'effort 0': {'files': 2, 'differ': ['b']}}, 'seconds': 1, 'compare': 'PASS',
+    res = {'part': 'pdf', 'errors': ['benchmark.py time failed for head (exit 1)'], 'settings': {'a': dict(s, effort=0)},
+           'threads': {'effort 0': {'files': 2, 'differ': ['b']}}, 'seconds': 1, 'compare': 'PASS',
            'machine': {'missing_tools': ['qpdf'], 'cpus': 4, 'cpu_model': 'x', 'builds': ['b', 'h'], 'binaries': ['1', '2'], 'calibration_cpu_s': [1.0, None]},
-           'readers': {'control': [], 'changed': 1, 'results': [{'file': 'opens', 'effort': 0, 'problems': [['pdf.js', 'pdf.js text differs']], 'unverified': [], 'pages': {'PDFium': 1}}]}}
+           'readers': {'control': [], 'changed': 2, 'results': [{'file': 'opens', 'effort': 0, 'problems': [['pdf.js', 'pdf.js text differs']], 'unverified': [], 'pages': {'PDFium': 1}},
+                                                                {'file': 'larger', 'effort': 0, 'problems': [], 'unverified': ['PDFium'], 'pages': {'pdf.js': 1}}]}}
     text, bad = render_pdf(res), red(res)
-    assert len(bad) == 9, bad
+    assert len(bad) == 11, bad
     assert text.count('| `larger` |') == 1 and text.count('| `smaller` |') == 1, 'a changed file is listed once'
-    for word in ('Needs a reviewer', 'Newly left untouched', '`refused`', 'keeps earlier revisions', 'pdf.js text differs', 'checking tools missing: qpdf', 'Not checked here'):
+    for word in ('Needs a reviewer', 'benchmark.py time failed', 'Newly left untouched', '`refused`', 'keeps earlier revisions', 'Fails on both, another way',
+                 'pdf.js text differs', '0 read the same as their originals by every reader, 1 differently, 1 not by every reader', 'checking tools missing: qpdf',
+                 'Not checked here'):
         assert word in text, word
-    res.update(settings={'a': dict(judge(base[:2], head[:2]), effort=0)}, threads={}, readers={'control': [], 'changed': 0, 'results': []})
+    assert 'the readers do not work here: node is missing' in red(dict(res, readers={'control': ['node is missing'], 'changed': 0, 'results': []}))
+    res.update(errors=[], settings={'a': dict(judge(base[:2], head[:2]), effort=0)}, threads={}, readers={'control': [], 'changed': 0, 'results': []})
     res['machine']['missing_tools'] = []
     assert not red(res) and '**No finding.**' in render_pdf(res)
     assert red(dict(res, settings={'a': dict(judge([], []), effort=0)})) == ['a setting or a suite measured nothing']
+    assert red(dict(res, settings={'a': dict(judge([row('x', 'ERROR')], [row('x', 'ERROR')]), effort=0)})) == ['a setting or a suite measured nothing'], \
+        'no file works on either build'
     assert red({'tables': {'pdfs': {'rows': 0, 'failures': [], 'skipped': None}}}) == ['a setting or a suite measured nothing']
+    # The hostile part: a failing case is a finding even when security.py's exit code says nothing.
+    ok = {'rows': 3, 'failures': [], 'skipped': None}
+    hostile = {'part': 'hostile', 'errors': [], 'base_failed': [], 'base_rows': 0, 'costlier': [], 'seconds': 1,
+               'tables': {'archives': ok, 'pdfs': dict(ok, failures=[['bomb.pdf', 'optimize', 'too-slow']]),
+                          'threads0-pdfs': {'rows': 1, 'failures': [], 'skipped': 'one core'}, 'selfcheck': ok}}
+    text = render_hostile(hostile)
+    assert red(hostile) == ['1 x failing in the hostile suite (pdfs)'], red(hostile)
+    for word in ('Needs a reviewer', 'bomb.pdf', 'too-slow', 'skipped: one core', 'Costs not compared'):
+        assert word in text, word
+    clean = dict(hostile, base_rows=3, tables=dict(hostile['tables'], pdfs=ok))
+    assert not red(clean) and '**No finding.**' in render_hostile(clean) and 'No hostile PDF costs head' in render_hostile(clean)
     print('deep check selftest: every planted finding is caught, and a clean run has none')
 
 
@@ -571,7 +626,7 @@ def main():
     ap.add_argument('--corpus', default=bm.DEFAULTS['corpus'], help='the corpus (default: $CORPUS, else bench/corpus)')
     ap.add_argument('--base-label', default='base', help='what the report calls the base build (a commit)')
     ap.add_argument('--head-label', default='head', help='what the report calls the head build (a commit)')
-    ap.add_argument('--efforts', default=','.join(str(e) for e in EFFORTS), help='efforts to measure (default 0,50,100)')
+    ap.add_argument('--efforts', default=','.join(str(e) for e in EFFORTS), help='engine levels to measure (default 0,50,100; lossless)')
     ap.add_argument('--set', help='the list of files (default: all for pdf, sample120 for archive)')
     ap.add_argument('--limit', type=int, help='only the first N files of the list (a quick look)')
     ap.add_argument('--verify-cap', type=int, default=VERIFY_CAP, help=f'changed outputs put before the readers (default {VERIFY_CAP})')
@@ -581,7 +636,15 @@ def main():
     if not (a.base and a.head and a.out):
         ap.error('--base, --head and --out are needed')
     a.base, a.head, a.out, a.corpus = (os.path.abspath(p) for p in (a.base, a.head, a.out, a.corpus))
-    a.efforts = [int(e) for e in a.efforts.split(',')]
+    try:
+        a.efforts = [int(e) for e in a.efforts.split(',')]
+    except ValueError:
+        ap.error(f'--efforts: numbers with commas, not {a.efforts!r}')
+    if a.set:
+        try:
+            bm.read_set(bm.DEFAULTS, a.set)
+        except (OSError, SystemExit) as e:
+            ap.error(f'--set: {e}')
     for what, path in (('base build', a.base), ('head build', a.head), ('corpus (bench/fetch_corpus.sh fetches it)', os.path.join(a.corpus, CONTROL))):
         if not os.path.isfile(path):
             say(f'no {what}: {path}')

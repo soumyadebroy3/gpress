@@ -9,7 +9,10 @@ name: Deep check
 # untouched that base rewrote). On a branch without a pull request: `gh workflow run deep-check.yml --ref BRANCH`,
 # and the reports are on the run's page.
 on:
+  # Base is main (below), so only pull requests into main: one into another branch would be measured against
+  # where that branch left main, with the branch's own changes counted as the pull request's.
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -127,7 +130,9 @@ jobs:
             --base "$RUNNER_TEMP/bin/base/gpress" --base-label "$BASE" --head "$RUNNER_TEMP/bin/head/gpress" --head-label "$HEAD"
       - name: The report, on the run's page
         if: ${{ !cancelled() }}
-        run: cat "$RUNNER_TEMP/deep-check/$PART.md" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          # No report when an earlier step failed: that step is the cause, not this one.
+          [ ! -f "$RUNNER_TEMP/deep-check/$PART.md" ] || cat "$RUNNER_TEMP/deep-check/$PART.md" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !cancelled() }}
         with:
@@ -141,7 +146,9 @@ jobs:
   # The one job that may write to the pull request. It checks nothing out and runs nothing of the pull request:
   # it puts the parts' reports, as text, under a heading of its own in one comment, which it finds again by its
   # first line and its author. A pull request from a fork gets no comment (its token cannot write): its reports
-  # are on the run's page.
+  # are on the run's page. The build job's outputs come from a job that ran the pull request's build scripts,
+  # like the reports, so they are text from the pull request too: `base` is used only when it is a short sha,
+  # and the comment says whose word "nothing to measure" is.
   comment:
     name: Report on the pull request
     needs: [build, check]
@@ -160,6 +167,7 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           BUILD: ${{ needs.build.result }}
+          CHECK: ${{ needs.check.result }}
           SAME: ${{ needs.build.outputs.same }}
           BASE: ${{ needs.build.outputs.base }}
         run: |
@@ -168,21 +176,22 @@ jobs:
           dir="$RUNNER_TEMP/reports" body="$RUNNER_TEMP/body.md" parts="$RUNNER_TEMP/parts.md"
           mkdir -p "$dir"
           gh run download "$GITHUB_RUN_ID" --pattern 'deep-check-report-*' --dir "$dir" || true
+          case "$BASE" in '' | *[!0-9a-f]*) BASE='?' ;; esac
           {
             echo "$mark"
             echo "## Deep check of \`$PR_HEAD\`"
             echo
-            echo "[Run $GITHUB_RUN_ID]($RUN_URL), attempt $GITHUB_RUN_ATTEMPT: this pull request merged into main, against main at \`${BASE:-?}\`. It reports and does not gate."
+            echo "[Run $GITHUB_RUN_ID]($RUN_URL), attempt $GITHUB_RUN_ATTEMPT: this pull request merged into main, against main at \`$BASE\`. It reports and does not gate."
             echo
           } > "$body"
           if [ "$SAME" = true ]; then
-            echo "**Nothing to measure:** the tool built from this pull request is byte for byte the tool built from main. The C library and the WebAssembly module are not compared." >> "$body"
+            echo "**Nothing to measure,** says the build job, which ran the pull request's build scripts: the tool built from this pull request is byte for byte the tool built from main. The C library and the WebAssembly module are not compared." >> "$body"
           else
             for part in pdf archive hostile; do
               if [ -s "$dir/deep-check-report-$part/$part.md" ]; then
                 cat "$dir/deep-check-report-$part/$part.md"
               else
-                printf '### %s: no report\n\nThis part did not finish (the build job: %s). The run has its log.\n' "$part" "$BUILD"
+                printf '### %s: no report\n\nNo report of this part reached this job (the build job: %s; the parts: %s). The run has the logs.\n' "$part" "$BUILD" "$CHECK"
               fi
               echo
             done > "$parts"
@@ -198,8 +207,12 @@ jobs:
             echo "The reports are too long for a comment: they are on the run's page." >> "$body.short"
             mv "$body.short" "$body"
           fi
-          # A run for an older commit that ends late must not replace the newer report.
-          [ "$(gh api "repos/$GH_REPO/pulls/$PR" --jq .head.sha)" = "$PR_HEAD" ] || exit 0
+          # A run for an older commit that ends late must not replace the newer report. A failed lookup fails the job.
+          now=$(gh api "repos/$GH_REPO/pulls/$PR" --jq .head.sha)
+          if [ "$now" != "$PR_HEAD" ]; then
+            echo "The pull request's head is now $now: this report of $PR_HEAD is not posted."
+            exit 0
+          fi
           id=$(gh api --paginate "repos/$GH_REPO/issues/$PR/comments" \
             --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- gpress-deep-check -->"))) | .id' | head -n 1)
           if [ -n "$id" ]; then
