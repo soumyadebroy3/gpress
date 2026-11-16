@@ -429,7 +429,7 @@ deliberately broken or unusual), fetched and pinned by `bench/fetch_corpus.sh`, 
 ### Normal PDF
 
 <p align="center">
-  <img src="docs/assets/normal-pdf.svg" width="880" alt="Normal PDF size as a share of the input on the 730 of 907 test PDFs gpress rewrites: gpress effort 40 (default) 73.3%, effort 0 75.0%; qpdf 12.4.2 with zopfli 77.7%, cpdf 2.9.3 with JBIG2 80.5%, qpdf at zlib level 9 80.7%, pdfsizeopt 86.7%, mutool 1.28.6 90.2%, Ghostscript 10.08.0 91.7%.">
+  <img src="docs/assets/normal-pdf.svg" width="880" alt="Normal PDF size as a share of the input on the 730 of 907 test PDFs gpress rewrites: gpress effort 40 (default) 73.3%, effort 0 75.0%; qpdf 12.4.2 with zopfli 77.7%, cpdf 2.9.3 with no page data and JBIG2 80.5%, qpdf at zlib level 9 80.7%, pdfsizeopt 86.7%, mutool 1.28.6 90.2%, Ghostscript 10.08.0 91.7%.">
 </p>
 
 | Tool and setting | All 907 files | The 730 files gpress rewrites | Median file, all 907 | CPU s, the 695 same files | Errors and timeouts | Wrong outputs |
@@ -466,7 +466,7 @@ median memory is the lowest, 5 MiB, and its peak is 76 MiB on one thread and 240
 
 gpress is build 2d3bf64; the one engine change since (#58) gives the same bytes on these files at efforts 0, 20,
 40 and 100. Each tool ran one command at a time on a 4-core 2.1 GHz Xeon cloud machine in November 2026. The
-command lines, the tools' other settings and the details are in
+command lines, how many settings each tool ran and the details are in
 [bench/RESULTS.md](bench/RESULTS.md#head-to-head-november-2026).
 
 ### Archive
