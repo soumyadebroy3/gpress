@@ -551,8 +551,9 @@ Versions: qpdf 12.4.2 (zlib 1.3, zopfli 1.0.3), mutool 1.28.6, cpdf 2.9.3 with j
 - pdfjs/bomb_giant.pdf makes Poppler write over 1 GB of messages, and the check stops a renderer at 1 GiB: the
   outputs that keep its large stream (gpress's, qpdf's, cpdf's and three of mutool's five settings') count
   unchecked, at the original's size.
-- The one engine change on `main` since 2d3bf64 (#58) gives the same bytes on the 907 files at efforts 0, 20, 40
-  and 100.
+- Of the two engine changes on `main` since 2d3bf64, #58 gives the same bytes on the 907 files at efforts 0, 20,
+  40 and 100, and #61 at 0, 40 and 100; at 20 it changes one file, pypdf-samples/007-imagemagick-images, by 2
+  bytes, so that Poppler reads it.
 
 ## Archive format version 9
 
