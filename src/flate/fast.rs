@@ -217,7 +217,7 @@ pub fn deflate(data: &[u8], level: u8, pool: Option<&Pool>, deadline: Deadline, 
         let mut pieces = segment(data, 0, &lv, deadline);
         // Usual case: the segment's bits are the whole stream.
         if let [Piece::Bits(..)] = pieces[..] {
-            if let Some(Piece::Bits(bytes, _)) = pieces.pop() {
+            if let Some(Piece::Bits(bytes, ..)) = pieces.pop() {
                 return bytes;
             }
         }
@@ -244,10 +244,10 @@ pub fn deflate(data: &[u8], level: u8, pool: Option<&Pool>, deadline: Deadline, 
 
 // ---------------------------------------------------------------- output: pieces and the final stream
 
-/// Part of a segment's output: Huffman-coded blocks (bytes and their exact number of bits, from bit 0), or
-/// a stored block for an input range (written in the final pass, where its alignment is known).
+/// Part of a segment's output: Huffman-coded blocks (bytes, their exact number of bits and their `reach`,
+/// from bit 0), or a stored block for an input range (written in the final pass, where its alignment is known).
 enum Piece {
-    Bits(Vec<u8>, u64),
+    Bits(Vec<u8>, u64, u64),
     Stored(usize, usize),
 }
 
@@ -271,7 +271,8 @@ impl Out {
         if n > 0 {
             let w = std::mem::take(&mut self.w);
             self.before += n;
-            self.pieces.push(Piece::Bits(w.finish(), n));
+            let reach = w.reach;
+            self.pieces.push(Piece::Bits(w.finish(), n, reach));
         }
     }
 
@@ -320,9 +321,11 @@ impl Stream {
                     self.pending = Some((a, b));
                 }
             },
-            Piece::Bits(bytes, n) => {
+            Piece::Bits(bytes, n, reach) => {
                 self.flush(data, false);
+                let at = self.w.bit_len();
                 splice(&mut self.w, &bytes, n);
+                self.w.reach = self.w.reach.max(at + reach);
             }
         }
     }
@@ -1378,6 +1381,28 @@ mod tests {
     use super::*;
     use crate::flate::inflate;
     use std::time::Duration;
+
+    #[test]
+    fn a_spliced_block_keeps_poppler_from_misreading_the_stored_block_after_it() {
+        let (syms, code, bytes) = crate::flate::block::tests::short_end_of_block();
+        let mut seg = BitWriter::new();
+        write_dynamic(&mut seg, &syms, &code, false);
+        let (n, reach) = (seg.bit_len(), seg.reach);
+        let piece = seg.finish();
+        let mut padded = 0;
+        for lead in 0..8 {
+            let mut s = Stream { w: BitWriter::new(), pending: None };
+            write_fixed(&mut s.w, &vec![Sym { litlen: 200, dist: 0 }; lead], false);
+            s.add(b"stored", Piece::Bits(piece.clone(), n, reach));
+            s.add(b"stored", Piece::Stored(0, 6));
+            let z = s.finish(b"stored");
+            let want = [vec![200; lead], bytes.clone(), b"stored".to_vec()].concat();
+            let (back, empty) = crate::flate::poppler::read(&z).unwrap_or_else(|| panic!("{lead}"));
+            assert_eq!(back, want, "{lead}");
+            padded += empty;
+        }
+        assert_eq!(padded, 1);
+    }
 
     /// Where segments start by default (the rule `fast_segment`).
     const SEGMENT: usize = FlateRules::RULES[FlateRules::at("fast_segment")].1 as usize;
