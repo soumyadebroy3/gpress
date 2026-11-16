@@ -4,6 +4,8 @@ Every pull request merged into `main` (or into a branch that reached it), newest
 
 | Pull request | Change |
 | --- | --- |
+| [#61](https://github.com/soumyadebroy3/gpress/pull/61) | Flate: an empty fixed block before a stored block that Poppler would misread |
+| [#60](https://github.com/soumyadebroy3/gpress/pull/60) | README and wiki: the November head-to-head |
 | [#59](https://github.com/soumyadebroy3/gpress/pull/59) | Effort table measured again on 2d3bf64; wiki: #57 and #58 done |
 | [#58](https://github.com/soumyadebroy3/gpress/pull/58) | Same bits on every machine: log2 and exp2 from basic arithmetic |
 
