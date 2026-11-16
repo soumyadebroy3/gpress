@@ -404,9 +404,9 @@ share of the input on the 90 files the engine rewrites.
 The README's effort table. `python3 -I bench/effort_table.py NAME --set SET` runs `gpress optimize --effort E
 --threads 1` on every file of a set at each effort and adds up the outputs; a file gpress leaves untouched
 counts with its own size. Measured on 2026-11-16 on `main` at 2d3bf64, on a cloud machine. Sizes only: nothing
-here was timed. #61 since gives the same outputs on the 907 files at efforts 0, 40 and 100, and at 20 one file 2
-bytes larger (pypdf-samples/007-imagemagick-images__imagemagick-images.pdf, 7,966); the lossy efforts and the
-photo set were not measured again.
+here was timed. The two engine changes since, #58 and #61, give the same outputs on the 907 files at efforts 0, 40
+and 100, and at 20 #61 makes one file 2 bytes larger (pypdf-samples/007-imagemagick-images__imagemagick-images.pdf,
+7,966); efforts 60 and 80 and the photo set were not measured again.
 
 | Effort | | 907 test files | Photo set, 23 files |
 | ---: | --- | ---: | ---: |
@@ -507,6 +507,7 @@ The settings (`IN` and `OUT` are the input and output files):
 
 ```
 gpress optimize IN OUT --effort 40 --threads 1          # gpress, effort 40 (default); with no flags, all four cores
+gpress optimize IN OUT --effort 20 --threads 1          # gpress, effort 20
 gpress optimize IN OUT --effort 0 --threads 1           # gpress, effort 0
 gpress optimize IN OUT --effort 40 --threads 1 --max-stream 1073741824
 QPDF_ZOPFLI=force qpdf --object-streams=generate --compress-streams=y --recompress-flate --compression-level=9 --decode-level=specialized IN OUT

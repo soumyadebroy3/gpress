@@ -182,9 +182,10 @@ strongest setting. The output is the same for any thread count.
 | 100 | lossy | 104,044,424 (79.7%) | 15,795,015 (69.5%) | As 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
 
 The two size columns are the bytes of all the outputs together and their share of the input, one thread, on
-build 2d3bf64; #61 since gives the same outputs on the 907 files at efforts 0, 40 and 100, and one 2 bytes larger
-at 20 (`bench/effort_table.py`; bench/RESULTS.md, "Sizes at the six efforts", has a row per file of the photo set and
-how close its pages stay to the input's). A file gpress leaves untouched counts with its own size: 177 of the
+build 2d3bf64 (`bench/effort_table.py`; bench/RESULTS.md, "Sizes at the six efforts", has a row per file of the
+photo set and how close its pages stay to the input's). The two engine changes since, #58 and #61, give the same
+outputs on the 907 files at efforts 0, 40 and 100, and at 20 #61 makes one 2 bytes larger; efforts 60 and 80 and
+the photo set were not measured again. A file gpress leaves untouched counts with its own size: 177 of the
 907 public test files. The lossy efforts change 4 of the 907. The photo
 set is 23 files that `bench/photo_set.py` puts together to show the lossy step: two of the test files, three
 photographs from scikit-image's sample data (two by NASA in the public domain, one under CC0), each on a page
