@@ -30,6 +30,7 @@ pub mod feature;
 pub mod flate;
 #[cfg(feature = "jpeg")]
 pub mod jpeg;
+mod math;
 mod off;
 #[cfg(feature = "archive")]
 pub mod pack;

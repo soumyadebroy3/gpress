@@ -1210,7 +1210,7 @@ fn decoded_len(s: &Stream, limit: usize) -> (usize, bool) {
 /// (`work_budget_doubling`; about 900 at 99).
 fn work_budget(effort: u8, rules: &RewriteRules) -> f64 {
     let doubling = rules.at(R::work_budget_doubling) as f64;
-    rules.at(R::work_budget_start) as f64 / 100.0 * 2f64.powf((effort.max(1) - 1) as f64 / doubling)
+    rules.at(R::work_budget_start) as f64 / 100.0 * crate::math::exp2((effort.max(1) - 1) as f64 / doubling)
 }
 
 /// Decoded bytes the quick settings may work on below effort 100, per byte of input: 16 at effort 0, twice
@@ -1220,7 +1220,7 @@ fn work_budget(effort: u8, rules: &RewriteRules) -> f64 {
 /// follows the file's size even when its streams decode to a hundred times their size.
 fn quick_budget(effort: u8, input_len: usize, rules: &RewriteRules) -> f64 {
     let doubling = rules.at(R::quick_budget_doubling) as f64;
-    (input_len as f64 * rules.at(R::quick_budget_factor) as f64 * 2f64.powf(effort as f64 / doubling))
+    (input_len as f64 * rules.at(R::quick_budget_factor) as f64 * crate::math::exp2(effort as f64 / doubling))
         .max(rules.at(R::quick_budget_floor) as f64)
 }
 
@@ -2494,7 +2494,7 @@ mod effort_tests {
             };
             assert_eq!(big_level(e, &rules), big, "effort {e}");
             assert_eq!(predictor_budget(e, &rules), (64usize << 10) << (e.min(99) as usize / 20), "effort {e}");
-            assert_eq!(work_budget(e, &rules), 2f64.powf((e.max(1) - 1) as f64 / 10.0), "effort {e}");
+            assert_eq!(work_budget(e, &rules), crate::math::exp2((e.max(1) - 1) as f64 / 10.0), "effort {e}");
             let cost = match e {
                 0..=19 => 1.0,
                 20..=39 => 1.7,
@@ -2504,7 +2504,7 @@ mod effort_tests {
             };
             assert_eq!(work_per_byte(e, &rules), cost, "effort {e}");
             for n in [0usize, 1, 999, 123_457, 5 << 20, 1 << 30] {
-                let quick = (n as f64 * 16.0 * 2f64.powf(e as f64 / 10.0)).max((4u64 << 20) as f64);
+                let quick = (n as f64 * 16.0 * crate::math::exp2(e as f64 / 10.0)).max((4u64 << 20) as f64);
                 assert_eq!(quick_budget(e, n, &rules), quick, "effort {e}, {n} bytes");
                 let bridge = if (10..20).contains(&e) { n as f64 * (1u64 << (e - 10)) as f64 / 16.0 } else { 0.0 };
                 assert_eq!(bridge_budget(e, n, &rules), bridge, "effort {e}, {n} bytes");

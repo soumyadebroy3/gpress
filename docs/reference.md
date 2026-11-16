@@ -820,6 +820,7 @@ crates.io. A default build depends on `aes`, `md-5` and `sha2` (RustCrypto, MIT 
 | `src/cm/` | The context-mixing model and arithmetic coder. |
 | `src/pack/` | The gpress archive (format versions 9 and 10), its rules (`rules.rs`), Type 1 fonts, encrypted streams, SHA-256. |
 | `src/par.rs` | The thread pool. |
+| `src/math.rs` | log2 and exp2 with the same bits on every platform, for the choices made in floating point. |
 | `src/bin/gpress.rs` | The command-line tool. |
 | `crates/gpress-c/` | C API, header, example. |
 | `crates/gpress-wasm/` | WebAssembly module and the TypeScript package. |
