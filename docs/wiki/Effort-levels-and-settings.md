@@ -12,14 +12,14 @@ _As on `main` at [2d3bf64](https://github.com/soumyadebroy3/gpress/commit/2d3bf6
 | Effort | | 907 test files | Photo set (23 files) | What it does to a normal PDF |
 | ---: | --- | ---: | ---: | --- |
 | the input | | 130,469,001 | 22,715,581 | |
-| 0 (`--quick`) | lossless | 115,335,908 (88.4%) | 20,900,294 (92.0%) | The fast path: gpress's fast Flate encoder and the cheap steps. |
-| 20 | lossless | 113,692,951 (87.1%) | 20,585,289 (90.6%) | The strong encoder's first step. |
-| 40 (default) | lossless | 113,347,672 (86.9%) | 20,510,774 (90.3%) | The smallest lossless output: everything the engine knows how to do. |
-| 60 | lossy | 111,788,415 (85.7%) | 16,452,936 (72.4%) | As 40, then an image shown at 375 pixels per inch or more is resampled down to 300, and a photo that was resampled, or is not a JPEG, is written as a JPEG at quality 85. Line art never becomes a JPEG: it stays samples behind Flate (still resampled down to 300 when shown at 375 or more). |
-| 80 | lossy | 111,270,471 (85.3%) | 15,934,992 (70.2%) | As 60, with photos down to 150 pixels per inch (those shown at 187.5 or more; a sharp photo stays at 300). |
-| 100 | lossy | 111,237,201 (85.3%) | 15,795,015 (69.5%) | As 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
+| 0 (`--quick`) | lossless | 107,790,202 (82.6%) | 20,900,294 (92.0%) | The fast path: gpress's fast Flate encoder and the cheap steps. |
+| 20 | lossless | 106,454,744 (81.6%) | 20,585,289 (90.6%) | The strong encoder's first step. |
+| 40 (default) | lossless | 106,154,895 (81.4%) | 20,510,774 (90.3%) | The smallest lossless output: everything the engine knows how to do. |
+| 60 | lossy | 104,595,638 (80.2%) | 16,452,936 (72.4%) | As 40, then an image shown at 375 pixels per inch or more is resampled down to 300, and a photo that was resampled, or is not a JPEG, is written as a JPEG at quality 85. Line art never becomes a JPEG: it stays samples behind Flate (still resampled down to 300 when shown at 375 or more). |
+| 80 | lossy | 104,077,694 (79.8%) | 15,934,992 (70.2%) | As 60, with photos down to 150 pixels per inch (those shown at 187.5 or more; a sharp photo stays at 300). |
+| 100 | lossy | 104,044,424 (79.7%) | 15,795,015 (69.5%) | As 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
 
-The sizes are all outputs together in bytes and their share of the input, one thread (`bench/effort_table.py`). A file gpress leaves untouched counts with its own size: 171 of the 907 test files. The lossy efforts change 4 of the 907. The sizes and the 171 were measured before [#51](https://github.com/soumyadebroy3/gpress/pull/51), which writes a file that keeps earlier saves as its newest save alone. At effort 0 that makes the total about 7.5 MB (about 5.8 points of the input) smaller: 29 files shrink from 11,098,675 to 3,542,487 bytes, and 6 small ones are now left untouched (177 in all). The other efforts have not been measured again yet. The photo set is 23 files that `bench/photo_set.py` puts together to show the lossy step; its lossy rows are from [#52](https://github.com/soumyadebroy3/gpress/pull/52), which let sharp photographs become JPEGs (they were 18,255,139, 17,737,195 and 17,703,925 before); bench/RESULTS.md, "Sizes at the six efforts", has a row per file of the photo set.
+The sizes are all outputs together in bytes and their share of the input, one thread (`bench/effort_table.py`). A file gpress leaves untouched counts with its own size: 177 of the 907 test files. The lossy efforts change 4 of the 907. The photo set is 23 files that `bench/photo_set.py` puts together to show the lossy step; its lossy rows are from [#52](https://github.com/soumyadebroy3/gpress/pull/52), which let sharp photographs become JPEGs (they were 18,255,139, 17,737,195 and 17,703,925 before); bench/RESULTS.md, "Sizes at the six efforts", has a row per file of the photo set.
 
 ### Floors that hold at every lossy level
 

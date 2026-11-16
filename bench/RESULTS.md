@@ -403,20 +403,20 @@ the engine rewrites.
 
 The README's effort table. `python3 -I bench/effort_table.py NAME --set SET` runs `gpress optimize --effort E
 --threads 1` on every file of a set at each effort and adds up the outputs; a file gpress leaves untouched
-counts with its own size. Measured on 2026-11-15 on 7bfeba4 (the effort scheme and the lossy image step, with
-main 369f1b8 merged in), on a 4-core cloud machine. Sizes only: nothing here was timed.
+counts with its own size. Measured on 2026-11-16 on `main` at 2d3bf64, on a cloud machine. Sizes only: nothing
+here was timed.
 
 | Effort | | 907 test files | Photo set, 23 files |
 | ---: | --- | ---: | ---: |
 | the input | | 130,469,001 | 22,715,581 |
-| 0 | lossless | 115,335,908 (88.40%) | 20,900,294 (92.01%) |
-| 20 | lossless | 113,692,951 (87.14%) | 20,585,289 (90.62%) |
-| 40 | lossless | 113,347,672 (86.88%) | 20,510,774 (90.29%) |
-| 60 | lossy | 111,788,415 (85.68%) | 16,452,936 (72.43%) |
-| 80 | lossy | 111,270,471 (85.28%) | 15,934,992 (70.15%) |
-| 100 | lossy | 111,237,201 (85.26%) | 15,795,015 (69.53%) |
+| 0 | lossless | 107,790,202 (82.62%) | 20,900,294 (92.01%) |
+| 20 | lossless | 106,454,744 (81.59%) | 20,585,289 (90.62%) |
+| 40 | lossless | 106,154,895 (81.36%) | 20,510,774 (90.29%) |
+| 60 | lossy | 104,595,638 (80.17%) | 16,452,936 (72.43%) |
+| 80 | lossy | 104,077,694 (79.77%) | 15,934,992 (70.15%) |
+| 100 | lossy | 104,044,424 (79.75%) | 15,795,015 (69.53%) |
 
-- The 907 files are `bench/sets/all.txt`; `bench/results/effort-levels/files.tsv` has a row per file. 171 are
+- The 907 files are `bench/sets/all.txt`; `bench/results/effort-levels/files.tsv` has a row per file. 177 are
   untouched at every effort and no run failed. The lossy efforts change 4 files:
   ocrmypdf/tests__resources__2400dpi.pdf (107,144 bytes at effort 40, 25,086 at 60, 80 and 100),
   pdfjs/bug1815476.pdf (103,311, then 75,033), pdfjs/issue19971.pdf (1,641,084, then 1,272,661, 754,717 and
