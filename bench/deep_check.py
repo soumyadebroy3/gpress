@@ -3,8 +3,8 @@
 
 BASE is the build the change starts from (main's), HEAD the build with the change. The "Deep check" workflow
 (.github/workflows/deep-check.yml) runs these commands for a pull request into main whose build of the tool
-is not main's, and posts the reports as one comment; nothing here needs GitHub, so the same commands work on
-any machine with both binaries.
+is not main's, and posts the reports as one comment (on the run's page for a pull request from a fork);
+nothing here needs GitHub, so the same commands work on any machine with both binaries.
 
     python3 -I bench/deep_check.py pdf      --base BIN --head BIN --out DIR
     python3 -I bench/deep_check.py archive  --base BIN --head BIN --out DIR
@@ -205,13 +205,16 @@ def reader_targets(settings, cap):
     """Head's rewritten outputs whose bytes are not base's, one per file and output bytes (each is read against
     its own original): the outcome changes (newly rewritten, works on head only) and growths first, in list
     order, then the rest spread evenly up to `cap`. -> (targets, how many there were)"""
-    first, rest, seen = [], [], set()
-    for name, s in settings.items():
-        urgent = {e['file'] for k in ('rewritten', 'fixed', 'larger') for e in s['groups'][k]}
+    first, rest, seen, urgent = [], [], set(), set()
+    for s in settings.values():  # over every setting first: the same bytes can be urgent at one level only
+        files = {e['file'] for k in ('rewritten', 'fixed', 'larger') for e in s['groups'][k]}
+        urgent |= {(e['file'], e['sha256']) for e in s['groups']['changed'] if e['file'] in files}
+    for s in settings.values():
         for e in s['groups']['changed']:
-            if e['head'][0] == 'SMALLER' and (e['file'], e['sha256']) not in seen:
-                seen.add((e['file'], e['sha256']))
-                (first if e['file'] in urgent else rest).append({'file': e['file'], 'effort': s['effort'], 'sha256': e['sha256']})
+            key = (e['file'], e['sha256'])
+            if e['head'][0] == 'SMALLER' and key not in seen:
+                seen.add(key)
+                (first if key in urgent else rest).append({'file': e['file'], 'effort': s['effort'], 'sha256': e['sha256']})
     room = max(0, cap - len(first))
     if len(rest) > room:
         rest = [rest[i * len(rest) // room] for i in range(room)]
@@ -595,6 +598,11 @@ def selftest():
     assert n == 6 and [t['file'] for t in targets] == ['larger', 'accepted', 'mended'], (targets, n)
     targets, n = reader_targets({'a': dict(judge([row('p'), row('q')], [row('p', sha='same'), row('q', sha='same')]), effort=0)}, 5)
     assert n == 2 and [t['file'] for t in targets] == ['p', 'q'], 'an output is read against each original it was made from'
+    # The same bytes at two levels, larger than base's at the second only: still read first.
+    rs = [row(f'r{i}') for i in range(4)]
+    targets, n = reader_targets({'a': dict(judge(rs + [row('z', n=200)], [row(f'r{i}', sha=f'R{i}') for i in range(4)] + [row('z', n=150, sha='Z')]), effort=0),
+                                 'b': dict(judge(rs + [row('z', n=120)], [row(f'r{i}', sha=f'R{i}') for i in range(4)] + [row('z', n=150, sha='Z')]), effort=50)}, 1)
+    assert n == 5 and [t['file'] for t in targets] == ['z'], (targets, n)
     assert costlier([{'file': 'f', 'op': 'pack', 'cpu_s': '2.0', 'maxrss_mib': '100'}], [{'file': 'f', 'op': 'pack', 'cpu_s': '2.6', 'maxrss_mib': '120'}]) == [['f', 'pack', '2 -> 2.6 s of CPU']]
     assert cell('x <!-- @y | z') == 'x &lt;!-- @y \\| z', cell('x <!-- @y | z')
     # A report from planted results says what it must.
@@ -628,6 +636,7 @@ def selftest():
     for word in ('Needs a reviewer', 'bomb.pdf', 'too-slow', 'skipped: one core', 'Costs not compared'):
         assert word in text, word
     clean = dict(hostile, base_rows=3, tables=dict(hostile['tables'], pdfs=ok))
+    assert 'Costs not compared' in render_hostile(dict(clean, tables=dict(clean['tables'], pdfs=dict(ok, rows=0)))), 'head wrote no table'
     assert not red(clean) and '**No finding.**' in render_hostile(clean) and 'No hostile PDF costs head' in render_hostile(clean)
     text = render_hostile(dict(clean, costlier=[['threads0-pdfs', 'f.pdf', 'optimize', '2 -> 2.6 s of CPU']]))
     assert '| threads0-pdfs | f.pdf | optimize | 2 -> 2.6 s of CPU |' in text and 'at least 1 s of CPU or 64 MiB' in text, text

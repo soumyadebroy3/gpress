@@ -867,10 +867,11 @@ crates.io. A default build depends on `aes`, `md-5` and `sha2` (RustCrypto, MIT 
   are printed as `benchmark.py compare` gives them, as an indication. `selftest` plants each finding in made-up
   results (CI runs it). The "Deep check" workflow (`.github/workflows/deep-check.yml`) builds the tool from
   every pull request into main and from main; when the two files differ, it runs the three parts and posts their
-  reports as one comment (for a pull request from a fork, on the run's page), and when they are the same,
-  nothing runs, also when only `bench/` changed. `checkers/` pins the Python and npm packages of the readers it
-  installs (pikepdf, pypdfium2, Pillow and pikepdf's own requirements in `requirements.txt`, pdf.js and its
-  canvas in `package.json`); the programs (qpdf, Poppler, jbig2dec) come from the runner's apt.
+  reports as one comment (for a pull request from a fork, on the run's page), and when they are the same, the
+  parts do not run and the comment says there is nothing to measure, also when only `bench/` changed.
+  `checkers/` pins the Python and npm packages of the readers it installs (pikepdf, pypdfium2, Pillow and
+  pikepdf's own requirements in `requirements.txt`, pdf.js and its canvas in `package.json`); the programs
+  (qpdf, Poppler, jbig2dec) come from the runner's apt.
 - `p5.py`: what the threads and the store do for a normal PDF, file by file. `run NAME --engine BIN`
   optimizes each file of a list (`--set`, `--files`; `--limit N` takes the N smallest) at each engine level and
   thread count, one process at a time with `PDFE_DEBUG` set, and keeps the child's wall and CPU time, peak
