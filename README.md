@@ -181,8 +181,9 @@ strongest setting. The output is the same for any thread count.
 | 80 | lossy | 104,077,694 (79.8%) | 15,934,992 (70.2%) | As 60, with photos down to 150 pixels per inch (those shown at 187.5 or more; a sharp photo stays at 300). |
 | 100 | lossy | 104,044,424 (79.7%) | 15,795,015 (69.5%) | As 80 at JPEG quality 75, and an existing JPEG photo is written again at that quality when that is at least a tenth smaller. |
 
-The two size columns are the bytes of all the outputs together and their share of the input, one thread
-(`bench/effort_table.py`; bench/RESULTS.md, "Sizes at the six efforts", has a row per file of the photo set and
+The two size columns are the bytes of all the outputs together and their share of the input, one thread, on
+build 2d3bf64; #61 since gives the same outputs on the 907 files at efforts 0, 40 and 100, and one 2 bytes larger
+at 20 (`bench/effort_table.py`; bench/RESULTS.md, "Sizes at the six efforts", has a row per file of the photo set and
 how close its pages stay to the input's). A file gpress leaves untouched counts with its own size: 177 of the
 907 public test files. The lossy efforts change 4 of the 907. The photo
 set is 23 files that `bench/photo_set.py` puts together to show the lossy step: two of the test files, three
@@ -250,7 +251,7 @@ for measuring, and then nothing is lossy unless `lossy` is set too. The figures 
 
 CPU time is for the whole 120-file sample (`bench/sets/sample120.txt`, 78.3 MB, a deliberately hard mix of the
 slowest, the largest and random files) on one thread; output is the total size as a share of the input on the 90
-files the engine rewrites. [Benchmarks](#benchmarks) compares efforts 0 and 40 with other tools on all 907
+files the engine rewrites. [Benchmarks](#benchmarks) compares efforts 0, 20 and 40 with other tools on all 907
 files. The first
 measurement (builds 52a91f0 and 20f8e69) was made in October 2026 for the change that added the fast path, on a
 4-core 2.1 GHz Xeon virtual machine. Later changes made the strong encoder faster. Build 37bd3f3 was measured
@@ -435,6 +436,7 @@ deliberately broken or unusual), fetched and pinned by `bench/fetch_corpus.sh`, 
 | Tool and setting | All 907 files | The 730 files gpress rewrites | Median file, all 907 | CPU s, the 695 same files | Errors and timeouts | Wrong outputs |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | gpress, effort 40 (default) | 81.36% | 73.26% | 88.7% | 625 | 0 | 0 |
+| gpress, effort 20 | 81.60% | 73.59% | 89.3% | 190 | 0 | 1 |
 | gpress, effort 0 (`--quick`) | 82.62% | 74.99% | 90.4% | 25 | 0 | 0 |
 | qpdf 12.4.2 with zopfli | 79.61% | 77.74% | 89.9% | 1,899 | 12 | 13 |
 | qpdf 12.4.2, zlib level 9 | 82.30% | 80.68% | 94.3% | 18 | 12 | 13 |
@@ -465,9 +467,10 @@ median memory is the lowest, 5 MiB, and its peak is 76 MiB on one thread and 240
 (the same output).
 
 gpress is build 2d3bf64. Of the two engine changes since, #58 gives the same bytes on these files at efforts 0,
-20, 40 and 100, and #61 at 0, 40 and 100; at 20 it changes one file by 2 bytes, so that Poppler reads it. Each tool ran one command at a time on a 4-core 2.1 GHz Xeon cloud machine in November 2026. The
-command lines, how many settings each tool ran and the details are in
-[bench/RESULTS.md](bench/RESULTS.md#head-to-head-november-2026).
+20, 40 and 100, and #61 at 0, 40 and 100. Effort 20's one wrong output was an image that Poppler 24.02 misread;
+#61 fixed it: that file's output is 2 bytes larger, and Poppler draws it as it draws the original. Each tool ran
+one command at a time on a 4-core 2.1 GHz Xeon cloud machine in November 2026. The command lines, how many
+settings each tool ran and the details are in [bench/RESULTS.md](bench/RESULTS.md#head-to-head-november-2026).
 
 ### Archive
 

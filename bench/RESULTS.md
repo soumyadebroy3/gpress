@@ -404,7 +404,9 @@ share of the input on the 90 files the engine rewrites.
 The README's effort table. `python3 -I bench/effort_table.py NAME --set SET` runs `gpress optimize --effort E
 --threads 1` on every file of a set at each effort and adds up the outputs; a file gpress leaves untouched
 counts with its own size. Measured on 2026-11-16 on `main` at 2d3bf64, on a cloud machine. Sizes only: nothing
-here was timed.
+here was timed. #61 since gives the same outputs on the 907 files at efforts 0, 40 and 100, and at 20 one file 2
+bytes larger (pypdf-samples/007-imagemagick-images__imagemagick-images.pdf, 7,966); the lossy efforts and the
+photo set were not measured again.
 
 | Effort | | 907 test files | Photo set, 23 files |
 | ---: | --- | ---: | ---: |
@@ -498,7 +500,7 @@ Ghostscript on the 907 test files (`bench/sets/all.txt`, 130,469,001 bytes). Tim
 2026-11-16 02:07 UTC on a cloud machine with 4 cores (Intel Xeon, 2.1 GHz) and 15.7 GiB: one command at a time,
 the settings in a new random order for each file, each command with a 30-minute limit and an 8 GiB memory cap.
 The run had 24 settings (gpress 10, three of them its lossy efforts 60, 80 and 100; qpdf 2, mutool 5, cpdf 4,
-pdfsizeopt 2, Ghostscript 1); the table shows nine lossless ones. Four commands hit the time limit, none of them
+pdfsizeopt 2, Ghostscript 1); the table shows ten lossless ones. Four commands hit the time limit, none of them
 gpress's. The harness that ran it is not in `bench/`.
 
 The settings (`IN` and `OUT` are the input and output files):
@@ -522,6 +524,7 @@ Versions: qpdf 12.4.2 (zlib 1.3, zopfli 1.0.3), mutool 1.28.6, cpdf 2.9.3 with j
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | gpress, effort 40 (default) | 81.36% | 73.26% | 88.7% | 729 | 0 | 0 | 625 | 76 |
 | gpress, effort 40, `--max-stream 1073741824` | 78.31% | 73.26% | 88.5% | 729 | 0 | 0 | 621 | 76 |
+| gpress, effort 20 | 81.60% | 73.59% | 89.3% | 728 | 0 | 1 | 190 | 70 |
 | gpress, effort 0 | 82.62% | 74.99% | 90.4% | 729 | 0 | 0 | 25 | 52 |
 | qpdf with zopfli | 79.61% | 77.74% | 89.9% | 721 | 12 | 13 | 1,899 | 106 |
 | qpdf, zlib level 9 | 82.30% | 80.68% | 94.3% | 695 | 12 | 13 | 18 | 23 |
@@ -552,8 +555,10 @@ Versions: qpdf 12.4.2 (zlib 1.3, zopfli 1.0.3), mutool 1.28.6, cpdf 2.9.3 with j
   outputs that keep its large stream (gpress's, qpdf's, cpdf's and three of mutool's five settings') count
   unchecked, at the original's size.
 - Of the two engine changes on `main` since 2d3bf64, #58 gives the same bytes on the 907 files at efforts 0, 20,
-  40 and 100, and #61 at 0, 40 and 100; at 20 it changes one file, pypdf-samples/007-imagemagick-images, by 2
-  bytes, so that Poppler reads it.
+  40 and 100, and #61 at 0, 40 and 100. At 20, #61 changes one file,
+  pypdf-samples/007-imagemagick-images__imagemagick-images.pdf: effort 20's one wrong output in the table, an
+  image Poppler 24.02 misread. Its output is now 7,966 bytes (7,964 before), and Poppler draws it as it draws the
+  original.
 
 ## Archive format version 9
 
