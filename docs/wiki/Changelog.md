@@ -1,9 +1,16 @@
 Every pull request merged into `main` (or into a branch that reached it), newest first, with its title as it stands on GitHub. Dates are UTC. What the recent ones give is on [Status and roadmap](Status-and-roadmap).
 
+## 2026-11-17
+
+| Pull request | Change |
+| --- | --- |
+| [#36](https://github.com/soumyadebroy3/gpress/pull/36) | Deep check: a pull request's build and main's over the corpus, reported as one comment |
+
 ## 2026-11-16
 
 | Pull request | Change |
 | --- | --- |
+| [#62](https://github.com/soumyadebroy3/gpress/pull/62) | Effort 20 in the head-to-head tables; wiki: #60 and #61 done |
 | [#61](https://github.com/soumyadebroy3/gpress/pull/61) | Flate: an empty fixed block before a stored block that Poppler would misread |
 | [#60](https://github.com/soumyadebroy3/gpress/pull/60) | README and wiki: the November head-to-head |
 | [#59](https://github.com/soumyadebroy3/gpress/pull/59) | Effort table measured again on 2d3bf64; wiki: #57 and #58 done |

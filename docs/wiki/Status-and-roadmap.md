@@ -1,8 +1,8 @@
-_Last updated 2026-11-16, `main` at [7c9ddf5](https://github.com/soumyadebroy3/gpress/commit/7c9ddf5)._
+_Last updated 2026-11-17, `main` at [84746a8](https://github.com/soumyadebroy3/gpress/commit/84746a8)._
 
 Every pull request merged into `main` is listed in the [Changelog](Changelog). This page says what each recent one gives, what is being built now and what comes next.
 
-## Done: the build of 2026-11-14 to 2026-11-16
+## Done: 2026-11-14 to 2026-11-17
 
 All figures are from each pull request's description, on the 907 public test PDFs (130.5 MB) with one thread unless it says otherwise. "Byte-identical" means every output is the same bytes as `main` gave before, at the efforts named.
 
@@ -10,6 +10,8 @@ The head-to-head on `main` at 2d3bf64 is done too (a measurement, not a pull req
 
 | Pull request | Merged (UTC) | What it gives |
 | --- | --- | --- |
+| [#36](https://github.com/soumyadebroy3/gpress/pull/36) Deep check | 2026-11-17 | A workflow that runs on each pull request into `main` and posts its reports as one comment (for a pull request from a fork, on the run's page). It builds the tool from the pull request and from `main`; when the two differ, it runs the 907 files with both at engine levels 0, 50 and 100 (lossless), the 120-file sample as archives, and the security suite on the pull request's build. It reports what a script can decide, such as an output larger than `main`'s, a file one build rewrites and the other leaves untouched, a file failing on the pull request's build only, other bytes with 4 threads than with 1, or a reader (qpdf, the object graph, PDFium, Poppler, pdf.js) that shows one of at most 200 changed outputs differently from its original. It reports and does not gate. The script is `bench/deep_check.py`; its self-test runs in CI. No engine code changes. |
+| [#62](https://github.com/soumyadebroy3/gpress/pull/62) Effort 20 in the head-to-head | 2026-11-16 | The README's and `bench/RESULTS.md`'s head-to-head tables get effort 20's row from the run on 2d3bf64: 81.60% of the input on the 907 files and 73.59% on the 730 it rewrites, with the one output Poppler misread, which #61 fixed. These pages brought up to date for #60 and #61. |
 | [#61](https://github.com/soumyadebroy3/gpress/pull/61) Poppler's stored-block misread | 2026-11-16 | Poppler 24.02 misread a Flate stream where a block stored as it is follows a Huffman-coded one, when the bytes it had read ahead for the longest code reached past the stored block's length: it lost one or two bytes and read the length that many bytes late. The head-to-head found one such output, an image on page 4 of one test file at effort 20. Both Flate encoders now put one or two empty blocks (10 bits each) in front of such a stored block. Byte-identical on the 907 files at efforts 0, 40 and 100 (`optimize`) and 0 (`pack`); at effort 20 that one file changes, 7,964 to 7,966 bytes, and Poppler draws each of its pages as it draws the original's. Instructions +0.24% at effort 0 and +0.02% at effort 40 on 31 small files. |
 | [#60](https://github.com/soumyadebroy3/gpress/pull/60) Head-to-head in the README | 2026-11-16 | The README's headline and Benchmarks section, and these pages, give the head-to-head on 2d3bf64 (above) in place of the 120-file sample against qpdf 11.9.0. |
 | [#59](https://github.com/soumyadebroy3/gpress/pull/59) Effort table | 2026-11-16 | The six efforts' sizes measured again on `main` at 2d3bf64 (they predated #51): 82.62% of the input at effort 0, 81.36% at 40 and 79.75% at 100 on the 907 files, with 177 files untouched (was 171). These pages brought up to date for #57 and #58. |
@@ -38,7 +40,7 @@ Earlier pull requests are in the [Changelog](Changelog).
 
 ## In progress
 
-Paused: the "Deep check" workflow, draft [#36](https://github.com/soumyadebroy3/gpress/pull/36), which would run both builds over the test files and the readers on every pull request.
+Nothing at the moment.
 
 ## Next
 
