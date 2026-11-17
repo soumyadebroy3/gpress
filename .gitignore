@@ -10,3 +10,5 @@ __pycache__/
 /bench/results/*/failures/
 # The corpus bench/fetch_corpus.sh fetches by default (130 MB of public test PDFs; bench/sets/corpus.lock pins them).
 /bench/corpus/
+# pdf.js and its canvas for the reader checks (bench/checkers/package.json).
+/bench/checkers/node_modules/
